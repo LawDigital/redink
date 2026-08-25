@@ -52,7 +52,8 @@ Namespace SharedLibrary
                                         Optional ForceJson As Boolean = False,
                                         Optional _context As ISharedContext = Nothing,
                                         Optional ByRef wasSaved As System.Boolean? = Nothing,
-                                        Optional ownerHandle As System.IntPtr = Nothing)
+                                        Optional ownerHandle As System.IntPtr = Nothing,
+                                        Optional readOnlyMode As Boolean = False)
 
             ' --- Guard & Input Validation ---
             Try
@@ -195,10 +196,17 @@ Namespace SharedLibrary
                     btnToggleWordWrap.Text = If(enabled, "Word Wrap: On", "Word Wrap: Off")
                 End Sub
 
-            flowButtons.Controls.Add(btnSave)
+            If Not readOnlyMode Then
+                flowButtons.Controls.Add(btnSave)
+            End If
             flowButtons.Controls.Add(btnCancel)
             flowButtons.Controls.Add(btnToggleWordWrap)
             flowButtons.Controls.SetChildIndex(btnToggleWordWrap, 1)
+
+            If readOnlyMode Then
+                textEditor.ReadOnly = True
+                btnCancel.Text = "Close"
+            End If
 
             applyWordWrap(False)
 
@@ -416,16 +424,10 @@ Namespace SharedLibrary
                                     ShowCustomMessageBox("The AI did not provide any response (which is an error).")
                                 Else
                                     ' Convert Markdown to HTML using Markdig
-                                    Dim pipeline = New MarkdownPipelineBuilder() _
-                                    .UseAdvancedExtensions() _
-                                    .UseEmphasisExtras() _
-                                    .UseFootnotes() _
-                                    .UsePipeTables() _
-                                    .UseTaskLists() _
-                                    .UseAutoLinks() _
-                                    .Build()
+                                    Dim pipeline As Markdig.MarkdownPipeline =
+                                        Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline()
 
-                                    Dim htmlResult As String = Markdown.ToHtml(result, pipeline)
+                                    Dim htmlResult As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(result), pipeline)
 
                                     ' Display result
                                     ShowHTMLCustomMessageBox(htmlResult, "AI Analysis Result")
@@ -452,6 +454,7 @@ Namespace SharedLibrary
             Dim doSave As System.Action =
         Sub()
             Try
+                If readOnlyMode Then Return
                 Dim dir As System.String = System.IO.Path.GetDirectoryName(filePath)
                 If dir Is Nothing OrElse dir.Trim().Length = 0 Then
                     ShowCustomMessageBox("Invalid file path or directory.")
@@ -535,10 +538,9 @@ Namespace SharedLibrary
                         End Try
 
                         Try
-                            editorForm.BringToFront()
-                            editorForm.Activate()
-                            NativeMethods.SetForegroundWindow(editorForm.Handle)
-                        Catch
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(editorForm)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(editorForm)
+                        Catch ex As System.Exception
                         End Try
                     End Sub
 
@@ -550,6 +552,17 @@ Namespace SharedLibrary
                     owner = New WindowWrapper(ownerHandle)
                 Else
                     owner = System.Windows.Forms.Form.ActiveForm
+                End If
+
+                ' Inspect and same-thread filter the resolved owner before using it as a modal
+                ' owner. A foreign owner (e.g. another Office process's main window, whether passed
+                ' in via ownerHandle or picked up as ActiveForm) would be disabled by ShowDialog and
+                ' never re-enabled, deadlocking that host. InspectDialogOwner logs cross-process
+                ' attempts; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back to
+                ' an ownerless dialog instead of deadlocking.
+                If owner IsNot Nothing Then
+                    OfficeWindowWatchdog.InspectDialogOwner(owner, "ShowTextFileEditor", "ShowTextFileEditor")
+                    owner = SharedMethods.IfOwnerOnCurrentThread(owner)
                 End If
 
                 If owner IsNot Nothing Then

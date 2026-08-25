@@ -128,8 +128,11 @@ Namespace Transcription
     Public Class TranscriptionStatusEventArgs
         Inherits EventArgs
         Public Property Message As String
-        Public Sub New(msg As String)
+        Public Property ProgressPercent As System.Nullable(Of Integer)
+
+        Public Sub New(msg As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
             Me.Message = msg
+            Me.ProgressPercent = progressPercent
         End Sub
     End Class
 

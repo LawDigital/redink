@@ -1888,11 +1888,20 @@ Partial Public Class ThisAddIn
 
         AddHandler frm.Shown, Async Sub(s, e)
                                   Try
-                                      Dim userDataFolder As String = System.IO.Path.Combine(
-                                          Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                                          "RedInk", "WebView2")
+                                      Dim userDataFolder As String = SharedLibrary.SharedLibrary.SharedMethods.GetWebView2UserDataFolder()
                                       Dim env As CoreWebView2Environment = Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder, Nothing)
                                       Await webView.EnsureCoreWebView2Async(env)
+
+                                      AddHandler webView.CoreWebView2.ProcessFailed,
+                                          Sub(pfSender, pfArgs)
+                                              SharedLibrary.SharedLibrary.SharedMethods.LogWebView2ProcessFailed("InboxBoard", pfArgs.ProcessFailedKind.ToString(), pfArgs.ExitCode.ToString())
+                                              Try
+                                                  If pfArgs.ProcessFailedKind = CoreWebView2ProcessFailedKind.RenderProcessExited Then
+                                                      webView.Reload()
+                                                  End If
+                                              Catch
+                                              End Try
+                                          End Sub
 
                                       ' Handle messages from JS — use TryGetWebMessageAsString()
                                       ' because JS sends JSON.stringify(...) which is a string,

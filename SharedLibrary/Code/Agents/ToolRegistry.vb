@@ -49,6 +49,7 @@ Namespace Agents
         ''' <summary>Registers a tool whose full <see cref="ModelConfig"/> is already known.</summary>
         Public Sub RegisterEager(config As SharedLibrary.ModelConfig, Optional category As String = "builtin", Optional source As String = Nothing)
             If config Is Nothing OrElse String.IsNullOrWhiteSpace(config.ToolName) Then Return
+            ExplicitOperationToolContract.ApplyToModelConfig(config)
             SyncLock _sync
                 _entries(config.ToolName) = New ToolEntry With {
                     .Manifest = New ToolManifest With {
@@ -145,6 +146,7 @@ Namespace Agents
             End Try
             If built Is Nothing Then Return Nothing
             If String.IsNullOrWhiteSpace(built.ToolName) Then built.ToolName = name
+            ExplicitOperationToolContract.ApplyToModelConfig(built)
 
             SyncLock _sync
                 ' Re-check in case another caller materialized concurrently.

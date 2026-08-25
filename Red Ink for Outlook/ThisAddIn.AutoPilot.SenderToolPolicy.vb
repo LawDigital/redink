@@ -17,12 +17,30 @@
 '    list is returned unchanged, so current behaviour is fully preserved.
 '
 ' Policy file format (one rule per line):
-'     # or ;            -> comment line (ignored)
-'     <pattern> = ALL                 -> sender may use every selected tool
-'     <pattern> = NONE                -> sender may use nothing (report_inability only)
-'     <pattern> = tool1, tool2, ...   -> sender may use only the listed tools
-'     <pattern> = ONLY skill_<name>   -> sender may only run that one skill
-'     DEFAULT = <rule>                -> fallback for senders that match no pattern
+'     # or ;                  -> comment line (ignored)
+'     <pattern> = ALL         -> sender may use every selected tool
+'     <pattern> = NONE        -> sender may use nothing (report_inability only)
+'     <pattern> = ONLY skill_<name>
+'                              -> sender may run that skill plus helpers declared in its allowed-tools
+'     <pattern> = <selector>, <selector>, ...
+'                              -> combined include/exclude selector list
+'     DEFAULT = <rule>        -> fallback for senders that match no pattern
+'
+'  - A selector is matched purely against the NAME of a tool, skill, agent, or online
+'    resource. Selectors may be:
+'      - an exact name (e.g. internet_search, skill_intake, agent_research, some_online_source)
+'      - a wildcard name pattern using * and ? (e.g. skill_*, swiss-caselaw*, agent_?)
+'      - the universal placeholder * (or ALL) matching every name
+'  - Prefix any selector with ! or - to EXCLUDE the matching names.
+'  - If a selector list contains only exclusions, it behaves like * except those exclusions.
+'
+'  - Any rule may append a hard, in-code system-prompt instruction for the sender:
+'         <pattern> = <rule> || <system prompt instruction>
+'    Example:
+'         info@lawdigital.com = ONLY skill_produkteanfragen || Only provide an answer
+'             during weekdays and process any response through that skill
+'    For an ONLY-skill rule without an explicit instruction, a default instruction is
+'    generated automatically that confines the sender to that skill and its declared helpers.
 '
 '  - <pattern> supports * and ? wildcards and is matched against the SMTP address.
 '  - First matching line wins (top-to-bottom). DEFAULT is only used if no pattern
@@ -56,15 +74,19 @@ Partial Public Class ThisAddIn
         Public Property Pattern As String
         Public Property IsDefault As Boolean
         Public Property Kind As AutoPilotSenderPolicyRuleKind
-        Public Property ToolNames As New List(Of String)()
+        Public Property AllowedToolSelectors As New List(Of String)()
+        Public Property DeniedToolSelectors As New List(Of String)()
         Public Property SkillToolName As String = ""
+
+        ''' <summary>
+        ''' Optional hard system-prompt instruction injected for this sender (in code, not
+        ''' under LLM control). Specified in the policy file after a "||" separator.
+        ''' </summary>
+        Public Property SystemPromptAddition As String = ""
     End Class
 
     ''' <summary>Parsed sender policy rules for the active session (Nothing = no policy in effect).</summary>
     Private _apSenderPolicyRules As List(Of AutoPilotSenderPolicyRule) = Nothing
-
-    ''' <summary>Cached set of internal (built-in) tool names, used for ONLY-skill helper retention.</summary>
-    Private _apInternalToolNamesCache As HashSet(Of String) = Nothing
 
     ''' <summary>
     ''' Loads and parses the sender tool policy from the configured file path.
@@ -73,7 +95,6 @@ Partial Public Class ThisAddIn
     ''' <param name="policyPath">Full path to the policy text file (may be empty).</param>
     Friend Sub LoadSenderToolPolicy(policyPath As String)
         _apSenderPolicyRules = Nothing
-        _apInternalToolNamesCache = Nothing
 
         Try
             If String.IsNullOrWhiteSpace(policyPath) Then Return
@@ -94,9 +115,20 @@ Partial Public Class ThisAddIn
                 Dim rulePart = line.Substring(sepIndex + 1).Trim()
                 If patternPart.Length = 0 OrElse rulePart.Length = 0 Then Continue For
 
+                ' Optional per-sender system-prompt instruction after a "||" separator:
+                '     <pattern> = <rule> || <system prompt instruction>
+                Dim promptPart As String = ""
+                Dim promptSepIndex = rulePart.IndexOf("||", StringComparison.Ordinal)
+                If promptSepIndex >= 0 Then
+                    promptPart = rulePart.Substring(promptSepIndex + 2).Trim()
+                    rulePart = rulePart.Substring(0, promptSepIndex).Trim()
+                    If rulePart.Length = 0 Then Continue For
+                End If
+
                 Dim rule As New AutoPilotSenderPolicyRule()
                 rule.IsDefault = patternPart.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
                 rule.Pattern = patternPart
+                rule.SystemPromptAddition = promptPart
 
                 If rulePart.Equals("ALL", StringComparison.OrdinalIgnoreCase) Then
                     rule.Kind = AutoPilotSenderPolicyRuleKind.AllowAll
@@ -107,9 +139,26 @@ Partial Public Class ThisAddIn
                     rule.SkillToolName = rulePart.Substring(5).Trim()
                 Else
                     rule.Kind = AutoPilotSenderPolicyRuleKind.ToolList
+
                     For Each namePart In rulePart.Split(","c)
-                        Dim toolName = namePart.Trim()
-                        If toolName.Length > 0 Then rule.ToolNames.Add(toolName)
+                        Dim selector As String = namePart.Trim()
+                        If selector.Length = 0 Then Continue For
+
+                        Dim isDenied As Boolean =
+            selector.StartsWith("!", StringComparison.Ordinal) OrElse
+            selector.StartsWith("-", StringComparison.Ordinal)
+
+                        If isDenied Then
+                            selector = selector.Substring(1).Trim()
+                        End If
+
+                        If selector.Length = 0 Then Continue For
+
+                        If isDenied Then
+                            rule.DeniedToolSelectors.Add(selector)
+                        Else
+                            rule.AllowedToolSelectors.Add(selector)
+                        End If
                     Next
                 End If
 
@@ -133,12 +182,13 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="senderEmail">SMTP address of the current sender.</param>
     ''' <param name="sessionTools">The tools selected for the session.</param>
-    Friend Function ResolveToolsForSender(senderEmail As String, sessionTools As List(Of ModelConfig)) As List(Of ModelConfig)
-        ' No policy in effect -> unchanged behaviour.
-        If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return sessionTools
-        If sessionTools Is Nothing OrElse sessionTools.Count = 0 Then Return sessionTools
+    ''' <summary>
+    ''' Returns the policy rule that applies to a sender (first pattern match wins;
+    ''' DEFAULT is used only when no specific pattern matched). Nothing = no policy.
+    ''' </summary>
+    Private Function MatchSenderPolicyRule(senderEmail As String) As AutoPilotSenderPolicyRule
+        If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return Nothing
 
-        ' First match wins; DEFAULT is only used when no specific pattern matched.
         Dim matched As AutoPilotSenderPolicyRule = Nothing
         Dim defaultRule As AutoPilotSenderPolicyRule = Nothing
 
@@ -154,6 +204,39 @@ Partial Public Class ThisAddIn
         Next
 
         If matched Is Nothing Then matched = defaultRule
+        Return matched
+    End Function
+
+    ''' <summary>
+    ''' Returns the hard, in-code system-prompt instruction that applies to a sender,
+    ''' or an empty string when none applies. For an ONLY-skill rule without an explicit
+    ''' instruction, a default instruction is generated that confines the sender to that skill.
+    ''' </summary>
+    Friend Function ResolveSystemPromptAdditionForSender(senderEmail As String) As String
+        Dim matched = MatchSenderPolicyRule(senderEmail)
+        If matched Is Nothing Then Return ""
+
+        Dim addition = If(matched.SystemPromptAddition, "").Trim()
+
+        If addition.Length = 0 AndAlso
+           matched.Kind = AutoPilotSenderPolicyRuleKind.OnlySkill AndAlso
+           Not String.IsNullOrWhiteSpace(matched.SkillToolName) Then
+            addition =
+                $"For this sender, you must handle the request exclusively by invoking the '{matched.SkillToolName.Trim()}' skill. " &
+                "You may use only the helper tools explicitly declared by that skill in its allowed-tools frontmatter, plus host safety/runtime tools that are exposed automatically. " &
+                "Do not use any other skill, agent, tool, online source, or undeclared model knowledge outside the loaded skill's instructions and references. " &
+                "If the request cannot be fulfilled by that skill and its declared helpers, briefly decline using report_inability."
+        End If
+
+        Return addition
+    End Function
+
+    Friend Function ResolveToolsForSender(senderEmail As String, sessionTools As List(Of ModelConfig)) As List(Of ModelConfig)
+        ' No policy in effect -> unchanged behaviour.
+        If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return sessionTools
+        If sessionTools Is Nothing OrElse sessionTools.Count = 0 Then Return sessionTools
+
+        Dim matched As AutoPilotSenderPolicyRule = MatchSenderPolicyRule(senderEmail)
 
         ' No matching rule and no DEFAULT -> sender inherits all tools (unchanged).
         If matched Is Nothing Then Return sessionTools
@@ -166,7 +249,7 @@ Partial Public Class ThisAddIn
                 Return KeepAlwaysAllowedToolsOnly(sessionTools)
 
             Case AutoPilotSenderPolicyRuleKind.ToolList
-                Return FilterToNamedTools(sessionTools, matched.ToolNames)
+                Return FilterToNamedTools(sessionTools, matched.AllowedToolSelectors, matched.DeniedToolSelectors)
 
             Case AutoPilotSenderPolicyRuleKind.OnlySkill
                 Return FilterToExclusiveSkill(sessionTools, matched.SkillToolName)
@@ -183,46 +266,150 @@ Partial Public Class ThisAddIn
             ToList()
     End Function
 
-    ''' <summary>Returns only tools whose name is in the allowed list, plus the always-allowed safety tools.</summary>
-    Private Function FilterToNamedTools(sessionTools As List(Of ModelConfig), allowedNames As List(Of String)) As List(Of ModelConfig)
-        Dim allowed As New HashSet(Of String)(
-            If(allowedNames, New List(Of String)()).Where(Function(n) Not String.IsNullOrWhiteSpace(n)).Select(Function(n) n.Trim()),
-            StringComparer.OrdinalIgnoreCase)
+    ''' <summary>
+    ''' Returns only tools that match the allowed selectors and do not match the denied selectors,
+    ''' plus the always-allowed safety tools. If only denied selectors are provided, the rule behaves
+    ''' like ALL except those exclusions.
+    ''' </summary>
+    Private Function FilterToNamedTools(
+    sessionTools As List(Of ModelConfig),
+    allowedSelectors As List(Of String),
+    deniedSelectors As List(Of String)) As List(Of ModelConfig)
+
+        Dim allowed As List(Of String) =
+        If(allowedSelectors, New List(Of String)()).
+            Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+            Select(Function(n) n.Trim()).
+            ToList()
+
+        Dim denied As List(Of String) =
+        If(deniedSelectors, New List(Of String)()).
+            Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+            Select(Function(n) n.Trim()).
+            ToList()
 
         Return sessionTools.
-            Where(Function(t) t IsNot Nothing AndAlso
-                              (IsAlwaysAllowedTool(t.ToolName) OrElse allowed.Contains(If(t.ToolName, "").Trim()))).
-            ToList()
+        Where(Function(t)
+                  If t Is Nothing OrElse String.IsNullOrWhiteSpace(t.ToolName) Then Return False
+
+                  Dim toolName As String = t.ToolName.Trim()
+
+                  If IsAlwaysAllowedTool(toolName) Then Return True
+
+                  Dim isAllowed As Boolean =
+                      allowed.Count = 0 OrElse
+                      allowed.Any(Function(selector) ToolSelectorMatches(selector, toolName))
+
+                  If Not isAllowed Then Return False
+
+                  Dim isDenied As Boolean =
+                      denied.Any(Function(selector) ToolSelectorMatches(selector, toolName))
+
+                  Return Not isDenied
+              End Function).
+        ToList()
     End Function
 
     ''' <summary>
-    ''' Restricts the session to a single skill (Option B): keeps the named skill, the
-    ''' skill loader, the always-allowed safety tools, and the internal helper tools the
-    ''' skill may need, while removing all other skills, all agents, and all external sources.
+    ''' Agnostic selector match: a selector is matched purely against a tool/skill/agent/online-resource
+    ''' NAME. Any named entity can be allowed or denied. "*" (or "ALL") matches everything; selectors
+    ''' containing * or ? are treated as wildcard name patterns; otherwise an exact (case-insensitive)
+    ''' name comparison is used. No entity-type-specific or name-specific heuristics are applied.
+    ''' </summary>
+    Private Function ToolSelectorMatches(selector As String, toolName As String) As Boolean
+        Dim normalizedSelector As String = If(selector, "").Trim()
+        Dim normalizedToolName As String = If(toolName, "").Trim()
+
+        If normalizedSelector = "" OrElse normalizedToolName = "" Then Return False
+
+        If normalizedSelector = "*" OrElse
+           normalizedSelector.Equals("ALL", StringComparison.OrdinalIgnoreCase) Then
+            Return True
+        End If
+
+        If ContainsWildcardPattern(normalizedSelector) Then
+            Return WildcardToolNameMatches(normalizedSelector, normalizedToolName)
+        End If
+
+        Return normalizedToolName.Equals(normalizedSelector, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ''' <summary>
+    ''' Restricts the already-authorized AutoPilot session to exactly one skill plus only
+    ''' the helper tools that skill explicitly declares in allowed-tools. This function is
+    ''' purely narrowing: it never enables a tool, agent, source, or service that was not
+    ''' already present in the session tool set. Other skills are always blocked.
     ''' </summary>
     Private Function FilterToExclusiveSkill(sessionTools As List(Of ModelConfig), skillToolName As String) As List(Of ModelConfig)
-        Dim exclusive = If(skillToolName, "").Trim()
-        Dim internalNames = GetInternalToolNames()
+        Dim exclusive As String = If(skillToolName, "").Trim()
+        Dim declaredHelperNames As System.Collections.Generic.HashSet(Of String) =
+            ResolveExclusiveSkillDeclaredHelperNames(exclusive)
 
         Return sessionTools.
             Where(Function(t)
-                      If t Is Nothing OrElse String.IsNullOrWhiteSpace(t.ToolName) Then Return False
-                      Dim name = t.ToolName.Trim()
+                      If t Is Nothing OrElse System.String.IsNullOrWhiteSpace(t.ToolName) Then Return False
+                      Dim name As String = t.ToolName.Trim()
 
-                      ' Always keep the safety tool and the skill loader.
                       If IsAlwaysAllowedTool(name) Then Return True
-                      If name.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then Return True
 
-                      ' Keep exactly the exclusive skill; block all other skills and all agents.
-                      If name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
-                          Return name.Equals(exclusive, StringComparison.OrdinalIgnoreCase)
+                      If name.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) Then
+                          Return name.Equals(exclusive, System.StringComparison.OrdinalIgnoreCase)
                       End If
-                      If name.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then Return False
 
-                      ' Keep internal helper tools (the skill may need them); block external sources.
-                      Return internalNames.Contains(name)
+                      Return declaredHelperNames.Contains(name)
                   End Function).
             ToList()
+    End Function
+
+    Private Function ResolveExclusiveSkillDeclaredHelperNames(exclusiveSkillToolName As String) As System.Collections.Generic.HashSet(Of String)
+        Dim result As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+
+        If System.String.IsNullOrWhiteSpace(exclusiveSkillToolName) Then Return result
+
+        Try
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
+
+            For Each skill As SharedLibrary.Agents.SkillDescriptor In SharedLibrary.Agents.AgentResources.Skills
+                If skill Is Nothing OrElse System.String.IsNullOrWhiteSpace(skill.Name) Then Continue For
+
+                Dim dynamicToolName As String = BuildDynamicSkillToolName(skill.Name)
+                If Not dynamicToolName.Equals(exclusiveSkillToolName.Trim(), System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                If skill.AllowedTools IsNot Nothing Then
+                    For Each rawToolName As String In skill.AllowedTools
+                        Dim helperName As String = If(rawToolName, "").Trim()
+                        If helperName <> "" Then result.Add(helperName)
+                    Next
+                End If
+
+                Exit For
+            Next
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine($"[AutoPilot] Failed to resolve ONLY-skill helper declarations: {ex.Message}")
+        End Try
+
+        Return result
+    End Function
+
+    Private Function BuildDynamicSkillToolName(skillName As String) As String
+        If System.String.IsNullOrWhiteSpace(skillName) Then Return ""
+
+        Dim suffixBuilder As New System.Text.StringBuilder()
+        Dim lastWasUnderscore As Boolean = False
+
+        For Each ch As Char In skillName.Trim()
+            If System.Char.IsLetterOrDigit(ch) Then
+                suffixBuilder.Append(System.Char.ToLowerInvariant(ch))
+                lastWasUnderscore = False
+            ElseIf Not lastWasUnderscore Then
+                suffixBuilder.Append("_"c)
+                lastWasUnderscore = True
+            End If
+        Next
+
+        Dim suffix As String = suffixBuilder.ToString().Trim("_"c)
+        If suffix = "" Then Return ""
+        Return "skill_" & suffix
     End Function
 
     ''' <summary>Determines whether a tool must never be filtered out (safety fallback).</summary>
@@ -231,23 +418,5 @@ Partial Public Class ThisAddIn
         Return toolName.Trim().Equals(AP_Tool_ReportInability, StringComparison.OrdinalIgnoreCase)
     End Function
 
-    ''' <summary>Builds (and caches) the set of internal/built-in AutoPilot tool names.</summary>
-    Private Function GetInternalToolNames() As HashSet(Of String)
-        If _apInternalToolNamesCache IsNot Nothing Then Return _apInternalToolNamesCache
-
-        Dim names As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        Try
-            For Each tool In GetAutoPilotInternalTools()
-                If tool IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(tool.ToolName) Then
-                    names.Add(tool.ToolName.Trim())
-                End If
-            Next
-        Catch ex As Exception
-            Debug.WriteLine($"[AutoPilot] Failed to enumerate internal tools for sender policy: {ex.Message}")
-        End Try
-
-        _apInternalToolNamesCache = names
-        Return names
-    End Function
 
 End Class

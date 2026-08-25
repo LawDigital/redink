@@ -19,7 +19,7 @@
 '
 ' Routes / Commands:
 '  - GET  `/inky/play` → full single-file HTML/CSS/JS game UI
-'  - API commands routed via `/inky/api`:
+'  - API commands routed via the authenticated `/inky/api` surface with CSRF protection:
 '      * `inkyplay_generate`
 '      * `inkyplay_gethighscores`
 '      * `inkyplay_savescore`
@@ -252,7 +252,7 @@ Partial Public Class ThisAddIn
     ''' Generates the full single-file HTML page for the InkyPlay game suite.
     ''' All CSS, JS, and game logic are inline (no external assets).
     ''' </summary>
-    Friend Function BuildInkyPlayHtmlPage() As String
+    Friend Function BuildInkyPlayHtmlPage(ByVal csrfToken As System.String) As System.String
         Dim logoUrl As String = GetLogoDataUrl()
         Dim brandName As String = If(Not String.IsNullOrWhiteSpace(AN), AN, "Red Ink")
 
@@ -409,7 +409,8 @@ Partial Public Class ThisAddIn
         ' CORE API & STATE
         ' ═══════════════════════════════════════════════════════════════════
         sb.AppendLine("'use strict';")
-        sb.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({Command:cmd},data))});const t=await r.text();try{return JSON.parse(t)}catch{return{ok:false,error:t}}}catch(e){return{ok:false,error:e.message}}};")
+        sb.AppendLine("const __redInkCsrf=" & Newtonsoft.Json.JsonConvert.SerializeObject(If(csrfToken, System.String.Empty)) & ";")
+        sb.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json','X-RedInk-CSRF':__redInkCsrf},body:JSON.stringify(Object.assign({Command:cmd},data))});const t=await r.text();try{return JSON.parse(t)}catch{return{ok:false,error:t}}}catch(e){return{ok:false,error:e.message}}};")
 
         sb.AppendLine("const canvas=document.getElementById('gc');const ctx=canvas.getContext('2d');")
         sb.AppendLine("var dpr=window.devicePixelRatio||1;canvas.width=800*dpr;canvas.height=500*dpr;ctx.scale(dpr,dpr);")

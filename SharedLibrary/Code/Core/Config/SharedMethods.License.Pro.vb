@@ -728,7 +728,7 @@ Namespace SharedLibrary
 
                                                       If confirmResult <> 1 Then Return
 
-                                                      ClearStoredLicense(True)
+                                                      ClearStoredLicense()
                                                       licenseExplicitlyCleared = True
                                                       dialogResult = False
                                                       isCurrentlyActivated = False
@@ -830,7 +830,12 @@ Namespace SharedLibrary
                                                  End If
                                              End Sub
 
-                form.ShowDialog()
+                Dim __safeDialogOwner833 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner833 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner833)
+                Else
+                    form.ShowDialog()
+                End If
                 Return dialogResult
             End Using
         End Function
@@ -882,15 +887,24 @@ Namespace SharedLibrary
 
                 LogLicenseEvent("API Call", $"Action={action}, ProductID={productId}, Instance={userId}")
 
-                ' Make request with retries
+                ' Make request with retries, bounded by an overall wall-clock budget so the
+                ' calling (host UI) thread is never blocked longer than ApiTotalBudgetMs.
                 Dim lastError As String = ""
+                Dim budget = System.Diagnostics.Stopwatch.StartNew()
                 For attempt As Integer = 1 To ApiRetryCount
+                    Dim remainingMs = ApiTotalBudgetMs - CInt(budget.ElapsedMilliseconds)
+                    If remainingMs <= 0 Then
+                        lastError = "License server did not respond within the allotted time budget."
+                        LogLicenseEvent("API Budget", $"Overall budget of {ApiTotalBudgetMs}ms exceeded before attempt {attempt}; deferring.")
+                        Exit For
+                    End If
+
                     Try
                         Dim httpResponse = SendHttpRequestAsync(
                             New SharedHttpRequest() With {
                                 .Url = url,
                                 .Method = "GET",
-                                .TimeoutMs = ApiTimeoutMs,
+                                .TimeoutMs = System.Math.Min(ApiTimeoutMs, remainingMs),
                                 .UserAgent = $"{AN}/1.0",
                                 .StackPreference = HttpStackPreference.PreferConfiguredDefault
                             }).GetAwaiter().GetResult()
@@ -908,12 +922,15 @@ Namespace SharedLibrary
                         LogLicenseEvent("API Error", $"Attempt {attempt}: {ex.Message}")
 
                         If attempt < ApiRetryCount Then
-                            Threading.Thread.Sleep(1000 * attempt) ' Exponential backoff
+                            Dim backoffMs = 1000 * attempt ' Exponential backoff
+                            Dim budgetLeft = ApiTotalBudgetMs - CInt(budget.ElapsedMilliseconds)
+                            If budgetLeft <= 0 Then Exit For
+                            Threading.Thread.Sleep(System.Math.Min(backoffMs, budgetLeft))
                         End If
                     End Try
                 Next
 
-                result.ErrorMessage = $"Failed after {ApiRetryCount} attempts: {lastError}"
+                result.ErrorMessage = $"Failed within {ApiTotalBudgetMs}ms budget: {lastError}"
                 Return result
 
             Catch ex As Exception

@@ -385,6 +385,7 @@ Partial Public Class ThisAddIn
         Catch ex As Exception
             MessageBox.Show($"Error in GenerateOpenAITTSAsync: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         End Try
+        Return System.Array.Empty(Of Byte)()
     End Function
 
     ' ==================== AUDIO GENERATION - GOOGLE/OPENAI UNIFIED ====================
@@ -1018,7 +1019,8 @@ Partial Public Class ThisAddIn
 
         If hasHost AndAlso hasGuest Then
             Using frm As New TTSSelectionForm("Select the voice you wish to use for creating your audio file and configure where to save it.", $"{AN} Text-to-Speech - Select Voices", True)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner1022 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner1022 IsNot Nothing, frm.ShowDialog(__safeDialogOwner1022), frm.ShowDialog()) = DialogResult.OK Then
                     Dim selectedVoices As List(Of String) = frm.SelectedVoices
                     Dim selectedLanguage As String = frm.SelectedLanguage
                     Dim outputPath As String = frm.SelectedOutputPath
@@ -1447,7 +1449,7 @@ Partial Public Class ThisAddIn
 
                 synth.Speak($"Hello! I am now using the voice: {chosenVoice}")
             Catch ex As Exception
-                MsgBox("Error selecting voice: " & ex.Message, MsgBoxStyle.Critical, "Error")
+                ShowCustomMessageBox("Error selecting voice: " & ex.Message)
             End Try
         Else
             ShowCustomMessageBox("Invalid voice number entered.", "Text-to-Speech")

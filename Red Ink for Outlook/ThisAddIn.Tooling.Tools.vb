@@ -3,6 +3,20 @@
 
 ' =============================================================================
 ' File: ThisAddIn.Tooling.Tools.vb
+' Purpose:
+'   Outlook Local Chat tooling support layer for host-specific tool definitions,
+'   registration helpers and execution utilities that are not implemented in the shared
+'   AgentToolRouter.
+'
+' Architecture / Function:
+'   - Builds/augments the Outlook tool catalog and bridges Outlook-specific capabilities
+'     into the common tooling loop while shared tools remain registered centrally.
+'   - Provides web-content retrieval/link extraction, WebView2 integration, reflection
+'     helpers and host adapters used by individual Outlook tools.
+'   - Keeps model-facing tool schemas/instructions separate from the sequencing and
+'     finalization rules in SharedLibrary.Agents.
+'   - Binary downloads, M365, Python, Office and other substantial capabilities are
+'     delegated to their dedicated modules rather than being implemented monolithically here.
 ' =============================================================================
 
 Option Explicit On
@@ -212,9 +226,7 @@ Partial Public Class ThisAddIn
                     Return
                 End If
 
-                Dim uniqueID As String = System.Guid.NewGuid().ToString()
-                userDataFolder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInkWebView2_" & uniqueID)
-                System.IO.Directory.CreateDirectory(userDataFolder)
+                userDataFolder = SharedLibrary.SharedLibrary.SharedMethods.CreateWebView2TransientFolder()
 
                 form = New System.Windows.Forms.Form() With {
                     .Width = 1920,
@@ -1827,6 +1839,66 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Web File Downloader" & InternalToolSuffix,
             .Tool = True,
             .ToolPriority = 996,
+            .ToolErrorHandling = "skip"
+        }
+    End Function
+
+    ''' <summary>Internal tool name used by the model to announce a major step (B1).</summary>
+    Public Const InternalProgressReportToolName As String = "report_progress"
+
+    ''' <summary>Returns True when the tool name is the internal report_progress tool.</summary>
+    Public Function IsReportProgressToolName(toolName As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(toolName) AndAlso
+               toolName.Trim().Equals(InternalProgressReportToolName, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ''' <summary>
+    ''' Model-facing instruction describing when to call report_progress. Major steps only;
+    ''' the note is authored in the dialogue language; it may be batched with real tool calls.
+    ''' </summary>
+    Public Function BuildMajorStepProgressToolInstruction() As String
+        Return "PROGRESS REPORTING RULE: You MUST call the report_progress tool before the first substantive tool action of every tooling run and again whenever you begin a materially different major phase of work. Do this whether or not the user explicitly asked for progress updates. Use exactly one short, user-facing sentence in the dialogue language. Call it only for major steps, not for every minor step. You may include report_progress in the same turn as the real tool calls that follow it. Do NOT write progress as plain text. Do NOT serialize tool calls as text or JSON text. Use only native tool calls. A major work phase must not begin silently without a preceding report_progress call."
+    End Function
+
+    ''' <summary>Canonical JSON definition for the internal report_progress tool.</summary>
+    Private Function BuildInternalProgressReportToolDefinition() As String
+        Dim definition As New JObject(
+            New JProperty("name", InternalProgressReportToolName),
+            New JProperty("description",
+                "Announces a single major step to the user in the dialogue language. " &
+                "Use only at the start of a significant new phase of work, not on every turn. " &
+                "Performs no other work and returns immediately."),
+            New JProperty("parameters",
+                New JObject(
+                    New JProperty("type", "object"),
+                    New JProperty("properties",
+                        New JObject(
+                            New JProperty("note",
+                                New JObject(
+                                    New JProperty("type", "string"),
+                                    New JProperty("description", "One short, user-facing sentence in the dialogue language describing the major step you are about to start. Do not reveal tool names, arguments, or internal reasoning.")
+                                )
+                            )
+                        )
+                    ),
+                    New JProperty("required", New JArray("note")),
+                    New JProperty("additionalProperties", False)
+                )
+            )
+        )
+
+        Return definition.ToString(Formatting.None)
+    End Function
+
+    ''' <summary>Creates the built-in report_progress tool configuration (B1 major-step channel).</summary>
+    Public Function GetInternalProgressReportTool() As ModelConfig
+        Return New ModelConfig() With {
+            .ToolName = InternalProgressReportToolName,
+            .ToolInstructionsPrompt = BuildMajorStepProgressToolInstruction(),
+            .ToolDefinition = BuildInternalProgressReportToolDefinition(),
+            .ModelDescription = "Progress Update" & InternalToolSuffix,
+            .Tool = True,
+            .ToolPriority = 995,
             .ToolErrorHandling = "skip"
         }
     End Function

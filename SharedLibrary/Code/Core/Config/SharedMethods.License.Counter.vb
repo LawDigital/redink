@@ -313,7 +313,8 @@ Namespace SharedLibrary
                         dlg.Description = "Select the folder to analyze"
                         dlg.SelectedPath = GetLicenseCounterBaseFolder()
 
-                        If dlg.ShowDialog() <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
+                        Dim __safeDialogOwner316 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner316 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner316), dlg.ShowDialog()) <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
                             Return
                         End If
 
@@ -330,7 +331,8 @@ Namespace SharedLibrary
                         dlg.Multiselect = True
                         dlg.Filter = "JSON / Log / Text|*.json;*.log;*.txt;*.csv;*.htm;*.html|All Files|*.*"
 
-                        If dlg.ShowDialog() <> DialogResult.OK OrElse dlg.FileNames Is Nothing OrElse dlg.FileNames.Length = 0 Then
+                        Dim __safeDialogOwner333 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner333 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner333), dlg.ShowDialog()) <> DialogResult.OK OrElse dlg.FileNames Is Nothing OrElse dlg.FileNames.Length = 0 Then
                             Return
                         End If
 
@@ -1982,7 +1984,18 @@ Namespace SharedLibrary
                 panel.Controls.Add(btnExportJson)
                 form.Controls.Add(pnlHost)
                 form.Controls.Add(panel)
-                form.ShowDialog()
+                AddHandler form.Shown,
+                    Sub()
+                        form.TopMost = True
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+                    End Sub
+                Dim __safeDialogOwner1985 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner1985 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner1985)
+                Else
+                    form.ShowDialog()
+                End If
             End Using
         End Sub
 

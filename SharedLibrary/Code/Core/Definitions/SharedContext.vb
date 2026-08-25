@@ -98,13 +98,18 @@ Namespace SharedLibrary
             Property INI_OAuth2Endpoint_2 As String
             Property INI_OAuth2ATExpiry_2 As Long
             Property INI_APIDebug As Boolean
+            Property INI_Crashlog As Boolean
             Property INI_UseHostColorOutlook As Boolean
             Property INI_UsageRestrictions As String
             Property INI_LogPath As String
+            Property INI_PythonAgentPath As String
             Property INI_AllowLegacyDocFiles As Boolean
+            Property INI_JsRunDisable As Boolean
+            Property INI_BrowserToolsDisable As Boolean
 
             Property INI_AutoPilotAutoStart As Boolean
             Property INI_AutoPilotSchedulerLocalChat As Boolean
+            Property INI_MonitorLink As String
             Property INI_Language1 As String
             Property INI_Language2 As String
             Property INI_DefaultPrefix As String
@@ -116,6 +121,7 @@ Namespace SharedLibrary
             Property INI_ReplaceText1 As Boolean
             Property INI_ReplaceText2 As Boolean
             Property INI_ReplaceText2Override As String
+            Property INI_RestrictedModelAccessCode As String
             Property INI_DoMarkupOutlook As Boolean
             Property INI_DoMarkupWord As Boolean
             Property INI_ChunkOCR As Integer
@@ -359,6 +365,9 @@ Namespace SharedLibrary
             ' Clients permitted to use the Configuration Wizard for central INI editing
             Property INI_CentralConfigClients As String
 
+            ' Password to turn on Central Config ability
+            Property INI_CentralConfigPW As String
+
             Property INI_AutoPilot As String
             ' Privacy protection for external search/web queries
             Property INI_EnablePrivacyForSearch As Boolean
@@ -367,6 +376,10 @@ Namespace SharedLibrary
             Property INI_ToolingLogWindow As Boolean
             Property INI_ToolingDryRun As Boolean
             Property INI_ToolingMaximumIterations As Integer
+            Property INI_ToolResponsePayloadBudgetChars As Integer
+            Property INI_BudgetMediumCompactionThresholdChars As Integer
+            Property INI_BudgetAggressiveCompactionThresholdChars As Integer
+            Property INI_BudgetCompactionPreviewChars As Integer
 
             Property INI_APICall_ToolInstructions_2 As String
             Property INI_APICall_ToolInstructions_Template_2 As String
@@ -465,12 +478,17 @@ Namespace SharedLibrary
         Public Property INI_OAuth2Endpoint_2 As String Implements ISharedContext.INI_OAuth2Endpoint_2
         Public Property INI_OAuth2ATExpiry_2 As Long Implements ISharedContext.INI_OAuth2ATExpiry_2
         Public Property INI_APIDebug As Boolean Implements ISharedContext.INI_APIDebug
+        Public Property INI_Crashlog As Boolean Implements ISharedContext.INI_Crashlog
         Public Property INI_UseHostColorOutlook As Boolean Implements ISharedContext.INI_UseHostColorOutlook
         Public Property INI_AutoPilotAutoStart As Boolean Implements ISharedContext.INI_AutoPilotAutoStart
         Public Property INI_AutoPilotSchedulerLocalChat As Boolean Implements ISharedContext.INI_AutoPilotSchedulerLocalChat
+        Public Property INI_MonitorLink As String Implements ISharedContext.INI_MonitorLink
         Public Property INI_UsageRestrictions As String Implements ISharedContext.INI_UsageRestrictions
         Public Property INI_LogPath As String Implements ISharedContext.INI_LogPath
+        Public Property INI_PythonAgentPath As String Implements ISharedContext.INI_PythonAgentPath
         Public Property INI_AllowLegacyDocFiles As Boolean Implements ISharedContext.INI_AllowLegacyDocFiles
+        Public Property INI_JsRunDisable As Boolean Implements ISharedContext.INI_JsRunDisable
+        Public Property INI_BrowserToolsDisable As Boolean Implements ISharedContext.INI_BrowserToolsDisable
         Public Property INI_Language1 As String Implements ISharedContext.INI_Language1
         Public Property INI_Language2 As String Implements ISharedContext.INI_Language2
         Public Property INI_MarkdownConvert As Boolean Implements ISharedContext.INI_MarkdownConvert
@@ -482,6 +500,7 @@ Namespace SharedLibrary
         Public Property INI_ReplaceText1 As Boolean Implements ISharedContext.INI_ReplaceText1
         Public Property INI_ReplaceText2 As Boolean Implements ISharedContext.INI_ReplaceText2
         Public Property INI_ReplaceText2Override As String Implements ISharedContext.INI_ReplaceText2Override
+        Public Property INI_RestrictedModelAccessCode As String Implements ISharedContext.INI_RestrictedModelAccessCode
         Public Property INI_DoMarkupOutlook As Boolean Implements ISharedContext.INI_DoMarkupOutlook
         Public Property INI_DoMarkupWord As Boolean Implements ISharedContext.INI_DoMarkupWord
         Public Property INI_ChunkOCR As Integer Implements ISharedContext.INI_ChunkOCR
@@ -712,6 +731,7 @@ Namespace SharedLibrary
         Public Property INI_UpdateIniSilentLog As Boolean Implements ISharedContext.INI_UpdateIniSilentLog
 
         Public Property INI_CentralConfigClients As String Implements ISharedContext.INI_CentralConfigClients
+        Public Property INI_CentralConfigPW As String Implements ISharedContext.INI_CentralConfigPW
         Public Property Ignore As String Implements ISharedContext.Ignore
         Public Property Location As String Implements ISharedContext.Location
 
@@ -723,6 +743,10 @@ Namespace SharedLibrary
         Public Property INI_ToolingLogWindow As Boolean Implements ISharedContext.INI_ToolingLogWindow
         Public Property INI_ToolingDryRun As Boolean Implements ISharedContext.INI_ToolingDryRun
         Public Property INI_ToolingMaximumIterations As Integer Implements ISharedContext.INI_ToolingMaximumIterations
+        Public Property INI_ToolResponsePayloadBudgetChars As Integer Implements ISharedContext.INI_ToolResponsePayloadBudgetChars
+        Public Property INI_BudgetMediumCompactionThresholdChars As Integer Implements ISharedContext.INI_BudgetMediumCompactionThresholdChars
+        Public Property INI_BudgetAggressiveCompactionThresholdChars As Integer Implements ISharedContext.INI_BudgetAggressiveCompactionThresholdChars
+        Public Property INI_BudgetCompactionPreviewChars As Integer Implements ISharedContext.INI_BudgetCompactionPreviewChars
         Public Property INI_APICall_ToolInstructions_2 As String Implements ISharedContext.INI_APICall_ToolInstructions_2
         Public Property INI_APICall_ToolInstructions_Template_2 As String Implements ISharedContext.INI_APICall_ToolInstructions_Template_2
         Public Property INI_APICall_ToolResponses_2 As String Implements ISharedContext.INI_APICall_ToolResponses_2

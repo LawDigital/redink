@@ -128,6 +128,11 @@ Partial Public Class ThisAddIn
                     winWasEnabled = True
                 End Try
                 Try
+                    SharedLibrary.SharedLibrary.OfficeWindowWatchdog.InspectCachedHwndUse(
+                        hwnd, "EnableWindow(False) in AddComments (bubble creation)")
+                Catch
+                End Try
+                Try
                     ' Disable the Word window so clicks cannot move the live Selection while ranges are being created
                     EnableWindow(hwnd, False)
                 Catch ex As System.Exception
@@ -445,6 +450,11 @@ Partial Public Class ThisAddIn
                 Try
                     hwnd = CType(win.Hwnd, IntPtr)
                     winWasEnabled = IsWindowEnabled(hwnd)
+                    Try
+                        SharedLibrary.SharedLibrary.OfficeWindowWatchdog.InspectCachedHwndUse(
+                            hwnd, "EnableWindow(False) in AddReplies (comment replies)")
+                    Catch
+                    End Try
                     EnableWindow(hwnd, False)
                 Catch
                 End Try
@@ -664,7 +674,7 @@ Partial Public Class ThisAddIn
                 html = src
             Else
                 Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                html = Markdig.Markdown.ToHtml(If(src, String.Empty), pipeline)
+                html = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(src, String.Empty)), pipeline)
             End If
 
             ' 2) Load/sanitize
@@ -742,7 +752,7 @@ Partial Public Class ThisAddIn
                 html = src
             Else
                 Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                html = Markdig.Markdown.ToHtml(If(src, String.Empty), pipeline)
+                html = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(src, String.Empty)), pipeline)
             End If
             Dim hdoc As New HtmlAgilityPack.HtmlDocument()
             hdoc.LoadHtml(html)

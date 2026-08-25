@@ -50,6 +50,18 @@ Namespace AgentsXX
             RunNamedTest(NameOf(TestSkillThenOtherStopsAtSkill), AddressOf TestSkillThenOtherStopsAtSkill)
             RunNamedTest(NameOf(TestUnknownToolActsAsBarrier), AddressOf TestUnknownToolActsAsBarrier)
             RunNamedTest(NameOf(TestFailedToolSetsUnresolvedToolFailure), AddressOf TestFailedToolSetsUnresolvedToolFailure)
+            RunNamedTest(NameOf(TestRetryInvariantRestoresDroppedDesign), AddressOf TestRetryInvariantRestoresDroppedDesign)
+            RunNamedTest(NameOf(TestRetryInvariantRejectsDesignReplacement), AddressOf TestRetryInvariantRejectsDesignReplacement)
+            RunNamedTest(NameOf(TestRetryInvariantSurvivesDifferentToolCall), AddressOf TestRetryInvariantSurvivesDifferentToolCall)
+            RunNamedTest(NameOf(TestSameToolRetryDoesNotPrematurelyRecoverFailure), AddressOf TestSameToolRetryDoesNotPrematurelyRecoverFailure)
+            RunNamedTest(NameOf(TestRetryInvariantReleasedAfterOriginalToolSuccess), AddressOf TestRetryInvariantReleasedAfterOriginalToolSuccess)
+            RunNamedTest(NameOf(TestRetryInvariantCapturesHostResolvedDefault), AddressOf TestRetryInvariantCapturesHostResolvedDefault)
+            RunNamedTest(NameOf(TestWordTemplateContractParsesPropertyLists), AddressOf TestWordTemplateContractParsesPropertyLists)
+            RunNamedTest(NameOf(TestWordTemplateContractNormalizesQuotedValues), AddressOf TestWordTemplateContractNormalizesQuotedValues)
+            RunNamedTest(NameOf(TestWordTemplateContractSlotNameIsSemanticFree), AddressOf TestWordTemplateContractSlotNameIsSemanticFree)
+            RunNamedTest(NameOf(TestWordTemplateContractStillAcceptsLegacyTables), AddressOf TestWordTemplateContractStillAcceptsLegacyTables)
+            RunNamedTest(NameOf(TestWordTemplateContractRejectsUnknownBodySemantic), AddressOf TestWordTemplateContractRejectsUnknownBodySemantic)
+            RunNamedTest(NameOf(TestWordRenderingRulesIgnoreHumanProse), AddressOf TestWordRenderingRulesIgnoreHumanProse)
             RunNamedTest(NameOf(TestActiveToolingAcceptsToolCallTurn), AddressOf TestActiveToolingAcceptsToolCallTurn)
             RunNamedTest(NameOf(TestActiveToolingAcceptsFinalCompleteTurn), AddressOf TestActiveToolingAcceptsFinalCompleteTurn)
             RunNamedTest(NameOf(TestActiveToolingAcceptsFinalBlockedTurn), AddressOf TestActiveToolingAcceptsFinalBlockedTurn)
@@ -537,6 +549,314 @@ Namespace AgentsXX
         Agents.SubAgentRuntimeHardening.ParentRegistryMissingPhase,
         obj("error")?.Value(Of String)("phase"),
         "Initialization failure phase mismatch.")
+        End Sub
+
+        Private Shared Sub TestRetryInvariantRestoresDroppedDesign()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            Dim firstArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"design_name", "Example_Design"},
+                {"content", "first"}
+            }
+            Dim restored As String = ""
+            Dim validationError As String = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", firstArgs, state, restored, validationError),
+                "Initial invariant capture should succeed.")
+
+            state.NoteToolFailure("create_artifact", "template_failure", "failed")
+
+            Dim retryArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"content", "retry"}
+            }
+            restored = ""
+            validationError = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", retryArgs, state, restored, validationError),
+                "Retry should restore a dropped design constraint.")
+            AssertEqual("Example_Design", retryArgs("design_name").ToString(), "Retry design was not restored.")
+            AssertTrue(restored.IndexOf("design_name=Example_Design", System.StringComparison.OrdinalIgnoreCase) >= 0, "Restore summary should report the restored design.")
+        End Sub
+
+        Private Shared Sub TestRetryInvariantRejectsDesignReplacement()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            Dim firstArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"design_name", "Example_Design"}
+            }
+            Dim restored As String = ""
+            Dim validationError As String = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", firstArgs, state, restored, validationError),
+                "Initial invariant capture should succeed.")
+            state.NoteToolFailure("create_artifact", "template_failure", "failed")
+
+            Dim retryArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"design_name", "Different_Design"}
+            }
+            restored = ""
+            validationError = ""
+            AssertFalse(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", retryArgs, state, restored, validationError),
+                "Retry must reject replacement of the required design.")
+            AssertTrue(validationError.IndexOf("remains binding", System.StringComparison.OrdinalIgnoreCase) >= 0, "Retry rejection should explain that the original design remains binding.")
+        End Sub
+
+        Private Shared Sub TestRetryInvariantSurvivesDifferentToolCall()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            Dim firstArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"design_name", "Example_Design"}
+            }
+            Dim restored As String = ""
+            Dim validationError As String = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", firstArgs, state, restored, validationError),
+                "Initial invariant capture should succeed.")
+            state.NoteToolFailure("create_artifact", "template_failure", "failed")
+
+            state.NoteRecoveryByLaterToolCall("helper_tool")
+            Dim helperArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)()
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("helper_tool", helperArgs, state, restored, validationError),
+                "A different recovery tool call must not erase the failed artifact's retry invariants.")
+            state.NoteSuccessfulProgress("helper_tool")
+
+            Dim retryArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)()
+            restored = ""
+            validationError = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", retryArgs, state, restored, validationError),
+                "Artifact retry should still restore the design after another tool call.")
+            AssertEqual("Example_Design", retryArgs("design_name").ToString(), "Different tool call erased the saved design invariant.")
+        End Sub
+
+        Private Shared Sub TestSameToolRetryDoesNotPrematurelyRecoverFailure()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            Dim firstArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"design_name", "Example_Design"}
+            }
+            Dim restored As String = ""
+            Dim validationError As String = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", firstArgs, state, restored, validationError),
+                "Initial invariant capture should succeed.")
+            state.NoteToolFailure("create_artifact", "template_failure", "failed", skippedByPolicy:=True, returnedToParent:=True)
+
+            state.NoteRecoveryByLaterToolCall("create_artifact")
+            AssertTrue(state.HasUnresolvedToolFailure, "Issuing the same failed tool again must remain a retry until success.")
+        End Sub
+
+        Private Shared Sub TestRetryInvariantReleasedAfterOriginalToolSuccess()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            Dim firstArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"design_name", "Example_Design"}
+            }
+            Dim restored As String = ""
+            Dim validationError As String = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", firstArgs, state, restored, validationError),
+                "Initial invariant capture should succeed.")
+            state.NoteToolFailure("create_artifact", "template_failure", "failed")
+
+            Dim retryArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)()
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", retryArgs, state, restored, validationError),
+                "Retry should restore the design.")
+            state.NoteSuccessfulProgress("create_artifact")
+
+            Dim laterIndependentArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)()
+            restored = ""
+            validationError = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", laterIndependentArgs, state, restored, validationError),
+                "A later independent call after success should not be forced to reuse the old design.")
+            AssertFalse(laterIndependentArgs.ContainsKey("design_name"), "Successful completion should release the prior retry design lock.")
+        End Sub
+
+        Private Shared Sub TestRetryInvariantCapturesHostResolvedDefault()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            Dim firstArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"content", "first"}
+            }
+            Dim restored As String = ""
+            Dim validationError As String = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", firstArgs, state, restored, validationError),
+                "Initial call without an explicit design should pass the retry gate.")
+
+            ' Simulate deterministic host-side default resolution after the dispatcher gate.
+            firstArgs("design_name") = "Resolved_Default"
+            ToolCallSequencing.CaptureRetryInvariantArguments("create_artifact", firstArgs, state)
+            state.NoteToolFailure("create_artifact", "template_failure", "failed")
+
+            Dim replacementArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"design_name", "Different_Design"}
+            }
+            restored = ""
+            validationError = ""
+            AssertFalse(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", replacementArgs, state, restored, validationError),
+                "A retry must not replace a host-resolved default design after failure.")
+
+            Dim droppedArgs As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)()
+            restored = ""
+            validationError = ""
+            AssertTrue(
+                ToolCallSequencing.EnforceRetryInvariantArguments("create_artifact", droppedArgs, state, restored, validationError),
+                "A retry that drops a host-resolved default should restore it.")
+            AssertEqual("Resolved_Default", droppedArgs("design_name").ToString(), "Host-resolved default design was not restored on retry.")
+        End Sub
+
+        Private Shared Sub TestWordTemplateContractParsesPropertyLists()
+            Dim guidance As String = System.String.Join(vbLf, New String() {
+                "# Example",
+                "## Word template slots",
+                "- placeholder: [[RI:Recipient]]",
+                "  source: template_fields.recipient",
+                "  purpose: Person or group to whom the document is addressed.",
+                "  required: yes",
+                "",
+                "- placeholder: [[RI:Body]]",
+                "  source: markdown_content",
+                "  purpose: Main substantive document body.",
+                "  required: yes",
+                "",
+                "## Word body styles",
+                "- paragraph: Body Style",
+                "- heading1: Heading One",
+                "- bullet1: Bullet One",
+                "- quote1: Quote One",
+                "",
+                "## Word authoring guidance",
+                "- Use plain paragraphs for ordinary prose."
+            })
+
+            Dim contract As Agents.WordTemplateBindingContract = Nothing
+            Dim validationError As String = ""
+            AssertTrue(
+                Agents.WordTemplateBindingContractParser.TryParse(guidance, "Example.md", contract, validationError),
+                "Property-list Word template contract should parse.")
+            AssertTrue(contract IsNot Nothing, "Property-list contract should be returned.")
+            AssertEqual(2, contract.Slots.Count, "Unexpected property-list slot count.")
+            AssertEqual("text", contract.Slots(0).ContentMode, "template_fields content mode should default to text.")
+            AssertEqual("markdown", contract.Slots(1).ContentMode, "markdown_content content mode should default to markdown.")
+            AssertEqual("Person or group to whom the document is addressed.", contract.Slots(0).Purpose, "Slot purpose mismatch.")
+            AssertTrue(contract.BuildPromptSummary().IndexOf("Person or group", System.StringComparison.OrdinalIgnoreCase) >= 0, "Prompt summary should expose slot purpose.")
+            AssertEqual(4, contract.BodyStyles.Count, "Unexpected property-list body-style count.")
+            AssertEqual("Body Style", contract.BuildNativeParagraphStyleMap()("paragraph"), "Paragraph native style mapping mismatch.")
+            AssertEqual("Quote One", contract.BuildNativeParagraphStyleMap()("quote1"), "Quote native style mapping mismatch.")
+            AssertTrue(contract.BuildPromptSummary().IndexOf("plain paragraphs", System.StringComparison.OrdinalIgnoreCase) >= 0, "Prompt summary should expose Word authoring guidance.")
+        End Sub
+
+        Private Shared Sub TestWordTemplateContractNormalizesQuotedValues()
+            Dim guidance As String = System.String.Join(vbLf, New String() {
+                "## Word template slots",
+                "- placeholder: `[[RI:Recipient]]`",
+                "  source: ""template_fields.recipient""",
+                "  purpose: 'Recipient field'",
+                "  required: `yes`",
+                "",
+                "- placeholder: [[RI:Body]]",
+                "  source: markdown_content",
+                "  purpose: Main body",
+                "  required: yes",
+                "",
+                "## Word body styles",
+                "- paragraph: `Body Style`",
+                "- heading1: ""Heading One"""
+            })
+
+            Dim contract As Agents.WordTemplateBindingContract = Nothing
+            Dim validationError As String = ""
+            AssertTrue(
+                Agents.WordTemplateBindingContractParser.TryParse(guidance, "Quoted.md", contract, validationError),
+                "Matching quotes/backticks should be tolerated as input.")
+            AssertEqual("[[RI:Recipient]]", contract.Slots(0).Placeholder, "Quoted placeholder was not normalized.")
+            AssertEqual("template_fields.recipient", contract.Slots(0).Source, "Quoted source was not normalized.")
+            AssertEqual("Recipient field", contract.Slots(0).Purpose, "Quoted purpose was not normalized.")
+            AssertEqual("Body Style", contract.BuildNativeParagraphStyleMap()("paragraph"), "Quoted style name was not normalized.")
+            AssertEqual("Heading One", contract.BuildNativeParagraphStyleMap()("heading1"), "Quoted heading style was not normalized.")
+        End Sub
+
+        Private Shared Sub TestWordTemplateContractSlotNameIsSemanticFree()
+            Dim bodyGuidance As String = System.String.Join(vbLf, New String() {
+                "## Word template slots",
+                "- placeholder: [[RI:Body]]",
+                "  source: markdown_content",
+                "  content: markdown",
+                "  required: yes"
+            })
+            Dim textGuidance As String = bodyGuidance.Replace("[[RI:Body]]", "[[RI:Text]]")
+
+            Dim bodyContract As Agents.WordTemplateBindingContract = Nothing
+            Dim textContract As Agents.WordTemplateBindingContract = Nothing
+            Dim validationError As String = ""
+            AssertTrue(
+                Agents.WordTemplateBindingContractParser.TryParse(bodyGuidance, "Body.md", bodyContract, validationError),
+                "Body-named slot should parse.")
+            validationError = ""
+            AssertTrue(
+                Agents.WordTemplateBindingContractParser.TryParse(textGuidance, "Text.md", textContract, validationError),
+                "Text-named slot should parse.")
+            AssertTrue(bodyContract.Slots(0).UsesMarkdownContent, "Body slot source should define markdown semantics.")
+            AssertTrue(textContract.Slots(0).UsesMarkdownContent, "Text slot source should define markdown semantics.")
+            AssertEqual("Body", bodyContract.Slots(0).SlotId, "Body slot id mismatch.")
+            AssertEqual("Text", textContract.Slots(0).SlotId, "Text slot id mismatch.")
+        End Sub
+
+        Private Shared Sub TestWordTemplateContractStillAcceptsLegacyTables()
+            Dim guidance As String = System.String.Join(vbLf, New String() {
+                "## Word template slots",
+                "| Placeholder | Source | Content | Required |",
+                "| --- | --- | --- | --- |",
+                "| [[RI:Body]] | markdown_content | markdown | yes |",
+                "",
+                "## Word body styles",
+                "| Semantic | Word style |",
+                "| --- | --- |",
+                "| paragraph | Legacy Body |"
+            })
+
+            Dim contract As Agents.WordTemplateBindingContract = Nothing
+            Dim validationError As String = ""
+            AssertTrue(
+                Agents.WordTemplateBindingContractParser.TryParse(guidance, "Legacy.md", contract, validationError),
+                "Legacy Markdown-table Word contract should remain readable.")
+            AssertEqual(1, contract.Slots.Count, "Legacy slot count mismatch.")
+            AssertEqual(1, contract.BodyStyles.Count, "Legacy body-style count mismatch.")
+        End Sub
+
+        Private Shared Sub TestWordTemplateContractRejectsUnknownBodySemantic()
+            Dim guidance As String = System.String.Join(vbLf, New String() {
+                "## Word body styles",
+                "- heading7: Unsupported"
+            })
+
+            Dim contract As Agents.WordTemplateBindingContract = Nothing
+            Dim validationError As String = ""
+            AssertFalse(
+                Agents.WordTemplateBindingContractParser.TryParse(guidance, "Invalid.md", contract, validationError),
+                "Unknown body-style semantic must be rejected.")
+            AssertTrue(validationError.IndexOf("Word body styles", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                       validationError.IndexOf("semantic", System.StringComparison.OrdinalIgnoreCase) >= 0,
+                       "Unknown semantic rejection should be explicit.")
+        End Sub
+
+        Private Shared Sub TestWordRenderingRulesIgnoreHumanProse()
+            Dim guidance As String = System.String.Join(vbLf, New String() {
+                "# Example",
+                "## Word rendering rules",
+                "- heading_numbering: native",
+                "",
+                "A design-specific companion may override this with `heading_numbering: preserve` when required.",
+                "This prose contains another colon: it is documentation, not configuration."
+            })
+
+            Dim contract As Agents.WordTemplateBindingContract = Nothing
+            Dim validationError As String = ""
+            AssertTrue(
+                Agents.WordTemplateBindingContractParser.TryParse(guidance, "Rendering.md", contract, validationError),
+                "Human prose in the rendering-rules section must not be parsed as configuration.")
+            AssertTrue(contract IsNot Nothing, "Rendering-rule contract should be returned.")
+            AssertEqual("native", contract.HeadingNumberingMode, "Explicit heading_numbering rule should remain authoritative.")
         End Sub
 
         Private Shared Sub TestActiveToolingAcceptsToolCallTurn()

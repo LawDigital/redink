@@ -68,6 +68,8 @@ Namespace SharedLibrary
 
             Try
                 Me.TopMost = True
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
                 Me.Activate()
                 Me.BringToFront()
             Catch
@@ -97,13 +99,23 @@ Namespace SharedLibrary
 
         Private Async Sub InitializeWebViewAsync()
             Try
-                Dim userDataFolder As String = Path.Combine(Path.GetTempPath(), "RedInk_WebView2_OAuth")
-                Directory.CreateDirectory(userDataFolder)
+                Dim userDataFolder As String = SharedLibrary.SharedMethods.GetWebView2UserDataFolder()
 
                 Dim env As CoreWebView2Environment =
                     Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
 
                 Await _webView.EnsureCoreWebView2Async(env)
+
+                AddHandler _webView.CoreWebView2.ProcessFailed,
+                    Sub(s, e)
+                        SharedLibrary.SharedMethods.LogWebView2ProcessFailed("OAuth", e.ProcessFailedKind.ToString(), e.ExitCode.ToString())
+                        Try
+                            If e.ProcessFailedKind = CoreWebView2ProcessFailedKind.RenderProcessExited Then
+                                _webView.Reload()
+                            End If
+                        Catch
+                        End Try
+                    End Sub
 
                 _webView.CoreWebView2.Settings.AreDevToolsEnabled = False
                 _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = True

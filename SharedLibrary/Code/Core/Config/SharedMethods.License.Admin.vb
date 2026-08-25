@@ -1007,7 +1007,7 @@ Namespace SharedLibrary
 
                 AddHandler btnClose.Click, Sub() form.Close()
 
-                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveDialogOwner()
+                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
                 If ownerWnd IsNot Nothing Then
                     form.ShowDialog(ownerWnd)
                 Else
@@ -2056,7 +2056,8 @@ Namespace SharedLibrary
                 dialog.Filter = "Supported files (*.csv;*.txt;*.json)|*.csv;*.txt;*.json|CSV files (*.csv)|*.csv|Text files (*.txt)|*.txt|JSON files (*.json)|*.json|All files (*.*)|*.*"
                 dialog.Multiselect = False
 
-                If dialog.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                Dim __safeDialogOwner2059 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner2059 IsNot Nothing, dialog.ShowDialog(__safeDialogOwner2059), dialog.ShowDialog()) <> System.Windows.Forms.DialogResult.OK Then
                     Return 0
                 End If
 
@@ -2694,7 +2695,7 @@ Namespace SharedLibrary
                         form.Close()
                     End Sub
 
-                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveDialogOwner()
+                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
                 Dim ownerScope As System.IDisposable = Nothing
 
                 Try
@@ -3163,7 +3164,8 @@ Namespace SharedLibrary
                 dialog.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
                 dialog.FileName = If(resultsOnly, "license-manager-result-report.csv", "license-manager-current-table.csv")
 
-                If dialog.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                Dim __safeDialogOwner3166 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner3166 IsNot Nothing, dialog.ShowDialog(__safeDialogOwner3166), dialog.ShowDialog()) <> System.Windows.Forms.DialogResult.OK Then
                     Return
                 End If
 

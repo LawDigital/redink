@@ -3,23 +3,22 @@
 '
 ' =============================================================================
 ' File: AgentGate.vb
-' Purpose: Global serialization gate ensuring that no two LLM / MCP model calls
-'          execute concurrently. Required because sub-agents are not yet
-'          isolated; only one model interaction may run at a time.
+' Purpose: Global serialization gate ensuring that no two agentic runs / LLM / MCP
+'          model calls that depend on shared host state execute concurrently.
 '
 ' Architecture:
-'  - Uses SemaphoreSlim(1, 1) for mutual exclusion across all concurrent async flows.
-'  - Re-entrant support via BeginOwnedScope / EndOwnedScope for tooling loops that
-'    hold the gate across nested LLM calls without deadlock.
-'  - AsyncLocal(Of OwnerHolder) tracks ownership per logical async flow.
-'  - IsBusy property exposes gate status for debugging and monitoring.
+'  - Uses SemaphoreSlim(1, 1) for mutual exclusion across independent async flows.
+'  - Re-entrant support via BeginOwnedScopeAsync / EndOwnedScope for complete
+'    tooling runs that contain nested LLM/MCP/sub-agent calls.
+'  - AsyncLocal(Of OwnerHolder) carries one mutable holder through a logical async
+'    flow. Nested depth is protected by SyncLock so ownership can safely transfer
+'    to a captured Task.Run execution context without a release/acquire race.
+'  - MarkCurrentFlowAsOwner / UnmarkCurrentFlowAsOwner remain compatible with the
+'    SubAgentRunner EnterAsync -> Mark -> ... -> Unmark -> Release pattern.
 ' =============================================================================
 
 Option Strict On
 Option Explicit On
-
-Imports System.Threading
-Imports System.Threading.Tasks
 
 Namespace Agents
 
@@ -28,38 +27,50 @@ Namespace Agents
         Private Sub New()
         End Sub
 
-        Private Shared ReadOnly _gate As New SemaphoreSlim(1, 1)
+        Private Shared ReadOnly _gate As New System.Threading.SemaphoreSlim(1, 1)
 
-        ' Re-entrancy support. We hold the flag in a *mutable* holder so that
-        ' writes performed inside awaited helpers are observable in the caller.
-        ' (Plain AsyncLocal(Of Boolean) writes only flow DOWN into child async
-        ' frames; they do NOT flow back UP to the calling method, which would
-        ' otherwise cause the same async flow to dead-lock against itself when
-        ' a sub-agent runner takes the gate and then calls into LLM().)
         Private NotInheritable Class OwnerHolder
-            Public Owned As Boolean
+            Public Depth As Integer
+            Public GateHeld As Boolean
         End Class
 
-        Private Shared ReadOnly _ownerHolder As New AsyncLocal(Of OwnerHolder)
+        Private Shared ReadOnly _ownerHolder As New System.Threading.AsyncLocal(Of OwnerHolder)()
 
         Private Shared Function EnsureHolder() As OwnerHolder
-            Dim h = _ownerHolder.Value
-            If h Is Nothing Then
-                h = New OwnerHolder()
-                _ownerHolder.Value = h
+            Dim holder As OwnerHolder = _ownerHolder.Value
+            If holder Is Nothing Then
+                holder = New OwnerHolder()
+                _ownerHolder.Value = holder
             End If
-            Return h
+            Return holder
         End Function
 
         Private Shared Function IsOwner() As Boolean
-            Dim h = _ownerHolder.Value
-            Return h IsNot Nothing AndAlso h.Owned
+            Dim holder As OwnerHolder = _ownerHolder.Value
+            If holder Is Nothing Then Return False
+
+            SyncLock holder
+                Return holder.Depth > 0
+            End SyncLock
         End Function
 
-        ''' <summary>Acquires the global model-call gate. Honors cancellation.</summary>
-        Public Shared Async Function EnterAsync(Optional cancellationToken As CancellationToken = Nothing) As Task
-            Dim owner = IsOwner()
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] EnterAsync ENTER owner={owner} busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
+        Private Shared Function GetOwnerDepth() As Integer
+            Dim holder As OwnerHolder = _ownerHolder.Value
+            If holder Is Nothing Then Return 0
+
+            SyncLock holder
+                Return holder.Depth
+            End SyncLock
+        End Function
+
+        ''' <summary>Acquires the global gate for a single non-owned call. Honors cancellation.</summary>
+        Public Shared Async Function EnterAsync(
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task
+
+            Dim owner As Boolean = IsOwner()
+            System.Diagnostics.Debug.WriteLine(
+                $"[AGENTGATE] EnterAsync ENTER owner={owner} depth={GetOwnerDepth()} busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+
             If owner Then
                 System.Diagnostics.Debug.WriteLine("[AGENTGATE] EnterAsync BYPASS (owner)")
                 Return
@@ -67,71 +78,181 @@ Namespace Agents
 
             System.Diagnostics.Debug.WriteLine("[AGENTGATE] EnterAsync WAITING")
             Await _gate.WaitAsync(cancellationToken).ConfigureAwait(False)
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] EnterAsync ACQUIRED busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
+            System.Diagnostics.Debug.WriteLine(
+                $"[AGENTGATE] EnterAsync ACQUIRED busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
         End Function
 
-        ''' <summary>Releases the gate. Safe to call only if EnterAsync was awaited.</summary>
+        ''' <summary>
+        ''' Releases a gate acquired by EnterAsync. If the current logical flow still
+        ''' has an owned outer scope, the call was re-entrant and no release occurs.
+        ''' </summary>
         Public Shared Sub Release()
-            If IsOwner() Then Return
+            Dim holder As OwnerHolder = _ownerHolder.Value
+            Dim shouldRelease As Boolean = False
+
+            If holder Is Nothing Then
+                shouldRelease = True
+            Else
+                SyncLock holder
+                    If holder.Depth > 0 Then
+                        Return
+                    End If
+
+                    ' SubAgentRunner uses EnterAsync -> Mark -> Unmark -> Release.
+                    ' GateHeld remains True after Unmark reaches depth zero so this
+                    ' Release call can relinquish the physical semaphore exactly once.
+                    If holder.GateHeld Then
+                        holder.GateHeld = False
+                    End If
+                    shouldRelease = True
+                End SyncLock
+            End If
+
+            If Not shouldRelease Then Return
+
             Try
                 _gate.Release()
-            Catch
-                ' Ignore over-release; defensive.
+            Catch ex As System.Exception
+                ' Defensive only. Correct call pairs must never over-release.
+                System.Diagnostics.Debug.WriteLine($"[AGENTGATE] Release ERROR: {ex.Message}")
             End Try
         End Sub
 
         ''' <summary>
-        ''' Marks the current async flow as the owner of the gate for the duration
-        ''' of a nested scope. Pair with <see cref="EndOwnedScope"/> in Finally.
-        ''' Useful when a tooling loop wants to hold the gate across many internal
-        ''' LLM/MCP calls without serializing against itself.
+        ''' Acquires an owned run scope. Nested scopes increment a holder-local depth;
+        ''' only the outermost EndOwnedScope releases the physical semaphore.
         ''' </summary>
-        Public Shared Async Function BeginOwnedScopeAsync(Optional cancellationToken As CancellationToken = Nothing) As Task
-            Dim holder = EnsureHolder()
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] BeginOwnedScopeAsync ENTER holderExists={holder IsNot Nothing} owned={holder.Owned} busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
-            If holder.Owned Then
-                System.Diagnostics.Debug.WriteLine("[AGENTGATE] BeginOwnedScopeAsync BYPASS (already owner)")
-                Return
+        Public Shared Function BeginOwnedScopeAsync(
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task
+
+            ' IMPORTANT: establish the AsyncLocal holder synchronously in the CALLER's
+            ' execution context before returning a Task. If the holder is first assigned
+            ' inside an Async Function, that AsyncLocal assignment belongs to the callee's
+            ' captured execution context and is restored when the awaited method returns.
+            ' The caller would then hold the physical semaphore but appear to nested
+            ' LLM/MCP calls as a non-owner, causing a self-deadlock in EnterAsync().
+            Dim holder As OwnerHolder = EnsureHolder()
+
+            SyncLock holder
+                System.Diagnostics.Debug.WriteLine(
+                    $"[AGENTGATE] BeginOwnedScopeAsync ENTER depth={holder.Depth} held={holder.GateHeld} busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+
+                If holder.Depth > 0 Then
+                    holder.Depth += 1
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[AGENTGATE] BeginOwnedScopeAsync NESTED depth={holder.Depth}")
+                    Return System.Threading.Tasks.Task.CompletedTask
+                End If
+            End SyncLock
+
+            Return AcquireOwnedScopeAsync(holder, cancellationToken)
+        End Function
+
+        Private Shared Async Function AcquireOwnedScopeAsync(
+            holder As OwnerHolder,
+            cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+
+            If holder Is Nothing Then
+                Throw New System.InvalidOperationException("AgentGate owner holder was not initialized.")
             End If
 
             System.Diagnostics.Debug.WriteLine("[AGENTGATE] BeginOwnedScopeAsync WAITING")
             Await _gate.WaitAsync(cancellationToken).ConfigureAwait(False)
-            holder.Owned = True
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] BeginOwnedScopeAsync ACQUIRED owned={holder.Owned} busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
+
+            SyncLock holder
+                holder.GateHeld = True
+                holder.Depth += 1
+                System.Diagnostics.Debug.WriteLine(
+                    $"[AGENTGATE] BeginOwnedScopeAsync ACQUIRED depth={holder.Depth} held={holder.GateHeld} busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+            End SyncLock
         End Function
 
         Public Shared Sub EndOwnedScope()
-            Dim holder = _ownerHolder.Value
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] EndOwnedScope ENTER holderIsNothing={holder Is Nothing} owned={If(holder Is Nothing, False, holder.Owned)} busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
-            If holder Is Nothing OrElse Not holder.Owned Then
-                System.Diagnostics.Debug.WriteLine("[AGENTGATE] EndOwnedScope BYPASS (not owner)")
+            Dim holder As OwnerHolder = _ownerHolder.Value
+            If holder Is Nothing Then
+                System.Diagnostics.Debug.WriteLine("[AGENTGATE] EndOwnedScope BYPASS (no holder)")
                 Return
             End If
 
-            holder.Owned = False
-            Try
-                _gate.Release()
-                System.Diagnostics.Debug.WriteLine($"[AGENTGATE] EndOwnedScope RELEASED busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
-            Catch ex As Exception
-                System.Diagnostics.Debug.WriteLine($"[AGENTGATE] EndOwnedScope RELEASE ERROR: {ex.Message}")
-            End Try
+            Dim shouldRelease As Boolean = False
+
+            SyncLock holder
+                System.Diagnostics.Debug.WriteLine(
+                    $"[AGENTGATE] EndOwnedScope ENTER depth={holder.Depth} held={holder.GateHeld} busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+
+                If holder.Depth <= 0 Then
+                    holder.Depth = 0
+                    System.Diagnostics.Debug.WriteLine("[AGENTGATE] EndOwnedScope BYPASS (not owner)")
+                    Return
+                End If
+
+                holder.Depth -= 1
+                If holder.Depth > 0 Then
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[AGENTGATE] EndOwnedScope NESTED-EXIT depth={holder.Depth}")
+                    Return
+                End If
+
+                If holder.GateHeld Then
+                    holder.GateHeld = False
+                    shouldRelease = True
+                End If
+            End SyncLock
+
+            If shouldRelease Then
+                Try
+                    _gate.Release()
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[AGENTGATE] EndOwnedScope RELEASED busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[AGENTGATE] EndOwnedScope RELEASE ERROR: {ex.Message}")
+                End Try
+            End If
         End Sub
 
+        ''' <summary>
+        ''' Marks ownership after a successful EnterAsync. Nested callers only increase
+        ''' depth; a depth-zero transition records that this holder owns the semaphore.
+        ''' </summary>
         Public Shared Sub MarkCurrentFlowAsOwner()
-            Dim holder = EnsureHolder()
-            holder.Owned = True
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] MarkCurrentFlowAsOwner owned={holder.Owned} busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
+            Dim holder As OwnerHolder = EnsureHolder()
+
+            SyncLock holder
+                If holder.Depth = 0 Then
+                    holder.GateHeld = True
+                End If
+                holder.Depth += 1
+                System.Diagnostics.Debug.WriteLine(
+                    $"[AGENTGATE] MarkCurrentFlowAsOwner depth={holder.Depth} held={holder.GateHeld} busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+            End SyncLock
         End Sub
 
+        ''' <summary>
+        ''' Removes one SubAgentRunner ownership level. It intentionally does not release
+        ''' the semaphore; the caller's paired Release() performs that step only when no
+        ''' outer owned scope remains.
+        ''' </summary>
         Public Shared Sub UnmarkCurrentFlowAsOwner()
-            Dim holder = _ownerHolder.Value
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] UnmarkCurrentFlowAsOwner ENTER holderIsNothing={holder Is Nothing} owned={If(holder Is Nothing, False, holder.Owned)} busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
+            Dim holder As OwnerHolder = _ownerHolder.Value
             If holder Is Nothing Then Return
-            holder.Owned = False
-            System.Diagnostics.Debug.WriteLine($"[AGENTGATE] UnmarkCurrentFlowAsOwner EXIT owned={holder.Owned} busy={IsBusy} thread={Thread.CurrentThread.ManagedThreadId}")
+
+            SyncLock holder
+                System.Diagnostics.Debug.WriteLine(
+                    $"[AGENTGATE] UnmarkCurrentFlowAsOwner ENTER depth={holder.Depth} held={holder.GateHeld} busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+
+                If holder.Depth > 0 Then
+                    holder.Depth -= 1
+                Else
+                    holder.Depth = 0
+                End If
+
+                System.Diagnostics.Debug.WriteLine(
+                    $"[AGENTGATE] UnmarkCurrentFlowAsOwner EXIT depth={holder.Depth} held={holder.GateHeld} busy={IsBusy} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}")
+            End SyncLock
         End Sub
 
-        ''' <summary>True if the gate is currently held by some caller.</summary>
+        ''' <summary>True if the physical gate is currently held by some caller.</summary>
         Public Shared ReadOnly Property IsBusy As Boolean
             Get
                 Return _gate.CurrentCount = 0

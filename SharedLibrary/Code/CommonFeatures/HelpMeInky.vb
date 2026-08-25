@@ -31,6 +31,7 @@
 '  - Markdig: Markdown -> HTML rendering.
 '  - HtmlAgilityPack: HTML -> plain text extraction for manual loading.
 '  - SharedLibrary.SharedMethods: LLM invocation, PDF/RTF reading, config discovery, model switching.
+'  - External links are opened only through SharedMethods.SafeOpenExternalLink (HTTP/HTTPS/MAILTO).
 ' =============================================================================
 
 Option Strict On
@@ -63,6 +64,9 @@ Namespace SharedLibrary
 
         ''' <summary>Name shown in the chat UI for assistant messages.</summary>
         Private Const AssistantName As String = AN8
+
+        ''' <summary>Refresh interval for cached remote manuals and indexed sources.</summary>
+        Private Const RemoteManualCacheRefreshHours As Integer = 72
 
         ''' <summary>Shared configuration/context provider (prompts, INI paths, model settings, etc.).</summary>
         Private ReadOnly _context As ISharedContext
@@ -126,11 +130,20 @@ Namespace SharedLibrary
         ''' <summary>Conversation history used to build transcript and LLM context.</summary>
         Private ReadOnly _history As New List(Of (Role As String, Content As String))()
 
+        ''' <summary>
+        ''' Wiederverwendbarer Status für Quellen-IDs, Quellenbereiche, Thema und Suchintention.
+        ''' </summary>
+        Private ReadOnly _semanticConversationState As New SharedMethods.SemanticSearchConversationState()
+
+
         ''' <summary>Cached manual text for the currently configured manual path/URL.</summary>
         Private _manualCache As String = Nothing
 
         ''' <summary>Path/URL that `_manualCache` was loaded from.</summary>
         Private _manualCachePath As String = Nothing
+
+        ''' <summary>Serializes refreshes of local cache files for remote manuals and semantic-search indexes.</summary>
+        Private Shared ReadOnly _remoteManualCacheSemaphore As New Threading.SemaphoreSlim(1, 1)
 
         ''' <summary>Welcome generation state flag (0 = none, 1 = running).</summary>
         Private _welcomeInProgress As Integer = 0 ' 0 = none, 1 = running
@@ -201,10 +214,7 @@ Namespace SharedLibrary
             table.Controls.Add(pnlButtons, 0, 2)
             Me.Controls.Add(table)
 
-            _mdPipeline = New MarkdownPipelineBuilder().
-            UseAdvancedExtensions().
-            UseSoftlineBreakAsHardlineBreak().
-            Build()
+            _mdPipeline = Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
             AddHandler Me.Load, AddressOf OnLoadForm
             AddHandler Me.FormClosing, AddressOf OnFormClosing
@@ -247,6 +257,30 @@ Namespace SharedLibrary
         Private Sub Dbg(msg As String)
             Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] {msg}")
         End Sub
+
+        ''' <summary>
+        ''' Removes a trailing internal Sources line from an answer and returns it for diagnostics.
+        ''' </summary>
+        Private Shared Function RemoveTrailingSourcesLine(answer As String, ByRef sourcesLine As String) As String
+            Dim value As String = If(answer, "").TrimEnd()
+            sourcesLine = ""
+
+            If value.Length = 0 Then
+                Return value
+            End If
+
+            Dim match As Match = Regex.Match(
+                value,
+                "(?is)^(.*?)(?:\r\n|\r|\n){0,2}(Sources:\s*[^\r\n]+)\s*$",
+                RegexOptions.IgnoreCase)
+
+            If Not match.Success Then
+                Return value
+            End If
+
+            sourcesLine = match.Groups(2).Value.Trim()
+            Return match.Groups(1).Value.TrimEnd()
+        End Function
 
         ''' <summary>
         ''' Executes an action on the UI thread (no-op if the form is disposed).
@@ -432,7 +466,9 @@ Namespace SharedLibrary
             Dbg("OnClear start")
             Try
                 _history.Clear()
+                SharedMethods.ResetSemanticSearchConversationState(_semanticConversationState)
                 InitializeChatHtml()
+
                 My.Settings.LastHelpMeChat = ""
                 My.Settings.LastHelpMeChatHtml = ""
                 My.Settings.Save()
@@ -495,20 +531,24 @@ Namespace SharedLibrary
                                         System.Globalization.CultureInfo.CurrentUICulture.DisplayName,
                                         _hostLanguage)
             Dim partOfDay As String = GetPartOfDay()
-            Dim manualText As String = Await GetManualOnceAsync()
+            Dim manualText As String = Await GetManualAvailabilityTextAsync().ConfigureAwait(False)
             Dim systemPrompt As String
+            Dim userPrompt As String = ""
 
             manualText = manualText.Trim()
-            If manualText.StartsWith("Error", System.StringComparison.OrdinalIgnoreCase) OrElse manualText = "" Then
+            If IsManualLoadError(manualText) Then
+                systemPrompt = $"Generate a brief, friendly {langName} welcome that naturally references it is {partOfDay} now, but explain that you cannot work because the configured manual could not be loaded. Start the reply with exactly 'Manual access error:'. Include the provided error details and advise checking the configured file path or URL."
+                userPrompt = manualText
+            ElseIf manualText = "" Then
                 systemPrompt = $"Generate a brief, friendly {langName} welcome that naturally references it is {partOfDay} now, but tell the user that you can't work because you have no access to the manual (which needs to be configured and is retrieved either via an URL or file path; most likely, the path/URL is wrong or not working). Advise that the configured source should be checked or configured as per the manual."
             Else
                 systemPrompt = $"Generate a brief, friendly {langName} welcome that naturally references it is {partOfDay} now and asks what you can do. Do NOT state your name. One short short sentence, not talkative."
             End If
-            Dim userPrompt As String = ""
+
             Dim answer As String = ""
             Try
                 Dim sw = Stopwatch.StartNew()
-                answer = Await CallHelpMeLlmAsync(systemPrompt, userPrompt)
+                answer = Await CallHelpMeLlmAsync(systemPrompt, userPrompt).ConfigureAwait(False)
                 sw.Stop()
                 Dbg($"Welcome LLM ms={sw.ElapsedMilliseconds} rawLen={If(answer, "").Length}")
             Catch ex As Exception
@@ -517,64 +557,388 @@ Namespace SharedLibrary
             End Try
 
             answer = If(answer, "").Trim()
+            If IsManualLoadError(manualText) Then
+                answer = EnsureManualAccessErrorPrefix(answer, manualText)
+            End If
+
             AppendAssistantMarkdown(answer)
             _history.Add(("assistant", answer))
             PersistChatHtml()
             Dbg("GenerateWelcomeAsync done")
         End Function
 
-        ''' <summary>
-        ''' Builds the user prompt (question + manual + conversation + optional config), invokes the LLM,
-        ''' and appends the response to the chat.
-        ''' </summary>
-        Private Async Function SendAsync(userText As String) As Task
-            Dbg("SendAsync start")
-            Try
-                Dim hostInfo As String = If(String.IsNullOrEmpty(_hostAppName), "", $" (Host application (and version of {AN} add-in): Microsoft {_hostAppName})")
-                Dim systemPrompt As String = _context.SP_HelpMe & hostInfo
-                Dim manualText As String = Await GetManualOnceAsync()
-                Dim convo As String = BuildConversationForLlm()
+        Private Function BuildHelpMeUserPrompt(
+            userText As String,
+            sourceText As String,
+            conversation As String,
+            Optional previousDraft As String = "",
+            Optional verificationNotes As String = ""
+        ) As String
 
-                manualText = manualText.Trim()
-                If manualText.StartsWith("Error", System.StringComparison.OrdinalIgnoreCase) Or manualText = "" Then
-                    manualText = "No manual"
+            Dim builder As New System.Text.StringBuilder()
+            builder.AppendLine("User question:")
+            builder.AppendLine(userText)
+            builder.AppendLine()
+            builder.AppendLine("Manual:")
+            builder.AppendLine(sourceText)
+            builder.AppendLine()
+            builder.AppendLine("Conversation so far:")
+            builder.AppendLine(conversation)
+
+            If Not String.IsNullOrWhiteSpace(previousDraft) Then
+                builder.AppendLine()
+                builder.AppendLine("Previous draft; rewrite it completely from the supplied original sources:")
+                builder.AppendLine(previousDraft)
+            End If
+
+            If Not String.IsNullOrWhiteSpace(verificationNotes) Then
+                builder.AppendLine()
+                builder.AppendLine("Verifier findings that must be corrected:")
+                builder.AppendLine(verificationNotes)
+            End If
+
+            If _chkIncludeConfig.Checked Then
+                Dim configContent As String = GetConfigurationContent()
+                If Not String.IsNullOrEmpty(configContent) Then
+                    builder.AppendLine()
+                    builder.AppendLine(configContent)
                 End If
-                Dim sb As New StringBuilder()
-                sb.AppendLine("User question:")
-                sb.AppendLine(userText)
-                sb.AppendLine()
-                sb.AppendLine("Manual:")
-                sb.AppendLine(manualText)
-                sb.AppendLine()
-                sb.AppendLine("Conversation so far:")
-                sb.AppendLine(convo)
+            End If
 
-                ' Include configuration files if checkbox is checked
-                If _chkIncludeConfig.Checked Then
-                    Dim configContent = GetConfigurationContent()
-                    If Not String.IsNullOrEmpty(configContent) Then
-                        sb.AppendLine()
-                        sb.AppendLine(configContent)
+            Return builder.ToString()
+        End Function
+
+        Private Shared Function ShouldForceFullSemanticScan(userText As String) As Boolean
+            Dim value As String = If(userText, "")
+            Dim indicators As String() = {
+                "gründlich",
+                "vollständig durchsuchen",
+                "alles durchsuchen",
+                "komplette suche",
+                "exhaustive",
+                "search everything",
+                "thorough search"
+            }
+
+            For Each indicator As String In indicators
+                If value.IndexOf(indicator, System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function BuildVerificationNotes(
+            verification As SharedMethods.SemanticSearchResponseVerificationResult
+        ) As String
+
+            If verification Is Nothing Then
+                Return ""
+            End If
+
+            Dim builder As New System.Text.StringBuilder()
+
+            If verification.UnsupportedClaims IsNot Nothing AndAlso
+               verification.UnsupportedClaims.Count > 0 Then
+                builder.AppendLine("Unsupported claims:")
+                For Each value As String In verification.UnsupportedClaims
+                    builder.AppendLine("- " & value)
+                Next
+            End If
+
+            If verification.MissingDetails IsNot Nothing AndAlso
+               verification.MissingDetails.Count > 0 Then
+                builder.AppendLine("Missing details:")
+                For Each value As String In verification.MissingDetails
+                    builder.AppendLine("- " & value)
+                Next
+            End If
+
+            If Not String.IsNullOrWhiteSpace(verification.RevisedSearchIntent) Then
+                builder.AppendLine("Revised search intent: " & verification.RevisedSearchIntent)
+            End If
+
+            Return builder.ToString().Trim()
+        End Function
+
+        ''' <summary>
+        ''' Builds the user prompt, retrieves only relevant original source segments when possible,
+        ''' invokes the LLM and verifies the generated response.
+        ''' </summary>
+        Private Async Function SendAsync(userText As String) As System.Threading.Tasks.Task
+            Dbg("SendAsync start")
+
+            Try
+                Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                Dim hostInfo As String = If(
+                    String.IsNullOrEmpty(_hostAppName),
+                    "",
+                    $" (Host application (and version of {AN} add-in): Microsoft {_hostAppName})")
+                Dim systemPrompt As String = _context.SP_HelpMe & hostInfo
+                Dim conversation As String = BuildConversationForLlm()
+                Dim configuredPath As String = If(
+                    _context IsNot Nothing,
+                    ExpandEnvironmentVariables(_context.INI_HelpMeInkyPath),
+                    "")
+                Dim sourceText As String = ""
+                Dim retrieval As SharedMethods.SemanticSearchRetrievalResult = Nothing
+
+                Dim isRemote As Boolean =
+                    configuredPath.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) OrElse
+                    configuredPath.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase)
+                Dim retrievalPath As String = configuredPath
+
+                If isRemote Then
+                    retrievalPath = Await EnsureLocalSemanticSearchIndexPathAsync(
+                        configuredPath,
+                        AddressOf UpdateAssistantThinking).ConfigureAwait(False)
+                End If
+
+                Dim retrievalIndexed As Boolean =
+                    Not String.IsNullOrWhiteSpace(retrievalPath) AndAlso
+                    SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(retrievalPath)
+
+                Dim retrievalOptions As New SharedMethods.SemanticSearchRetrievalOptions() With {
+                    .MinimumSelectedSegments = 1,
+                    .MaximumSelectedSegments = 8,
+                    .MaximumTotalSegments = 24,
+                    .ContextBytesBefore = 2048,
+                    .ContextBytesAfter = 2048,
+                    .MergeGapBytes = 0,
+                    .SpecialTaskName = "HelpMe",
+                    .IncludePreviouslyUsedIds = True,
+                    .MaximumPreviouslyUsedIds = 4,
+                    .IncludeAdjacentToPreviouslyUsedIds = True,
+                    .EnableFullScanFallback = True,
+                    .ForceFullScan = ShouldForceFullSemanticScan(userText),
+                    .FallbackWhenPotentiallyMissing = True,
+                    .MinimumSelectionRelevance = 0.35R,
+                    .FullScanMinimumRelevance = 0.5R,
+                    .MaximumFullScanSegments = 8,
+                    .MaximumReloadRounds = 2,
+                    .MaximumLlmAttempts = 2,
+                    .MaximumConversationCharacters = 12000
+                }
+
+                If retrievalIndexed Then
+                    UpdateAssistantThinking("Searching indexed manual...")
+
+                    retrieval = Await SharedMethods.RetrieveSemanticSearchAsync(
+                        retrievalPath,
+                        _context,
+                        userText,
+                        conversation,
+                        _semanticConversationState,
+                        retrievalOptions).ConfigureAwait(False)
+
+                    If retrieval IsNot Nothing AndAlso retrieval.IsIndexed Then
+                        sourceText = retrieval.ReducedSourceText
+
+                        systemPrompt &=
+                            " Answer exclusively from the supplied original SOURCE excerpts. " &
+                            "Do not invent functions, steps or UI elements. Preserve exact UI terms, " &
+                            "prerequisites, restrictions and warnings. If the excerpts are insufficient, " &
+                            "state that clearly. Do not expose internal SOURCE IDs or append a 'Sources:' line."
+
+                        If String.IsNullOrWhiteSpace(sourceText) Then
+                            UpdateAssistantThinking("Indexed manual — no relevant material found.")
+                            sourceText =
+                                "No relevant original source excerpts were found in the indexed source. " &
+                                "Do not invent an answer; explain that the available source does not contain enough information."
+                        Else
+                            Dim matchCount As Integer =
+                                If(retrieval.SelectedEntryIds IsNot Nothing, retrieval.SelectedEntryIds.Count, 0)
+                            UpdateAssistantThinking($"Indexed manual — {matchCount:N0} relevant segment(s) found. Drafting answer...")
+                        End If
+                    Else
+                        UpdateAssistantThinking("Indexed manual unavailable. Falling back to the full manual...")
                     End If
                 End If
 
-                Dim sw = Stopwatch.StartNew()
-                Dim answer As String = Await CallHelpMeLlmAsync(systemPrompt, sb.ToString())
-                sw.Stop()
+                ' Normale Dateien, URLs und ungültige Indizes verwenden unverändert den bisherigen Pfad.
+                If retrieval Is Nothing OrElse Not retrieval.IsIndexed Then
+                    Dbg($"Semantic retrieval skipped (isRemote={isRemote}, indexed={retrievalIndexed}, retrievalPath='{retrievalPath}') - sending full manual")
+                    sourceText = Await GetManualOnceAsync().ConfigureAwait(False)
+                End If
 
+                sourceText = If(sourceText, "").Trim()
+
+                If IsManualLoadError(sourceText) Then
+                    systemPrompt &=
+                        " If the manual section contains an 'Error loading HelpMeInky manual...' entry, " &
+                        "treat it as a hard failure to access the manual. Return a concise error response " &
+                        "that includes the failure details. Start with exactly 'Manual access error:'. " &
+                        "Do not invent manual content."
+                ElseIf sourceText.Length = 0 Then
+                    sourceText = "No manual configured."
+                End If
+
+                Dim answer As String = Await CallHelpMeLlmAsync(
+                    systemPrompt,
+                    BuildHelpMeUserPrompt(userText, sourceText, conversation)).ConfigureAwait(False)
                 answer = If(answer, "").Trim()
-                Dbg($"SendAsync ms={sw.ElapsedMilliseconds} ansLen={answer.Length}")
+
+                If IsManualLoadError(sourceText) Then
+                    answer = EnsureManualAccessErrorPrefix(answer, sourceText)
+                End If
+
+                Dim lastVerification As SharedMethods.SemanticSearchResponseVerificationResult = Nothing
+
+                If retrieval IsNot Nothing AndAlso
+                   retrieval.IsIndexed AndAlso
+                   Not String.IsNullOrWhiteSpace(retrieval.ReducedSourceText) Then
+
+                    For reloadRound As Integer = 0 To retrievalOptions.MaximumReloadRounds
+                        lastVerification = Await SharedMethods.VerifySemanticSearchResponseAsync(
+                            retrievalPath,
+                            _context,
+                            "HelpMe",
+                            userText,
+                            conversation,
+                            retrieval,
+                            answer,
+                            maximumLlmAttempts:=retrievalOptions.MaximumLlmAttempts,
+                            maximumConversationCharacters:=retrievalOptions.MaximumConversationCharacters).ConfigureAwait(False)
+
+                        If lastVerification Is Nothing OrElse
+                           (lastVerification.Supported AndAlso Not lastVerification.RequiresMoreSources) Then
+                            Exit For
+                        End If
+
+                        If reloadRound >= retrievalOptions.MaximumReloadRounds Then
+                            Exit For
+                        End If
+
+                        UpdateAssistantThinking("Indexed manual — loading additional relevant segments...")
+
+                        Dim additional As SharedMethods.SemanticSearchRetrievalResult =
+                            Await SharedMethods.RetrieveAdditionalSemanticSearchSourcesAsync(
+                                retrievalPath,
+                                _context,
+                                userText,
+                                conversation,
+                                retrieval,
+                                lastVerification,
+                                retrievalOptions).ConfigureAwait(False)
+
+                        If additional Is Nothing OrElse
+                           String.IsNullOrWhiteSpace(additional.ReducedSourceText) Then
+                            Exit For
+                        End If
+
+                        Dim knownIds As New System.Collections.Generic.HashSet(Of String)(
+                            retrieval.SelectedEntryIds,
+                            System.StringComparer.OrdinalIgnoreCase)
+
+                        For Each id As String In additional.SelectedEntryIds
+                            If knownIds.Add(id) Then
+                                retrieval.SelectedEntryIds.Add(id)
+                            End If
+                        Next
+
+                        Dim combinedRetrieval As SharedMethods.SemanticSearchRetrievalResult =
+                            Await SharedMethods.LoadAdditionalSemanticSearchSourcesAsync(
+                                retrievalPath,
+                                retrieval.SelectedEntryIds,
+                                retrievalOptions).ConfigureAwait(False)
+
+                        retrieval.LoadedSources = combinedRetrieval.LoadedSources
+                        retrieval.ReducedSourceText = combinedRetrieval.ReducedSourceText
+                        sourceText = retrieval.ReducedSourceText
+
+                        Dim expandedMatchCount As Integer =
+                            If(retrieval.SelectedEntryIds IsNot Nothing, retrieval.SelectedEntryIds.Count, 0)
+                        UpdateAssistantThinking($"Indexed manual — {expandedMatchCount:N0} relevant segment(s) loaded. Revising answer...")
+
+                        answer = Await CallHelpMeLlmAsync(
+                            systemPrompt,
+                            BuildHelpMeUserPrompt(
+                                userText,
+                                sourceText,
+                                conversation,
+                                answer,
+                                BuildVerificationNotes(lastVerification))).ConfigureAwait(False)
+                        answer = If(answer, "").Trim()
+                    Next
+
+                    ' Falls nach allen Nachladerunden noch ungestützte Aussagen vorhanden sind,
+                    ' wird ein letzter strikt quellengebundener Korrekturdurchlauf ausgeführt.
+                    If lastVerification IsNot Nothing AndAlso
+                       (Not lastVerification.Supported OrElse lastVerification.RequiresMoreSources) Then
+                        answer = Await CallHelpMeLlmAsync(
+                            systemPrompt &
+                                " Remove every unsupported claim identified by the verifier. " &
+                                "Where the sources are insufficient, explicitly say so instead of guessing.",
+                            BuildHelpMeUserPrompt(
+                                userText,
+                                sourceText,
+                                conversation,
+                                answer,
+                                BuildVerificationNotes(lastVerification))).ConfigureAwait(False)
+                        answer = If(answer, "").Trim()
+
+                        Dim finalVerification As SharedMethods.SemanticSearchResponseVerificationResult =
+                            Await SharedMethods.VerifySemanticSearchResponseAsync(
+                                retrievalPath,
+                                _context,
+                                "HelpMe",
+                                userText,
+                                conversation,
+                                retrieval,
+                                answer,
+                                maximumLlmAttempts:=retrievalOptions.MaximumLlmAttempts,
+                                maximumConversationCharacters:=retrievalOptions.MaximumConversationCharacters).ConfigureAwait(False)
+
+                        If finalVerification IsNot Nothing AndAlso
+                           (Not finalVerification.Supported OrElse finalVerification.RequiresMoreSources) Then
+                            answer &= vbCrLf & vbCrLf &
+                                "*The available source excerpts do not support a more complete answer.*"
+                        End If
+                    End If
+
+                    SharedMethods.UpdateSemanticSearchConversationState(
+                        _semanticConversationState,
+                        retrieval)
+                End If
+
+                Dim semanticSourceIdsForDebug As String = ""
+                If retrieval IsNot Nothing AndAlso
+                   retrieval.IsIndexed AndAlso
+                   retrieval.SelectedEntryIds IsNot Nothing Then
+
+                    semanticSourceIdsForDebug = String.Join(
+                        ", ",
+                        retrieval.SelectedEntryIds.
+                            Where(Function(id As String) Not String.IsNullOrWhiteSpace(id)).
+                            Distinct(System.StringComparer.OrdinalIgnoreCase))
+                End If
+
+                Dim sourcesLine As String = ""
+                answer = RemoveTrailingSourcesLine(answer, sourcesLine)
+
+                If Not String.IsNullOrWhiteSpace(sourcesLine) Then
+                    Dbg("SemanticSearch LLM output " & sourcesLine)
+                End If
+
+                If Not String.IsNullOrWhiteSpace(semanticSourceIdsForDebug) Then
+                    Dbg("SemanticSearch selected IDs: " & semanticSourceIdsForDebug)
+                End If
+
+                stopwatch.Stop()
+                Dbg($"SendAsync ms={stopwatch.ElapsedMilliseconds} ansLen={answer.Length}")
 
                 RemoveAssistantThinking()
                 AppendAssistantMarkdown(answer)
                 _history.Add(("assistant", answer))
                 PersistChatHtml()
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Dbg("SendAsync error: " & ex.Message)
                 RemoveAssistantThinking()
                 AppendAssistantMarkdown("*(Error: " & System.Security.SecurityElement.Escape(ex.Message) & ")*")
             End Try
         End Function
+
 
         ''' <summary>
         ''' Reads known configuration files and returns a single string block to be appended to the LLM prompt.
@@ -608,7 +972,7 @@ Namespace SharedLibrary
                 Try
                     Dim defaultPaths = SharedMethods.DefaultINIPaths
                     For Each kvp In defaultPaths
-                        Dim p = Environment.ExpandEnvironmentVariables(kvp.Value)
+                        Dim p = ExpandEnvironmentVariables(kvp.Value)
                         If File.Exists(p) AndAlso Not String.Equals(p, mainPath, StringComparison.OrdinalIgnoreCase) Then
                             sb.AppendLine($"<{kvp.Key} Configuration>")
                             sb.AppendLine($"Path: {p}")
@@ -757,26 +1121,425 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Checks whether the configured manual is available without loading the full manual text when
+        ''' a semantic-search index can be used.
+        ''' </summary>
+        Private Async Function GetManualAvailabilityTextAsync() As System.Threading.Tasks.Task(Of String)
+            Dim configuredPath As String = If(
+                _context IsNot Nothing,
+                ExpandEnvironmentVariables(_context.INI_HelpMeInkyPath),
+                "")
+
+            If String.IsNullOrWhiteSpace(configuredPath) Then
+                Return ""
+            End If
+
+            Dim retrievalPath As String = Await EnsureLocalSemanticSearchIndexPathAsync(
+                configuredPath,
+                AddressOf UpdateAssistantThinking).ConfigureAwait(False)
+
+            If Not String.IsNullOrWhiteSpace(retrievalPath) AndAlso
+               SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(retrievalPath) Then
+
+                Dim cacheItem As SharedMethods.SemanticSearchIndexCacheItem =
+                    Await SharedMethods.TryGetSemanticSearchIndexAsync(retrievalPath).ConfigureAwait(False)
+
+                If cacheItem IsNot Nothing Then
+                    Return "The configured indexed source is available."
+                End If
+            End If
+
+            Return Await GetManualOnceAsync().ConfigureAwait(False)
+        End Function
+
+        ''' <summary>
+        ''' Returns a local file path for semantic-search retrieval. Remote indexed manuals are cached to
+        ''' a deterministic temp file and refreshed at least every 72 hours.
+        ''' </summary>
+        Private Async Function EnsureLocalSemanticSearchIndexPathAsync(
+            pathOrUrl As String,
+            Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
+
+            Dim localPath As String = Await EnsureLocalManualFileCopyAsync(
+                pathOrUrl,
+                "Indexed manual — downloading refreshed source...",
+                statusReporter).ConfigureAwait(False)
+            If String.IsNullOrWhiteSpace(localPath) Then
+                Return ""
+            End If
+
+            If SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(localPath) Then
+                Return localPath
+            End If
+
+            Return ""
+        End Function
+
+        ''' <summary>
+        ''' Returns a local file path for a manual source. Remote URLs are cached to a deterministic temp
+        ''' file and refreshed at least every 72 hours.
+        ''' </summary>
+        Private Shared Async Function EnsureLocalManualFileCopyAsync(
+            pathOrUrl As String,
+            Optional downloadStatusText As String = "",
+            Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
+
+            Dim source As String = If(pathOrUrl, "").Trim()
+            If String.IsNullOrWhiteSpace(source) Then
+                Return ""
+            End If
+
+            Dim isRemote As Boolean =
+                source.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) OrElse
+                source.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase)
+
+            If Not isRemote Then
+                Return source
+            End If
+
+            Dim freshCachePath As String = GetFreshRemoteManualCachePath(source)
+            If Not String.IsNullOrWhiteSpace(freshCachePath) Then
+                Return freshCachePath
+            End If
+
+            If statusReporter IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(downloadStatusText) Then
+                statusReporter(downloadStatusText)
+            End If
+
+            Await _remoteManualCacheSemaphore.WaitAsync().ConfigureAwait(False)
+
+            Try
+                freshCachePath = GetFreshRemoteManualCachePath(source)
+                If Not String.IsNullOrWhiteSpace(freshCachePath) Then
+                    Return freshCachePath
+                End If
+
+                Dim candidateUrls As List(Of String) = BuildRemoteManualCandidateUrls(source)
+                Dim lastFailure As String = ""
+
+                For Each candidateUrl As String In candidateUrls
+                    Try
+                        Dim response = Await SharedMethods.SendHttpRequestAsync(
+                            New SharedMethods.SharedHttpRequest() With {
+                                .Url = candidateUrl,
+                                .Method = "GET",
+                                .TimeoutMs = 30000,
+                                .UserAgent = "RedInk/1.0 (+https://redink.ai)",
+                                .Accept = "application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/rtf, text/*, application/octet-stream, */*",
+                                .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
+                            }).ConfigureAwait(False)
+
+                        If response Is Nothing Then
+                            lastFailure = "The HTTP request returned no response."
+                            Continue For
+                        End If
+
+                        If response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
+                            lastFailure = $"The server returned HTTP status {response.StatusCode}."
+                            Continue For
+                        End If
+
+                        Dim data As Byte() = If(response.BodyBytes, New Byte() {})
+                        If data.Length = 0 Then
+                            lastFailure = "The download succeeded, but the response body was empty."
+                            Continue For
+                        End If
+
+                        Dim mediaType As String = ""
+                        If Not String.IsNullOrEmpty(response.ContentType) Then
+                            mediaType = response.ContentType.ToLowerInvariant()
+                        End If
+
+                        Dim cachedText As String = Nothing
+                        Dim extension As String = DetectRemoteManualExtension(candidateUrl, mediaType, data)
+
+                        If String.IsNullOrWhiteSpace(extension) Then
+                            cachedText = DecodeRemoteManualText(data, response.CharSet)
+                            If String.IsNullOrWhiteSpace(cachedText) Then
+                                lastFailure = "The downloaded content is not a supported manual file format."
+                                Continue For
+                            End If
+
+                            If LooksLikeHtml(cachedText) Then
+                                extension = ".html"
+                            Else
+                                extension = ".txt"
+                            End If
+                        End If
+
+                        Dim cachePath As String = GetRemoteManualCacheFilePath(source, extension)
+                        Dim cacheDirectory As String = Path.GetDirectoryName(cachePath)
+                        If Not String.IsNullOrWhiteSpace(cacheDirectory) Then
+                            Directory.CreateDirectory(cacheDirectory)
+                        End If
+
+                        Dim stagingPath As String = cachePath & ".download"
+
+                        Try
+                            If String.Equals(extension, ".txt", StringComparison.OrdinalIgnoreCase) OrElse
+                               String.Equals(extension, ".html", StringComparison.OrdinalIgnoreCase) OrElse
+                               String.Equals(extension, ".htm", StringComparison.OrdinalIgnoreCase) Then
+
+                                If cachedText Is Nothing Then
+                                    cachedText = DecodeRemoteManualText(data, response.CharSet)
+                                End If
+
+                                File.WriteAllText(stagingPath, cachedText, New System.Text.UTF8Encoding(True))
+                            Else
+                                File.WriteAllBytes(stagingPath, data)
+                            End If
+
+                            File.Copy(stagingPath, cachePath, True)
+                            DeleteRemoteManualCacheVariants(source, cachePath)
+                            Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] Refreshed local manual cache: {cachePath}")
+                            Return cachePath
+                        Finally
+                            Try
+                                If File.Exists(stagingPath) Then
+                                    File.Delete(stagingPath)
+                                End If
+                            Catch
+                            End Try
+                        End Try
+                    Catch ex As Exception
+                        lastFailure = GetExceptionSummary(ex)
+                    End Try
+                Next
+
+                Dim staleCachePath As String = GetAnyRemoteManualCachePath(source)
+                If Not String.IsNullOrWhiteSpace(staleCachePath) Then
+                    Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] Remote manual cache refresh failed; using stale local cache. {lastFailure}")
+                    Return staleCachePath
+                End If
+
+                If Not String.IsNullOrWhiteSpace(lastFailure) Then
+                    Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] Remote manual cache refresh failed: {lastFailure}")
+                End If
+
+                Return ""
+            Finally
+                _remoteManualCacheSemaphore.Release()
+            End Try
+        End Function
+
+        Private Shared Function DecodeRemoteManualText(data As Byte(), charSet As String) As String
+            If data Is Nothing OrElse data.Length = 0 Then
+                Return ""
+            End If
+
+            Dim enc As Encoding = Encoding.UTF8
+            If Not String.IsNullOrEmpty(charSet) Then
+                Try
+                    enc = Encoding.GetEncoding(charSet)
+                Catch
+                    enc = Encoding.UTF8
+                End Try
+            End If
+
+            Return enc.GetString(data)
+        End Function
+
+        Private Shared Function GetFreshRemoteManualCachePath(pathOrUrl As String) As String
+            Dim cachePath As String = GetAnyRemoteManualCachePath(pathOrUrl)
+            If String.IsNullOrWhiteSpace(cachePath) Then
+                Return ""
+            End If
+
+            If IsFreshRemoteManualCacheFile(cachePath) Then
+                Return cachePath
+            End If
+
+            Return ""
+        End Function
+
+        Private Shared Function GetAnyRemoteManualCachePath(pathOrUrl As String) As String
+            Try
+                Dim cachePrefix As String = GetRemoteManualCacheFilePathPrefix(pathOrUrl)
+                Dim cacheDirectory As String = Path.GetDirectoryName(cachePrefix)
+                If String.IsNullOrWhiteSpace(cacheDirectory) OrElse Not Directory.Exists(cacheDirectory) Then
+                    Return ""
+                End If
+
+                Dim cacheBaseName As String = Path.GetFileName(cachePrefix)
+                Dim latestPath As String = ""
+                Dim latestWriteTimeUtc As DateTime = DateTime.MinValue
+
+                For Each candidatePath As String In Directory.GetFiles(cacheDirectory, cacheBaseName & ".*")
+                    If candidatePath.EndsWith(".download", StringComparison.OrdinalIgnoreCase) Then
+                        Continue For
+                    End If
+
+                    Dim writeTimeUtc As DateTime = File.GetLastWriteTimeUtc(candidatePath)
+                    If writeTimeUtc > latestWriteTimeUtc Then
+                        latestWriteTimeUtc = writeTimeUtc
+                        latestPath = candidatePath
+                    End If
+                Next
+
+                Return latestPath
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function IsFreshRemoteManualCacheFile(cachePath As String) As Boolean
+            If String.IsNullOrWhiteSpace(cachePath) OrElse Not File.Exists(cachePath) Then
+                Return False
+            End If
+
+            Try
+                Dim cacheAge As TimeSpan = DateTime.UtcNow - File.GetLastWriteTimeUtc(cachePath)
+                Return cacheAge < TimeSpan.FromHours(RemoteManualCacheRefreshHours)
+            Catch
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function GetRemoteManualCacheFilePath(pathOrUrl As String, extension As String) As String
+            Dim cachePrefix As String = GetRemoteManualCacheFilePathPrefix(pathOrUrl)
+            Dim normalizedExtension As String = If(extension, "").Trim()
+
+            If normalizedExtension.Length = 0 Then
+                normalizedExtension = ".txt"
+            ElseIf Not normalizedExtension.StartsWith(".", StringComparison.Ordinal) Then
+                normalizedExtension = "." & normalizedExtension
+            End If
+
+            Return cachePrefix & normalizedExtension.ToLowerInvariant()
+        End Function
+
+        Private Shared Function GetRemoteManualCacheFilePathPrefix(pathOrUrl As String) As String
+            Dim normalizedPathOrUrl As String = If(pathOrUrl, "").Trim()
+
+            Dim hashBytes As Byte()
+            Using sha256 As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalizedPathOrUrl))
+            End Using
+
+            Dim keyBuilder As New StringBuilder(hashBytes.Length * 2)
+            For Each value As Byte In hashBytes
+                keyBuilder.Append(value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+            Next
+
+            Dim cacheDirectory As String = Path.Combine(Path.GetTempPath(), "RedInk", "HelpMeInkyRemoteManualCache")
+            Return Path.Combine(cacheDirectory, "manual-" & keyBuilder.ToString())
+        End Function
+
+        Private Shared Sub DeleteRemoteManualCacheVariants(pathOrUrl As String, keepPath As String)
+            Try
+                Dim cachePrefix As String = GetRemoteManualCacheFilePathPrefix(pathOrUrl)
+                Dim cacheDirectory As String = Path.GetDirectoryName(cachePrefix)
+                If String.IsNullOrWhiteSpace(cacheDirectory) OrElse Not Directory.Exists(cacheDirectory) Then
+                    Return
+                End If
+
+                Dim cacheBaseName As String = Path.GetFileName(cachePrefix)
+
+                For Each candidatePath As String In Directory.GetFiles(cacheDirectory, cacheBaseName & ".*")
+                    If String.Equals(candidatePath, keepPath, StringComparison.OrdinalIgnoreCase) Then
+                        Continue For
+                    End If
+
+                    Try
+                        File.Delete(candidatePath)
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+        End Sub
+
+        ''' <summary>
         ''' Returns manual text from cache when possible; otherwise loads it from the configured path/URL.
         ''' </summary>
         Private Async Function GetManualOnceAsync() As Task(Of String)
-            Dim path = If(_context IsNot Nothing, _context.INI_HelpMeInkyPath, "")
+
+            Dim path = If(_context IsNot Nothing, ExpandEnvironmentVariables(_context.INI_HelpMeInkyPath), "")
             If String.IsNullOrWhiteSpace(path) Then Return ""
             If _manualCache IsNot Nothing AndAlso String.Equals(_manualCachePath, path, StringComparison.OrdinalIgnoreCase) Then
                 Return _manualCache
             End If
+
             Dbg("Loading manual fresh: " & path)
-            Dim loaded = Await GetManualTextFreshAsync(path, _context)
-            If Not String.IsNullOrEmpty(loaded) Then
+            Dim loaded = Await GetManualTextFreshAsync(path, _context).ConfigureAwait(False)
+            If loaded IsNot Nothing Then
                 _manualCache = loaded
                 _manualCachePath = path
             End If
-            Return If(_manualCache, "")
+
+            Return If(loaded, "")
+        End Function
+
+        Private Shared Function IsManualLoadError(text As String) As Boolean
+            Return Not String.IsNullOrWhiteSpace(text) AndAlso
+                   text.StartsWith("Error loading HelpMeInky manual", StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function CreateManualLoadError(pathOrUrl As String, detail As String) As String
+            Dim source As String = If(String.IsNullOrWhiteSpace(pathOrUrl), "the configured source", pathOrUrl.Trim())
+            Dim message As String = If(String.IsNullOrWhiteSpace(detail), "Unknown error.", detail.Trim())
+
+            Return $"Error loading HelpMeInky manual from '{source}': {message}"
+        End Function
+
+        Private Shared Function GetExceptionSummary(ex As Exception) As String
+            If ex Is Nothing Then Return "Unknown error."
+
+            Dim parts As New List(Of String)()
+            Dim current As Exception = ex
+            Dim depth As Integer = 0
+
+            While current IsNot Nothing AndAlso depth < 5
+                Dim part As String = current.Message
+                If String.IsNullOrWhiteSpace(part) Then
+                    part = current.GetType().Name
+                End If
+
+                If parts.Count = 0 OrElse Not String.Equals(parts(parts.Count - 1), part, StringComparison.Ordinal) Then
+                    parts.Add(part)
+                End If
+
+                current = current.InnerException
+                depth += 1
+            End While
+
+            Return String.Join(" --> ", parts)
+        End Function
+
+        Private Shared Function EnsureManualAccessErrorPrefix(answer As String, detail As String) As String
+            Dim prefix As String = "Manual access error:"
+            Dim normalizedAnswer As String = If(answer, "").Trim()
+            Dim normalizedDetail As String = If(detail, "").Trim()
+
+            If String.IsNullOrWhiteSpace(normalizedAnswer) Then
+                If normalizedDetail.Length > 0 Then
+                    Return $"{prefix} {normalizedDetail}"
+                End If
+
+                Return prefix
+            End If
+
+            If normalizedAnswer.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then
+                If normalizedDetail.Length > 0 AndAlso
+                   normalizedAnswer.IndexOf(normalizedDetail, StringComparison.OrdinalIgnoreCase) < 0 Then
+                    Return normalizedAnswer & " Details: " & normalizedDetail
+                End If
+
+                Return normalizedAnswer
+            End If
+
+            If normalizedDetail.Length > 0 AndAlso
+               normalizedAnswer.IndexOf(normalizedDetail, StringComparison.OrdinalIgnoreCase) < 0 Then
+                Return $"{prefix} {normalizedAnswer} Details: {normalizedDetail}"
+            End If
+
+            Return $"{prefix} {normalizedAnswer}"
         End Function
 
         ''' <summary>
         ''' Loads manual text from an HTTP(S) URL or a local file path.
-        ''' Supports basic PDF detection for remote content and uses helper readers for PDF/RTF/DOCX.
+        ''' Supports remote PDF/DOCX/RTF downloads and a conservative SharePoint download fallback.
         ''' </summary>
         Private Shared Async Function GetManualTextFreshAsync(pathOrUrl As String, Optional context As ISharedContext = Nothing) As Task(Of String)
             If String.IsNullOrWhiteSpace(pathOrUrl) Then Return ""
@@ -793,126 +1556,390 @@ Namespace SharedLibrary
             ' Remote URL
             If s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
                 Try
-                    Dim response = Await SharedMethods.SendHttpRequestAsync(
-                        New SharedMethods.SharedHttpRequest() With {
-                            .Url = s,
-                            .Method = "GET",
-                            .TimeoutMs = 30000,
-                            .UserAgent = "RedInk/1.0 (+https://redink.ai)",
-                            .Accept = "application/pdf, text/*, */*",
-                            .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
-                        }).ConfigureAwait(False)
-
-                    If response Is Nothing OrElse response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
-                        Return ""
+                    Dim localCopyPath As String = Await EnsureLocalManualFileCopyAsync(s).ConfigureAwait(False)
+                    If Not String.IsNullOrWhiteSpace(localCopyPath) AndAlso
+                       Not String.Equals(localCopyPath, s, StringComparison.OrdinalIgnoreCase) Then
+                        Return Await GetManualTextFreshAsync(localCopyPath, context).ConfigureAwait(False)
                     End If
 
-                    Debug.WriteLine("Manual HTTP stack: " & response.UsedStack)
+                    Dim candidateUrls As List(Of String) = BuildRemoteManualCandidateUrls(s)
+                    Dim firstError As String = ""
 
-                    Dim data As Byte() = If(response.BodyBytes, New Byte() {})
+                    For Each candidateUrl As String In candidateUrls
+                        Dim remoteText As String = Await TryGetRemoteManualTextAsync(candidateUrl, context).ConfigureAwait(False)
 
-                    ' Extract media type if provided
-                    Dim mediaType As String = ""
-                    If Not String.IsNullOrEmpty(response.ContentType) Then
-                        mediaType = response.ContentType.ToLowerInvariant()
-                    End If
-
-                    ' PDF detection
-                    Dim isPdf As Boolean = False
-
-                    ' 1) Declared content-type
-                    If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                        isPdf = True
-                    End If
-
-                    ' 2) URL contains ".pdf" anywhere (also handles querystring)
-                    If Not isPdf Then
-                        If s.IndexOf(".pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                            isPdf = True
-                        End If
-                    End If
-
-                    ' 3) Magic header scan for "%PDF" within first KB (after possible BOM or garbage)
-                    If Not isPdf AndAlso data.Length >= 4 Then
-                        Dim scanMax As Integer = Math.Min(data.Length - 4, 1024)
-                        Dim i As Integer = 0
-                        While i <= scanMax
-                            If data(i) = AscW("%"c) AndAlso data(i + 1) = AscW("P"c) AndAlso data(i + 2) = AscW("D"c) AndAlso data(i + 3) = AscW("F"c) Then
-                                isPdf = True
-                                Exit While
+                        If IsManualLoadError(remoteText) Then
+                            If String.IsNullOrWhiteSpace(firstError) Then
+                                firstError = remoteText
                             End If
-                            i += 1
-                        End While
-                    End If
 
-                    If isPdf Then
-                        Try
-                            Dim tmpPath As String = Path.Combine(Path.GetTempPath(), "manual_" & Guid.NewGuid().ToString("N") & ".pdf")
-                            File.WriteAllBytes(tmpPath, data)
-                            Return Await SharedMethods.ReadPdfAsText(tmpPath, True, False, False, context).ConfigureAwait(False)
-                        Catch
-                            Return ""
-                        End Try
-                    End If
-
-                    ' Fallback: decode as text
-                    Dim enc As Encoding = Encoding.UTF8
-                    If Not String.IsNullOrEmpty(response.CharSet) Then
-                        Try
-                            enc = Encoding.GetEncoding(response.CharSet)
-                        Catch
-                            enc = Encoding.UTF8
-                        End Try
-                    End If
-
-                    Dim text As String = enc.GetString(data)
-
-                    ' HTML -> plain
-                    If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("html", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                        If LooksLikeHtml(text) Then
-                            Return HtmlToPlain(text)
-                        Else
-                            Return text
+                            Continue For
                         End If
+
+                        If Not String.IsNullOrWhiteSpace(remoteText) Then
+                            Return remoteText
+                        End If
+                    Next
+
+                    If Not String.IsNullOrWhiteSpace(firstError) Then
+                        Return firstError
                     End If
 
-                    ' Generic octet-stream sometimes still is HTML
-                    If LooksLikeHtml(text) Then
-                        Return HtmlToPlain(text)
-                    End If
-
-                    Return text
-                Catch
-                    Return ""
+                    Return CreateManualLoadError(s, "The URL was reached, but no readable manual text could be extracted.")
+                Catch ex As Exception
+                    Return CreateManualLoadError(s, GetExceptionSummary(ex))
                 End Try
             End If
 
-            ' Local file path
+            ' Local file path (includes UNC paths)
             Try
-                If Not File.Exists(s) Then Return ""
+                If Not File.Exists(s) Then
+                    Return CreateManualLoadError(s, "The file does not exist or is not reachable.")
+                End If
+
                 Select Case Path.GetExtension(s).ToLowerInvariant()
                     Case ".txt", ".md", ".log"
                         Return File.ReadAllText(s, Encoding.UTF8)
+
+                    Case ".htm", ".html"
+                        Dim htmlText As String = File.ReadAllText(s, Encoding.UTF8)
+                        If String.IsNullOrWhiteSpace(htmlText) Then
+                            Return CreateManualLoadError(s, "The HTML file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return HtmlToPlain(htmlText)
+
                     Case ".docx"
-                        Return SharedMethods.ReadDocxSandboxed(s)
+                        Dim docxText As String = SharedMethods.ReadDocxSandboxed(s)
+                        If String.IsNullOrWhiteSpace(docxText) Then
+                            Return CreateManualLoadError(s, "The DOCX file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return docxText
+
                     Case ".rtf"
-                        Try
-                            Return SharedMethods.ReadRtfAsText(s)
-                        Catch
-                            Return ""
-                        End Try
+                        Dim rtfText As String = SharedMethods.ReadRtfAsText(s)
+                        If String.IsNullOrWhiteSpace(rtfText) Then
+                            Return CreateManualLoadError(s, "The RTF file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return rtfText
+
                     Case ".pdf"
-                        Try
-                            Return Await SharedMethods.ReadPdfAsText(s, True, False, False, context).ConfigureAwait(False)
-                        Catch
-                            Return ""
-                        End Try
+                        Dim pdfText As String = Await SharedMethods.ReadPdfAsText(s, True, False, False, context).ConfigureAwait(False)
+                        If String.IsNullOrWhiteSpace(pdfText) Then
+                            Return CreateManualLoadError(s, "The PDF file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return pdfText
+
                     Case Else
                         Return File.ReadAllText(s, Encoding.UTF8)
                 End Select
+            Catch ex As Exception
+                Return CreateManualLoadError(s, GetExceptionSummary(ex))
+            End Try
+        End Function
+
+        Private Shared Async Function TryGetRemoteManualTextAsync(requestUrl As String, Optional context As ISharedContext = Nothing) As Task(Of String)
+            Try
+                Dim response = Await SharedMethods.SendHttpRequestAsync(
+                    New SharedMethods.SharedHttpRequest() With {
+                        .Url = requestUrl,
+                        .Method = "GET",
+                        .TimeoutMs = 30000,
+                        .UserAgent = "RedInk/1.0 (+https://redink.ai)",
+                        .Accept = "application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/rtf, text/*, */*",
+                        .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
+                    }).ConfigureAwait(False)
+
+                If response Is Nothing Then
+                    Return CreateManualLoadError(requestUrl, "The HTTP request returned no response.")
+                End If
+
+                If response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
+                    Return CreateManualLoadError(requestUrl, $"The server returned HTTP status {response.StatusCode}.")
+                End If
+
+                Debug.WriteLine("Manual HTTP stack: " & response.UsedStack)
+
+                Dim data As Byte() = If(response.BodyBytes, New Byte() {})
+                Dim mediaType As String = ""
+
+                If Not String.IsNullOrEmpty(response.ContentType) Then
+                    mediaType = response.ContentType.ToLowerInvariant()
+                End If
+
+                Dim detectedExtension As String = DetectRemoteManualExtension(requestUrl, mediaType, data)
+                Select Case detectedExtension
+                    Case ".pdf", ".docx", ".rtf"
+                        Return Await TryReadRemoteBinaryDocumentAsync(data, detectedExtension, requestUrl, context).ConfigureAwait(False)
+                End Select
+
+                Dim enc As Encoding = Encoding.UTF8
+                If Not String.IsNullOrEmpty(response.CharSet) Then
+                    Try
+                        enc = Encoding.GetEncoding(response.CharSet)
+                    Catch
+                        enc = Encoding.UTF8
+                    End Try
+                End If
+
+                Dim text As String = enc.GetString(data)
+
+                If String.IsNullOrWhiteSpace(text) Then
+                    Return CreateManualLoadError(requestUrl, "The request succeeded, but the response body was empty.")
+                End If
+
+                If LooksLikeHtml(text) Then
+                    If IsSharePointLikeUrl(requestUrl) AndAlso LooksLikeSharePointSignInOrViewerPage(text) Then
+                        Return CreateManualLoadError(requestUrl, "The URL returned a SharePoint sign-in or viewer page instead of the document content.")
+                    End If
+
+                    Return HtmlToPlain(text)
+                End If
+
+                Return text
+            Catch ex As Exception
+                Return CreateManualLoadError(requestUrl, GetExceptionSummary(ex))
+            End Try
+        End Function
+
+        Private Shared Async Function TryReadRemoteBinaryDocumentAsync(data As Byte(), extension As String, sourceDescription As String, Optional context As ISharedContext = Nothing) As Task(Of String)
+            If data Is Nothing OrElse data.Length = 0 Then
+                Return CreateManualLoadError(sourceDescription, "The download succeeded, but the document content was empty.")
+            End If
+
+            Dim tempPath As String = Path.Combine(Path.GetTempPath(), "manual_" & Guid.NewGuid().ToString("N") & extension)
+
+            Try
+                File.WriteAllBytes(tempPath, data)
+
+                Select Case extension
+                    Case ".pdf"
+                        Dim pdfText As String = Await SharedMethods.ReadPdfAsText(tempPath, True, False, False, context).ConfigureAwait(False)
+                        If String.IsNullOrWhiteSpace(pdfText) Then
+                            Return CreateManualLoadError(sourceDescription, "The PDF download succeeded, but no readable text was extracted.")
+                        End If
+
+                        Return pdfText
+
+                    Case ".docx"
+                        Dim docxText As String = SharedMethods.ReadDocxSandboxed(tempPath)
+                        If String.IsNullOrWhiteSpace(docxText) Then
+                            Return CreateManualLoadError(sourceDescription, "The DOCX download succeeded, but no readable text was extracted.")
+                        End If
+
+                        Return docxText
+
+                    Case ".rtf"
+                        Dim rtfText As String = SharedMethods.ReadRtfAsText(tempPath)
+                        If String.IsNullOrWhiteSpace(rtfText) Then
+                            Return CreateManualLoadError(sourceDescription, "The RTF download succeeded, but no readable text was extracted.")
+                        End If
+
+                        Return rtfText
+
+                    Case Else
+                        Return CreateManualLoadError(sourceDescription, $"Unsupported manual document type '{extension}'.")
+                End Select
+            Catch ex As Exception
+                Return CreateManualLoadError(sourceDescription, GetExceptionSummary(ex))
+            Finally
+                Try
+                    If File.Exists(tempPath) Then
+                        File.Delete(tempPath)
+                    End If
+                Catch
+                End Try
+            End Try
+        End Function
+
+        Private Shared Function BuildRemoteManualCandidateUrls(url As String) As List(Of String)
+            Dim result As New List(Of String)()
+
+            AddRemoteManualCandidateUrl(result, url)
+
+            If IsSharePointLikeUrl(url) Then
+                AddRemoteManualCandidateUrl(result, TryBuildSharePointDownloadUrl(url))
+            End If
+
+            Return result
+        End Function
+
+        Private Shared Sub AddRemoteManualCandidateUrl(urls As List(Of String), candidateUrl As String)
+            If urls Is Nothing OrElse String.IsNullOrWhiteSpace(candidateUrl) Then Return
+
+            For Each existingUrl As String In urls
+                If String.Equals(existingUrl, candidateUrl, StringComparison.OrdinalIgnoreCase) Then
+                    Return
+                End If
+            Next
+
+            urls.Add(candidateUrl)
+        End Sub
+
+        Private Shared Function TryBuildSharePointDownloadUrl(url As String) As String
+            If String.IsNullOrWhiteSpace(url) Then Return ""
+
+            Try
+                Dim builder As New UriBuilder(url)
+                Dim query As String = builder.Query
+
+                If query.StartsWith("?", StringComparison.Ordinal) Then
+                    query = query.Substring(1)
+                End If
+
+                If Regex.IsMatch(query, "(^|&)web=1($|&)", RegexOptions.IgnoreCase) Then
+                    query = Regex.Replace(query, "(^|&)web=1($|&)", "$1web=0$2", RegexOptions.IgnoreCase)
+                End If
+
+                If Not Regex.IsMatch(query, "(^|&)download=1($|&)", RegexOptions.IgnoreCase) Then
+                    If query.Length > 0 Then
+                        query &= "&download=1"
+                    Else
+                        query = "download=1"
+                    End If
+                End If
+
+                builder.Query = query
+
+                Dim candidateUrl As String = builder.Uri.AbsoluteUri
+                If String.Equals(candidateUrl, url, StringComparison.OrdinalIgnoreCase) Then
+                    Return ""
+                End If
+
+                Return candidateUrl
             Catch
                 Return ""
             End Try
+        End Function
+
+        Private Shared Function IsSharePointLikeUrl(url As String) As Boolean
+            If String.IsNullOrWhiteSpace(url) Then Return False
+
+            Dim uri As Uri = Nothing
+            If Not Uri.TryCreate(url, UriKind.Absolute, uri) OrElse uri Is Nothing Then
+                Return False
+            End If
+
+            If Not String.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase) AndAlso
+               Not String.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Dim host As String = uri.Host
+
+            Return host.EndsWith(".sharepoint.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.EndsWith(".sharepoint-df.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.Equals("sharepoint.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.Equals("onedrive.live.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.Equals("1drv.ms", StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function DetectRemoteManualExtension(requestUrl As String, mediaType As String, data As Byte()) As String
+            If Not String.IsNullOrEmpty(mediaType) Then
+                If mediaType.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return ".pdf"
+                End If
+
+                If mediaType.IndexOf("wordprocessingml.document", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return ".docx"
+                End If
+
+                If mediaType.IndexOf("rtf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return ".rtf"
+                End If
+            End If
+
+            Dim urlExtension As String = GetUrlPathExtension(requestUrl)
+            Select Case urlExtension
+                Case ".pdf", ".docx", ".rtf"
+                    Return urlExtension
+            End Select
+
+            If LooksLikePdfBytes(data) Then
+                Return ".pdf"
+            End If
+
+            If LooksLikeRtfBytes(data) Then
+                Return ".rtf"
+            End If
+
+            Return ""
+        End Function
+
+        Private Shared Function GetUrlPathExtension(url As String) As String
+            If String.IsNullOrWhiteSpace(url) Then Return ""
+
+            Try
+                Dim uri As Uri = Nothing
+                If Uri.TryCreate(url, UriKind.Absolute, uri) AndAlso uri IsNot Nothing Then
+                    Return Path.GetExtension(uri.AbsolutePath).ToLowerInvariant()
+                End If
+            Catch
+            End Try
+
+            Try
+                Dim normalized As String = url
+                Dim q As Integer = normalized.IndexOf("?"c)
+                If q >= 0 Then
+                    normalized = normalized.Substring(0, q)
+                End If
+
+                Dim h As Integer = normalized.IndexOf("#"c)
+                If h >= 0 Then
+                    normalized = normalized.Substring(0, h)
+                End If
+
+                Return Path.GetExtension(normalized).ToLowerInvariant()
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function LooksLikePdfBytes(data As Byte()) As Boolean
+            If data Is Nothing OrElse data.Length < 4 Then Return False
+
+            Dim scanMax As Integer = Math.Min(data.Length - 4, 1024)
+            Dim i As Integer = 0
+
+            While i <= scanMax
+                If data(i) = AscW("%"c) AndAlso
+                   data(i + 1) = AscW("P"c) AndAlso
+                   data(i + 2) = AscW("D"c) AndAlso
+                   data(i + 3) = AscW("F"c) Then
+                    Return True
+                End If
+
+                i += 1
+            End While
+
+            Return False
+        End Function
+
+        Private Shared Function LooksLikeRtfBytes(data As Byte()) As Boolean
+            If data Is Nothing OrElse data.Length = 0 Then Return False
+
+            Try
+                Dim probeLength As Integer = Math.Min(data.Length, 32)
+                Dim probe As String = Encoding.ASCII.GetString(data, 0, probeLength).TrimStart(ChrW(&HFEFF), ChrW(&HFFFE), ControlChars.NullChar)
+                Return probe.StartsWith("{\rtf", StringComparison.OrdinalIgnoreCase)
+            Catch
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function LooksLikeSharePointSignInOrViewerPage(html As String) As Boolean
+            If String.IsNullOrWhiteSpace(html) OrElse Not LooksLikeHtml(html) Then Return False
+
+            Return html.IndexOf("login.microsoftonline.com", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("Sign in to your account", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("WopiFrame.aspx", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("_layouts/15/", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("Office Online", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   (html.IndexOf("OneDrive", StringComparison.OrdinalIgnoreCase) >= 0 AndAlso
+                    html.IndexOf("<script", StringComparison.OrdinalIgnoreCase) >= 0)
         End Function
 
         ''' <summary>
@@ -1004,6 +2031,12 @@ Namespace SharedLibrary
                           var el=document.getElementById(id); if(!el||!el.parentNode) return;
                           el.parentNode.removeChild(el);
                         }}
+                        function setThinking(id, html) {{
+                          var el=document.getElementById(id); if(!el) return;
+                          var content=el.querySelector('.content'); if(!content) return;
+                          content.innerHTML=html;
+                          window.scrollTo(0, document.body.scrollHeight);
+                        }}
                         </script>
                         </head>
                         <body><div id=""chat""></div></body>
@@ -1020,7 +2053,7 @@ Namespace SharedLibrary
             Dbg("DocumentCompleted flushQueue=" & _htmlQueue.Count)
             If _htmlQueue.Count > 0 Then
                 Try
-                    For Each frag In _htmlQueue
+                    For Each frag As String In _htmlQueue
                         _chat.Document.InvokeScript("appendMessage", New Object() {frag})
                     Next
                 Catch ex As Exception
@@ -1032,6 +2065,41 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
+        ''' Removes the last "Thinking..." placeholder from the chat DOM (if present).
+        ''' </summary>
+        Private Sub RemoveAssistantThinking()
+            If String.IsNullOrEmpty(_lastThinkingId) Then Return
+            Ui(Sub()
+                   Try
+                       If _chat.Document IsNot Nothing Then
+                           _chat.Document.InvokeScript("removeById", New Object() {_lastThinkingId})
+                       End If
+                   Catch
+                   Finally
+                       _lastThinkingId = Nothing
+                   End Try
+               End Sub)
+        End Sub
+
+        ''' <summary>
+        ''' Updates the text of the current "Thinking..." placeholder to show semantic-search progress.
+        ''' </summary>
+        Private Sub UpdateAssistantThinking(statusText As String)
+            If String.IsNullOrEmpty(_lastThinkingId) Then Return
+
+            Ui(Sub()
+                   Try
+                       If _chat.Document IsNot Nothing Then
+                           _chat.Document.InvokeScript(
+                               "setThinking",
+                               New Object() {_lastThinkingId, WebUtility.HtmlEncode(If(statusText, ""))})
+                       End If
+                   Catch
+                   End Try
+               End Sub)
+        End Sub
+
+        ''' <summary>
         ''' Intercepts navigation to external links and opens them via the OS shell.
         ''' </summary>
         Private Sub Chat_Navigating(sender As Object, e As WebBrowserNavigatingEventArgs)
@@ -1039,7 +2107,7 @@ Namespace SharedLibrary
                 Dim scheme = e.Url?.Scheme?.ToLowerInvariant()
                 If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                     e.Cancel = True
-                    Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(e.Url.ToString())
                 End If
             Catch ex As Exception
                 Dbg("Navigating error: " & ex.Message)
@@ -1087,29 +2155,12 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Removes the last "Thinking..." placeholder from the chat DOM (if present).
-        ''' </summary>
-        Private Sub RemoveAssistantThinking()
-            If String.IsNullOrEmpty(_lastThinkingId) Then Return
-            Ui(Sub()
-                   Try
-                       If _chat.Document IsNot Nothing Then
-                           _chat.Document.InvokeScript("removeById", New Object() {_lastThinkingId})
-                       End If
-                   Catch
-                   Finally
-                       _lastThinkingId = Nothing
-                   End Try
-               End Sub)
-        End Sub
-
-        ''' <summary>
         ''' Converts Markdown to HTML and appends an assistant message.
         ''' Single-paragraph replies are rendered inline; multi-block replies are split into inline first paragraph + block content.
         ''' </summary>
         Private Sub AppendAssistantMarkdown(md As String)
             md = If(md, "")
-            Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
+            Dim body = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
             Dim t = body.Trim()
             Dim isSingle = Regex.IsMatch(t, "^\s*<p>[\s\S]*?</p>\s*$", RegexOptions.IgnoreCase) AndAlso
                        Not Regex.IsMatch(t, "<(ul|ol|pre|table|h[1-6]|blockquote|hr|div)\b", RegexOptions.IgnoreCase)

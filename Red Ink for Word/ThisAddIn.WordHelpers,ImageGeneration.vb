@@ -2,7 +2,7 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
-' File: ThisAddIn.WordHelpers.ImageGeneration.vb
+' File: ThisAddIn.WordHelpers,ImageGeneration.vb
 ' Purpose: Interactive image generation using a configured "ImageGeneration"
 '          special task model. Prompts the user for a description, optionally
 '          attaches a reference image via (file), calls the LLM, displays
@@ -86,7 +86,7 @@ Partial Public Class ThisAddIn
 
             If imgModelHasObjectCall Then
                 insertButtonsList.Add(
-                    System.Tuple.Create("📎", "Attach a reference image for editing/modification (file)", ImageGen_FileTrigger))
+                    System.Tuple.Create("Include Image", "Include one reference image for editing/modification. You will be asked to select the image after confirming this dialog.", ImageGen_FileTrigger))
             End If
 
             ' Grab the current Word selection and/or entire document text for insert buttons
@@ -171,10 +171,17 @@ Partial Public Class ThisAddIn
             If hasExplicitSelection Then promptHintParts.Add("'Clipboard' button below to insert the current selection")
             promptHintParts.Add("'Document' button to insert the entire document text")
 
+            Dim imageInsertLimits As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing
+            If imgModelHasObjectCall Then
+                imageInsertLimits = New System.Collections.Generic.Dictionary(Of System.String, System.Int32)(System.StringComparer.OrdinalIgnoreCase) From {
+                    {ImageGen_FileTrigger, 1}
+                }
+            End If
+
             Dim prompt As String = SLib.ShowCustomInputBox(
                 "Describe the image you want to generate." &
                 If(imgModelHasObjectCall,
-                   " Add '" & ImageGen_FileTrigger & "' (or use the clip button) to include a reference image for editing.",
+                   " Use 'Include Image' to attach one reference image for editing; after you confirm this dialog, you will be asked to select the image file.",
                    "") &
                 " Use the " & String.Join(" or ", promptHintParts) & " button." &
                 lastPromptHint,
@@ -183,7 +190,8 @@ Partial Public Class ThisAddIn
                 "",
                 My.Settings.LastImageGenPrompt,
                 Nothing,
-                insertButtons).Trim()
+                insertButtons,
+                InsertButtonMaxOccurrences:=imageInsertLimits).Trim()
 
             ' ESC or empty → abort
             If prompt = "ESC" OrElse String.IsNullOrWhiteSpace(prompt) Then Return
@@ -285,7 +293,7 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(modelText) Then
                 Try
                     Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                    bodyHtml = Markdig.Markdown.ToHtml(modelText, pipeline)
+                    bodyHtml = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(modelText), pipeline)
                 Catch
                     ' Fallback: plain-text HTML encoding
                     bodyHtml = "<p>" & System.Net.WebUtility.HtmlEncode(modelText).Replace(vbLf, "<br/>") & "</p>"

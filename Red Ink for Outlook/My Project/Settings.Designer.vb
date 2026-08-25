@@ -781,6 +781,330 @@ Namespace My
                 Me("AP_SenderToolPolicyPath") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowX() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowX"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowY() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowY"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowW() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowW"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowW") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowH() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowH"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowH") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property CrashLog() As Boolean
+            Get
+                Return CType(Me("CrashLog"),Boolean)
+            End Get
+            Set
+                Me("CrashLog") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogX() As Integer
+            Get
+                Return CType(Me("ToolingLogX"),Integer)
+            End Get
+            Set
+                Me("ToolingLogX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogY() As Integer
+            Get
+                Return CType(Me("ToolingLogY"),Integer)
+            End Get
+            Set
+                Me("ToolingLogY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogHeight() As Integer
+            Get
+                Return CType(Me("ToolingLogHeight"),Integer)
+            End Get
+            Set
+                Me("ToolingLogHeight") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogWidth() As Integer
+            Get
+                Return CType(Me("ToolingLogWidth"),Integer)
+            End Get
+            Set
+                Me("ToolingLogWidth") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogMinimized() As Boolean
+            Get
+                Return CType(Me("ToolingLogMinimized"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogMinimized") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogMaximized() As Boolean
+            Get
+                Return CType(Me("ToolingLogMaximized"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogMaximized") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogWindowOverrideEnabled() As Boolean
+            Get
+                Return CType(Me("ToolingLogWindowOverrideEnabled"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogWindowOverrideEnabled") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogWindowOverrideValue() As Boolean
+            Get
+                Return CType(Me("ToolingLogWindowOverrideValue"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogWindowOverrideValue") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset1Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset1Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset1Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset2Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset2Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset2Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset3Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset3Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset3Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset4Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset4Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset4Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset5Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset5Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset5Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset1Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset1Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset1Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset2Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset2Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset2Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset3Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset3Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset3Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset4Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset4Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset4Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset5Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset5Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset5Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property FreestylePromptUiState() As String
+            Get
+                Return CType(Me("FreestylePromptUiState"),String)
+            End Get
+            Set
+                Me("FreestylePromptUiState") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_ThreadRetentionDays() As Integer
+            Get
+                Return CType(Me("AP_ThreadRetentionDays"),Integer)
+            End Get
+            Set
+                Me("AP_ThreadRetentionDays") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LocalHttpAuthMasterKey() As String
+            Get
+                Return CType(Me("LocalHttpAuthMasterKey"),String)
+            End Get
+            Set
+                Me("LocalHttpAuthMasterKey") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LocalHttpApprovedOrigins() As String
+            Get
+                Return CType(Me("LocalHttpApprovedOrigins"),String)
+            End Get
+            Set
+                Me("LocalHttpApprovedOrigins") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

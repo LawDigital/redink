@@ -539,6 +539,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_Crashlog As Boolean
+        Get
+            Return _context.INI_Crashlog
+        End Get
+        Set(value As Boolean)
+            _context.INI_Crashlog = value
+        End Set
+    End Property
+
     Public Shared Property INI_AutoPilotAutoStart As Boolean
         Get
             Return _context.INI_AutoPilotAutoStart
@@ -1909,6 +1918,25 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_JsRunDisable As Boolean
+        Get
+            Return _context.INI_JsRunDisable
+        End Get
+        Set(value As Boolean)
+            _context.INI_JsRunDisable = value
+        End Set
+    End Property
+
+
+    Public Shared Property INI_BrowserToolsDisable As Boolean
+        Get
+            Return _context.INI_BrowserToolsDisable
+        End Get
+        Set(value As Boolean)
+            _context.INI_BrowserToolsDisable = value
+        End Set
+    End Property
+
 
     Public Shared Property INI_UpdateCheckInterval As Integer
         Get
@@ -2443,6 +2471,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_PythonAgentPath As String
+        Get
+            Return _context.INI_PythonAgentPath
+        End Get
+        Set(value As String)
+            _context.INI_PythonAgentPath = value
+        End Set
+    End Property
+
     Public Shared Property INI_LicenseCounterPath As String
         Get
             Return _context.INI_LicenseCounterPath
@@ -2572,6 +2609,62 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Function HasToolingLogWindowOverride() As Boolean
+        Try
+            Return My.Settings.ToolingLogWindowOverrideEnabled
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Public Function GetEffectiveToolingLogWindowSetting() As Boolean
+        Try
+            If My.Settings.ToolingLogWindowOverrideEnabled Then
+                Return My.Settings.ToolingLogWindowOverrideValue
+            End If
+        Catch
+        End Try
+
+        Return _context IsNot Nothing AndAlso _context.INI_ToolingLogWindow
+    End Function
+
+    Public Sub ApplyEffectiveToolingLogWindowSettingToContext()
+        If _context Is Nothing Then
+            Return
+        End If
+
+        _context.INI_ToolingLogWindow = GetEffectiveToolingLogWindowSetting()
+    End Sub
+
+    Public Sub SetToolingLogWindowOverride(value As Boolean)
+        Try
+            My.Settings.ToolingLogWindowOverrideEnabled = True
+            My.Settings.ToolingLogWindowOverrideValue = value
+            My.Settings.Save()
+        Catch
+        End Try
+
+        If _context IsNot Nothing Then
+            _context.INI_ToolingLogWindow = value
+        End If
+    End Sub
+
+    Public Sub RefreshOpenToolingLogPreferenceWindows()
+        Try
+            If chatForm IsNot Nothing AndAlso Not chatForm.IsDisposed Then
+                chatForm.SyncToolingLogPreferenceFromSettings()
+            End If
+        Catch
+        End Try
+
+        Try
+            If _win2 IsNot Nothing AndAlso Not _win2.IsDisposed Then
+                _win2.SyncToolingLogPreferenceFromSettings()
+            End If
+        Catch
+        End Try
+    End Sub
+
     Public Shared Property INI_ToolingDryRun As Boolean
         Get
             Return _context.INI_ToolingDryRun
@@ -2588,6 +2681,42 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Integer)
             _context.INI_ToolingMaximumIterations = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolResponsePayloadBudgetChars As Integer
+        Get
+            Return _context.INI_ToolResponsePayloadBudgetChars
+        End Get
+        Set(value As Integer)
+            _context.INI_ToolResponsePayloadBudgetChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetMediumCompactionThresholdChars As Integer
+        Get
+            Return _context.INI_BudgetMediumCompactionThresholdChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetMediumCompactionThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetAggressiveCompactionThresholdChars As Integer
+        Get
+            Return _context.INI_BudgetAggressiveCompactionThresholdChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetAggressiveCompactionThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetCompactionPreviewChars As Integer
+        Get
+            Return _context.INI_BudgetCompactionPreviewChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetCompactionPreviewChars = value
         End Set
     End Property
 

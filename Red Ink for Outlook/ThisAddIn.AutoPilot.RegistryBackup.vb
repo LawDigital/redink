@@ -43,7 +43,7 @@ Partial Public Class ThisAddIn
         Try
             Dim json As New JObject From {
                 {"T", "AutoPilot"},
-                {"V", 3},
+                {"V", 5},
                 {"AP_FilterRules", If(My.Settings.AP_FilterRules, "")},
                 {"AP_WhitelistedSenders", If(My.Settings.AP_WhitelistedSenders, "")},
                 {"AP_SubjectTriggerWord", If(My.Settings.AP_SubjectTriggerWord, "")},
@@ -66,7 +66,12 @@ Partial Public Class ThisAddIn
                 {"AP_EnableUserFiles", My.Settings.AP_EnableUserFiles},
                 {"AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection},
                 {"AP_SelectedExternalToolNames", If(My.Settings.AP_SelectedExternalToolNames, "")},
+                {"AP_DashboardWindowX", My.Settings.AP_DashboardWindowX},
+                {"AP_DashboardWindowY", My.Settings.AP_DashboardWindowY},
+                {"AP_DashboardWindowW", My.Settings.AP_DashboardWindowW},
+                {"AP_DashboardWindowH", My.Settings.AP_DashboardWindowH},
                 {"AP_SenderToolPolicyPath", If(My.Settings.AP_SenderToolPolicyPath, "")},
+                {"AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays},
                 {"D", Date.UtcNow.ToString("o")}
             }
 
@@ -77,6 +82,31 @@ Partial Public Class ThisAddIn
         Catch ex As Exception
             Debug.WriteLine($"[AutoPilot] Failed to save registry backup: {ex.Message}")
         End Try
+    End Sub
+
+    ''' <summary>
+    ''' Persists AutoPilot settings to My.Settings and refreshes the registry backup.
+    ''' Keeps the reinstall-safe backup in sync with the latest saved values.
+    ''' </summary>
+    Private Sub SaveAutoPilotSettingsWithRegistryBackup()
+        My.Settings.Save()
+        BackupAutoPilotSettingsToRegistry()
+    End Sub
+
+    ''' <summary>
+    ''' Ensures the registry-backed AutoPilot settings are restored at most once per session.
+    ''' This avoids duplicate restore attempts when both auto-start and the manual dialog path
+    ''' touch the same recovery logic during the same Outlook session.
+    ''' </summary>
+    Private _autoPilotRegistrySettingsRestoredThisSession As Boolean = False
+
+    Private Sub EnsureAutoPilotSettingsRestoredFromRegistry()
+        If _autoPilotRegistrySettingsRestoredThisSession Then
+            Return
+        End If
+
+        TryRestoreAutoPilotSettingsFromRegistry()
+        _autoPilotRegistrySettingsRestoredThisSession = True
     End Sub
 
 
@@ -110,14 +140,6 @@ Partial Public Class ThisAddIn
             Dim monitoredMailbox As String = GetJsonString(json, "AP_MonitoredMailbox")
             Dim whitelistedSenders As String = GetJsonString(json, "AP_WhitelistedSenders")
 
-            ' Match the existing "saved config" heuristic before restoring
-            If String.IsNullOrWhiteSpace(filterRules) AndAlso
-               String.IsNullOrWhiteSpace(monitoredMailbox) AndAlso
-               String.IsNullOrWhiteSpace(whitelistedSenders) Then
-                Debug.WriteLine("[AutoPilot] Registry backup found but contains no saved AutoPilot config.")
-                Return False
-            End If
-
             My.Settings.AP_FilterRules = filterRules
             My.Settings.AP_WhitelistedSenders = whitelistedSenders
             My.Settings.AP_SubjectTriggerWord = GetJsonString(json, "AP_SubjectTriggerWord")
@@ -140,7 +162,12 @@ Partial Public Class ThisAddIn
             My.Settings.AP_EnableUserFiles = GetJsonBoolean(json, "AP_EnableUserFiles", My.Settings.AP_EnableUserFiles)
             My.Settings.AP_EnablePrivacyProtection = GetJsonBoolean(json, "AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection)
             My.Settings.AP_SelectedExternalToolNames = GetJsonString(json, "AP_SelectedExternalToolNames")
+            My.Settings.AP_DashboardWindowX = GetJsonInteger(json, "AP_DashboardWindowX", My.Settings.AP_DashboardWindowX)
+            My.Settings.AP_DashboardWindowY = GetJsonInteger(json, "AP_DashboardWindowY", My.Settings.AP_DashboardWindowY)
+            My.Settings.AP_DashboardWindowW = GetJsonInteger(json, "AP_DashboardWindowW", My.Settings.AP_DashboardWindowW)
+            My.Settings.AP_DashboardWindowH = GetJsonInteger(json, "AP_DashboardWindowH", My.Settings.AP_DashboardWindowH)
             My.Settings.AP_SenderToolPolicyPath = GetJsonString(json, "AP_SenderToolPolicyPath")
+            My.Settings.AP_ThreadRetentionDays = GetJsonInteger(json, "AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays)
 
             My.Settings.Save()
 

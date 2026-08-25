@@ -56,46 +56,47 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Modal selection dialog used by <see cref="SelectValue"/> to capture an integer choice from a list.
         ''' </summary>
+
+
         Friend NotInheritable Class SelectionFormSmall
             Inherits System.Windows.Forms.Form
 
-            ''' <summary>List box containing <see cref="SelectionItem"/> entries.</summary>
             Private ReadOnly _lst As System.Windows.Forms.ListBox
-
-            ''' <summary>Prompt label displayed above the list.</summary>
             Private ReadOnly _lbl As System.Windows.Forms.Label
-
-            ''' <summary>Selected result value. 0 indicates cancellation/no selection in this implementation.</summary>
+            Private ReadOnly _btnAction As System.Windows.Forms.Button
+            Private ReadOnly _pnlAction As System.Windows.Forms.Panel
             Private _result As Integer = 0
 
             ''' <summary>
-            ''' Initializes a new instance of the selection form.
+            ''' When True, the dialog was shown WITHOUT a resolved owner, so it must
+            ''' force itself to the foreground on Shown (Windows' foreground lock can
+            ''' otherwise keep an ownerless, background/STA dialog behind the active
+            ''' Office window). When it has a real owner, ownership handles Z-order and
+            ''' this stays False so no TopMost band is applied. Set by SelectValue.
             ''' </summary>
-            ''' <param name="items">Items to display in the ListBox.</param>
-            ''' <param name="defaultValue">Default selected value (matched against <see cref="SelectionItem.Value"/>).</param>
-            ''' <param name="promptText">Prompt text shown above the list.</param>
-            ''' <param name="headerText">Optional window title. If missing/blank, <c>AN</c> is used.</param>
+            Friend Property ForceForegroundOnShow As Boolean
+
             Friend Sub New(items As IReadOnlyList(Of SelectionItem),
-                           defaultValue As Integer,
-                           promptText As String,
-                           Optional headerText As String = Nothing)
+                   defaultValue As Integer,
+                   promptText As String,
+                   Optional headerText As String = Nothing,
+                   Optional actionButtonText As String = Nothing,
+                   Optional actionButtonValue As Integer = 0)
 
                 Const minWidth As Integer = 400
                 Const maxWidth As Integer = 900
                 Const sidePadding As Integer = 10
-                Const bottomPadding As Integer = 24
-
+                Const actionPadding As Integer = 12
                 Const minVisibleRows As Integer = 5
                 Const maxVisibleRows As Integer = 18
 
                 Me.SuspendLayout()
 
                 Dim stdFont As New System.Drawing.Font(
-                    "Segoe UI",
-                    9.0F,
-                    System.Drawing.FontStyle.Regular,
-                    System.Drawing.GraphicsUnit.Point
-                )
+            "Segoe UI",
+            9.0F,
+            System.Drawing.FontStyle.Regular,
+            System.Drawing.GraphicsUnit.Point)
                 Me.Font = stdFont
                 Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
 
@@ -105,127 +106,170 @@ Namespace SharedLibrary
                 Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-                ' Important: don't reference baseWidth (it no longer exists).
-                ' We compute ClientSize after measuring content.
                 Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
                 Me.KeyPreview = True
 
                 _lbl = New System.Windows.Forms.Label With {
-                    .AutoSize = True,
-                    .Text = promptText,
-                    .Location = New System.Drawing.Point(sidePadding, sidePadding),
-                    .Anchor = System.Windows.Forms.AnchorStyles.Top Or
-                              System.Windows.Forms.AnchorStyles.Left Or
-                              System.Windows.Forms.AnchorStyles.Right
-                }
+            .AutoSize = True,
+            .Text = promptText,
+            .Location = New System.Drawing.Point(sidePadding, sidePadding),
+            .Anchor = System.Windows.Forms.AnchorStyles.Top Or
+                      System.Windows.Forms.AnchorStyles.Left Or
+                      System.Windows.Forms.AnchorStyles.Right
+        }
                 Controls.Add(_lbl)
 
-                ' Important: do NOT anchor Bottom yet (avoid early stretch)
                 _lst = New System.Windows.Forms.ListBox With {
-                    .IntegralHeight = False,
-                    .SelectionMode = System.Windows.Forms.SelectionMode.One,
-                    .Anchor = System.Windows.Forms.AnchorStyles.Top Or
-                              System.Windows.Forms.AnchorStyles.Left Or
-                              System.Windows.Forms.AnchorStyles.Right
-                }
+            .IntegralHeight = False,
+            .SelectionMode = System.Windows.Forms.SelectionMode.One,
+            .Anchor = System.Windows.Forms.AnchorStyles.Top Or
+                      System.Windows.Forms.AnchorStyles.Left Or
+                      System.Windows.Forms.AnchorStyles.Right
+        }
 
-                ' Fill items first (so width can be measured)
                 For Each it In items
                     _lst.Items.Add(it)
                 Next
 
-                ' --- Dynamic width based on widest item / prompt ---
                 Dim measuredContentWidth As Integer = minWidth
-
                 Using g As System.Drawing.Graphics = Me.CreateGraphics()
                     Dim maxItemTextWidth As Integer = 0
-
                     For Each it As SelectionItem In items
                         Dim w As Integer = System.Windows.Forms.TextRenderer.MeasureText(
-                            g,
-                            it.DisplayText,
-                            stdFont,
-                            New System.Drawing.Size(Integer.MaxValue, Integer.MaxValue),
-                            System.Windows.Forms.TextFormatFlags.SingleLine
-                        ).Width
+                    g,
+                    it.DisplayText,
+                    stdFont,
+                    New System.Drawing.Size(Integer.MaxValue, Integer.MaxValue),
+                    System.Windows.Forms.TextFormatFlags.SingleLine).Width
                         If w > maxItemTextWidth Then maxItemTextWidth = w
                     Next
 
                     Dim promptWidth As Integer = System.Windows.Forms.TextRenderer.MeasureText(
-                        g,
-                        promptText,
-                        stdFont,
-                        New System.Drawing.Size(Integer.MaxValue, Integer.MaxValue),
-                        System.Windows.Forms.TextFormatFlags.SingleLine
-                    ).Width
+                g,
+                promptText,
+                stdFont,
+                New System.Drawing.Size(Integer.MaxValue, Integer.MaxValue),
+                System.Windows.Forms.TextFormatFlags.SingleLine).Width
 
-                    ' Add ListBox borders/scrollbar + padding
-                    Dim listChrome As Integer = 35 ' scrollbar + borders (approx)
+                    Dim actionButtonWidth As Integer = 0
+                    If Not String.IsNullOrWhiteSpace(actionButtonText) Then
+                        actionButtonWidth = System.Windows.Forms.TextRenderer.MeasureText(
+                    g,
+                    actionButtonText,
+                    stdFont,
+                    New System.Drawing.Size(Integer.MaxValue, Integer.MaxValue),
+                    System.Windows.Forms.TextFormatFlags.SingleLine).Width + 30
+                    End If
+
+                    Dim listChrome As Integer = 35
                     Dim neededClientWidth As Integer =
-                        Math.Max(promptWidth, maxItemTextWidth + listChrome) + (2 * sidePadding)
-
+                Math.Max(Math.Max(promptWidth, maxItemTextWidth + listChrome), actionButtonWidth) + (2 * sidePadding)
                     measuredContentWidth = Math.Max(minWidth, Math.Min(maxWidth, neededClientWidth))
                 End Using
 
-                ' --- Dynamic height based on item count (more than 5 rows if long list) ---
                 Dim visibleRows As Integer = Math.Min(maxVisibleRows, Math.Max(minVisibleRows, items.Count))
                 _lst.ItemHeight = CInt(stdFont.GetHeight())
                 Dim desiredListHeight As Integer = _lst.ItemHeight * visibleRows + 9
 
-                ' Place controls now that width/height is known
-                _lbl.MaximumSize = New System.Drawing.Size(measuredContentWidth - (2 * sidePadding), 0) ' allow wrapping if needed
-
+                _lbl.MaximumSize = New System.Drawing.Size(measuredContentWidth - (2 * sidePadding), 0)
                 _lst.Location = New System.Drawing.Point(sidePadding, _lbl.Bottom + 10)
                 _lst.Width = measuredContentWidth - (2 * sidePadding)
                 _lst.Height = desiredListHeight
                 Controls.Add(_lst)
 
-                Dim requiredHeight As Integer = _lst.Top + desiredListHeight + bottomPadding
+                Dim actionAreaHeight As Integer = 0
+                If Not String.IsNullOrWhiteSpace(actionButtonText) Then
+                    _btnAction = New System.Windows.Forms.Button With {
+                .Text = actionButtonText,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Font = stdFont,
+                .Padding = New System.Windows.Forms.Padding(6, 4, 6, 4),
+                .Anchor = System.Windows.Forms.AnchorStyles.Top Or
+                          System.Windows.Forms.AnchorStyles.Right
+            }
+
+                    _pnlAction = New System.Windows.Forms.Panel With {
+                .Height = _btnAction.PreferredSize.Height + (2 * actionPadding),
+                .Width = measuredContentWidth,
+                .Anchor = System.Windows.Forms.AnchorStyles.Left Or
+                          System.Windows.Forms.AnchorStyles.Right Or
+                          System.Windows.Forms.AnchorStyles.Bottom
+            }
+
+                    _btnAction.Location = New System.Drawing.Point(
+                measuredContentWidth - sidePadding - _btnAction.PreferredSize.Width,
+                actionPadding)
+                    _pnlAction.Controls.Add(_btnAction)
+                    Controls.Add(_pnlAction)
+
+                    actionAreaHeight = _pnlAction.Height
+
+                    AddHandler _btnAction.Click,
+                Sub()
+                    _result = actionButtonValue
+                    Me.DialogResult = System.Windows.Forms.DialogResult.OK
+                    Close()
+                End Sub
+                End If
+
+                Dim requiredHeight As Integer = _lst.Top + desiredListHeight + actionAreaHeight + If(_pnlAction Is Nothing, actionPadding, 0)
                 Me.ClientSize = New System.Drawing.Size(measuredContentWidth, requiredHeight)
 
-                ' After ClientSize is finalized, enable Bottom anchoring
+                If _pnlAction IsNot Nothing Then
+                    _pnlAction.Location = New System.Drawing.Point(0, Me.ClientSize.Height - _pnlAction.Height)
+                    _pnlAction.Width = Me.ClientSize.Width
+                End If
+
                 _lst.Anchor = System.Windows.Forms.AnchorStyles.Top Or
-                              System.Windows.Forms.AnchorStyles.Left Or
-                              System.Windows.Forms.AnchorStyles.Right Or
-                              System.Windows.Forms.AnchorStyles.Bottom
-
-                ' Ensure width matches final client width
+                      System.Windows.Forms.AnchorStyles.Left Or
+                      System.Windows.Forms.AnchorStyles.Right Or
+                      System.Windows.Forms.AnchorStyles.Bottom
                 _lst.Width = Me.ClientSize.Width - (2 * sidePadding)
-
-                ' Keep minimum width at least 400, but allow resizing smaller than the initial computed width if desired.
                 Me.MinimumSize = New System.Drawing.Size(minWidth, Me.Size.Height)
 
                 AddHandler _lst.KeyDown,
-                    Sub(s, e)
-                        If e.KeyCode = System.Windows.Forms.Keys.Enter Then AcceptCurrentSelection()
-                    End Sub
-
+            Sub(s, e)
+                If e.KeyCode = System.Windows.Forms.Keys.Enter Then AcceptCurrentSelection()
+            End Sub
                 AddHandler _lst.DoubleClick, Sub() AcceptCurrentSelection()
 
                 AddHandler Me.KeyDown,
-                    Sub(sender, e)
-                        If e.KeyCode = System.Windows.Forms.Keys.Escape Then
-                            _result = 0
-                            Me.DialogResult = System.Windows.Forms.DialogResult.Cancel
-                            Close()
-                        End If
-                    End Sub
+            Sub(sender, e)
+                If e.KeyCode = System.Windows.Forms.Keys.Escape Then
+                    _result = 0
+                    Me.DialogResult = System.Windows.Forms.DialogResult.Cancel
+                    Close()
+                End If
+            End Sub
 
                 AddHandler Me.FormClosing,
-                    Sub(s, e)
-                        If Me.DialogResult <> System.Windows.Forms.DialogResult.OK Then _result = 0
-                    End Sub
+            Sub(s, e)
+                If Me.DialogResult <> System.Windows.Forms.DialogResult.OK Then _result = 0
+            End Sub
 
-                ' Keep padding and width on resize
                 AddHandler Me.Resize,
-                    Sub()
-                        _lbl.Width = Me.ClientSize.Width - (2 * sidePadding)
-                        _lst.Width = Me.ClientSize.Width - (2 * sidePadding)
-                        Dim newHeight = Me.ClientSize.Height - _lst.Top - bottomPadding
-                        If newHeight > 40 Then _lst.Height = newHeight
-                    End Sub
+            Sub()
+                _lbl.Width = Me.ClientSize.Width - (2 * sidePadding)
+                _lst.Width = Me.ClientSize.Width - (2 * sidePadding)
 
-                ' Preselect default
+                If _pnlAction IsNot Nothing Then
+                    _pnlAction.Location = New System.Drawing.Point(0, Me.ClientSize.Height - _pnlAction.Height)
+                    _pnlAction.Width = Me.ClientSize.Width
+
+                    Dim buttonSize As System.Drawing.Size = _btnAction.PreferredSize
+                    _btnAction.Location = New System.Drawing.Point(
+                        _pnlAction.ClientSize.Width - sidePadding - buttonSize.Width,
+                        actionPadding)
+
+                    Dim newHeight As Integer = _pnlAction.Top - actionPadding - _lst.Top
+                    If newHeight > 40 Then _lst.Height = newHeight
+                Else
+                    Dim newHeight As Integer = Me.ClientSize.Height - _lst.Top - actionPadding
+                    If newHeight > 40 Then _lst.Height = newHeight
+                End If
+            End Sub
+
                 Dim defIdx As Integer = items.ToList().FindIndex(Function(it) it.Value = defaultValue)
                 If defIdx >= 0 Then
                     _lst.SelectedIndex = defIdx
@@ -237,9 +281,6 @@ Namespace SharedLibrary
                 _lst.Focus()
             End Sub
 
-            ''' <summary>
-            ''' Accepts the current ListBox selection and closes the form with <see cref="DialogResult.OK"/>.
-            ''' </summary>
             Private Sub AcceptCurrentSelection()
                 If _lst.SelectedIndex >= 0 Then
                     Dim item As SelectionItem = DirectCast(_lst.SelectedItem, SelectionItem)
@@ -250,8 +291,18 @@ Namespace SharedLibrary
             End Sub
 
             ''' <summary>
-            ''' Gets the selected integer result (0 when canceled/no selection in this implementation).
+            ''' Surfaces the dialog only when it was shown ownerless (see
+            ''' <see cref="ForceForegroundOnShow"/>); owned dialogs rely on ambient
+            ''' ownership for correct Z-order per SharedMethods.DialogOwner.vb.
             ''' </summary>
+            Protected Overrides Sub OnShown(e As System.EventArgs)
+                MyBase.OnShown(e)
+                If ForceForegroundOnShow Then
+                    SharedMethods.ForceDialogToForeground(Me)
+                    SharedMethods.AttachForeignForegroundWatchdog(Me)
+                End If
+            End Sub
+
             Friend ReadOnly Property Result As Integer
                 Get
                     Return _result
@@ -259,37 +310,44 @@ Namespace SharedLibrary
             End Property
         End Class
 
+
+
         ''' <summary>
         ''' Shows a modal selection dialog and returns the chosen integer value.
         ''' </summary>
-        ''' <param name="items">Items to offer in the selection list.</param>
-        ''' <param name="defaultValue">Default selected value.</param>
-        ''' <param name="prompt">Prompt shown above the selection list.</param>
-        ''' <param name="header">Optional window title. If missing/blank, <c>AN</c> is used.</param>
-        ''' <param name="owner">
-        ''' Optional explicit owner window. If <c>Nothing</c>, falls back to the ambient
-        ''' dialog owner (see <see cref="SharedMethods.PushDialogOwner"/>) and then to the
-        ''' Office host window. Ensures correct Z-order when called from TopMost parent forms.
-        ''' </param>
-        ''' <returns>The selected value, or 0 when canceled or when <paramref name="items"/> is Nothing.</returns>
         Public Shared Function SelectValue(items As IEnumerable(Of SelectionItem),
-                                           defaultValue As Integer,
-                                           Optional prompt As String = "Please choose …",
-                                           Optional header As String = Nothing,
-                                           Optional owner As System.Windows.Forms.IWin32Window = Nothing) As Integer
+                                   defaultValue As Integer,
+                                   Optional prompt As String = "Please choose …",
+                                   Optional header As String = Nothing,
+                                   Optional owner As System.Windows.Forms.IWin32Window = Nothing,
+                                   Optional actionButtonText As String = Nothing,
+                                   Optional actionButtonValue As Integer = 0) As Integer
 
             If items Is Nothing Then
                 System.Windows.Forms.MessageBox.Show("SelectValue Error: Items collection must not be null.")
                 Return 0
             End If
 
-            Dim effectiveOwner As System.Windows.Forms.IWin32Window =
-                If(owner, SharedMethods.ResolveDialogOwner())
+            Dim effectiveOwner As System.Windows.Forms.IWin32Window
+            If owner IsNot Nothing Then
+                ' Caller-supplied owners must be inspected and same-thread filtered too.
+                ' Otherwise a foreign (cross-thread/cross-process) owner would be disabled by
+                ' ShowDialog and never re-enabled, deadlocking that host window. InspectDialogOwner
+                ' also records the attempt in the crash log; IfOwnerOnCurrentThread rejects a
+                ' cross-thread owner and falls back to an ownerless dialog.
+                OfficeWindowWatchdog.InspectDialogOwner(owner, "SelectValue", "SelectValue")
+                effectiveOwner = SharedMethods.IfOwnerOnCurrentThread(owner)
+            Else
+                effectiveOwner = SharedMethods.ResolveSameThreadDialogOwner()
+            End If
 
-            Using frm As New SelectionFormSmall(items.ToList(), defaultValue, prompt, header)
+            Using frm As New SelectionFormSmall(items.ToList(), defaultValue, prompt, header, actionButtonText, actionButtonValue)
                 If effectiveOwner IsNot Nothing Then
                     frm.ShowDialog(effectiveOwner)
                 Else
+                    ' No resolved owner: force the ownerless dialog to the foreground
+                    ' on Shown so it does not stay behind the active Office window.
+                    frm.ForceForegroundOnShow = True
                     frm.ShowDialog()
                 End If
                 Return frm.Result

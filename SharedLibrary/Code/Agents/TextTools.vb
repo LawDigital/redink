@@ -21,12 +21,15 @@ Option Explicit On
 Imports System.IO
 Imports System.Text
 Imports System.Text.RegularExpressions
+Imports System.Threading
+Imports System.Threading.Tasks
 Imports Newtonsoft.Json
 Imports SharedLibrary.SharedLibrary
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace Agents
 
-    Public NotInheritable Class TextTools
+    Partial Public NotInheritable Class TextTools
 
         Private Sub New()
         End Sub
@@ -38,29 +41,73 @@ Namespace Agents
         Public Shared Function IsTextTool(name As String) As Boolean
             If String.IsNullOrWhiteSpace(name) Then Return False
             Select Case name
-                Case ToolRead, ToolWrite, ToolSearch : Return True
-                Case Else : Return False
+                Case ToolRead, ToolWrite, ToolSearch
+                    Return True
+                Case Else
+                    Return IsExtendedTextTool(name)
             End Select
         End Function
 
         Public Shared Function BuildAll() As List(Of ModelConfig)
-            Return New List(Of ModelConfig) From {BuildRead(), BuildWrite(), BuildSearch()}
+            Dim tools As New List(Of ModelConfig) From {
+                BuildRead(),
+                BuildWrite(),
+                BuildSearch()
+            }
+
+            tools.AddRange(BuildExtendedTools())
+            Return tools
         End Function
 
         ' --------------------------------------------------------------- dispatch
 
         Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object)) As String
+            Return ExecuteAsync(toolName, arguments, Nothing, CancellationToken.None).GetAwaiter().GetResult()
+        End Function
+
+        Public Shared Async Function ExecuteAsync(toolName As String,
+                                                  arguments As IDictionary(Of String, Object),
+                                                  context As ISharedContext,
+                                                  Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
             Try
                 Select Case toolName
-                    Case ToolRead : Return ExecuteRead(arguments)
-                    Case ToolWrite : Return ExecuteWrite(arguments)
-                    Case ToolSearch : Return ExecuteSearch(arguments)
-                    Case Else : Return JsonConvert.SerializeObject(New With {Key .error = "unknown_text_tool", Key .tool = toolName})
+                    Case ToolRead
+                        Return ExecuteRead(arguments)
+
+                    Case ToolWrite
+                        Return ExecuteWrite(arguments)
+
+                    Case ToolSearch
+                        Return ExecuteSearch(arguments)
+
+                    Case Else
+                        Dim extendedResult As String =
+                            Await ExecuteExtendedAsync(toolName, arguments, context, cancellationToken).ConfigureAwait(False)
+
+                        If extendedResult IsNot Nothing Then
+                            Return extendedResult
+                        End If
+
+                        Return JsonConvert.SerializeObject(New With {
+                            Key .error = "unknown_text_tool",
+                            Key .tool = toolName
+                        })
                 End Select
             Catch uae As UnauthorizedAccessException
-                Return JsonConvert.SerializeObject(New With {Key .error = "access_denied", Key .message = uae.Message})
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = "access_denied",
+                    Key .message = uae.Message
+                })
+            Catch oce As OperationCanceledException
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = "cancelled",
+                    Key .message = "The operation was cancelled."
+                })
             Catch ex As Exception
-                Return JsonConvert.SerializeObject(New With {Key .error = "text_tool_failed", Key .message = ex.Message})
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = "text_tool_failed",
+                    Key .message = ex.Message
+                })
             End Try
         End Function
 
@@ -101,6 +148,23 @@ Namespace Agents
                 target = PathPolicy.Resolve(rawPath, PathAccess.Write)
             End If
 
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+
+            If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                args,
+                ArtifactStorageKind.Unknown,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = artifactFailureCode,
+                    Key .message = artifactFailureMessage
+                })
+            End If
+
             Dim dir = Path.GetDirectoryName(target)
             If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
 
@@ -117,10 +181,25 @@ Namespace Agents
             End Select
 
             Dim fi As New FileInfo(target)
+
+            ' Pick up edits to SKILL.md/AGENT.md immediately when writing into a resource root.
+            AgentResources.RefreshIfResourcePath(target)
+
+            If artifactMetadata Is Nothing Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .path = target,
+                    Key .size = fi.Length,
+                    Key .mode = If(String.IsNullOrWhiteSpace(mode), "overwrite", mode)
+                })
+            End If
+
             Return JsonConvert.SerializeObject(New With {
                 Key .path = target,
                 Key .size = fi.Length,
-                Key .mode = If(String.IsNullOrWhiteSpace(mode), "overwrite", mode)
+                Key .mode = If(String.IsNullOrWhiteSpace(mode), "overwrite", mode),
+                Key .produces_user_deliverable = artifactMetadata.ProducesUserDeliverable,
+                Key .produces_intermediate_data = artifactMetadata.ProducesIntermediateData,
+                Key .artifacts = New System.Object() {artifactMetadata.BuildArtifact(target)}
             })
         End Function
 
@@ -211,13 +290,21 @@ Namespace Agents
         Private Shared Function BuildWrite() As ModelConfig
             Dim def =
                 "{""name"":""" & ToolWrite & """," &
-                """description"":""Write a UTF-8 text file. If 'path' is omitted, a new file is created under the workspace (or the Desktop if no workspace is set) using 'filename' as a suggestion. Modes: overwrite (default), append, create_new."",""parameters"":{" &
+                """description"":""Write a UTF-8 text file. If 'path' is omitted, a new file is created in the default writable root using 'filename' as a suggestion. The default writable root is the connected workspace when one is set; otherwise the current session's staging/working area, which is delivered to the user at the end of the run. Prefer relative paths or an omitted path so intermediate edits stay in the working area rather than a fixed location. Modes: overwrite (default), append, create_new."",""parameters"":{" &
                 """type"":""object""," &
                 """properties"":{" &
-                """path"":{""type"":""string"",""description"":""Absolute or workspace-relative path. Omit to auto-name in the default writable root.""}," &
+                """path"":{""type"":""string"",""description"":""Absolute path, or a path relative to the default writable root (connected workspace, otherwise the session staging/working area). Omit to auto-name in the default writable root.""}," &
                 """filename"":{""type"":""string"",""description"":""Suggested filename when 'path' is omitted.""}," &
                 """text"":{""type"":""string"",""description"":""Content to write.""}," &
-                """mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Write mode (default 'overwrite').""}}," &
+                """mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Write mode (default 'overwrite').""}," &
+                """artifact_id"":{""type"":""string"",""description"":""Optional opaque artifact id. When any artifact metadata is supplied, artifact_id/logical_deliverable_id/output_slot_id/artifact_state/artifact_delivery_intent are required together.""}," &
+                """logical_deliverable_id"":{""type"":""string""}," &
+                """output_slot_id"":{""type"":""string""}," &
+                """supersedes_artifact_id"":{""type"":""string""}," &
+                """artifact_state"":{""type"":""string"",""enum"":[""working"",""intermediate"",""final""]}," &
+                """artifact_delivery_intent"":{""type"":""string"",""enum"":[""none"",""deliver_to_user"",""persist_only"",""deliver_and_persist""]}," &
+                """storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]}," &
+                """expected_artifacts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}}," &
                 """required"":[""text""]}}"
             Return New ModelConfig() With {
                 .ToolName = ToolWrite,
@@ -226,7 +313,8 @@ Namespace Agents
                 .ModelDescription = "Text (write)",
                 .Tool = True,
                 .ToolPriority = 921,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .CapabilityTags = "artifact_generation"
             }
         End Function
 

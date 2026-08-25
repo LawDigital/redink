@@ -191,6 +191,7 @@ Namespace SharedLibrary
         ''' </summary>
         Private Sub Form_Shown(sender As Object, e As System.EventArgs)
             UpdateStatusLayout()
+            SharedMethods.ForceDialogToForeground(Me)
         End Sub
 
         ''' <summary>

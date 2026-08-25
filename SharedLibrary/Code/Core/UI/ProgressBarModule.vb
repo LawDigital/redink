@@ -43,7 +43,12 @@ Namespace SharedLibrary
             Dim t As New Thread(Sub()
                                     ' Create and show the progress form modally.
                                     Dim progressForm As New ProgressForm(headerText, initialLabel)
-                                    progressForm.ShowDialog()
+                                    Dim __safeDialogOwner46 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                    If __safeDialogOwner46 IsNot Nothing Then
+                                        progressForm.ShowDialog(__safeDialogOwner46)
+                                    Else
+                                        progressForm.ShowDialog()
+                                    End If
                                 End Sub)
             t.SetApartmentState(ApartmentState.STA)
             t.Start()

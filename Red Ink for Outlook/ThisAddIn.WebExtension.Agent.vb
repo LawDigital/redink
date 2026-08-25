@@ -60,6 +60,15 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private _chatAgentSurfacedFiles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
+    ''' <summary>
+    ''' Paths that a tool edited in place during the current turn and that must be
+    ''' delivered even though they pre-existed (and are therefore in
+    ''' _chatAgentSurfacedFiles). Populated by tools such as the live Excel workbook
+    ''' completion when editing the existing file in place. Reset at the start of
+    ''' every non-sub-agent tooling run.
+    ''' </summary>
+    Private _chatAgentForcedDeliverables As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
     ''' <summary>Temp directory used by the current chat agent session.</summary>
     Private _chatAgentTempDir As String = Nothing
 
@@ -88,6 +97,8 @@ Partial Public Class ThisAddIn
 
     Private ReadOnly _chatAgentWorkspaceHistory As New List(Of String)()
     Private Const CA_MaxWorkspaceHistoryEntries As Integer = 12
+    Private Const CA_WorkspacePresetCount As Integer = 5
+    Private Const CA_WorkspacePresetSettingPrefix As String = "Inky_WorkspacePreset"
 
     Friend Class ChatAgentWorkspaceState
         Public Property RootPath As String = ""
@@ -95,10 +106,33 @@ Partial Public Class ThisAddIn
         Public Property AllowRead As Boolean = True
         Public Property AllowWrite As Boolean = True
         Public Property AllowMoveCopyRename As Boolean = True
-        Public Property AllowDelete As Boolean = False
+        Public Property AllowDelete As Boolean = SharedMethods.WorkspaceDeleteByDefaultOn
         Public Property SaveDroppedFilesToWorkspace As Boolean = False
         Public Property IncludeHiddenSystem As Boolean = False
     End Class
+
+    Private Class ChatAgentWorkspacePresetInfo
+        Public Property Slot As Integer
+        Public Property RootPath As String = ""
+        Public Property Label As String = ""
+    End Class
+
+    Private Function BuildAutoPilotTempWorkspaceState() As ChatAgentWorkspaceState
+        If String.IsNullOrWhiteSpace(_apCurrentTempDir) OrElse Not Directory.Exists(_apCurrentTempDir) Then
+            Return Nothing
+        End If
+
+        Return New ChatAgentWorkspaceState() With {
+            .RootPath = Path.GetFullPath(_apCurrentTempDir),
+            .PersistUntilRevoked = False,
+            .AllowRead = True,
+            .AllowWrite = True,
+            .AllowMoveCopyRename = True,
+            .AllowDelete = True,
+            .SaveDroppedFilesToWorkspace = False,
+            .IncludeHiddenSystem = True
+        }
+    End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  FILE MANAGEMENT
@@ -112,11 +146,9 @@ Partial Public Class ThisAddIn
     Private Function ChatAgentAddFile(sourcePath As String) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(sourcePath) OrElse Not File.Exists(sourcePath) Then Return Nothing
 
-        ' Ensure per-session temp dir exists
-        If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
-            _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
-            Directory.CreateDirectory(_chatAgentTempDir)
-        End If
+        ' Ensure per-session temp dir exists (also reclaims stale dirs and registers the
+        ' staging root with PathPolicy, so uploads and tool outputs share the same session).
+        EnsureChatAgentTempDir()
 
         ' The upload handler (inky_upload) saves files as "{32-hex-guid}_{originalName}".
         ' Strip that GUID prefix so tools see the user's original filename.
@@ -174,6 +206,10 @@ Partial Public Class ThisAddIn
     Private Function GetAgentFileListForBrowser() As List(Of Object)
         Dim result As New List(Of Object)()
 
+        ' Surface any files produced by tools into the session staging directory as chips,
+        ' so users can see and open/download them alongside drag-and-dropped uploads.
+        RegisterStagingFilesAsSessionChips()
+
         For Each att In _chatAgentFiles
             Dim hydrated = EnsureSessionAttachmentAvailable(att)
             If hydrated Is Nothing Then Continue For
@@ -195,6 +231,85 @@ Partial Public Class ThisAddIn
     Private Sub ChatAgentClearFiles()
         CleanupChatAgentTempDir()
     End Sub
+
+    ''' <summary>
+    ''' Resolves a registered session file by name (uploaded or produced) and returns its
+    ''' current temp path, hydrating it from its source if necessary. Returns Nothing when
+    ''' the file cannot be located or materialized.
+    ''' </summary>
+    Private Function ResolveSessionFilePath(fileName As String) As String
+        If String.IsNullOrWhiteSpace(fileName) Then Return Nothing
+
+        Dim trimmedName = fileName.Trim()
+
+        ' The browser chips are rendered from _chatAgentFiles (GetAgentFileListForBrowser),
+        ' so resolve against that list first. _apCurrentAttachments (used by FindAttachment)
+        ' is only populated during an active tooling run and is often Nothing here.
+        Dim att As AutoPilotAttachmentInfo = Nothing
+        If _chatAgentFiles IsNot Nothing Then
+            att = _chatAgentFiles.FirstOrDefault(
+                Function(a) a IsNot Nothing AndAlso
+                            Not String.IsNullOrWhiteSpace(a.OriginalFileName) AndAlso
+                            a.OriginalFileName.Equals(trimmedName, StringComparison.OrdinalIgnoreCase))
+        End If
+
+        If att Is Nothing Then
+            att = FindAttachment(trimmedName)
+        End If
+
+        att = EnsureSessionAttachmentAvailable(att)
+
+        If att Is Nothing OrElse String.IsNullOrWhiteSpace(att.TempFilePath) OrElse Not File.Exists(att.TempFilePath) Then
+            Return Nothing
+        End If
+
+        Return att.TempFilePath
+    End Function
+
+    ''' <summary>
+    ''' Opens a registered session file (uploaded or produced) in the OS default application.
+    ''' Returns False when the file cannot be located.
+    ''' </summary>
+    Private Function ChatAgentOpenFileInDefaultApp(fileName As String) As Boolean
+        Dim path = ResolveSessionFilePath(fileName)
+        If String.IsNullOrWhiteSpace(path) Then Return False
+
+        Try
+            Dim psi As New ProcessStartInfo(path) With {.UseShellExecute = True}
+            Process.Start(psi)
+            Return True
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to open session file in default application.", ex:=ex)
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Resolves a registered session file by name (uploaded or produced) and copies it to
+    ''' Desktop\Inky\, returning the saved path. Works for any file surfaced as a browser chip.
+    ''' </summary>
+    Private Function ChatAgentDownloadFileToDesktop(fileName As String) As String
+        Dim path = ResolveSessionFilePath(fileName)
+        If String.IsNullOrWhiteSpace(path) Then Return Nothing
+
+        Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Dim outputDir = System.IO.Path.Combine(desktopPath, "Inky")
+        Directory.CreateDirectory(outputDir)
+
+        Dim destName = System.IO.Path.GetFileName(path)
+        Dim destPath = System.IO.Path.Combine(outputDir, destName)
+
+        Dim counter = 1
+        While File.Exists(destPath)
+            destPath = System.IO.Path.Combine(
+                outputDir,
+                System.IO.Path.GetFileNameWithoutExtension(destName) & $"_{counter}" & System.IO.Path.GetExtension(destName))
+            counter += 1
+        End While
+
+        File.Copy(path, destPath, overwrite:=False)
+        Return destPath
+    End Function
 
     Private Function EnsureSessionAttachmentAvailable(att As AutoPilotAttachmentInfo) As AutoPilotAttachmentInfo
         If att Is Nothing Then Return Nothing
@@ -448,6 +563,7 @@ Partial Public Class ThisAddIn
         _apCurrentTempDir = _chatAgentTempDir
         _apCurrentAttachments = _chatAgentFiles
         _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(_chatAgentTempDir)
 
         _apCurrentMailInfo = New AutoPilotMailInfo() With {
             .EntryID = "",
@@ -495,6 +611,10 @@ Partial Public Class ThisAddIn
     Private Sub ChatAgentTeardownToolContext()
         _chatAgentActive = False
         SyncWorkspaceToPathPolicy()
+        ' Session staging is valid only while a Local Agent tool run is active.
+        ' Leaving it globally registered would make a later AutoPilot/Scheduler
+        ' strict-path run authorize the previous Local Agent temp directory too.
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(Nothing)
         ClearAttachmentCaches()
         _apCurrentTempDir = Nothing
         _apCurrentAttachments = Nothing
@@ -519,60 +639,82 @@ Partial Public Class ThisAddIn
         If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso Directory.Exists(_chatAgentTempDir) Then
             Dim resultFiles = CollectResultAttachments(_chatAgentTempDir, _chatAgentFiles)
             If resultFiles IsNot Nothing AndAlso resultFiles.Count > 0 Then
+                ' Do not path-deduplicate registry-resolved files here. Two explicit sibling
+                ' artifacts may intentionally reference the same physical source path.
                 filesToCopy.AddRange(resultFiles)
             End If
         End If
 
         If extraFilePaths IsNot Nothing Then
-            filesToCopy.AddRange(
-                extraFilePaths.
-                    Where(Function(p) Not String.IsNullOrWhiteSpace(p) AndAlso File.Exists(p)))
+            For Each extraPath As String In extraFilePaths
+                If String.IsNullOrWhiteSpace(extraPath) OrElse Not File.Exists(extraPath) Then Continue For
+                Dim normalizedExtra As String = Path.GetFullPath(extraPath)
+                If Not filesToCopy.Any(Function(existingPath)
+                                           Return Not String.IsNullOrWhiteSpace(existingPath) AndAlso
+                                                  String.Equals(Path.GetFullPath(existingPath), normalizedExtra, StringComparison.OrdinalIgnoreCase)
+                                       End Function) Then
+                    filesToCopy.Add(normalizedExtra)
+                End If
+            Next
         End If
 
         filesToCopy = filesToCopy.
+            Where(Function(p) Not String.IsNullOrWhiteSpace(p) AndAlso File.Exists(p)).
             Select(Function(p) Path.GetFullPath(p)).
-            Distinct(StringComparer.OrdinalIgnoreCase).
             ToList()
 
-        If filesToCopy.Count = 0 Then
-            Return copiedFiles
-        End If
+        If filesToCopy.Count = 0 Then Return copiedFiles
 
-        Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-        Dim timestamp = DateTime.Now.ToString("yyMMdd_HH-mm")
-        Dim outputDir = Path.Combine(desktopPath, "Inky", timestamp)
-
-        Dim counter = 1
-        While Directory.Exists(outputDir)
-            outputDir = Path.Combine(desktopPath, "Inky", timestamp & $"_{counter}")
+        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Dim timestamp As String = DateTime.Now.ToString("yyMMdd_HH-mm")
+        Dim finalOutputDir As String = Path.Combine(desktopPath, "Inky", timestamp)
+        Dim counter As Integer = 1
+        While Directory.Exists(finalOutputDir)
+            finalOutputDir = Path.Combine(desktopPath, "Inky", timestamp & $"_{counter}")
             counter += 1
         End While
 
-        Directory.CreateDirectory(outputDir)
+        Dim parentDir As String = Path.GetDirectoryName(finalOutputDir)
+        Directory.CreateDirectory(parentDir)
+        Dim partialDir As String = Path.Combine(parentDir, ".partial_" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(partialDir)
 
-        For Each srcPath In filesToCopy
-            Try
-                Dim destName = Path.GetFileName(srcPath)
-                Dim destPath = Path.Combine(outputDir, destName)
+        Try
+            For Each srcPath As String In filesToCopy
+                Dim destName As String = Path.GetFileName(srcPath)
+                Dim destPath As String = Path.Combine(partialDir, destName)
 
-                Dim fileCounter = 1
+                Dim fileCounter As Integer = 1
                 While File.Exists(destPath)
-                    Dim baseName = Path.GetFileNameWithoutExtension(destName)
-                    Dim ext = Path.GetExtension(destName)
-                    destPath = Path.Combine(outputDir, baseName & $"_{fileCounter}{ext}")
+                    Dim baseName As String = Path.GetFileNameWithoutExtension(destName)
+                    Dim ext As String = Path.GetExtension(destName)
+                    destPath = Path.Combine(partialDir, baseName & $"_{fileCounter}" & ext)
                     fileCounter += 1
                 End While
 
                 File.Copy(srcPath, destPath, overwrite:=False)
-                copiedFiles.Add(destPath)
-            Catch
+            Next
+
+            Directory.Move(partialDir, finalOutputDir)
+
+            For Each publishedPath As String In Directory.GetFiles(finalOutputDir, "*", System.IO.SearchOption.TopDirectoryOnly)
+                copiedFiles.Add(publishedPath)
+            Next
+        Catch ex As System.Exception
+            Try
+                If Directory.Exists(partialDir) Then Directory.Delete(partialDir, recursive:=True)
+            Catch cleanupEx As System.Exception
+                ToolingFileLogger.LogWarn("Failed to clean partial Local Agent output directory.", ex:=cleanupEx)
             End Try
-        Next
+            ToolingFileLogger.LogWarn("Local Agent output publication failed; no partial final set was published.", ex:=ex)
+            Return New List(Of String)()
+        End Try
 
         If copiedFiles.Count > 0 Then
             Try
-                Process.Start("explorer.exe", outputDir)
-            Catch
+                Process.Start("explorer.exe", finalOutputDir)
+            Catch ex As System.Exception
+                ToolingFileLogger.LogWarn("Failed to open Local Agent output directory.", ex:=ex)
             End Try
         End If
 
@@ -611,6 +753,7 @@ Partial Public Class ThisAddIn
     Friend Sub ResetChatAgentDeliverableTrackingForNewTurn()
         Try
             _chatAgentSurfacedFiles = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            _chatAgentForcedDeliverables = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
             If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso Directory.Exists(_chatAgentTempDir) Then
                 For Each filePath In Directory.GetFiles(_chatAgentTempDir, "*.*", IO.SearchOption.AllDirectories)
@@ -632,6 +775,119 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+    ''' <summary>
+    ''' When a shared in-place file-editing tool (e.g. word_write/word_markup/word_format/
+    ''' word_comment_*) succeeds, its result JSON carries the edited file 'path'. That path
+    ''' pre-existed the turn and would be filtered out by the already-surfaced gate in
+    ''' CollectResultAttachments. Force its delivery so in-place edits reach Desktop\Inky.
+    ''' No-ops for tools/results without a usable in-temp-dir path.
+    ''' </summary>
+    Private Sub MarkInPlaceEditAsForcedDeliverable(toolName As String, resultJson As String)
+        Try
+            If String.IsNullOrWhiteSpace(toolName) OrElse String.IsNullOrWhiteSpace(resultJson) Then Return
+
+            ' Only shared Word document-file tools that mutate the file in place.
+            Select Case toolName
+                Case SharedLibrary.Agents.WordTools.ToolWrite,
+                     SharedLibrary.Agents.WordTools.ToolMarkup,
+                     SharedLibrary.Agents.WordTools.ToolFormat,
+                     SharedLibrary.Agents.WordTools.ToolCommentAdd,
+                     SharedLibrary.Agents.WordTools.ToolCommentRemove
+                    ' proceed
+                Case Else
+                    Return
+            End Select
+
+            Dim obj As JObject
+            Try
+                obj = JObject.Parse(resultJson)
+            Catch
+                Return
+            End Try
+
+            Dim editedPath As String = If(obj.Value(Of String)("path"), "").Trim()
+            If String.IsNullOrWhiteSpace(editedPath) OrElse Not File.Exists(editedPath) Then Return
+
+            Dim full As String = Path.GetFullPath(editedPath)
+
+            ' Security: only files inside the active session staging/temp dir are eligible.
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) Then Return
+            If Not full.StartsWith(Path.GetFullPath(stagingDir), StringComparison.OrdinalIgnoreCase) Then Return
+
+            _chatAgentForcedDeliverables.Add(full)
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("MarkInPlaceEditAsForcedDeliverable failed.", ex:=ex)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Bridges the host-agnostic deliverable registry (ToolingRunState) into the
+    ''' Outlook collection path. Every registered final-deliverable artifact that lives
+    ''' inside the active session staging directory is promoted into
+    ''' _chatAgentForcedDeliverables, the set CollectResultAttachments already consults
+    ''' to bypass the "already surfaced" filter. This guarantees a validated deliverable
+    ''' that satisfied the completion gate is actually attached, even if it pre-existed
+    ''' the turn (e.g. word_save_as overwriting a prior file). The directory scan itself
+    ''' is intentionally left unchanged to minimize regression risk.
+    ''' </summary>
+    Friend Sub PromoteRegisteredDeliverablesToForcedDelivery(runState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState)
+        Try
+            If runState Is Nothing OrElse runState.RegisteredDeliverableArtifacts Is Nothing Then Return
+            If _chatAgentForcedDeliverables Is Nothing Then
+                _chatAgentForcedDeliverables = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) Then Return
+            Dim stagingFull As String = Path.GetFullPath(stagingDir)
+            Dim promotedCount As Integer = 0
+
+            For Each artifact In runState.RegisteredDeliverableArtifacts
+                If artifact Is Nothing OrElse Not artifact.IsFinalDeliverable Then Continue For
+                If String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
+                If Not File.Exists(artifact.SessionPath) Then Continue For
+
+                Dim full As String = Path.GetFullPath(artifact.SessionPath)
+                ' Security: only files inside the active session staging dir are eligible.
+                If Not full.StartsWith(stagingFull, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                If _chatAgentForcedDeliverables.Add(full) Then
+                    promotedCount += 1
+                    ToolingFileLogger.LogStep(
+                        $"Deliverable registry: promoted artifact to forced delivery. tool={If(artifact.SourceTool, "")}; file={Path.GetFileName(full)}")
+                End If
+            Next
+
+            ' Legacy compatibility remains deliberately separate from Registry Finality.
+            ' It may, however, force-deliver an existing file produced by an explicitly
+            ' deliverable-capable tool when no expected-artifact contract exists.
+            Dim legacyPaths As System.Collections.Generic.List(Of String) =
+                SharedLibrary.Agents.ArtifactDelivery.ResolveLegacyCompatibilityPaths(runState)
+            For Each legacyPath As String In legacyPaths
+                If String.IsNullOrWhiteSpace(legacyPath) OrElse Not File.Exists(legacyPath) Then Continue For
+                Dim full As String = Path.GetFullPath(legacyPath)
+                If Not full.StartsWith(stagingFull, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If _chatAgentForcedDeliverables.Add(full) Then
+                    promotedCount += 1
+                    ToolingFileLogger.LogStep(
+                        $"Legacy compatibility: promoted bounded output to forced delivery. file={Path.GetFileName(full)}")
+                End If
+            Next
+
+            ToolingFileLogger.LogStep(
+                $"Deliverable registry summary. registered={runState.RegisteredDeliverableArtifacts.Count}; promotedThisCall={promotedCount}; validatedFinal={runState.HasValidatedFinalDeliverable}; validatedForCompletion={runState.HasValidatedDeliverableForCompletion}")
+        Catch ex As Exception
+            ' Never throw from delivery promotion. Worst case the scan behaves exactly as before.
+            ToolingFileLogger.LogWarn("PromoteRegisteredDeliverablesToForcedDelivery failed.", ex:=ex)
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Deletes the chat agent temp directory (recursively, including subdirectories)
     ''' and resets the file tracking list. Safe to call multiple times.
@@ -645,6 +901,106 @@ Partial Public Class ThisAddIn
         Catch
         End Try
         _chatAgentTempDir = Nothing
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(Nothing)
+    End Sub
+
+    ''' <summary>
+    ''' Registers any files currently present in the active session staging directory
+    ''' as session attachments so tool consumers can resolve them by name. Runs on every
+    ''' FindAttachment lookup; registration is deduped by temp-file path. Registers into
+    ''' _apCurrentAttachments only (in Local Agent this is the same list as _chatAgentFiles;
+    ''' in AutoPilot it is the mail-attachment list), so no cross-session state is polluted.
+    ''' </summary>
+    Private Sub RefreshSessionStagingAttachments()
+        Try
+            If _apCurrentAttachments Is Nothing Then Return
+
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) OrElse Not Directory.Exists(stagingDir) Then Return
+
+            For Each filePath In Directory.GetFiles(stagingDir, "*.*", IO.SearchOption.AllDirectories)
+                Dim full = Path.GetFullPath(filePath)
+
+                Dim already = _apCurrentAttachments.Any(
+                    Function(a) a IsNot Nothing AndAlso
+                                Not String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso
+                                a.TempFilePath.Equals(full, StringComparison.OrdinalIgnoreCase))
+                If already Then Continue For
+
+                Dim fi As New FileInfo(full)
+                _apCurrentAttachments.Add(New AutoPilotAttachmentInfo() With {
+                    .OriginalFileName = Path.GetFileName(full),
+                    .Extension = Path.GetExtension(full).ToLowerInvariant(),
+                    .TempFilePath = full,
+                    .SizeBytes = fi.Length,
+                    .IsOverSizeLimit = False,
+                    .StatusMessage = "Session staging file",
+                    .IsToolOutput = True,
+                    .OutputFiles = New List(Of String)()
+                })
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("RefreshSessionStagingAttachments failed.", ex:=ex)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Registers files present in the session staging directory into _chatAgentFiles so
+    ''' they appear as browser chips. Deduped by temp-file path. Unlike
+    ''' RefreshSessionStagingAttachments (which targets the active tool-run attachment list),
+    ''' this keeps the browser chip list current even outside an active tool run.
+    ''' </summary>
+    Private Sub RegisterStagingFilesAsSessionChips()
+        Try
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) OrElse Not Directory.Exists(stagingDir) Then Return
+
+            For Each filePath In Directory.GetFiles(stagingDir, "*.*", IO.SearchOption.AllDirectories)
+                Dim full = Path.GetFullPath(filePath)
+                If _chatAgentFiles.Any(
+                    Function(a) a IsNot Nothing AndAlso
+                                Not String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso
+                                a.TempFilePath.Equals(full, StringComparison.OrdinalIgnoreCase)) Then Continue For
+
+                RegisterSessionFile(full, "Session staging file", isToolOutput:=True)
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("RegisterStagingFilesAsSessionChips failed.", ex:=ex)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Best-effort reclamation of orphaned chat-agent staging directories from prior
+    ''' sessions whose cleanup previously failed. Deletes only directories matching this
+    ''' host's temp prefix, excluding the current active dirs, and only when older than
+    ''' 24 hours (age gate protects concurrently running sessions).
+    ''' </summary>
+    Private Sub CleanupStaleChatAgentTempDirs()
+        Try
+            Dim tempRoot = Path.GetTempPath()
+            Dim cutoff = DateTime.UtcNow.AddHours(-24)
+
+            For Each dirPath In Directory.GetDirectories(tempRoot, CA_TempPrefix & "*")
+                Try
+                    Dim full = Path.GetFullPath(dirPath)
+
+                    If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso
+                       full.Equals(Path.GetFullPath(_chatAgentTempDir), StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If Not String.IsNullOrWhiteSpace(_apCurrentTempDir) AndAlso
+                       full.Equals(Path.GetFullPath(_apCurrentTempDir), StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    If Directory.GetLastWriteTimeUtc(full) > cutoff Then Continue For
+
+                    Directory.Delete(full, recursive:=True)
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
     End Sub
 
     ''' <summary>
@@ -699,6 +1055,437 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private Function IsValidWorkspacePresetSlot(slot As Integer) As Boolean
+        Return slot >= 1 AndAlso slot <= CA_WorkspacePresetCount
+    End Function
+
+    Private Function GetWorkspacePresetPathSettingName(slot As Integer) As String
+        Return CA_WorkspacePresetSettingPrefix & slot.ToString(CultureInfo.InvariantCulture) & "Path"
+    End Function
+
+    Private Function GetWorkspacePresetLabelSettingName(slot As Integer) As String
+        Return CA_WorkspacePresetSettingPrefix & slot.ToString(CultureInfo.InvariantCulture) & "Label"
+    End Function
+
+    Private Function TrySetAppSettingValue(settingName As String, value As Object) As Boolean
+        Try
+            Dim p = GetType(My.MySettings).GetProperty(
+                settingName,
+                System.Reflection.BindingFlags.Public Or System.Reflection.BindingFlags.Instance)
+
+            If p Is Nothing OrElse Not p.CanWrite Then Return False
+
+            p.SetValue(My.Settings, value, Nothing)
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function GetWorkspacePresetEntries() As List(Of ChatAgentWorkspacePresetInfo)
+        Dim result As New List(Of ChatAgentWorkspacePresetInfo)()
+
+        For slot As Integer = 1 To CA_WorkspacePresetCount
+            Dim rootPath As String = TryGetAppSetting(Of String)(GetWorkspacePresetPathSettingName(slot), "")
+            Dim label As String = TryGetAppSetting(Of String)(GetWorkspacePresetLabelSettingName(slot), "")
+
+            If Not String.IsNullOrWhiteSpace(rootPath) Then
+                Try
+                    rootPath = Path.GetFullPath(rootPath.Trim())
+                Catch
+                    rootPath = rootPath.Trim()
+                End Try
+            Else
+                rootPath = ""
+            End If
+
+            result.Add(New ChatAgentWorkspacePresetInfo() With {
+                .Slot = slot,
+                .RootPath = rootPath,
+                .Label = If(label, "")
+            })
+        Next
+
+        Return result
+    End Function
+
+    Private Function CleanWorkspaceLabelToken(value As String) As String
+        Dim cleaned As String = If(value, "").Trim()
+
+        cleaned = cleaned.Replace("_", " ").Replace("-", " ")
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, "[^\p{L}\p{Nd} ]+", " ")
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, "\s+", " ").Trim()
+
+        If cleaned.Length > 24 Then
+            cleaned = cleaned.Substring(0, 24).Trim()
+        End If
+
+        Return cleaned
+    End Function
+
+    Private Function NormalizeWorkspacePresetLabel(label As String, fallbackLabel As String) As String
+        Dim cleaned As String = If(label, "").Trim()
+
+        cleaned = cleaned.Replace("`", " ").Replace("""", " ").Replace("'", " ")
+        cleaned = CleanWorkspaceLabelToken(cleaned)
+
+        If String.IsNullOrWhiteSpace(cleaned) Then
+            cleaned = CleanWorkspaceLabelToken(fallbackLabel)
+        End If
+
+        If String.IsNullOrWhiteSpace(cleaned) Then
+            cleaned = "Workspace"
+        End If
+
+        Dim words = cleaned.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries)
+        If words.Length > 2 Then
+            cleaned = words(0) & " " & words(1)
+        End If
+
+        If cleaned.Length > 24 Then
+            cleaned = cleaned.Substring(0, 24).Trim()
+        End If
+
+        Return cleaned
+    End Function
+
+    Private Function SplitWorkspacePathSegments(rootPath As String) As List(Of String)
+        Dim result As New List(Of String)()
+
+        If String.IsNullOrWhiteSpace(rootPath) Then Return result
+
+        Dim normalized As String = rootPath
+
+        Try
+            normalized = Path.GetFullPath(rootPath)
+        Catch
+        End Try
+
+        normalized = normalized.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+        For Each rawSegment In normalized.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar}, StringSplitOptions.RemoveEmptyEntries)
+            Dim segment = CleanWorkspaceLabelToken(rawSegment)
+            If String.IsNullOrWhiteSpace(segment) Then Continue For
+            If segment.EndsWith(":", StringComparison.Ordinal) Then Continue For
+            result.Add(segment)
+        Next
+
+        Return result
+    End Function
+
+    Private Function BuildWorkspacePresetFallbackLabels(entries As List(Of ChatAgentWorkspacePresetInfo)) As Dictionary(Of Integer, String)
+        Dim labels As New Dictionary(Of Integer, String)()
+        Dim tokenMap As New Dictionary(Of Integer, List(Of String))()
+
+        If entries Is Nothing Then Return labels
+
+        For Each entry In entries
+            If entry Is Nothing OrElse String.IsNullOrWhiteSpace(entry.RootPath) Then Continue For
+
+            Dim tokens = SplitWorkspacePathSegments(entry.RootPath)
+            tokenMap(entry.Slot) = tokens
+
+            Dim leaf As String = If(tokens.Count > 0, tokens(tokens.Count - 1), "Workspace")
+            labels(entry.Slot) = NormalizeWorkspacePresetLabel(leaf, "Workspace " & entry.Slot.ToString(CultureInfo.InvariantCulture))
+        Next
+
+        Dim duplicateGroups =
+            labels.GroupBy(Function(kvp) kvp.Value, StringComparer.OrdinalIgnoreCase).
+                   Where(Function(g) g.Count() > 1).
+                   ToList()
+
+        For Each group In duplicateGroups
+            For Each item In group
+                Dim tokens As List(Of String) = Nothing
+                If Not tokenMap.TryGetValue(item.Key, tokens) Then Continue For
+
+                Dim leaf As String = If(tokens.Count > 0, tokens(tokens.Count - 1), "Workspace")
+                Dim parent As String = If(tokens.Count > 1, tokens(tokens.Count - 2), "")
+
+                Dim candidate As String
+                If Not String.IsNullOrWhiteSpace(parent) Then
+                    candidate = parent & " " & leaf
+                Else
+                    candidate = leaf & " " & item.Key.ToString(CultureInfo.InvariantCulture)
+                End If
+
+                labels(item.Key) = NormalizeWorkspacePresetLabel(candidate, leaf & " " & item.Key.ToString(CultureInfo.InvariantCulture))
+            Next
+        Next
+
+        duplicateGroups =
+            labels.GroupBy(Function(kvp) kvp.Value, StringComparer.OrdinalIgnoreCase).
+                   Where(Function(g) g.Count() > 1).
+                   ToList()
+
+        For Each group In duplicateGroups
+            For Each item In group
+                Dim tokens As List(Of String) = Nothing
+                If Not tokenMap.TryGetValue(item.Key, tokens) Then Continue For
+
+                Dim leaf As String = If(tokens.Count > 0, tokens(tokens.Count - 1), "Workspace")
+                labels(item.Key) = NormalizeWorkspacePresetLabel(
+                    leaf & " " & item.Key.ToString(CultureInfo.InvariantCulture),
+                    "Workspace " & item.Key.ToString(CultureInfo.InvariantCulture))
+            Next
+        Next
+
+        Return labels
+    End Function
+
+    Private Async Function RefreshWorkspacePresetLabelsAsync() As Task(Of Boolean)
+        Dim allEntries = GetWorkspacePresetEntries()
+        Dim populated =
+            allEntries.
+                Where(Function(entry) entry IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(entry.RootPath)).
+                ToList()
+
+        Dim fallbackLabels = BuildWorkspacePresetFallbackLabels(populated)
+        Dim resolvedLabels As New Dictionary(Of Integer, String)()
+
+        For Each kvp In fallbackLabels
+            resolvedLabels(kvp.Key) = kvp.Value
+        Next
+
+        If populated.Count > 0 Then
+            Try
+                Dim sysPrompt As String =
+                    "You create ultra-short UI labels for saved workspace folder paths. Return strict JSON only."
+
+                Dim userPrompt As New StringBuilder()
+                userPrompt.AppendLine("Create unique memory-button labels for these workspace paths.")
+                userPrompt.AppendLine("Return JSON only in this exact shape:")
+                userPrompt.AppendLine("[{""slot"":1,""label"":""Client Docs""}]")
+                userPrompt.AppendLine("Rules:")
+                userPrompt.AppendLine("- One object per slot shown below.")
+                userPrompt.AppendLine("- label must be 1 or 2 words only.")
+                userPrompt.AppendLine("- Keep labels distinct across the full list.")
+                userPrompt.AppendLine("- Prefer the most distinguishing folder name or two folder names from the path.")
+                userPrompt.AppendLine("- No punctuation except spaces.")
+                userPrompt.AppendLine("- No explanations, markdown, or prose.")
+                userPrompt.AppendLine("Paths:")
+
+                For Each entry In populated
+                    userPrompt.AppendLine("- slot " &
+                                          entry.Slot.ToString(CultureInfo.InvariantCulture) &
+                                          ": " & entry.RootPath)
+                Next
+
+                Dim llmOut As String =
+                    Await RunLlmAsync(
+                        sysPrompt,
+                        userPrompt.ToString(),
+                        False,
+                        False,
+                        "",
+                        CancellationToken.None).ConfigureAwait(False)
+
+                llmOut = If(llmOut, "").Trim()
+
+                If llmOut.StartsWith("```", StringComparison.Ordinal) Then
+                    Dim firstLf = llmOut.IndexOf(vbLf, StringComparison.Ordinal)
+                    If firstLf >= 0 Then
+                        llmOut = llmOut.Substring(firstLf + 1).Trim()
+                    End If
+
+                    Dim fenceEnd = llmOut.LastIndexOf("```", StringComparison.Ordinal)
+                    If fenceEnd >= 0 Then
+                        llmOut = llmOut.Substring(0, fenceEnd).Trim()
+                    End If
+                End If
+
+                Dim arr = JArray.Parse(llmOut)
+
+                For Each item As JToken In arr
+                    Dim slot As Integer = 0
+                    If Not Integer.TryParse(item("slot")?.ToString(), slot) Then Continue For
+                    If Not IsValidWorkspacePresetSlot(slot) Then Continue For
+
+                    Dim fallbackLabel As String =
+                        If(fallbackLabels.ContainsKey(slot),
+                           fallbackLabels(slot),
+                           "Workspace " & slot.ToString(CultureInfo.InvariantCulture))
+
+                    Dim label As String = NormalizeWorkspacePresetLabel(item("label")?.ToString(), fallbackLabel)
+                    If Not String.IsNullOrWhiteSpace(label) Then
+                        resolvedLabels(slot) = label
+                    End If
+                Next
+            Catch
+            End Try
+        End If
+
+        For Each entry In allEntries
+            Dim label As String = ""
+
+            If Not String.IsNullOrWhiteSpace(entry.RootPath) Then
+                Dim fallbackLabel As String =
+                    If(fallbackLabels.ContainsKey(entry.Slot),
+                       fallbackLabels(entry.Slot),
+                       "Workspace " & entry.Slot.ToString(CultureInfo.InvariantCulture))
+
+                label =
+                    If(resolvedLabels.ContainsKey(entry.Slot),
+                       NormalizeWorkspacePresetLabel(resolvedLabels(entry.Slot), fallbackLabel),
+                       fallbackLabel)
+            End If
+
+            If Not TrySetAppSettingValue(GetWorkspacePresetLabelSettingName(entry.Slot), label) Then
+                Return False
+            End If
+        Next
+
+        Try
+            My.Settings.Save()
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Friend Async Function ChatAgentWorkspaceSaveCurrentPresetAsync(slot As Integer) As Task(Of String)
+        If Not IsValidWorkspacePresetSlot(slot) Then
+            Return "Invalid workspace memory slot."
+        End If
+
+        LoadChatAgentWorkspaceIfNeeded()
+
+        Dim rootPath As String = If(_chatAgentWorkspace?.RootPath, "")
+        If String.IsNullOrWhiteSpace(rootPath) OrElse Not Directory.Exists(rootPath) Then
+            Return "No workspace is currently connected."
+        End If
+
+        rootPath = Path.GetFullPath(rootPath)
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetPathSettingName(slot), rootPath) Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetLabelSettingName(slot), "") Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        Dim saved As Boolean = Await RefreshWorkspacePresetLabelsAsync().ConfigureAwait(False)
+        If Not saved Then
+            Return "The workspace memory could not be saved."
+        End If
+
+        Return Nothing
+    End Function
+
+    Friend Async Function ChatAgentWorkspaceClearPresetAsync(slot As Integer) As Task(Of String)
+        If Not IsValidWorkspacePresetSlot(slot) Then
+            Return "Invalid workspace memory slot."
+        End If
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetPathSettingName(slot), "") Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetLabelSettingName(slot), "") Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        Dim saved As Boolean = Await RefreshWorkspacePresetLabelsAsync().ConfigureAwait(False)
+        If Not saved Then
+            Return "The workspace memory could not be cleared."
+        End If
+
+        Return Nothing
+    End Function
+
+    Friend Function ChatAgentWorkspaceApplyPreset(slot As Integer) As String
+        If Not IsValidWorkspacePresetSlot(slot) Then
+            Return "Invalid workspace memory slot."
+        End If
+
+        Dim presetPath As String = TryGetAppSetting(Of String)(GetWorkspacePresetPathSettingName(slot), "")
+        If String.IsNullOrWhiteSpace(presetPath) Then
+            Return "That workspace memory is empty."
+        End If
+
+        Try
+            presetPath = Path.GetFullPath(presetPath.Trim())
+        Catch
+            Return "The saved workspace path is invalid."
+        End Try
+
+        If Not Directory.Exists(presetPath) Then
+            Return "The saved workspace path no longer exists."
+        End If
+
+        LoadChatAgentWorkspaceIfNeeded()
+
+        Dim persistUntilRevoked As Boolean = If(_chatAgentWorkspace?.PersistUntilRevoked, False)
+
+        If Not ChatAgentWorkspaceSetRoot(presetPath, persistUntilRevoked) Then
+            Return "The saved workspace path could not be activated."
+        End If
+
+        Return Nothing
+    End Function
+
+    Friend Function GetAgentWorkspacePresetsForBrowser() As List(Of Object)
+        Dim result As New List(Of Object)()
+        Dim entries = GetWorkspacePresetEntries()
+        Dim populated =
+            entries.
+                Where(Function(entry) entry IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(entry.RootPath)).
+                ToList()
+
+        Dim fallbackLabels = BuildWorkspacePresetFallbackLabels(populated)
+
+        Dim currentRoot As String = ""
+        If IsChatAgentWorkspaceConnected() Then
+            Try
+                currentRoot =
+                    Path.GetFullPath(_chatAgentWorkspace.RootPath).
+                        TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            Catch
+                currentRoot = ""
+            End Try
+        End If
+
+        For Each entry In entries
+            Dim assigned As Boolean = Not String.IsNullOrWhiteSpace(entry.RootPath)
+            Dim exists As Boolean = assigned AndAlso Directory.Exists(entry.RootPath)
+
+            Dim fallbackLabel As String =
+                If(fallbackLabels.ContainsKey(entry.Slot),
+                   fallbackLabels(entry.Slot),
+                   "Workspace " & entry.Slot.ToString(CultureInfo.InvariantCulture))
+
+            Dim displayLabel As String =
+                If(assigned,
+                   NormalizeWorkspacePresetLabel(entry.Label, fallbackLabel),
+                   "")
+
+            Dim isActive As Boolean = False
+            If assigned AndAlso exists AndAlso Not String.IsNullOrWhiteSpace(currentRoot) Then
+                Try
+                    Dim presetRoot =
+                        Path.GetFullPath(entry.RootPath).
+                            TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+                    isActive = presetRoot.Equals(currentRoot, StringComparison.OrdinalIgnoreCase)
+                Catch
+                    isActive = False
+                End Try
+            End If
+
+            result.Add(New With {
+                .slot = entry.Slot,
+                .path = If(assigned, entry.RootPath, ""),
+                .label = displayLabel,
+                .assigned = assigned,
+                .exists = exists,
+                .active = isActive
+            })
+        Next
+
+        Return result
+    End Function
+
     Friend Function GetAgentWorkspaceForBrowser() As Object
         LoadChatAgentWorkspaceIfNeeded()
 
@@ -713,9 +1500,10 @@ Partial Public Class ThisAddIn
             .allowRead = If(_chatAgentWorkspace?.AllowRead, True),
             .allowWrite = If(_chatAgentWorkspace?.AllowWrite, True),
             .allowMoveCopyRename = If(_chatAgentWorkspace?.AllowMoveCopyRename, True),
-            .allowDelete = If(_chatAgentWorkspace?.AllowDelete, False),
+            .allowDelete = If(_chatAgentWorkspace?.AllowDelete, SharedMethods.WorkspaceDeleteByDefaultOn),
             .saveDroppedFilesToWorkspace = If(_chatAgentWorkspace?.SaveDroppedFilesToWorkspace, False),
-            .includeHiddenSystem = If(_chatAgentWorkspace?.IncludeHiddenSystem, False)
+            .includeHiddenSystem = If(_chatAgentWorkspace?.IncludeHiddenSystem, False),
+            .presets = GetAgentWorkspacePresetsForBrowser()
         }
     End Function
 
@@ -888,9 +1676,21 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function EnsureChatAgentTempDir() As String
+        If _apActive AndAlso
+           Not String.IsNullOrWhiteSpace(_apCurrentTempDir) AndAlso
+           Directory.Exists(_apCurrentTempDir) Then
+
+            Return _apCurrentTempDir
+        End If
+
         If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
+            CleanupStaleChatAgentTempDirs()
             _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_chatAgentTempDir)
+        End If
+
+        If Not _apActive Then
+            SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(_chatAgentTempDir)
         End If
 
         Return _chatAgentTempDir
@@ -898,7 +1698,8 @@ Partial Public Class ThisAddIn
 
     Private Function RegisterSessionFile(filePath As String,
                                          statusMessage As String,
-                                         Optional sourcePath As String = Nothing) As AutoPilotAttachmentInfo
+                                         Optional sourcePath As String = Nothing,
+                                         Optional isToolOutput As Boolean = False) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then Return Nothing
 
         Dim fileName = Path.GetFileName(filePath)
@@ -929,7 +1730,7 @@ Partial Public Class ThisAddIn
             .CreatedTime = fi.CreationTimeUtc,
             .LastModifiedTime = fi.LastWriteTimeUtc,
             .OutputFiles = New List(Of String)(),
-            .IsToolOutput = False
+            .IsToolOutput = isToolOutput
         }
 
         _chatAgentFiles.Add(att)
@@ -1040,10 +1841,8 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    Private Function GetChatAgentWorkspaceTools() As List(Of ModelConfig)
+    Private Function BuildAgentWorkspaceToolsCore() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
-
-        If Not IsChatAgentWorkspaceConnected() Then Return tools
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
@@ -1063,24 +1862,6 @@ Partial Public Class ThisAddIn
                 "},""required"":[""path""]}}"
         })
 
-
-        tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
-            .ModelDescription = "Agent Workspace: Read File",
-            .ToolPriority = 122,
-            .ToolErrorHandling = "skip",
-            .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceRead & ": Read or extract text from one workspace file. " &
-                "For one local workspace PDF or Office document, prefer this tool over calling extract_pdf_text directly on a workspace path, because it stages the file and uses the existing attachment extraction stack. " &
-                "For many files, use agent_workspace_stage first and then continue processing the full staged set.",
-            .ToolDefinition =
-                "{""name"":""" & CA_Tool_WorkspaceRead & """," &
-                """description"":""Reads or extracts text from one workspace file. Prefer this for a single workspace PDF or Office file instead of calling extract_pdf_text directly on a workspace path, because the file is staged and processed through the existing attachment extraction stack.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """path"":{""type"":""string"",""description"":""Relative workspace file path.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, capped.""}" &
-                "},""required"":[""path""]}}"
-        })
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceWrite,
@@ -1167,8 +1948,28 @@ Partial Public Class ThisAddIn
 
         AddWorkspaceMoreTools(tools)
 
+        For Each tool As ModelConfig In tools
+            If tool Is Nothing Then Continue For
+            Select Case tool.ToolName
+                Case CA_Tool_WorkspaceWrite, CA_Tool_WorkspaceSaveSessionFile
+                    SharedLibrary.Agents.ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
+            End Select
+        Next
+
         Return tools
 
+    End Function
+
+    Private Function GetChatAgentWorkspaceTools() As List(Of ModelConfig)
+        If Not IsChatAgentWorkspaceConnected() Then
+            Return New List(Of ModelConfig)()
+        End If
+
+        Return BuildAgentWorkspaceToolsCore()
+    End Function
+
+    Private Function GetAutoPilotAgentWorkspaceTools() As List(Of ModelConfig)
+        Return BuildAgentWorkspaceToolsCore()
     End Function
 
     Friend Function IsChatAgentWorkspaceTool(toolName As String) As Boolean
@@ -1219,14 +2020,52 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        Try
-            If Not _chatAgentActive OrElse _apActive Then
+        Dim artifactMetadata As SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+        If toolCall.ToolName.Equals(CA_Tool_WorkspaceWrite, StringComparison.OrdinalIgnoreCase) OrElse
+           toolCall.ToolName.Equals(CA_Tool_WorkspaceSaveSessionFile, StringComparison.OrdinalIgnoreCase) Then
+
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+            If Not SharedLibrary.Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                toolCall.Arguments,
+                SharedLibrary.Agents.ArtifactStorageKind.ConnectedWorkspace,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
                 response.Success = False
-                response.ErrorMessage = "Workspace tools are available only in Local Chat Agent mode."
+                response.ResultKind = "error"
+                response.ErrorCode = artifactFailureCode
+                response.ErrorMessage = artifactFailureMessage
+                Return response
+            End If
+        End If
+
+        Try
+            If Not ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) Then
+                response.Success = False
+                response.ErrorMessage = "Workspace tools are available only in Local Chat Agent mode, during AutoPilot processing, or during scheduled-task execution."
+            ElseIf Not IsChatAgentWorkspaceConnected() AndAlso
+                   toolCall.ToolName.Equals(CA_Tool_WorkspaceSaveSessionFile, StringComparison.OrdinalIgnoreCase) Then
+                ' No workspace is connected, so there is nothing to save into. This is not a hard
+                ' failure: session outputs are already delivered to the Desktop output folder and
+                ' remain available as session files. Return a soft, self-correcting result so the
+                ' tooling loop can finalize cleanly instead of aborting (this tool uses abort).
+                response.Success = True
+                response.Response = ToWorkspaceJson(New With {
+                    .saved = False,
+                    .reason = "no_workspace_connected",
+                    .message = "No workspace is connected, so no file was saved to a workspace. The produced file is already delivered to the Desktop output folder and remains available as a session file; no further action is needed."
+                })
             ElseIf Not IsChatAgentWorkspaceConnected() Then
                 response.Success = False
-                response.ErrorMessage = "No agent workspace is connected."
+                response.ErrorMessage = "No active workspace is available."
             Else
+                ' A connected workspace operation is successful unless the selected
+                ' executor reports an error/throws below. ToolResponse defaults Success=False,
+                ' so set the positive state before dispatch.
+                response.Success = True
+
                 Select Case toolCall.ToolName
                     Case CA_Tool_WorkspaceList
                         response.Response = ExecuteWorkspaceList(toolCall)
@@ -1283,6 +2122,21 @@ Partial Public Class ThisAddIn
                         response.Success = False
                         response.ErrorMessage = "Unknown workspace tool."
                 End Select
+
+                If response.Success AndAlso artifactMetadata IsNot Nothing Then
+                    Dim producedPath As String = ""
+                    If toolCall.ToolName.Equals(CA_Tool_WorkspaceWrite, StringComparison.OrdinalIgnoreCase) Then
+                        producedPath = ResolveWorkspacePath(GetArgString(toolCall.Arguments, "path"))
+                    ElseIf toolCall.ToolName.Equals(CA_Tool_WorkspaceSaveSessionFile, StringComparison.OrdinalIgnoreCase) Then
+                        producedPath = ResolveWorkspacePath(GetArgString(toolCall.Arguments, "target_path"))
+                    End If
+
+                    response.Response = SharedLibrary.Agents.ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(
+                        response.Response,
+                        artifactMetadata,
+                        producedPath)
+                    response.ResultKind = "json_object"
+                End If
 
                 If response.Success AndAlso
                    response.Response IsNot Nothing AndAlso
@@ -1896,7 +2750,8 @@ Partial Public Class ThisAddIn
     toolPriority As Integer,
     toolErrorHandling As String,
     toolInstructionsPrompt As String,
-    toolDefinition As Object) As ModelConfig
+    toolDefinition As Object,
+    Optional capabilityTags As String = Nothing) As ModelConfig
 
         Return New ModelConfig() With {
             .ToolOnly = True,
@@ -1906,7 +2761,8 @@ Partial Public Class ThisAddIn
             .ToolPriority = toolPriority,
             .ToolErrorHandling = toolErrorHandling,
             .ToolInstructionsPrompt = toolInstructionsPrompt,
-            .ToolDefinition = JsonConvert.SerializeObject(toolDefinition, Formatting.None)
+            .ToolDefinition = JsonConvert.SerializeObject(toolDefinition, Formatting.None),
+            .CapabilityTags = capabilityTags
         }
     End Function
 
@@ -2128,7 +2984,8 @@ Partial Public Class ThisAddIn
                     },
                     .required = New String() {"output_format"}
                 }
-            }))
+            },
+            "explicit_operation"))
     End Sub
 
 

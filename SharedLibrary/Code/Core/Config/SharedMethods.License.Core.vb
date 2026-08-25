@@ -4,19 +4,18 @@
 ' =============================================================================
 ' File: SharedMethods.License.Core.vb
 ' Purpose: Core license validation and state management for Private and Pro licenses,
-'          including API-based verification/activation and legacy-license migration enforcement.
+'          including API-based verification/activation with offline grace handling.
 '
 ' Architecture:
 '  - Flow Priority in `LicenseOK`:
 '     1. License disabled via config (`LicenseNoCheck`) → allow use (state set to `ProActive`).
 '     2. Config-based Pro license (`LicenseKey` in config) → process/activate via API or UI.
 '     3. Stored Pro license → periodic API verification with offline grace handling.
-'     4. Legacy Pro license → valid until `LegacyRegimeEndDate`, then enforce migration with grace.
+'     4. Registry-backup restore of a previously stored Pro license.
 '     5. Stored Private license → processed with periodic compliance confirmation (handled in other partial file).
-'     6. No license → clear legacy Private license (if present), show license selection UI.
+'     6. No license → show license selection UI.
 '  - Stored state:
-'     - New regime: persisted in `My.Settings.License_*`.
-'     - Legacy regime: persisted in `My.Settings.LicenseStatus`, `My.Settings.LicensedTill`, `My.Settings.LicenseUsers`.
+'     - Persisted in `My.Settings.License_*`.
 '  - Network failure handling:
 '     - If previously API-confirmed: allow continuation for `OfflineGracePeriodDays` with warnings.
 '     - If never API-confirmed: fail closed and require connectivity/license update.
@@ -72,6 +71,12 @@ Namespace SharedLibrary
         Private Const ApiTimeoutMs As Integer = 10000
         Private Const ApiRetryCount As Integer = 3
 
+        ' Hard upper bound on the total wall-clock time the license API may block the
+        ' calling (host UI) thread across all retry attempts and backoff waits.
+        ' When exceeded, the call returns an empty response so callers fall back to the
+        ' existing offline-grace path instead of freezing the host.
+        Private Const ApiTotalBudgetMs As Integer = 6000
+
         ' Private License
         Private Const PrivateReconfirmIntervalDays As Integer = 30
         Private Const PrivateReconfirmDismissMax As Integer = 3
@@ -79,7 +84,7 @@ Namespace SharedLibrary
 
         ' Professional License
         Private Const ProLicenseCheckIntervalDays As Integer = 5
-        Private Const OfflineGracePeriodDays As Integer = 3
+        Private Const OfflineGracePeriodDays As Integer = 5
         Private Const RevocationGracePeriodDays As Integer = 1
 
         ' Testing Pro License
@@ -88,11 +93,6 @@ Namespace SharedLibrary
         Private Const TestingProComplianceMessage As String = "This Pro Test Tec license is for non-productive testing purposes only. " &
                                     "You confirm that you are not using this software for any productive purposes. " &
                                     "For productive use, please obtain another suitable Professional License."
-
-        ' Legacy Transition
-        Private Shared ReadOnly LegacyRegimeEndDate As Date = #1/31/2026#
-        Private Const LegacyMigrationGracePeriodDays As Integer = 12
-        Private Const LegacyMigrationPromptIntervalStartups As Integer = 15
 
         ' Warning/Prompt Intervals
         Private Const OfflineGraceWarningIntervalStartups As Integer = 5
@@ -162,16 +162,8 @@ Namespace SharedLibrary
             ProPendingActivation = 6
             ''' <summary>Pro license in offline grace period.</summary>
             ProOfflineGrace = 7
-            ''' <summary>Legacy Pro license still valid (until `LegacyRegimeEndDate`).</summary>
-            LegacyProActive = 8
-            ''' <summary>Legacy Pro license - migration required.</summary>
-            LegacyProMigrationRequired = 9
             ''' <summary>Testing Pro license active.</summary>
             TestingProActive = 10
-            ''' <summary>Backward compatibility: old-regime license still valid.</summary>
-            LegacyActive = 11
-            ''' <summary>Backward compatibility: old-regime license expired.</summary>
-            LegacyExpired = 12
         End Enum
 
 #End Region
@@ -321,29 +313,19 @@ Namespace SharedLibrary
                     Return ProcessStoredProLicense(context)
                 End If
 
-
                 ' ═══════════════════════════════════════════════════════════════
-                ' STEP 3: Legacy Pro License (valid until LegacyRegimeEndDate)
-                ' Legacy Private licenses are ignored/cleared, not processed here
-                ' ═══════════════════════════════════════════════════════════════
-                If HasLegacyProLicense() Then
-                    LogLicenseEvent("Flow", "Legacy Pro License path")
-                    Return ProcessLegacyProLicense(context)
-                End If
-
-                ' ═══════════════════════════════════════════════════════════════
-                ' STEP 4: Stored Private License (with compliance confirmation)
+                ' STEP 3: Stored Private License (with compliance confirmation)
                 ' ═══════════════════════════════════════════════════════════════
                 If HasStoredPrivateLicense() Then
                     LogLicenseEvent("Flow", "Private License path")
                     Return ProcessStoredPrivateLicense(context)
                 End If
 
+                ' ═══════════════════════════════════════════════════════════════                
+                ' STEP 4: No valid license found
+                ' Purge any stale old-regime license data and show welcome dialog
                 ' ═══════════════════════════════════════════════════════════════
-                ' STEP 5: No valid license found
-                ' Clear any legacy private license and show welcome dialog
-                ' ═══════════════════════════════════════════════════════════════
-                ClearLegacyPrivateLicenseIfExists()
+                ClearLegacyLicense()
 
                 LogLicenseEvent("Flow", "No license - showing welcome dialog")
                 Return ShowLicenseTypeSelectionDialog(context)
@@ -387,25 +369,6 @@ Namespace SharedLibrary
 
                 ' Load LicenseNoCheck from config
                 LicenseCheckDisabled = ParseBoolean(configDict, "LicenseNoCheck", False)
-
-                ' Check if LicensedTill explicitly disables checking
-                If configDict.ContainsKey("LicensedTill") Then
-                    Dim configValue = configDict("LicensedTill").Trim()
-
-                    If configValue.Equals("False", StringComparison.OrdinalIgnoreCase) OrElse
-                       configValue.Equals("No", StringComparison.OrdinalIgnoreCase) Then
-                        LicenseCheckDisabled = False
-                        Return
-                    End If
-
-                    Dim configDate As Date
-                    If Date.TryParse(configValue, configDate) Then
-                        If configDate > Date.Now.AddYears(LicenseCheckDisabledYears) Then
-                            LicenseCheckDisabled = False
-                            Return
-                        End If
-                    End If
-                End If
 
             Catch ex As Exception
                 LogLicenseEvent("Settings Load Error", ex.Message)
@@ -455,11 +418,6 @@ Namespace SharedLibrary
             Else
                 DisablePrivateText = $"This version is too old for a new private license. Update at {AN4}{UpdateSubUrl} or get a Pro License."
             End If
-            If HasLegacyProLicense() Then
-                privateAvailable = False
-                DisablePrivateText = "For personal, non-commercial use only (for private use, uninstall the add-in first)"
-            End If
-
             Using form As New Form()
                 ' DPI awareness
                 form.AutoScaleMode = AutoScaleMode.Dpi
@@ -690,7 +648,12 @@ Namespace SharedLibrary
                         form.MaximumSize = form.Size
                     End Sub
 
-                form.ShowDialog()
+                Dim __safeDialogOwner651 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner651 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner651)
+                Else
+                    form.ShowDialog()
+                End If
                 Return dialogResult
             End Using
         End Function
@@ -1053,35 +1016,18 @@ Namespace SharedLibrary
                                         Return True
                                     End If
 
-                                    ' Need to verify - check API
-                                    Dim statusResponse = CallLicenseApi("status", storedProductId, storedLicenseKey, storedUserId)
+                                    ' Non-blocking startup: this is a matching, previously confirmed
+                                    ' Pro license within its validity/offline-grace window. Keep using
+                                    ' the cached state and refresh via the license API in the background.
+                                    ' Any revocation/invalid result is enforced on the next startup.
+                                    ' The background task performs NO UI, so concurrent UI interaction is safe.
+                                    _currentLicenseState = If(IsTestingProLicenseByProductId(storedProductId), LicenseState.TestingProActive, LicenseState.ProActive)
+                                    LicenseStatus = My.Settings.License_ProductName
+                                    LicenseFromConfig = True
+                                    ScheduleBackgroundProLicenseRecheck(storedProductId, storedLicenseKey, storedUserId)
+                                    LogLicenseEvent("Config Pro", "API check deferred to background; using cached state")
+                                    Return True
 
-                                    If statusResponse.Success AndAlso statusResponse.Activated Then
-                                        RecordSuccessfulApiCheck()
-                                        _currentLicenseState = If(IsTestingProLicenseByProductId(storedProductId), LicenseState.TestingProActive, LicenseState.ProActive)
-                                        LicenseStatus = My.Settings.License_ProductName
-                                        LicenseFromConfig = True
-                                        Return True
-                                    End If
-
-                                    ' API check failed - could be network issue
-                                    If statusResponse.RawJson Is Nothing OrElse statusResponse.RawJson.Length = 0 Then
-                                        If offlineStart = Date.MinValue Then
-                                            My.Settings.License_OfflineGraceStart = Date.Now.Date
-                                            My.Settings.Save()
-                                        End If
-                                        Dim offlineDays = CInt((Date.Now.Date - My.Settings.License_OfflineGraceStart.Date).TotalDays)
-                                        If offlineDays <= OfflineGracePeriodDays Then
-                                            LogLicenseEvent("Config Pro", $"Matching Pro license - network issue, entering offline grace ({OfflineGracePeriodDays - offlineDays}d left)")
-                                            _currentLicenseState = LicenseState.ProOfflineGrace
-                                            LicenseStatus = My.Settings.License_ProductName
-                                            LicenseFromConfig = True
-                                            Return True
-                                        End If
-                                    End If
-
-                                    ' License no longer valid - proceed with config activation
-                                    LogLicenseEvent("Config Pro", "Matching Pro license no longer valid - will re-activate")
                                 End If
                             End If
                         End If
@@ -1089,7 +1035,7 @@ Namespace SharedLibrary
 
                     ' No matching valid Pro license - clear and proceed with config
                     LogLicenseEvent("Config Pro", "LicenseClearAll=True - no matching valid Pro license, clearing and applying config")
-                    ClearStoredLicense(includeLegacy:=True)
+                    ClearStoredLicense()
                 End If
 
                 ' ═══════════════════════════════════════════════════════════════
@@ -1158,8 +1104,8 @@ Namespace SharedLibrary
 
                 ' Check if LicenseClearAll is set - if so, clear all licenses before proceeding
                 If _licenseConfigDict IsNot Nothing AndAlso ParseBoolean(_licenseConfigDict, "LicenseClearAll", False) Then
-                    LogLicenseEvent("Auto Activation", "LicenseClearAll=True - clearing all licenses including legacy")
-                    ClearStoredLicense(includeLegacy:=True)
+                    LogLicenseEvent("Auto Activation", "LicenseClearAll=True - clearing all licenses")
+                    ClearStoredLicense()
                 End If
                 LogLicenseEvent("Auto Activation", $"Checking status for {userId}")
 
@@ -1396,7 +1342,32 @@ Namespace SharedLibrary
                 End If
 
                 If shouldCheckApi Then
-                    ' Time for API verification
+                    ' Non-blocking startup: when a prior successful API confirmation exists and we
+                    ' are still within the offline-grace window, keep using the cached state and
+                    ' refresh via the license API on a background thread. Any revocation/invalid
+                    ' result is enforced on the next startup (the current session stays valid).
+                    ' The background task performs NO UI, so concurrent UI interaction is safe.
+                    If CanDeferProLicenseVerification() Then
+                        Dim cachedState = If(IsTestingProLicenseByProductId(productId), LicenseState.TestingProActive, LicenseState.ProActive)
+
+                        ' Preserve offline-grace state if currently within the offline window.
+                        Dim offlineStartCached = My.Settings.License_OfflineGraceStart
+                        If offlineStartCached > Date.MinValue Then
+                            Dim offlineDaysCached = CInt((Date.Now.Date - offlineStartCached.Date).TotalDays)
+                            If offlineDaysCached <= OfflineGracePeriodDays Then
+                                cachedState = LicenseState.ProOfflineGrace
+                            End If
+                        End If
+
+                        _currentLicenseState = cachedState
+                        LicenseStatus = productName
+                        ScheduleBackgroundProLicenseRecheck(productId, licenseKey, userId)
+                        LogLicenseEvent("Stored Pro", "API check deferred to background; using cached state")
+                        Return True
+                    End If
+
+                    ' Time for API verification (synchronous: first confirmation, offline grace
+                    ' exceeded, or otherwise not deferrable).
                     Return VerifyAndProcessProLicense(context, productId, licenseKey, userId)
                 End If
 
@@ -1430,6 +1401,115 @@ Namespace SharedLibrary
                 Return False ' Fail closed
             End Try
         End Function
+
+        ' Guards against launching more than one concurrent background recheck.
+        Private Shared _backgroundRecheckInFlight As Integer = 0
+
+        ' Serializes background writes to My.Settings so a background recheck never races a
+        ' concurrent settings save with the persistence helpers.
+        Private Shared ReadOnly _licenseSettingsLock As New Object()
+
+        ''' <summary>
+        ''' Determines whether the periodic Pro license API verification may be deferred to a
+        ''' background thread instead of blocking the caller (host UI) thread.
+        ''' Deferral is only allowed when a prior successful API confirmation exists and the
+        ''' offline-grace window has not been exceeded; otherwise verification must run
+        ''' synchronously so it can fail closed and/or surface the required UI.
+        ''' </summary>
+        Private Shared Function CanDeferProLicenseVerification() As Boolean
+            Try
+                If Not HasApiConfirmedProLicense() Then Return False
+
+                Dim offlineStart = My.Settings.License_OfflineGraceStart
+                If offlineStart > Date.MinValue Then
+                    Dim offlineDays = CInt((Date.Now.Date - offlineStart.Date).TotalDays)
+                    If offlineDays > OfflineGracePeriodDays Then Return False
+                End If
+
+                Return True
+            Catch
+                Return False
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Schedules a one-shot background verification of the stored Pro license so startup is
+        ''' not blocked by the license server. At most one recheck runs at a time. The background
+        ''' work performs NO UI and only updates persisted state; enforcement of any negative
+        ''' result is deferred to the next startup via the existing synchronous flow.
+        ''' </summary>
+        Private Shared Sub ScheduleBackgroundProLicenseRecheck(productId As String, licenseKey As String, userId As String)
+            ' Copy arguments to locals before capturing them in the background lambda.
+            Dim pid As String = productId
+            Dim key As String = licenseKey
+            Dim uid As String = userId
+
+            If System.Threading.Interlocked.CompareExchange(_backgroundRecheckInFlight, 1, 0) <> 0 Then
+                Return
+            End If
+
+            System.Threading.Tasks.Task.Run(
+                Sub()
+                    Try
+                        BackgroundVerifyProLicenseState(pid, key, uid)
+                    Catch ex As System.Exception
+                        LogLicenseEvent("Background Recheck Error", ex.Message)
+                    Finally
+                        System.Threading.Interlocked.Exchange(_backgroundRecheckInFlight, 0)
+                    End Try
+                End Sub)
+        End Sub
+
+        ''' <summary>
+        ''' Performs the deferred Pro license status verification on a background thread and updates
+        ''' only persisted state. This method never shows UI, so it is safe to run while the host
+        ''' processes user interaction. Negative results are recorded so the next startup enforces
+        ''' them through the existing synchronous verification path.
+        ''' </summary>
+        Private Shared Sub BackgroundVerifyProLicenseState(productId As String, licenseKey As String, userId As String)
+            Dim response = CallLicenseApi("status", productId, licenseKey, userId)
+
+            SyncLock _licenseSettingsLock
+                If response.Success AndAlso (response.Activated OrElse response.StatusCheck.Equals("active", StringComparison.OrdinalIgnoreCase)) Then
+                    ' Still valid - refresh confirmation and clear any grace tracking.
+                    RecordSuccessfulApiCheck()
+                    LogLicenseEvent("Background Recheck", "License valid; state refreshed")
+                    Return
+                End If
+
+                If response.Success OrElse (response.RawJson IsNot Nothing AndAlso response.RawJson.Length > 0) Then
+                    ' The server responded and indicated the license is inactive/revoked or the
+                    ' credentials were rejected. Defer enforcement to the next startup.
+                    MarkProLicenseVerificationPending()
+                    LogLicenseEvent("Background Recheck", "License reported inactive/invalid; enforcement deferred to next startup", alwaysLog:=True)
+                    Return
+                End If
+
+                ' No response received - connectivity issue. Maintain offline grace silently.
+                Try
+                    If My.Settings.License_OfflineGraceStart = Date.MinValue Then
+                        My.Settings.License_OfflineGraceStart = Date.Now.Date
+                        My.Settings.Save()
+                    End If
+                Catch
+                End Try
+                LogLicenseEvent("Background Recheck", "No response; offline grace maintained")
+            End SyncLock
+        End Sub
+
+        ''' <summary>
+        ''' Marks the stored Pro license so the next startup re-verifies it synchronously. Clearing
+        ''' the API-confirmed flag prevents further background deferral, ensuring the existing
+        ''' revocation/invalid-credentials UI is presented. The current session is unaffected.
+        ''' </summary>
+        Private Shared Sub MarkProLicenseVerificationPending()
+            Try
+                My.Settings.License_ApiConfirmed = False
+                My.Settings.License_LastCheck = Date.MinValue
+                My.Settings.Save()
+            Catch
+            End Try
+        End Sub
 
         ''' <summary>
         ''' Verifies a Pro license via the license API and updates local state accordingly.
@@ -1727,243 +1807,23 @@ Namespace SharedLibrary
 
 #End Region
 
-#Region "Legacy Pro License Processing"
+#Region "Legacy License Cleanup"
+
+#Region "Legacy License Cleanup"
 
         ''' <summary>
-        ''' Returns whether legacy Pro license settings are present (non-Private) and no new-regime license is set.
-        ''' </summary>
-        Private Shared Function HasLegacyProLicense() As Boolean
-            Try
-                ' Must not have new system license already activated
-                Dim newLicenseType = My.Settings.License_Type
-                If Not String.IsNullOrEmpty(newLicenseType) Then
-                    Return False
-                End If
-
-                ' Check legacy fields - these are preserved until migration succeeds
-                Dim legacyStatus = My.Settings.LicenseStatus
-                Dim legacyTill = My.Settings.LicensedTill
-
-                If String.IsNullOrEmpty(legacyStatus) Then Return False
-                If legacyTill = Date.MinValue Then Return False
-
-                ' Must NOT be a Private License (those are cleared, not migrated)
-                If legacyStatus.Equals("Private License", StringComparison.OrdinalIgnoreCase) Then
-                    Return False
-                End If
-
-                ' Has legacy Pro license data
-                Return True
-
-            Catch
-                Return False
-            End Try
-        End Function
-
-        ''' <summary>
-        ''' Returns whether a legacy migration flow has been started (tracked in settings).
-        ''' </summary>
-        Private Shared Function IsLegacyMigrationStarted() As Boolean
-            Try
-                Return My.Settings.License_LegacyMigrationStarted > Date.MinValue
-            Catch
-                Return False
-            End Try
-        End Function
-
-        ''' <summary>
-        ''' Processes a legacy Pro license, including regime end enforcement and migration prompting.
-        ''' </summary>
-        Private Shared Function ProcessLegacyProLicense(context As ISharedContext) As Boolean
-            Try
-                Dim legacyStatus = My.Settings.LicenseStatus
-                Dim legacyTill = My.Settings.LicensedTill
-                Dim legacyUsers = My.Settings.LicenseUsers
-
-                LogLicenseEvent("Legacy Pro", $"Status={legacyStatus}, ValidTill={legacyTill:d}")
-
-                ' Update global variables for display
-                LicenseStatus = legacyStatus
-                LicensedTill = legacyTill
-                LicenseUsers = legacyUsers
-
-                ' Check if legacy license itself is expired
-                If Date.Now > legacyTill Then
-                    _currentLicenseState = LicenseState.LegacyExpired
-
-                    ' Only show expiration message once (first time we detect expiration)
-                    ' Use License_LegacyMigrationStarted to track that user has been notified
-                    If Not IsLegacyMigrationStarted() Then
-                        ShowCustomMessageBox(
-                            $"Your legacy license ({legacyStatus}) expired on {legacyTill:d}." & vbCrLf & vbCrLf &
-                            StandardLicenseContactMessage,
-                            $"{AN} - License Expired")
-                    End If
-
-                    Return HandleLegacyProMigration(context, legacyStatus, legacyTill)
-                End If
-
-                ' Check if we're past the legacy regime end date
-                If Date.Now >= LegacyRegimeEndDate Then
-                    Return HandleLegacyProMigration(context, legacyStatus, legacyTill)
-                End If
-
-                ' Before regime end date - legacy license is valid
-                _currentLicenseState = LicenseState.LegacyProActive
-                LogLicenseEvent("Legacy Pro", "Valid (before regime end)")
-
-                ' Show expiry warnings for legacy license (on warning days, throttled by interval)
-                If Not LicenseNoWarning AndAlso legacyTill > Date.Now AndAlso legacyTill < Date.MaxValue Then
-                    ' Calculate days until legacy license expires
-                    Dim daysUntilExpiry = CInt((legacyTill.Date - Date.Now.Date).TotalDays)
-
-                    ' Check against warning thresholds
-                    For Each warningDay In LicenseWarningDays
-                        If daysUntilExpiry = warningDay Then
-                            ' Check if we should show warning based on startup interval
-                            If ShouldShowLicenseWarning() Then
-                                Dim result = ShowCustomYesNoBox(
-                                    $"Your license ({legacyStatus}) will EXPIRE in {daysUntilExpiry} day(s) on {legacyTill:d}." & vbCrLf & vbCrLf &
-                                    "Upgrade to the new licensing scheme to continue using the software." & vbCrLf & vbCrLf &
-                                    StandardLicenseContactMessage & vbCrLf & vbCrLf &
-                                    "Would you like to enter your new license now?",
-                                    "Enter License",
-                                    "Later",
-                                    $"{AN} - License Warning")
-
-                                RecordLicenseWarningShown()
-
-                                If result = 1 Then
-                                    ' User wants to enter license now
-                                    Dim answer = ShowLicenseTypeSelectionDialog(context)
-                                    Return True ' License is still valid, continue regardless
-                                End If
-                            End If
-                            Exit For
-                        End If
-                    Next
-                End If
-
-                Return True
-
-            Catch ex As Exception
-                LogLicenseEvent("Legacy Pro Error", ex.Message)
-                Return False
-            End Try
-        End Function
-
-        ''' <summary>
-        ''' Enforces migration requirements for legacy Pro licenses after `LegacyRegimeEndDate`.
-        ''' Legacy license data remains stored until a new license is successfully activated.
-        ''' </summary>
-        Private Shared Function HandleLegacyProMigration(context As ISharedContext, legacyStatus As String, legacyTill As Date) As Boolean
-            Try
-                ' Calculate days since regime ended
-                Dim daysSinceRegimeEnd = CInt((Date.Now.Date - LegacyRegimeEndDate.Date).TotalDays)
-
-                ' Check if within migration grace period
-                If daysSinceRegimeEnd <= LegacyMigrationGracePeriodDays Then
-                    ' Within grace - allow usage but prompt for migration
-                    _currentLicenseState = LicenseState.LegacyProMigrationRequired
-                    Dim remainingDays = LegacyMigrationGracePeriodDays - daysSinceRegimeEnd
-
-                    ' Show migration prompt:
-                    ' - Immediately on first encounter (migration not yet started)
-                    ' - Every X startups thereafter
-                    If Not IsLegacyMigrationStarted() OrElse IsComplianceCheckDue(LegacyMigrationPromptIntervalStartups) Then
-                        ' Mark that we've shown the migration prompt (first time)
-                        If Not IsLegacyMigrationStarted() Then
-                            My.Settings.License_LegacyMigrationStarted = Date.Now.Date
-                            My.Settings.Save()
-                        End If
-
-                        ShowLegacyMigrationPrompt(context, legacyStatus, remainingDays)
-                    End If
-
-                    Return True ' Allow usage during grace period
-                End If
-
-                ' Grace period expired - migration is mandatory
-                _currentLicenseState = LicenseState.LegacyProMigrationRequired
-
-                ' Always show the "grace period expired" message
-                ShowCustomMessageBox(
-                    $"Your legacy license ({legacyStatus}) requires migration to the new licensing system." & vbCrLf & vbCrLf &
-                    "The grace period for migration has expired. You must enter a new license to continue." & vbCrLf & vbCrLf &
-                    StandardLicenseContactMessage,
-                    $"{AN} - License Migration Required")
-
-                ' Show license selection - returns False if user cancels (blocking app)
-                Return ShowLicenseTypeSelectionDialog(context)
-
-            Catch ex As Exception
-                LogLicenseEvent("Legacy Migration Error", ex.Message)
-                Return False
-            End Try
-        End Function
-
-
-        ''' <summary>
-        ''' Shows a prompt explaining the legacy migration requirement and optionally opens the license dialog.
-        ''' </summary>
-        Private Shared Sub ShowLegacyMigrationPrompt(context As ISharedContext, legacyStatus As String, remainingDays As Integer)
-            Try
-                Dim msg = $"Your legacy license ({legacyStatus}) must be migrated to the new licensing system." & vbCrLf & vbCrLf &
-                          $"You have {remainingDays} day(s) remaining to complete migration." & vbCrLf & vbCrLf &
-                          "The new license system requires you to enter a license key, a product ID and user ID." & vbCrLf & vbCrLf &
-                          StandardLicenseContactMessage & vbCrLf & vbCrLf &
-                          "Would you like to enter your new license now?"
-
-                Dim result = ShowCustomYesNoBox(
-                    msg,
-                    "Enter License",
-                    "Later",
-                    $"{AN} - License Migration Required")
-
-                If result = 1 Then
-                    ' Show license dialog - legacy license cleared only on successful activation
-                    ShowLicenseTypeSelectionDialog(context)
-                End If
-
-            Catch ex As Exception
-                LogLicenseEvent("Migration Prompt Error", ex.Message)
-            End Try
-        End Sub
-
-
-        ''' <summary>
-        ''' Clears legacy license fields stored in `My.Settings` and resets corresponding globals.
+        ''' Resets the license status global. Old-regime license settings no longer exist, so there is
+        ''' nothing further to purge from `My.Settings`.
         ''' </summary>
         Private Shared Sub ClearLegacyLicense()
             Try
-                My.Settings.LicenseStatus = ""
-                My.Settings.LicensedTill = Date.MinValue
-                My.Settings.LicenseUsers = 0
-                My.Settings.Save()
-
                 LicenseStatus = ""
-                LicensedTill = Date.MinValue
-                LicenseUsers = 0
-
             Catch ex As Exception
                 LogLicenseEvent("Clear Legacy Error", ex.Message)
             End Try
         End Sub
 
-        ''' <summary>
-        ''' Clears an existing legacy Private license from legacy storage (legacy Private licenses are not migrated).
-        ''' </summary>
-        Private Shared Sub ClearLegacyPrivateLicenseIfExists()
-            Try
-                Dim legacyStatus = My.Settings.LicenseStatus
-                If Not String.IsNullOrEmpty(legacyStatus) AndAlso
-                   legacyStatus.Equals("Private License", StringComparison.OrdinalIgnoreCase) Then
-                    LogLicenseEvent("Legacy Private", "Clearing legacy private license")
-                    ClearLegacyLicense()
-                End If
-            Catch
-            End Try
-        End Sub
+#End Region
 
 #End Region
 
@@ -2005,10 +1865,7 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Clears stored license data in `My.Settings`.
         ''' </summary>
-        ''' <param name="includeLegacy">
-        ''' If <see langword="True"/>, also clears legacy storage fields (`LicenseStatus`, `LicensedTill`, `LicenseUsers`).
-        ''' </param>
-        Private Shared Sub ClearStoredLicense(Optional includeLegacy As Boolean = False)
+        Private Shared Sub ClearStoredLicense()
             Try
                 ' Clear new license system settings
                 My.Settings.License_Type = ""
@@ -2027,17 +1884,6 @@ Namespace SharedLibrary
                 My.Settings.License_GracePeriodStart = Date.MinValue
                 My.Settings.License_State = ""
                 My.Settings.License_AutoActivationWarningShown = False
-                My.Settings.License_LegacyMigrationStarted = Date.MinValue
-                My.Settings.License_LastMigrationPrompt = Date.MinValue
-
-                If includeLegacy Then
-                    ' Only clear legacy when explicitly requested (after successful new license activation)
-                    My.Settings.LicenseStatus = ""
-                    My.Settings.LicensedTill = Date.MinValue
-                    My.Settings.LicenseUsers = 0
-                    LicensedTill = Date.MinValue
-                    LicenseUsers = 0
-                End If
 
                 My.Settings.Save()
 
@@ -2175,30 +2021,6 @@ Namespace SharedLibrary
                         sb.AppendLine("Your license is configured but not yet activated.")
                         sb.AppendLine("Activation will occur on the next application start.")
 
-                    Case LicenseState.LegacyProActive
-                        sb.AppendLine($"License Type: {LicenseStatus} (Legacy)")
-                        sb.AppendLine()
-                        If LicensedTill > Date.MinValue AndAlso LicensedTill < Date.MaxValue Then
-                            sb.AppendLine($"Valid Until: {LicensedTill:d}")
-                            Dim daysRemaining = CInt((LicensedTill.Date - Date.Now.Date).TotalDays)
-                            If daysRemaining > 0 Then
-                                sb.AppendLine($"Days Remaining: {daysRemaining}")
-                            End If
-                        End If
-                        If LicenseUsers > 0 Then
-                            sb.AppendLine($"Licensed Users: {LicenseUsers}")
-                        End If
-                        sb.AppendLine()
-                        sb.AppendLine("⚠ This legacy license will require migration to the new system.")
-                        sb.AppendLine("Please contact your administrator for a new license key.")
-
-                    Case LicenseState.LegacyProMigrationRequired
-                        sb.AppendLine($"License Type: {LicenseStatus} (Migration Required)")
-                        sb.AppendLine()
-                        sb.AppendLine("Your legacy license requires migration to the new licensing system.")
-                        sb.AppendLine()
-                        sb.AppendLine(StandardLicenseContactMessage)
-
                     Case Else
                         sb.AppendLine("License status unknown.")
                 End Select
@@ -2302,18 +2124,6 @@ Namespace SharedLibrary
                         End If
                         Return $"{displayName} (offline)"
 
-                    Case LicenseState.LegacyProActive
-                        If Not String.IsNullOrEmpty(LicenseStatus) Then
-                            Return $"{LicenseStatus} (legacy)"
-                        End If
-                        Return "Legacy License (active)"
-
-                    Case LicenseState.LegacyProMigrationRequired
-                        If Not String.IsNullOrEmpty(LicenseStatus) Then
-                            Return $"{LicenseStatus} (migrate!)"
-                        End If
-                        Return "Legacy License (migrate!)"
-
                     Case Else
                         Return "Unknown license state"
                 End Select
@@ -2332,13 +2142,7 @@ Namespace SharedLibrary
             End If
 
             ' No product name available
-            If Date.Now >= LegacyRegimeEndDate Then
-                ' After new regime - indicate missing product title
-                Return "Pro License (no product title available)"
-            Else
-                ' Before new regime - use generic name
-                Return "Pro License"
-            End If
+            Return "Pro License (no product title available)"
         End Function
 
 

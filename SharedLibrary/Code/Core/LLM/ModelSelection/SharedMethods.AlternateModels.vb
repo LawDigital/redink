@@ -111,6 +111,7 @@ Namespace SharedLibrary
                 mc.ToolAPICall = GetConfigString(configDict, "ToolAPICall")
                 mc.ToolErrorHandling = GetConfigString(configDict, "ToolErrorHandling", "skip")
                 mc.ToolParameterDefaults = GetConfigString(configDict, "ToolParameterDefaults")
+                mc.CapabilityTags = GetConfigString(configDict, "CapabilityTags")
 
                 mc.ToolPriority = GetConfigInt(configDict, "ToolPriority", 100)
 
@@ -296,66 +297,275 @@ Namespace SharedLibrary
         ''' If <c>True</c>, only returns entries that contain a <c>ToolDefinition</c> or <c>ToolInstructionsPrompt</c>.
         ''' </param>
         ''' <returns>List of parsed <see cref="ModelConfig"/> entries (empty if the file is missing or has no sections).</returns>
+        Private NotInheritable Class AlternativeModelIniSection
+            Public Property Description As String
+            Public Property Values As Dictionary(Of String, String)
+        End Class
+
+        Private NotInheritable Class AlternativeModelIniCacheEntry
+            Public Property FileLength As Long
+            Public Property LastWriteUtcTicks As Long
+            Public Property Sections As List(Of AlternativeModelIniSection)
+        End Class
+
+        Private Shared ReadOnly _alternativeModelIniCacheSync As New Object()
+        Private Shared ReadOnly _alternativeModelIniCache As New Dictionary(Of String, AlternativeModelIniCacheEntry)(StringComparer.OrdinalIgnoreCase)
+
+        Private Shared Function NormalizeAlternativeModelIniPath(ByVal iniFilePath As String) As String
+            Dim expanded As String = ExpandEnvironmentVariables(If(iniFilePath, ""))
+            If String.IsNullOrWhiteSpace(expanded) Then Return ""
+
+            Try
+                Return System.IO.Path.GetFullPath(expanded)
+            Catch
+                Return expanded
+            End Try
+        End Function
+
+        Private Shared Function ParseAlternativeModelIniSections(ByVal lines As IEnumerable(Of String)) As List(Of AlternativeModelIniSection)
+            Dim sections As New List(Of AlternativeModelIniSection)()
+            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            Dim description As String = ""
+
+            For Each rawLine As String In lines
+                Dim trimmedLine As String = If(rawLine, "").Trim()
+
+                If String.IsNullOrEmpty(trimmedLine) OrElse trimmedLine.StartsWith(";") Then
+                    Continue For
+                End If
+
+                If trimmedLine.StartsWith("[") AndAlso trimmedLine.EndsWith("]") Then
+                    If Not String.IsNullOrWhiteSpace(description) Then
+                        sections.Add(New AlternativeModelIniSection With {
+                            .Description = description,
+                            .Values = New Dictionary(Of String, String)(currentDict, StringComparer.OrdinalIgnoreCase)
+                        })
+                        currentDict.Clear()
+                    End If
+
+                    description = trimmedLine.Substring(1, trimmedLine.Length - 2).Trim()
+                    Continue For
+                End If
+
+                Dim tokens() As String = trimmedLine.Split(New Char() {"="c}, 2)
+                If tokens.Length = 2 Then
+                    Dim key As String = tokens(0).Trim()
+                    Dim value As String = tokens(1).Trim()
+                    currentDict(key) = value
+                End If
+            Next
+
+            If Not String.IsNullOrWhiteSpace(description) Then
+                sections.Add(New AlternativeModelIniSection With {
+                    .Description = description,
+                    .Values = New Dictionary(Of String, String)(currentDict, StringComparer.OrdinalIgnoreCase)
+                })
+            End If
+
+            Return sections
+        End Function
+
+        Private Shared Function GetAlternativeModelIniSections(ByVal iniFilePath As String,
+                                                               ByRef cacheHit As Boolean) As List(Of AlternativeModelIniSection)
+            cacheHit = False
+            Dim normalizedPath As String = NormalizeAlternativeModelIniPath(iniFilePath)
+            If String.IsNullOrWhiteSpace(normalizedPath) OrElse Not File.Exists(normalizedPath) Then
+                Return New List(Of AlternativeModelIniSection)()
+            End If
+
+            Dim beforeInfo As New FileInfo(normalizedPath)
+            Dim beforeLength As Long = beforeInfo.Length
+            Dim beforeTicks As Long = beforeInfo.LastWriteTimeUtc.Ticks
+
+            SyncLock _alternativeModelIniCacheSync
+                Dim cached As AlternativeModelIniCacheEntry = Nothing
+                If _alternativeModelIniCache.TryGetValue(normalizedPath, cached) AndAlso
+                   cached IsNot Nothing AndAlso
+                   cached.FileLength = beforeLength AndAlso
+                   cached.LastWriteUtcTicks = beforeTicks AndAlso
+                   cached.Sections IsNot Nothing Then
+                    cacheHit = True
+                    Return cached.Sections
+                End If
+            End SyncLock
+
+            ' Parse outside the cache lock so a background warm-up can never block the UI
+            ' behind file I/O. A concurrent miss may parse the same small INI twice, which is safe.
+            Dim parsed As List(Of AlternativeModelIniSection) =
+                ParseAlternativeModelIniSections(File.ReadAllLines(normalizedPath))
+
+            Dim afterInfo As New FileInfo(normalizedPath)
+            Dim afterLength As Long = afterInfo.Length
+            Dim afterTicks As Long = afterInfo.LastWriteTimeUtc.Ticks
+
+            If beforeLength = afterLength AndAlso beforeTicks = afterTicks Then
+                SyncLock _alternativeModelIniCacheSync
+                    _alternativeModelIniCache(normalizedPath) = New AlternativeModelIniCacheEntry With {
+                        .FileLength = afterLength,
+                        .LastWriteUtcTicks = afterTicks,
+                        .Sections = parsed
+                    }
+                End SyncLock
+            End If
+
+            Return parsed
+        End Function
+
+        ''' <summary>
+        ''' Warms only the context-independent INI parse cache. No Office COM, WinForms,
+        ''' API-key resolution, restricted-access evaluation, or ModelConfig mutation occurs.
+        ''' Safe for a background startup task.
+        ''' </summary>
+        Public Shared Sub WarmAlternativeModelsCache(ByVal iniFilePath As String)
+            Try
+                Dim normalizedPath As String = NormalizeAlternativeModelIniPath(iniFilePath)
+                If String.IsNullOrWhiteSpace(normalizedPath) OrElse Not File.Exists(normalizedPath) Then Return
+
+                Dim cacheHit As Boolean = False
+                Dim ignored As List(Of AlternativeModelIniSection) =
+                    GetAlternativeModelIniSections(normalizedPath, cacheHit)
+            Catch
+                ' Non-fatal. LoadAlternativeModels will retry synchronously on demand.
+            End Try
+        End Sub
+
         Public Shared Function LoadAlternativeModels(ByVal iniFilePath As String,
                                                       context As ISharedContext,
                                                       Optional Title As String = "",
                                                       Optional includeToolOnly As Boolean = False,
                                                       Optional toolsOnly As Boolean = False) As List(Of ModelConfig)
 
-            iniFilePath = ExpandEnvironmentVariables(iniFilePath)
+            iniFilePath = NormalizeAlternativeModelIniPath(iniFilePath)
 
             Dim models As New List(Of ModelConfig)()
             Try
-                If Not File.Exists(iniFilePath) Then
+                If String.IsNullOrWhiteSpace(iniFilePath) OrElse Not File.Exists(iniFilePath) Then
                     ShowCustomMessageBox($"INI file for alternative models not found (update {AN2}.ini): " & iniFilePath)
                     Return models
                 End If
 
-                Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-                Dim Description As String = ""
+                Dim cacheHit As Boolean = False
+                Dim sections As List(Of AlternativeModelIniSection) =
+                    GetAlternativeModelIniSections(iniFilePath, cacheHit)
 
-                For Each XLine In File.ReadAllLines(iniFilePath)
-                    Dim trimmedLine As String = XLine.Trim()
-
-                    ' Skip empty lines and comments (';').
-                    If String.IsNullOrEmpty(trimmedLine) OrElse trimmedLine.StartsWith(";") Then
+                For Each section As AlternativeModelIniSection In sections
+                    If section Is Nothing OrElse
+                       String.IsNullOrWhiteSpace(section.Description) OrElse
+                       section.Values Is Nothing Then
                         Continue For
                     End If
 
-                    ' Section header (e.g., [Model1]) starts a new model section.
-                    If trimmedLine.StartsWith("[") AndAlso trimmedLine.EndsWith("]") Then
-                        If Not String.IsNullOrWhiteSpace(Description) Then
-                            ProcessModelSection(currentDict, Description, context, models, includeToolOnly, toolsOnly)
-                            currentDict.Clear()
-                        End If
-
-                        Description = trimmedLine.Substring(1, trimmedLine.Length - 2).Trim()
-                        Continue For
-                    End If
-
-                    ' Parse key=value lines.
-                    Dim tokens() As String = trimmedLine.Split(New Char() {"="c}, 2)
-                    If tokens.Length = 2 Then
-                        Dim key As String = tokens(0).Trim()
-                        Dim value As String = tokens(1).Trim()
-
-                        If Not currentDict.ContainsKey(key) Then
-                            currentDict.Add(key, value)
-                        Else
-                            currentDict(key) = value
-                        End If
-                    End If
+                    ' Materialization remains per-call and context-sensitive by design:
+                    ' restricted access, defaults, API key resolution, and filters keep
+                    ' exactly the same semantics as before. Only file I/O/parsing is cached.
+                    ProcessModelSection(section.Values,
+                                        section.Description,
+                                        context,
+                                        models,
+                                        includeToolOnly,
+                                        toolsOnly)
                 Next
 
-                ' Materialize the final section (if any).
-                If Not String.IsNullOrWhiteSpace(Description) Then
-                    ProcessModelSection(currentDict, Description, context, models, includeToolOnly, toolsOnly)
-                End If
+                System.Diagnostics.Debug.WriteLine(
+                    "[PERF] LoadAlternativeModels: cache=" &
+                    If(cacheHit, "hit", "miss") &
+                    "; path=" & iniFilePath &
+                    "; models=" & models.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
             Catch ex As System.Exception
                 ShowCustomMessageBox($"Error reading INI file for models {If(String.IsNullOrWhiteSpace(Title), " ", $"for '{Title}' ")}({iniFilePath}): " & ex.Message)
             End Try
             Return models
+        End Function
+
+        Private Shared Function IsModelAccessibleForCurrentUser(ByVal configDict As Dictionary(Of String, String),
+                                                                ByVal context As ISharedContext) As Boolean
+            Dim restrictedAccess As String = GetConfigString(configDict, "RestrictedAccess")
+            If String.IsNullOrWhiteSpace(restrictedAccess) Then
+                Return True
+            End If
+
+            Dim storedUserCodes As String = ""
+            If context IsNot Nothing Then
+                storedUserCodes = If(context.INI_RestrictedModelAccessCode, "")
+            End If
+
+            Dim userCodes As HashSet(Of String) = SplitRestrictedAccessTokens(storedUserCodes)
+            If userCodes.Count = 0 Then
+                Return False
+            End If
+
+            Dim requiredCodes As HashSet(Of String) = SplitRestrictedAccessTokens(DecodeRestrictedAccessValue(restrictedAccess, context))
+            If requiredCodes.Count = 0 Then
+                Return False
+            End If
+
+            For Each requiredCode In requiredCodes
+                If userCodes.Contains(requiredCode) Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function SplitRestrictedAccessTokens(ByVal value As String) As HashSet(Of String)
+            Dim tokens As New HashSet(Of String)(StringComparer.Ordinal)
+
+            If String.IsNullOrWhiteSpace(value) Then
+                Return tokens
+            End If
+
+            For Each token As String In value.Split(New Char() {","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                Dim trimmedToken As String = token.Trim()
+                If Not String.IsNullOrWhiteSpace(trimmedToken) Then
+                    tokens.Add(trimmedToken)
+                End If
+            Next
+
+            Return tokens
+        End Function
+
+        Private Shared Function DecodeRestrictedAccessValue(ByVal value As String, ByVal context As ISharedContext) As String
+            Dim rawValue As String = RemoveCR(If(value, "")).Trim()
+            If String.IsNullOrWhiteSpace(rawValue) Then
+                Return ""
+            End If
+
+            Dim codebasis As String = ResolveRestrictedAccessCodebasis(context)
+            If String.IsNullOrWhiteSpace(codebasis) Then
+                Return rawValue
+            End If
+
+            Dim decodedValue As String = DecodeString(rawValue, codebasis)
+            If String.IsNullOrWhiteSpace(decodedValue) OrElse
+               decodedValue.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                Return rawValue
+            End If
+
+            Return RemoveCR(decodedValue).Trim()
+        End Function
+
+        Private Shared Function ResolveRestrictedAccessCodebasis(ByVal context As ISharedContext) As String
+            Dim codebasis As String = ""
+
+            If context IsNot Nothing Then
+                codebasis = If(context.Codebasis, "")
+            End If
+
+            If String.IsNullOrWhiteSpace(codebasis) Then
+                If IsEmptyOrBlank(Int_CodeBasis) Then
+                    codebasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                Else
+                    codebasis = Int_CodeBasis
+                End If
+
+                If context IsNot Nothing Then
+                    context.Codebasis = codebasis
+                End If
+            End If
+
+            Return If(codebasis, "").Trim()
         End Function
 
         ''' <summary>
@@ -376,6 +586,10 @@ Namespace SharedLibrary
                                                toolsOnly As Boolean)
             ' Exclude deprecated sections.
             If ParseBoolean(currentDict, "Depreciated") OrElse ParseBoolean(currentDict, "Deprecated") Then
+                Return
+            End If
+
+            If Not IsModelAccessibleForCurrentUser(currentDict, context) Then
                 Return
             End If
 
@@ -476,7 +690,8 @@ Namespace SharedLibrary
                 originalConfigLoaded = True
 
                 Dim selector As New ModelSelectorForm(iniFilePath, context, Title, Listtype, OptionText, UseCase)
-                If selector.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner573 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner573 IsNot Nothing, selector.ShowDialog(__safeDialogOwner573), selector.ShowDialog()) = DialogResult.OK Then
                     If selector.UseDefault AndAlso UseCase = 1 Then
                         RestoreDefaults(context, originalConfig)
                     ElseIf selector.SelectedModel IsNot Nothing Then
@@ -520,7 +735,8 @@ Namespace SharedLibrary
                 End If
 
                 Using form As New MultiModelSelectorForm(alternativeModels, LastAlternateModel, AN & " - Select Alternate Models", True, "")
-                    If form.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                    Dim __safeDialogOwner617 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner617 IsNot Nothing, form.ShowDialog(__safeDialogOwner617), form.ShowDialog()) <> System.Windows.Forms.DialogResult.OK Then
                         Return False
                     End If
 
@@ -594,6 +810,10 @@ Namespace SharedLibrary
 
                             Dim lowered = raw.ToLowerInvariant()
                             If truthy.Contains(lowered) OrElse lowered = "1" Then
+                                If Not IsModelAccessibleForCurrentUser(currentDict, context) Then
+                                    Return False
+                                End If
+
                                 Dim mc = CreateModelConfigFromDict(currentDict, context, description)
                                 ApplyModelConfig(context, mc)
                                 Return True

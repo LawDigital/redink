@@ -38,10 +38,76 @@ Namespace Agents
 
         Public Shared Sub Enable()
             Interlocked.Increment(_persistent)
+            ' Make sure the local .inky tree (root + skills/ + agents/) exists so new
+            ' resources and Inky.md can be created even on a fresh setup. If no local root
+            ' is configured this is a no-op and author mode still works against central
+            ' (when central writes are permitted).
+            Try
+                AgentResources.EnsureLocalResourceDirectories()
+            Catch
+            End Try
+            PersistState()
         End Sub
+
+        ''' <summary>Persists the current author-mode flags to My.Settings (best-effort, silent).</summary>
+        Private Shared Sub PersistState()
+            Try
+                My.Settings.Item("SkillAuthorModeEnabled") = (Volatile.Read(_persistent) > 0)
+                My.Settings.Item("SkillAuthorCentralWrites") = (Volatile.Read(_allowCentralWrites) > 0)
+                My.Settings.Save()
+            Catch
+                ' My.Settings entry may not exist yet; ignore.
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Restores persisted author-mode flags at startup. Enabling here also ensures the
+        ''' local resource tree exists when a local root is configured; when there is no local
+        ''' root, author mode is still restored and operates against central if permitted.
+        ''' </summary>
+        Public Shared Sub RestorePersistedState()
+            Try
+                Dim enabled As Boolean = False
+                Dim central As Boolean = False
+                Try : enabled = CBool(My.Settings.Item("SkillAuthorModeEnabled")) : Catch : End Try
+                Try : central = CBool(My.Settings.Item("SkillAuthorCentralWrites")) : Catch : End Try
+
+                If enabled AndAlso Volatile.Read(_persistent) = 0 Then
+                    Enable()
+                End If
+                If central Then
+                    Volatile.Write(_allowCentralWrites, 1)
+                End If
+            Catch
+            End Try
+        End Sub
+
+        ' When False (default), author-mode writes are confined to the LOCAL resource
+        ' root (the user's .inky directory). Set True to also permit writing into the
+        ' shared/central resource root. Kept separate so the safe default is local-only.
+        Private Shared _allowCentralWrites As Integer = 0
+
+        Public Shared Property AllowCentralWrites As Boolean
+            Get
+                Return Volatile.Read(_allowCentralWrites) > 0
+            End Get
+            Set(value As Boolean)
+                Volatile.Write(_allowCentralWrites, If(value, 1, 0))
+                ' Make sure the central resource tree (root + skills/ + agents/) exists so
+                ' new resources can be created there once central writing is permitted.
+                If value Then
+                    Try
+                        AgentResources.EnsureCentralResourceDirectories()
+                    Catch
+                    End Try
+                End If
+                PersistState()
+            End Set
+        End Property
 
         Public Shared Sub Disable()
             If Volatile.Read(_persistent) > 0 Then Interlocked.Decrement(_persistent)
+            PersistState()
         End Sub
 
         ''' <summary>Push/pop a scope. Best when scoping per-call (chat surface).</summary>

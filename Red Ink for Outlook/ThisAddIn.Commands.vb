@@ -749,25 +749,10 @@ Partial Public Class ThisAddIn
 
         'Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-        Dim builder As New MarkdownPipelineBuilder()
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-        Dim htmlText As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+        Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
         Dim fullHtml As String =
               "<!DOCTYPE html>" &
@@ -801,25 +786,10 @@ Partial Public Class ThisAddIn
 
         'Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-        Dim builder As New MarkdownPipelineBuilder()
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-        Dim htmlText As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+        Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
         ShowHTMLCustomMessageBox(htmlText, $"{AN} Translation")
 
@@ -842,25 +812,10 @@ Partial Public Class ThisAddIn
 
         ' Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-        Dim builder As New MarkdownPipelineBuilder()
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-        Dim htmlText As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+        Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
         Dim fullHtml As String =
               "<!DOCTYPE html>" &
@@ -1199,25 +1154,10 @@ Partial Public Class ThisAddIn
             ' Convert Markdown to HTML using Markdig
             ' Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-            Dim builder As New MarkdownPipelineBuilder()
+            Dim markdownPipeline As MarkdownPipeline =
+                Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            builder.UsePipeTables()
-            builder.UseGridTables()
-            builder.UseSoftlineBreakAsHardlineBreak()
-            builder.UseListExtras()
-            builder.UseFootnotes()
-            builder.UseDefinitionLists()
-            builder.UseAbbreviations()
-            builder.UseAutoLinks()
-            builder.UseTaskLists()
-            builder.UseMathematics()
-            builder.UseFigures()
-            builder.UseAdvancedExtensions()
-            builder.UseGenericAttributes()
-
-            Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-            Dim convertedHtml As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+            Dim convertedHtml As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
             If mailItem.BodyFormat = OlBodyFormat.olFormatHTML Then
                 ' Insert via Word editor to preserve the existing font/style and paragraph spacing
@@ -1390,7 +1330,8 @@ Partial Public Class ThisAddIn
 
                     Dim reviewed As String = Nothing
                     Using dlg As New ReviewChangesDialog(strippedOriginalForReview, strippedSuggestedForReview)
-                        If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                        Dim __safeDialogOwner1333 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner1333 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner1333), dlg.ShowDialog()) <> System.Windows.Forms.DialogResult.OK Then
                             ' Cancel = do absolutely nothing
                             Return
                         End If
@@ -1639,6 +1580,8 @@ Partial Public Class ThisAddIn
                 DefaultPrefixText = $" (default prefix: '{DefaultPrefix}')"
             End If
 
+            GoTo SkipPromptWin
+
             ' Prompt for the text to process
 
             Dim InsertButtons As System.Tuple(Of String, String, String)() = {
@@ -1660,6 +1603,371 @@ Partial Public Class ThisAddIn
 
                 OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context)
             End If
+
+SkipPromptWin:
+
+            ' =============================================================
+            ' FREESTYLE PROMPT UI
+            ' =============================================================
+
+            Dim freestylePromptUiState As String = ""
+
+            Try
+                freestylePromptUiState = CStr(My.Settings.Item("FreestylePromptUiState"))
+            Catch
+                freestylePromptUiState = ""
+            End Try
+
+            Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                .Title = $"{AN} Freestyle",
+                .Heading = "What would you like Red Ink to do?",
+                .ModeCaption = "Output",
+                .ModelText = INI_Model,
+                .ContextStatusText = If(NoText, "No text selected", "The current mail selection will be used as context"),
+                .LastPrompt = My.Settings.LastPrompt,
+                .PromptLibraryEnabled = INI_PromptLib,
+                .Context = _context,
+                .CallerId = "outlook.freestyle",
+                .PersistedState = freestylePromptUiState,
+                .RestorePersistedState = False
+            }
+
+            ' =============================================================
+            ' OUTPUT PREFIXES
+            '
+            ' Covers:
+            ' ClipboardPrefix
+            ' ClipboardPrefix2
+            ' NewDocPrefix
+            ' MarkupPrefix
+            ' MarkupPrefixApprove
+            ' MarkupPrefixWord
+            ' MarkupPrefixDiffW
+            ' MarkupPrefixDiff
+            ' InPlacePrefix
+            ' =============================================================
+
+            Dim modeDefault As New SLib.FreestylePromptMode() With {
+                .Id = "default",
+                .Text = "Configured default",
+                .Prefix = System.String.Empty,
+                .ManualSyntax = DefaultPrefix,
+                .IsDefault = True
+            }
+
+            promptOptions.Modes.Add(modeDefault)
+
+
+            Dim modeWindow As New SLib.FreestylePromptMode() With {
+                .Id = "window",
+                .Text = "Separate window / clipboard",
+                .Prefix = ClipboardPrefix,
+                .ManualSyntax = ClipboardPrefix & " / " & ClipboardPrefix2
+            }
+
+            modeWindow.Prefixes.Add(ClipboardPrefix)
+            modeWindow.Prefixes.Add(ClipboardPrefix2)
+
+            promptOptions.Modes.Add(modeWindow)
+
+
+            Dim modeNewDocument As New SLib.FreestylePromptMode() With {
+                .Id = "new-document",
+                .Text = "New Word document",
+                .Prefix = NewDocPrefix,
+                .ManualSyntax = NewDocPrefix
+            }
+
+            modeNewDocument.Prefixes.Add(NewDocPrefix)
+
+            promptOptions.Modes.Add(modeNewDocument)
+
+
+            Dim modeReplace As New SLib.FreestylePromptMode() With {
+                .Id = "replace",
+                .Text = "Replace selection",
+                .Prefix = InPlacePrefix,
+                .ManualSyntax = InPlacePrefix,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Replacing text requires a selection in the e-mail."
+            }
+
+            modeReplace.Prefixes.Add(InPlacePrefix)
+
+            promptOptions.Modes.Add(modeReplace)
+
+
+            Dim modeMarkup As New SLib.FreestylePromptMode() With {
+                .Id = "markup",
+                .Text = "Track changes - configured method",
+                .Prefix = MarkupPrefix,
+                .ManualSyntax = MarkupPrefix,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Markup requires a text selection in the e-mail."
+            }
+
+            modeMarkup.Prefixes.Add(MarkupPrefix)
+
+            promptOptions.Modes.Add(modeMarkup)
+
+
+            Dim modeMarkupReview As New SLib.FreestylePromptMode() With {
+                .Id = "markup-review",
+                .Text = "Review changes",
+                .Prefix = MarkupPrefixApprove,
+                .ManualSyntax = MarkupPrefixApprove,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Review changes requires a text selection in the e-mail."
+            }
+
+            modeMarkupReview.Prefixes.Add(MarkupPrefixApprove)
+
+            promptOptions.Modes.Add(modeMarkupReview)
+
+
+            Dim modeMarkupWord As New SLib.FreestylePromptMode() With {
+                .Id = "markup-word",
+                .Text = "Track changes - Word compare",
+                .Prefix = MarkupPrefixWord,
+                .ManualSyntax = MarkupPrefixWord,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Word comparison requires a text selection in the e-mail."
+            }
+
+            modeMarkupWord.Prefixes.Add(MarkupPrefixWord)
+
+            promptOptions.Modes.Add(modeMarkupWord)
+
+
+            Dim modeMarkupDiffWindow As New SLib.FreestylePromptMode() With {
+                .Id = "markup-diff-window",
+                .Text = "Track changes - diff window",
+                .Prefix = MarkupPrefixDiffW,
+                .ManualSyntax = MarkupPrefixDiffW,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Diff comparison requires a text selection in the e-mail."
+            }
+
+            modeMarkupDiffWindow.Prefixes.Add(MarkupPrefixDiffW)
+
+            promptOptions.Modes.Add(modeMarkupDiffWindow)
+
+
+            Dim modeMarkupDiff As New SLib.FreestylePromptMode() With {
+                .Id = "markup-diff",
+                .Text = "Track changes - inline diff",
+                .Prefix = MarkupPrefixDiff,
+                .ManualSyntax = MarkupPrefixDiff,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Diff markup requires a text selection in the e-mail."
+            }
+
+            modeMarkupDiff.Prefixes.Add(MarkupPrefixDiff)
+
+            promptOptions.Modes.Add(modeMarkupDiff)
+
+            If Not NoText Then
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-window",
+                        .Text = "Run (window)",
+                        .Description = "Run immediately with the separate window / clipboard prefix.",
+                        .Prefix = ClipboardPrefix
+                    })
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-newdoc",
+                        .Text = "Run (new doc)",
+                        .Description = "Run immediately with the new-Word-document prefix.",
+                        .Prefix = NewDocPrefix
+                    })
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-markup",
+                        .Text = "Run (markup)",
+                        .Description = "Run immediately with the configured markup prefix.",
+                        .Prefix = MarkupPrefix
+                    })
+
+            Else
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-window",
+                        .Text = "Run (window)",
+                        .Description = "Run immediately with the separate window / clipboard prefix.",
+                        .Prefix = ClipboardPrefix
+                    })
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-newdoc",
+                        .Text = "Run (new doc)",
+                        .Description = "Run immediately with the new-Word-document prefix.",
+                        .Prefix = NewDocPrefix
+                    })
+
+            End If
+
+            ' =============================================================
+            ' ADD CONTEXT
+            '
+            ' Covers:
+            ' AddmailTrigger
+            ' ObjectTrigger2
+            ' =============================================================
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "mail-chain",
+                    .Text = "Full mail chain",
+                    .Description = "Include the full surrounding e-mail chain as additional context (" & AddmailTrigger & ").",
+                    .InsertText = AddmailTrigger
+                })
+
+            If DoFileObject Then
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "clipboard-object",
+                        .Text = "Clipboard object",
+                        .Description = "Include clipboard content as an LLM object (" & ObjectTrigger2 & ").",
+                        .InsertText = ObjectTrigger2
+                    })
+
+            End If
+
+            ' =============================================================
+            ' FORMATTING
+            '
+            ' Covers:
+            ' NoFormatTrigger
+            ' NoFormatTrigger2
+            ' KFTrigger
+            ' KFTrigger2
+            ' KPFTrigger
+            ' KPFTrigger2
+            ' =============================================================
+
+            Dim formattingSection As New SLib.FreestylePromptSection() With {
+                .Id = "formatting",
+                .Caption = "Formatting"
+            }
+
+            formattingSection.Options.Add(
+                New SLib.FreestylePromptToggleOption() With {
+                    .Id = "no-format",
+                    .Text = "Do not preserve formatting",
+                    .Trigger = NoFormatTrigger2,
+                    .ManualSyntax = NoFormatTrigger & " / " & NoFormatTrigger2,
+                    .Description = "Override the formatting default and do not preserve the selected text's formatting."
+                })
+
+            formattingSection.Options.Add(
+                New SLib.FreestylePromptToggleOption() With {
+                    .Id = "keep-format",
+                    .Text = "Keep character formatting",
+                    .Trigger = KFTrigger2,
+                    .ManualSyntax = KFTrigger & " / " & KFTrigger2,
+                    .Description = "Preserve character-level formatting where supported."
+                })
+
+            formattingSection.Options.Add(
+                New SLib.FreestylePromptToggleOption() With {
+                    .Id = "keep-paragraph-format",
+                    .Text = "Keep paragraph formatting",
+                    .Trigger = KPFTrigger2,
+                    .ManualSyntax = KPFTrigger & " / " & KPFTrigger2,
+                    .Description = "Preserve paragraph-level formatting where supported."
+                })
+
+            promptOptions.Sections.Add(formattingSection)
+
+            ' =============================================================
+            ' PROCESSING
+            '
+            ' Covers:
+            ' MyStyleTrigger
+            ' =============================================================
+
+            Dim processingSection As New SLib.FreestylePromptSection() With {
+                .Id = "processing",
+                .Caption = "Processing"
+            }
+
+            If Not System.String.IsNullOrWhiteSpace(INI_MyStylePath) Then
+
+                processingSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "mystyle",
+                        .Text = "Apply MyStyle",
+                        .Trigger = MyStyleTrigger,
+                        .ManualSyntax = MyStyleTrigger,
+                        .Description = "Apply one of your Outlook MyStyle prompts."
+                    })
+
+            End If
+
+            If processingSection.Options.Count > 0 Then
+                promptOptions.Sections.Add(processingSection)
+            End If
+
+            ' =============================================================
+            ' MODELS
+            '
+            ' Covers:
+            ' SecondAPICode
+            ' =============================================================
+
+            If INI_SecondAPI Then
+
+                Dim modelSection As New SLib.FreestylePromptSection() With {
+                    .Id = "models",
+                    .Caption = "Models"
+                }
+
+                Dim secondModelText As System.String
+
+                If System.String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                    secondModelText = "Use secondary model"
+                Else
+                    secondModelText = "Choose alternate model"
+                End If
+
+                modelSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "second-api",
+                        .Text = secondModelText,
+                        .Trigger = SecondAPICode,
+                        .ManualSyntax = SecondAPICode,
+                        .Description = If(System.String.IsNullOrWhiteSpace(INI_AlternateModelPath), "Use the configured secondary model (" & INI_Model_2 & ").", "Open the configured alternate-model selector before running.")
+                    })
+
+                promptOptions.Sections.Add(modelSection)
+
+            End If
+
+            ' =============================================================
+            ' SHOW
+            ' =============================================================
+
+            Dim promptResult As SLib.FreestylePromptResult = SLib.ShowFreestylePromptForm(promptOptions)
+
+            If promptResult Is Nothing OrElse Not promptResult.Accepted Then
+                Exit Sub
+            End If
+
+            Try
+                My.Settings.Item("FreestylePromptUiState") = promptResult.PersistedState
+                My.Settings.Save()
+            Catch
+                ' non-critical
+            End Try
+
+            OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
 
             If String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt <> "ESC" AndAlso INI_PromptLib Then
 
@@ -1899,7 +2207,8 @@ Partial Public Class ThisAddIn
 
                 Dim reviewed As String = Nothing
                 Using dlg As New ReviewChangesDialog(textToProcess, reviewSuggested)
-                    If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                    Dim __safeDialogOwner2209 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner2209 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner2209), dlg.ShowDialog()) <> System.Windows.Forms.DialogResult.OK Then
                         Return
                     End If
                     reviewed = dlg.ReviewedText
@@ -2429,6 +2738,7 @@ Partial Public Class ThisAddIn
                         {"Timeout", "Timeout of {model}"},
                         {"Temperature_2", "Temperature of {model2}"},
                         {"Timeout_2", "Timeout of {model2}"},
+                        {"RestrictedModelAccessCode", "Restricted model access code(s)"},
                         {"DoubleS", "Convert '" & ChrW(223) & "' to 'ss'"},
                         {"Clean", "Clean the LLM response"},
                         {"NoEmDash", "Convert em to en dash"},
@@ -2467,6 +2777,7 @@ Partial Public Class ThisAddIn
                         {"Timeout", "In milliseconds"},
                         {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},
                         {"Timeout_2", "In milliseconds"},
+                        {"RestrictedModelAccessCode", "Optional personal access code list for restricted alternate models. Use commas or semicolons to separate multiple codes. A restricted model is only shown when one stored code matches the model's 'RestrictedAccess' value."},
                         {"DoubleS", "For Switzerland"},
                         {"Clean", "To remove double-spaces and hidden markers that may have been inserted by the LLM"},
                         {"NoEmDash", "This will convert long dashes typically generated by LLMs but that are not commonly used (thus suggesting that the text has been AI generated)"},
@@ -2499,7 +2810,15 @@ Partial Public Class ThisAddIn
                         {"KnowledgeStoreBackgroundIndexingWindow", "Optional local-time processing window for background indexing. Leave empty to allow any time. Examples: '22:00-06:00' (only at night), 'allow:22:00-06:00;12:00-13:00', 'deny:08:00-18:00'."}
                 }
 
+        Dim hadToolingLogOverrideBefore As Boolean = HasToolingLogWindowOverride()
+        Dim toolingLogSettingBefore As Boolean = GetEffectiveToolingLogWindowSetting()
+
+        ApplyEffectiveToolingLogWindowSettingToContext()
         ShowSettingsWindow(Settings, SettingsTips)
+
+        If hadToolingLogOverrideBefore OrElse _context.INI_ToolingLogWindow <> toolingLogSettingBefore Then
+            SetToolingLogWindowOverride(_context.INI_ToolingLogWindow)
+        End If
 
         Globals.Ribbons.Ribbon1.UpdateRibbon()
         Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()

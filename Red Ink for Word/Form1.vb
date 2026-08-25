@@ -3,192 +3,25 @@
 
 ' =============================================================================
 ' File: Form1.vb
-' PURPOSE
-'   Interactive chat assistant UI (Inky) embedded in Microsoft Word.
-'   Provides conversational interface to LLM with optional document manipulation
-'   commands and Markdown-rendered responses.
+' Purpose:
+'   Main interactive Inky chat window for Word. It gathers user/document context,
+'   maintains the conversation, invokes configured models/tooling when enabled and
+'   presents or applies results back to the Word host.
 '
-' =============================================================================
-' ARCHITECTURE OVERVIEW
-' =============================================================================
-'
-' UI Components
-'   • Primary Controls:
-'     - txtChatHistory:  Plain text transcript (hidden when HTML active)
-'     - txtUserInput:    Multiline user input box
-'     - wbChat:          WebBrowser control for Markdown-rendered HTML chat
-'     - lblInstructions: Usage instructions displayed at top
-'
-'   • Buttons:
-'     - btnSend:             Submit user message to LLM
-'     - btnCopy:             Copy entire conversation to clipboard
-'     - btnCopyLastAnswer:   Copy most recent assistant response
-'     - btnClear:            Clear conversation history
-'     - btnSwitchModel:      Toggle between primary/secondary/alternate models
-'     - btnTools:            Select which tools are available for the chat session
-'     - btnExit:             Close chat window (saves state)
-'
-'   • Checkboxes (User Configuration):
-'     - chkIncludeDocText:    Include complete active document content
-'     - chkIncludeSelection:  Include current selection or cursor context
-'     - chkIncludeOtherDocs:  Include all other open Word documents
-'     - chkPermitCommands:    Allow LLM to execute write operations
-'     - chkEnableTooling:     Enable tool calling loop (when model supports tools)
-'     - chkShowToolingLog:    Show/hide the tooling log window during tool runs
-'     - Passed to ExecuteToolingLoop via hideLogWindow:=Not chkShowToolingLog.Checked
-'     - Set from INI_ToolingLogWindow on first session load; not persisted
-'     - chkStayOnTop:         Toggle always-on-top window behavior
-'     - chkConvertMarkdown:   Apply Markdown formatting to inserted text
-'
-' Prompt Construction Pipeline
-'   1. System Prompt Assembly:
-'      - Base template from SharedContext.SP_ChatWord()
-'      - User language interpolation ({UserLanguage})
-'      - Assistant name and current timestamp
-'      - Conditional capability declarations:
-'        * "You have access to the user's active document" (if chkIncludeDocText)
-'        * "You have access to a selection..." (if chkIncludeSelection)
-'        * "You also have access to all other open Word documents" (if chkIncludeOtherDocs)
-'      - Command permission block (SP_Add_ChatWord_Commands or SP_Add_Chat_NoCommands)
-'
-'   2. User Prompt Construction:
-'      - Active document text (if enabled, extracted in Final view mode)
-'      - Selection text or cursor context (25 chars before/after with "[cursor is here]" marker)
-'      - Other open documents (via GatherSelectedDocuments with <DOCUMENTn> tags)
-'      - User's current message
-'      - Recent conversation history (trimmed to INI_ChatCap limit)
-'
-'   3. Context Enrichment:
-'      - Comments/bubbles extracted via BubblesExtract (when available)
-'      - Revision view temporarily set to wdRevisionsViewFinal (excludes deleted content)
-'      - Document names included for multi-document context
-'
-' Model Selection System
-'   • Primary Model:  Default model from INI_Model
-'   • Secondary API:  Optional second model (INI_SecondAPI / INI_Model_2)
-'   • Alternate Model: User-selectable from external INI file (INI_AlternateModelPath)
-'
-'   Model Switching Behavior:
-'     - btnSwitchModel toggles between available models
-'     - Alternate model selection uses ShowModelSelection dialog
-'     - Configuration snapshot/restore pattern preserves global context integrity
-'     - Secondary/alternate models disable document-related checkboxes (UpdateDocumentCheckboxesState)
-'     - CallLlmWithSelectedModelAsync handles temporary config application
-'
-' Tooling (Optional)
-'   • Tool selection:
-'     - btnTools opens SelectToolsForSession dialog
-'     - _selectedToolsForChat caches selected tool set per chat session
-'
-'   • Tool calling loop:
-'     - When chkEnableTooling is checked and current model supports tools,
-'       ExecuteToolingLoop is used instead of a direct LLM() call.
-'
-'   • Tooling log window:
-'     - chkShowToolingLog toggles visibility of the tooling log while tools run.
-'     - Passed to ExecuteToolingLoop via hideLogWindow:=Not chkShowToolingLog.Checked
-'     - Persisted to My.Settings.ChatShowToolingLog
-'
-'   • ToolTrigger "(t)" - One-Shot Tooling Model:
-'     - Users can type "(t)" anywhere in their prompt to invoke a one-shot tooling request.
-'     - The "(t)" token is always stripped from the prompt before it is sent to the LLM.
-'     - On detection, btnSend_Click loads the model marked ToolDefaultModel=True from the
-'       alternate models INI via GetSpecialTaskModel, without permanently altering context.
-'     - The ToolDefaultModel config is captured (snapshot), the global context is immediately
-'       restored, and the snapshot is applied temporarily only for the ExecuteToolingLoop call.
-'     - If no tools are currently selected, the tool selection dialog is shown (forceDialog).
-'     - Validation checks: INI path configured, ToolDefaultModel found, model supports tooling,
-'       tools selected. Each failure reports an error to chat and restores the original prompt
-'       (prefixed with "(t)") into txtUserInput so the user can resend without retyping.
-'     - Availability is checked at form load via HasToolingCapableSpecialTaskModel(). When 
-'       available, lblInstructions includes "(t)" usage hint.
-'     - The one-shot model is never persisted — after the request completes, subsequent messages
-'       use whatever model was previously active (primary/secondary/alternate).
-'
-' Bot Command Execution (Optional)
-'   Pattern: [#verb: @@argument1@@ §§argument2§§ #]
-'
-'   Supported Commands:
-'     • find:          Locate and highlight text (ExecuteFindCommand)
-'     • replace:       Replace or delete text with tracked changes (ExecuteReplaceCommand)
-'     • insert:        Insert at current cursor position (ExecuteInsertCommand)
-'     • insertbefore:  Insert text before anchor text (ExecuteInsertBeforeAfterCommand)
-'     • insertafter:   Insert text after anchor text (ExecuteInsertBeforeAfterCommand)
-'     • addcomment:    Add Word comment to matched text (ExecuteAddComment)
-'     • replycomment:  Add threaded reply to existing comment (ExecuteReplyToCommentByIdToken)
-'
-'   Command Processing:
-'     - ParseCommands extracts commands using tempered-greedy regex
-'     - Supports single @ or § inside arguments (only @@ or §§ terminate)
-'     - Second argument optional (empty for delete operations)
-'     - DecodeParagraphMarks normalizes line breaks (vbCr, vbLf, \r\n, ^p, ^13)
-'     - FindLongTextInChunks ensures reliability with large documents
-'     - MarkerChar (U+E000) prevents infinite loops during replacement
-'     - TOC ranges skipped to prevent corruption (TocEndIfInside)
-'     - ESC key aborts execution mid-operation
-'     - Failed commands reported to chat with error formatting
-'
-' Markdown & HTML Rendering
-'   • Markdig Pipeline:
-'     - UseAdvancedExtensions (tables, footnotes, task lists, etc.)
-'     - UseEmojiAndSmiley (emoji shortcode support)
-'     - UseSoftlineBreakAsHardlineBreak (single newlines render as <br>)
-'
-'   • User Messages:  HTML-encoded plain text with line breaks preserved
-'   • Assistant Messages: Markdown → HTML conversion with link instrumentation
-'   • Link Handling: All anchor tags instrumented to open in default browser
-'     via BrowserBridge COM-visible class (prevents internal WebBrowser navigation)
-'   • Thinking Indicator: Temporary DOM element removed on LLM response
-'   • Inline Optimization: Single-paragraph responses rendered as <span> instead of <div>
-'
-' Persistence & State Management
-'   • Chat History:
-'     - Plain text:  My.Settings.LastChatHistory (fallback, trimmed to INI_ChatCap)
-'     - HTML:        My.Settings.LastChatHistoryHtml (preferred, preserves formatting)
-'     - In-memory:   _chatHistory list of (Role, Content) tuples
-'
-'   • Window State:
-'     - Position:    My.Settings.FormLocation
-'     - Size:        My.Settings.FormSize
-'     - RestoreBounds saved when minimized/maximized
-'
-'   • User Preferences:
-'     - IncludeDocument, IncludeSelection, DoCommands
-'     - ChatEnableTooling (persisted), ChatShowToolingLog (session-only, from INI)
-'     - NotAlwaysOnTop, ConvertMarkdownInChat
-'     - All persisted via My.Settings except ChatShowToolingLog
-'
-' Safety & COM Interop
-'   • Word View Management:
-'     - Temporarily switches to wdRevisionsViewFinal for clean text extraction
-'     - ShowRevisionsAndComments toggled to hide markups during extraction
-'     - Original view settings restored in Finally blocks
-'
-'   • Selection Restoration:
-'     - Original selection bounds saved before command execution
-'     - Restored with boundary guards (Math.Min/Max to prevent out-of-range)
-'     - Main story enforcement prevents caret stuck in headers/footnotes/comments
-'
-'   • Abort Mechanism:
-'     - GetAsyncKeyState polls ESC key during long operations
-'     - InfoBox provides user feedback during command execution
-'
-'   • COM Object Cleanup:
-'     - Marshal.ReleaseComObject called on Word.Application references
-'     - Try-Catch-Finally patterns ensure cleanup on errors
-'
-' Dependencies
-'   • SharedLibrary.SharedContext:  INI configuration and model settings
-'   • SharedLibrary.SharedMethods:  LLM invocation, UI helpers, model selection
-'   • Markdig:                      Markdown parsing and HTML generation
-'   • Microsoft.Office.Interop.Word: Word automation and COM interop
-'   • HtmlAgilityPack:              HTML parsing (ConvertHtmlToPlainText)
-'
-' Known Limitations
-'   • WebBrowser control uses legacy IE rendering engine (no modern CSS support)
-'   • FindLongTextInChunks may fail on complex table structures
-'   • TOC detection relies on TablesOfContents collection (custom TOCs may be missed)
-'   • Comment ID tokens must match specific formats (see TryParseCommentIdToken)
+' Architecture / Function:
+'   - WinForms/WebBrowser chat UI with persisted window/session preferences and bounded
+'     conversation history; UI controls determine which Word context is exposed.
+'   - Prompt assembly keeps system instructions, selected document/selection/other-document
+'     context and user turns separate before calling the shared LLM bridge.
+'   - Optional tooling delegates to ExecuteToolingLoop and the shared agent/tool registry;
+'     this form selects capabilities/permissions but does not implement tool semantics.
+'   - Document-changing commands are routed back through ThisAddIn command/processing
+'     methods so Word COM work remains on the host/UI boundary.
+'   - Model switching, Markdown/HTML rendering, clipboard/export and status/error handling
+'     are UI responsibilities; cross-host policy remains in SharedLibrary.
+' Security:
+'   - External link launches from rendered chat content route through the shared
+'     SafeOpenExternalLink boundary (absolute HTTP/HTTPS/MAILTO only).
 '
 ' =============================================================================
 
@@ -341,6 +174,7 @@ Public Class frmAIChat
     ''' After the first call to UpdateToolingControlsState, mid-session user toggles are preserved.
     ''' </summary>
     Private _toolingControlsInitialized As Boolean = False
+    Private _suppressToolingLogPreferenceSync As Boolean = False
 
     ' =========================================================================
     ' UI Controls - Buttons
@@ -401,6 +235,14 @@ Public Class frmAIChat
         .AutoSize = True,
         .Checked = My.Settings.IncludeDocument
     }
+
+    ''' <summary>
+    ''' Maximum active-document size (in characters) allowed when "Include document"
+    ''' is checked. Documents above this threshold cause btnSend_Click to abort early
+    ''' and automatically uncheck chkIncludeDocText, avoiding UI stalls on very large
+    ''' documents. Empirically, roughly 2,000,000 characters still performs well.
+    ''' </summary>
+    Private Const MaxIncludeDocumentCharacters As Integer = 2000000
 
     ''' <summary>
     ''' When checked, includes current selection or cursor context in prompt.
@@ -568,6 +410,51 @@ Public Class frmAIChat
     ''' Plain text content only (Markdown stripped for commands/persistence).
     ''' </summary>
     Private _chatHistory As New List(Of (Role As String, Content As String))
+
+    ' Loaded external context (attached via the Load Context button)
+    Private Const PersistedContextFileName As String = "redink-wordchatcontext.txt"
+
+    ' Loaded semantic index (attached via the Load Context button, either a document OR an index).
+    Private Const PersistedIndexFileName As String = "redink-wordchatindex.index.txt"
+
+    Private Shared ReadOnly SupportedContextExtensions As String() = {
+        ".txt", ".rtf", ".doc", ".docx", ".xlsx", ".pdf", ".pptx", ".msg", ".eml",
+        ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md",
+        ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+    }
+
+    Private Shared _cachedLoadedContextContent As String = Nothing
+    Private Shared _cachedLoadedContextPath As String = Nothing
+
+    Private _loadedContextContent As String = Nothing
+    Private _loadedContextPath As String = Nothing
+
+    ''' <summary>
+    ''' Individual documents currently loaded as external context. Each entry keeps its
+    ''' file name and extracted content so documents can be added or removed individually.
+    ''' The combined _loadedContextContent is rebuilt from this list, always wrapping every
+    ''' document in numbered &lt;documentN name="…"&gt; tags.
+    ''' </summary>
+    Private _loadedContextDocuments As New List(Of ContextDocument)
+
+    Private _isUpdatingPersistContextCheckbox As Boolean = False
+    Private ReadOnly _contextToolTip As New System.Windows.Forms.ToolTip()
+
+    ' Loaded semantic index state (either a document context or an index is active, never both).
+    Private _loadedIndexSourcePath As String = Nothing
+    Private _loadedIndexDisplayName As String = Nothing
+    Private Shared _cachedLoadedIndexPath As String = Nothing
+    Private Shared _cachedLoadedIndexDisplayName As String = Nothing
+    Private _semanticConversationState As New SharedMethods.SemanticSearchConversationState()
+
+    ''' <summary>Button: attach or remove external context material (files or a folder).</summary>
+    Private WithEvents btnLoadContext As New Button() With {.Text = "Load Context", .AutoSize = True}
+
+    ''' <summary>Checkbox: persist the loaded context or index to durable AppData storage.</summary>
+    Private WithEvents chkPersistContext As New System.Windows.Forms.CheckBox() With {
+        .Text = "Persist context",
+        .AutoSize = True
+    }
 
     ' =========================================================================
     ' Constructor
@@ -765,6 +652,7 @@ Public Class frmAIChat
         ' Populate button panel
         pnlButtons.Padding = New Padding(0, 2, 8, 12)
         pnlButtons.Controls.Add(btnSend)
+        pnlButtons.Controls.Add(btnLoadContext)
         pnlButtons.Controls.Add(btnCopyLastAnswer)
         pnlButtons.Controls.Add(btnCopy)
         pnlButtons.Controls.Add(btnClear)
@@ -791,6 +679,7 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkIncludeOtherDocs)
         pnlCheckboxes.Controls.Add(chkInkyMemory)
         pnlCheckboxes.Controls.Add(lnkEditMemory)
+        pnlCheckboxes.Controls.Add(chkPersistContext)
 
         ' Attach event handlers to buttons
         AddHandler btnCopy.Click, AddressOf btnCopy_Click
@@ -809,12 +698,27 @@ Public Class frmAIChat
         AddHandler chkIncludeOtherDocs.Click, AddressOf chkIncludeOtherDocs_Click
         AddHandler chkInkyMemory.Click, AddressOf chkInkyMemory_Click
         AddHandler lnkEditMemory.LinkClicked, AddressOf lnkEditMemory_LinkClicked
+        AddHandler btnLoadContext.Click, AddressOf btnLoadContext_Click
+        AddHandler chkPersistContext.CheckedChanged, AddressOf chkPersistContext_CheckedChanged
 
         ' Attach event handlers for tooling controls
         AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
         AddHandler chkAdvancedTools.Click, AddressOf chkAdvancedTools_Click
         AddHandler chkShowToolingLog.CheckedChanged, AddressOf chkShowToolingLog_CheckedChanged
         AddHandler btnTools.Click, AddressOf btnTools_Click
+
+        _isUpdatingPersistContextCheckbox = True
+        Try : chkPersistContext.Checked = My.Settings.ChatPersistContext : Catch : chkPersistContext.Checked = False : End Try
+        _isUpdatingPersistContextCheckbox = False
+        UpdatePersistContextTooltip()
+
+        If Not chkPersistContext.Checked Then
+            DeletePersistedContextFile(False)
+            DeletePersistedIndexFile(False)
+        End If
+
+        Await RestoreLoadedContextAsync()
+        UpdateLoadContextButtonText()
 
         RestoreAlternateModelFromSettings()
 
@@ -1008,6 +912,14 @@ Public Class frmAIChat
                 End If
             End If
 
+            ' Tell the model that per-message index excerpts may be supplied when an index is loaded.
+            If HasLoadedIndex() Then
+                SystemPrompt &= vbLf &
+                    "The user has loaded a searchable index. The most relevant original excerpts for the current message " &
+                    "will be provided inside <INDEX_EXCERPTS> if available. Answer also based on those excerpts, preserve exact terms, " &
+                    "and never expose internal source IDs."
+            End If
+
             If My.Settings.DoCommands AndAlso (chkIncludeDocText.Checked Or chkIncludeselection.Checked) Then
                 Dim activeDocumentNameForCommands As String = ""
 
@@ -1052,6 +964,28 @@ Public Class frmAIChat
             End If
 
             ' ──────────────────────────────────────────────────────────────
+            ' STEP 3b: Guard Against Oversized Documents (Include Document)
+            ' ──────────────────────────────────────────────────────────────
+            ' Including the entire document for very large files can stall Word.
+            ' Read the character count cheaply via Content.End (O(1), no text
+            ' extraction), and if it exceeds the threshold, automatically uncheck
+            ' "Include document" and abort with a message before any expensive work.
+            If chkIncludeDocText.Checked Then
+                Dim documentCharacterCount As Integer = 0
+                Try
+                    documentCharacterCount = appGuard.ActiveDocument.Content.End
+                Catch
+                    documentCharacterCount = 0
+                End Try
+
+                If documentCharacterCount > MaxIncludeDocumentCharacters Then
+                    chkIncludeDocText.Checked = False
+                    ShowCustomMessageBox($"The active document is too large to include in full ({documentCharacterCount:N0} characters, limit is {MaxIncludeDocumentCharacters:N0}). ""Include document"" has been unchecked. Please use 'Include selection' instead after selecting the relevant portion of the document, and try again.")
+                    Return
+                End If
+            End If
+
+            ' ──────────────────────────────────────────────────────────────
             ' STEP 4: Gather Document Context
             ' ──────────────────────────────────────────────────────────────
             ' Extract active document text (if checkbox enabled)
@@ -1087,6 +1021,18 @@ Public Class frmAIChat
             ' Add active document content if present
             If Not String.IsNullOrEmpty(docText) Then
                 fullPrompt.AppendLine($"The user's document has the name '{Globals.ThisAddIn.Application.ActiveDocument.Name}' and has the following content: '{docText}'")
+
+                ' Provide read-only automatic paragraph/margin numbering for the active document.
+                ' Word does not expose these generated numbers via Content.Text, so we supply them
+                ' separately (numbered elements only; bullets are excluded by the builder).
+                Try
+                    Dim activeNumbering As String = ThisAddIn.BuildParagraphNumberingContext(Globals.ThisAddIn.Application.ActiveDocument.Content)
+                    If Not String.IsNullOrEmpty(activeNumbering) Then
+                        fullPrompt.AppendLine($"The following is read-only automatic numbering information for the document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' (it is not part of the editable text shown above; the references to TEXTTOPROCESS below mean this document):")
+                        fullPrompt.AppendLine(activeNumbering)
+                    End If
+                Catch
+                End Try
             End If
 
             ' Add selection or cursor context if present
@@ -1106,17 +1052,47 @@ Public Class frmAIChat
 
                 fullPrompt.AppendLine("The following are the other open Word documents (each enclosed in <DOCUMENTn> tags, including their name so you can refer to them):")
                 fullPrompt.AppendLine(otherDocs)
+
+                ' Provide read-only automatic numbering for each other open Word document.
+                ' Mirrors the de-duplication/exclusion logic of GatherSelectedDocuments so the
+                ' numbering aligns with the documents whose content was just added above.
+                Try
+                    Dim appDocs As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                    Dim activeDoc As Microsoft.Office.Interop.Word.Document = Nothing
+                    Try
+                        activeDoc = appDocs.ActiveDocument
+                    Catch
+                        activeDoc = Nothing
+                    End Try
+
+                    Dim seenDocs As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                    For Each d As Microsoft.Office.Interop.Word.Document In appDocs.Documents
+                        If activeDoc IsNot Nothing AndAlso Object.ReferenceEquals(d, activeDoc) Then Continue For
+
+                        Dim key As String = If(Not String.IsNullOrEmpty(d.FullName), d.FullName, d.Name)
+                        If seenDocs.Contains(key) Then Continue For
+                        seenDocs.Add(key)
+
+                        Dim otherNumbering As String = ThisAddIn.BuildParagraphNumberingContext(d.Content)
+                        If Not String.IsNullOrEmpty(otherNumbering) Then
+                            fullPrompt.AppendLine($"The following is read-only automatic numbering information for the open document '{d.Name}' (it is not part of the editable text; the references to TEXTTOPROCESS below mean this document):")
+                            fullPrompt.AppendLine(otherNumbering)
+                        End If
+                    Next
+                Catch
+                End Try
             End If
 
-            ' Add current user message
-            fullPrompt.AppendLine("User: " & userPrompt)
+            ' Add loaded external context if present
+            If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
+                fullPrompt.AppendLine("The user also loaded the following external context material:")
+                fullPrompt.AppendLine("<LOADED_CONTEXT>")
+                fullPrompt.AppendLine(_loadedContextContent)
+                fullPrompt.AppendLine("</LOADED_CONTEXT>")
+            End If
 
-            ' Add conversation history for context
-            fullPrompt.AppendLine($"The conversation so far (not including any previously added text document):{vbLf}{conversationSoFar}")
-
-            ' Debug logging
-            Debug.WriteLine("Document=" & Globals.ThisAddIn.Application.ActiveDocument.Name)
-            Debug.WriteLine(fullPrompt.ToString())
+            ' The user message and conversation history are appended after any index retrieval
+            ' (see Step 8b) so the index excerpts can be inserted before them.
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 6: Update UI - Show User Message
@@ -1199,7 +1175,7 @@ Public Class frmAIChat
                     Try
                         Me.TopMost = False
                         _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(
-                            forceDialog:=toolTriggerDetected)
+                            forceDialog:=False)
                     Finally
                         Me.TopMost = wasTopMost
                     End Try
@@ -1235,6 +1211,40 @@ Public Class frmAIChat
                                 End Sub)
 
             ' ──────────────────────────────────────────────────────────────
+            ' STEP 8b: Query the loaded semantic index (if any) with live progress
+            ' ──────────────────────────────────────────────────────────────
+            If HasLoadedIndex() Then
+                Dim indexExcerpt As String = Await BuildIndexExcerptAsync(
+                    userPrompt,
+                    conversationSoFar,
+                    Sub(status)
+                        Try
+                            Me.BeginInvoke(New MethodInvoker(Sub() UpdateAssistantThinking(status)))
+                        Catch
+                        End Try
+                    End Sub)
+
+                If Not String.IsNullOrWhiteSpace(indexExcerpt) Then
+                    fullPrompt.AppendLine("The user loaded a searchable index. The following are the most relevant original excerpts for this message:")
+                    fullPrompt.AppendLine("<INDEX_EXCERPTS>")
+                    fullPrompt.AppendLine(indexExcerpt)
+                    fullPrompt.AppendLine("</INDEX_EXCERPTS>")
+                End If
+
+                ' Restore the neutral thinking caption once retrieval progress is complete.
+                Await UpdateUIAsync(Sub()
+                                        UpdateAssistantThinking(If(useTooling,
+                                            $"Thinking (using {Globals.ThisAddIn.ToolFriendlyName.ToLower})...",
+                                            "Thinking..."))
+                                    End Sub)
+            End If
+
+            ' Finalize the prompt with the current user message and conversation history.
+            fullPrompt.AppendLine("User: " & userPrompt)
+            fullPrompt.AppendLine($"The conversation so far (not including any previously added text document):{vbLf}{conversationSoFar}")
+            Debug.WriteLine(fullPrompt.ToString())
+
+            ' ──────────────────────────────────────────────────────────────
             ' STEP 9: Call LLM Asynchronously (with optional Tooling)
             ' ──────────────────────────────────────────────────────────────
 
@@ -1267,7 +1277,13 @@ Public Class frmAIChat
                         If(toolTriggerDetected, True, _useSecondApi),
                         fullPromptOverride:=fullPrompt.ToString(),
                         hideSplash:=True,
-                        hideLogWindow:=Not chkShowToolingLog.Checked)
+                        hideLogWindow:=Not chkShowToolingLog.Checked,
+                        progressSink:=Sub(status)
+                                          Try
+                                              Me.BeginInvoke(New MethodInvoker(Sub() UpdateAssistantThinking(status)))
+                                          Catch
+                                          End Try
+                                      End Sub)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -1281,6 +1297,25 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             ' STEP 9: Process LLM Response
             ' ──────────────────────────────────────────────────────────────
+
+            ' Guard against an empty/whitespace response so the chat does not
+            ' render a bare "Inky:" line. Surface it as an error and restore
+            ' the prompt so the user can resend without retyping.
+            If String.IsNullOrWhiteSpace(aiResponseOriginal) Then
+                Await UpdateUIAsync(Sub()
+                                        RemoveLastLineFromChatHistory()
+                                        RemoveAssistantThinking()
+                                        ReportCommandExecutionError("The model returned an empty response. Please try again.")
+                                        txtUserInput.Text = promptToRestore
+                                    End Sub)
+
+                ' Remove the user turn we optimistically added so history stays consistent.
+                If _chatHistory.Count > 0 AndAlso _chatHistory(_chatHistory.Count - 1).Role = "user" Then
+                    _chatHistory.RemoveAt(_chatHistory.Count - 1)
+                End If
+
+                Return
+            End If
 
             ' Process InkyMemory updates from LLM response (if enabled)
             If chkInkyMemory.Checked Then
@@ -1641,8 +1676,12 @@ Public Class frmAIChat
     ''' and by the (t) trigger path, even when the checkbox is disabled.
     ''' </summary>
     Private Sub chkShowToolingLog_CheckedChanged(sender As Object, e As EventArgs)
-        ' No persistence — checkbox state lives only for the current session.
-        ' Value is read at call time via: hideLogWindow:=Not chkShowToolingLog.Checked
+        If _suppressToolingLogPreferenceSync Then
+            Return
+        End If
+
+        Globals.ThisAddIn.SetToolingLogWindowOverride(chkShowToolingLog.Checked)
+        Globals.ThisAddIn.RefreshOpenToolingLogPreferenceWindows()
     End Sub
 
 
@@ -1849,6 +1888,26 @@ Public Class frmAIChat
     ''' When only ToolDefaultModel is available, checking "Enable tooling" means:
     ''' treat every request as if it had "(t)".
     ''' </remarks>
+    Public Sub SyncToolingLogPreferenceFromSettings()
+        If Me.IsDisposed Then
+            Return
+        End If
+
+        Dim effectiveSetting As Boolean = Globals.ThisAddIn.GetEffectiveToolingLogWindowSetting()
+
+        If chkShowToolingLog.Checked = effectiveSetting Then
+            Return
+        End If
+
+        _suppressToolingLogPreferenceSync = True
+
+        Try
+            chkShowToolingLog.Checked = effectiveSetting
+        Finally
+            _suppressToolingLogPreferenceSync = False
+        End Try
+    End Sub
+
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
 
@@ -1875,7 +1934,7 @@ Public Class frmAIChat
         End If
 
         If Not _toolingControlsInitialized Then
-            chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+            SyncToolingLogPreferenceFromSettings()
             _toolingControlsInitialized = True
         End If
     End Sub
@@ -2369,13 +2428,18 @@ Public Class frmAIChat
             Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
             Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
 
+            ' Capture the specific window we modify so the Finally restore targets the SAME
+            ' window even if the active window changes meanwhile (e.g., a document-management
+            ' add-in switches documents during the operation).
+            Dim targetWindow As Word.Window = wordApp.ActiveWindow
+
             ' Save current view settings for restoration
-            Dim originalRevisionsView As Word.WdRevisionsView = wordApp.ActiveWindow.View.RevisionsView
-            Dim originalShowRevisions As Boolean = wordApp.ActiveWindow.View.ShowRevisionsAndComments
+            Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
+            Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
 
             Try
                 ' Temporarily show only final text (no tracked deletions)
-                With wordApp.ActiveWindow.View
+                With targetWindow.View
                     .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                     .ShowRevisionsAndComments = False
                 End With
@@ -2399,11 +2463,15 @@ Public Class frmAIChat
                 Return baseText
 
             Finally
-                ' Restore original view settings
-                With wordApp.ActiveWindow.View
-                    .RevisionsView = originalRevisionsView
-                    .ShowRevisionsAndComments = originalShowRevisions
-                End With
+                ' Restore original view settings on the SAME window we changed
+                Try
+                    With targetWindow.View
+                        .RevisionsView = originalRevisionsView
+                        .ShowRevisionsAndComments = originalShowRevisions
+                    End With
+                Catch
+                    ' Best-effort restore; the window may no longer be valid
+                End Try
             End Try
 
         Catch ex As Exception
@@ -2439,13 +2507,17 @@ Public Class frmAIChat
                 chkIncludeselection.Checked = False
                 Return ""
             Else
+                ' Capture the specific window we modify so the Finally restore targets the SAME
+                ' window even if the active window changes meanwhile.
+                Dim targetWindow As Word.Window = wordApp.ActiveWindow
+
                 ' Save current view settings
-                Dim originalRevisionsView As Word.WdRevisionsView = wordApp.ActiveWindow.View.RevisionsView
-                Dim originalShowRevisions As Boolean = wordApp.ActiveWindow.View.ShowRevisionsAndComments
+                Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
+                Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
 
                 Try
                     ' Temporarily show only final text
-                    With wordApp.ActiveWindow.View
+                    With targetWindow.View
                         .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                         .ShowRevisionsAndComments = False
                     End With
@@ -2469,11 +2541,15 @@ Public Class frmAIChat
                     Return baseText
 
                 Finally
-                    ' Restore original view settings
-                    With wordApp.ActiveWindow.View
-                        .RevisionsView = originalRevisionsView
-                        .ShowRevisionsAndComments = originalShowRevisions
-                    End With
+                    ' Restore original view settings on the SAME window we changed
+                    Try
+                        With targetWindow.View
+                            .RevisionsView = originalRevisionsView
+                            .ShowRevisionsAndComments = originalShowRevisions
+                        End With
+                    Catch
+                        ' Best-effort restore; the window may no longer be valid
+                    End Try
                 End Try
             End If
         Catch ex As Exception
@@ -2723,7 +2799,7 @@ Public Class frmAIChat
                 End If
             Next
         Catch ex As Exception
-            MsgBox("Error in ParseCommands: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ParseCommands: " & ex.Message)
         End Try
         Return results
     End Function
@@ -2760,7 +2836,7 @@ Public Class frmAIChat
             output = collapseRegex.Replace(output, Environment.NewLine)
 
         Catch ex As System.Exception
-            MsgBox("Error in RemoveCommands: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in RemoveCommands: " & ex.Message)
         End Try
 
         Return output
@@ -2972,15 +3048,18 @@ Public Class frmAIChat
             Debug.WriteLine($"Warning: Could not reset to main story: {ex.Message}")
         End Try
 
+        wordApp = Globals.ThisAddIn.Application
+
         If commands.Count() > 0 Then
             Globals.ThisAddIn.Application.Activate()
             System.Threading.Thread.Sleep(200)
 
-            wordApp = Globals.ThisAddIn.Application
-            With wordApp.ActiveWindow.View
-                .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
-                .ShowRevisionsAndComments = False
-            End With
+            If wordApp IsNot Nothing AndAlso wordApp.ActiveWindow IsNot Nothing Then
+                With wordApp.ActiveWindow.View
+                    .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
+                    .ShowRevisionsAndComments = False
+                End With
+            End If
         End If
 
         For Each pc In commands
@@ -3270,7 +3349,7 @@ Public Class frmAIChat
                 End With
             End Using
         Catch ex As Exception
-            MsgBox("Error in ReplaceSpecialCharacter: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ReplaceSpecialCharacter: " & ex.Message)
         Finally
             doc.TrackRevisions = trackChangesEnabled
         End Try
@@ -3698,7 +3777,7 @@ Public Class frmAIChat
             Return found
 
         Catch ex As System.Exception
-            MsgBox("Error in ExecuteFindCommand: " & ex.Message)
+            ShowCustomMessageBox("Error in ExecuteFindCommand: " & ex.Message)
             Return False
 
         Finally
@@ -4175,7 +4254,7 @@ Public Class frmAIChat
 #If DEBUG Then
             System.Diagnostics.Debugger.Break()
 #End If
-            MsgBox("Error in ExecuteReplaceCommand: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ExecuteReplaceCommand: " & ex.Message)
             Return False
 
         Finally
@@ -4481,7 +4560,7 @@ Public Class frmAIChat
             Debug.WriteLine("Stacktrace: " & ex.StackTrace)
             System.Diagnostics.Debugger.Break()
 #End If
-            MsgBox("Error in ExecuteInsertBeforeAfterCommand: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ExecuteInsertBeforeAfterCommand: " & ex.Message)
             Return False
 
         Finally
@@ -4531,7 +4610,7 @@ Public Class frmAIChat
 
             Return True
         Catch ex As Exception
-            MsgBox("Error in ExecuteInsertCommand: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ExecuteInsertCommand: " & ex.Message)
             Return False
         Finally
             doc.TrackRevisions = trackChangesEnabled
@@ -4592,10 +4671,7 @@ Partial Public Class frmAIChat
     ''' Configured with advanced extensions (tables, footnotes), emoji support, and soft line breaks.
     ''' </summary>
     Private ReadOnly _mdPipeline As MarkdownPipeline =
-        New MarkdownPipelineBuilder().
-            UseAdvancedExtensions().
-            UseSoftlineBreakAsHardlineBreak().
-            Build()
+        Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(True)
 
     ''' <summary>DOM ID of current "Thinking..." placeholder for removal when LLM responds</summary>
     Private _lastThinkingId As String = Nothing
@@ -4647,7 +4723,7 @@ Partial Public Class frmAIChat
             ' Only handle external protocols
             Dim lower = href.Trim().ToLowerInvariant()
             If lower.StartsWith("http://") OrElse lower.StartsWith("https://") OrElse lower.StartsWith("mailto:") Then
-                Process.Start(New ProcessStartInfo(href) With {.UseShellExecute = True})
+                Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(href)
                 ' Prevent internal WebBrowser navigation
                 If e IsNot Nothing Then
                     e.ReturnValue = False
@@ -4677,12 +4753,1221 @@ Partial Public Class frmAIChat
         Public Sub OpenLink(url As String)
             Try
                 If String.IsNullOrEmpty(url) Then Return
-                Process.Start(New ProcessStartInfo(url) With {.UseShellExecute = True})
+                Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(url)
             Catch
                 ' Silently ignore errors
             End Try
         End Sub
     End Class
+
+    ' =========================================================================
+    ' Load Context and File Handling
+    ' =========================================================================
+
+    ''' <summary>
+    ''' Represents a single loaded context document (its file name and extracted text).
+    ''' </summary>
+    Private Structure ContextDocument
+        Public ReadOnly FileName As String
+        Public ReadOnly Content As String
+        Public ReadOnly SourcePath As String
+
+        Public Sub New(
+            fileName As String,
+            content As String,
+            Optional sourcePath As String = Nothing)
+
+            Me.FileName = fileName
+            Me.Content = content
+            Me.SourcePath = sourcePath
+        End Sub
+    End Structure
+
+    ' ChatContextPath is retained as the single My.Settings field for source metadata.
+    ' New values are stored as a compact, versioned manifest. A value without this
+    ' header is treated as the legacy single file/folder path.
+    Private Const ContextSourceManifestHeader As String = "RICTX1"
+
+    Private Function EncodeContextManifestValue(value As String) As String
+        If value Is Nothing Then value = ""
+        Return System.Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value))
+    End Function
+
+    Private Function DecodeContextManifestValue(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return ""
+
+        Try
+            Return System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(value))
+        Catch ex As System.Exception
+            Return ""
+        End Try
+    End Function
+
+    Private Sub ReadContextSourceManifest(
+        ByRef documentPaths As System.Collections.Generic.List(Of String),
+        ByRef indexPath As String,
+        ByRef legacyPath As String)
+
+        documentPaths = New System.Collections.Generic.List(Of String)()
+        indexPath = ""
+        legacyPath = ""
+
+        Dim raw As String = ""
+
+        Try
+            raw = My.Settings.ChatContextPath
+        Catch
+            Return
+        End Try
+
+        If String.IsNullOrWhiteSpace(raw) Then Return
+
+        Dim normalized As String =
+            raw.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+
+        If normalized = ContextSourceManifestHeader OrElse
+           normalized.StartsWith(ContextSourceManifestHeader & vbLf, System.StringComparison.Ordinal) Then
+
+            Dim lines As String() =
+                normalized.Split(
+                    New String() {vbLf},
+                    System.StringSplitOptions.RemoveEmptyEntries)
+
+            For i As Integer = 1 To lines.Length - 1
+                Dim line As String = lines(i)
+                Dim separatorIndex As Integer = line.IndexOf("|"c)
+
+                If separatorIndex <= 0 OrElse separatorIndex >= line.Length - 1 Then
+                    Continue For
+                End If
+
+                Dim recordType As String = line.Substring(0, separatorIndex)
+                Dim decodedPath As String =
+                    DecodeContextManifestValue(line.Substring(separatorIndex + 1))
+
+                If String.IsNullOrWhiteSpace(decodedPath) Then Continue For
+
+                If String.Equals(recordType, "D", System.StringComparison.Ordinal) Then
+                    documentPaths.Add(decodedPath)
+                ElseIf String.Equals(recordType, "I", System.StringComparison.Ordinal) Then
+                    indexPath = decodedPath
+                End If
+            Next
+
+            Return
+        End If
+
+        ' Backward compatibility: older builds stored one raw path directly.
+        legacyPath = raw
+    End Sub
+
+    Private Sub ApplySavedSourcePathsToLoadedDocuments(
+        documentPaths As System.Collections.Generic.List(Of String),
+        legacyPath As String)
+
+        If _loadedContextDocuments Is Nothing OrElse
+           _loadedContextDocuments.Count = 0 Then
+            Return
+        End If
+
+        If documentPaths IsNot Nothing AndAlso
+           documentPaths.Count = _loadedContextDocuments.Count Then
+
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                Dim oldDocument As ContextDocument = _loadedContextDocuments(i)
+
+                _loadedContextDocuments(i) =
+                    New ContextDocument(
+                        oldDocument.FileName,
+                        oldDocument.Content,
+                        documentPaths(i))
+            Next
+
+            Return
+        End If
+
+        ' Migrate an old single-file ChatContextPath where possible.
+        If Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.File.Exists(legacyPath) AndAlso
+           _loadedContextDocuments.Count = 1 Then
+
+            Dim oldDocument As ContextDocument = _loadedContextDocuments(0)
+
+            _loadedContextDocuments(0) =
+                New ContextDocument(
+                    oldDocument.FileName,
+                    oldDocument.Content,
+                    legacyPath)
+
+            Return
+        End If
+
+        ' Migrate an old directory ChatContextPath by matching the stored file names.
+        If Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.Directory.Exists(legacyPath) Then
+
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                Dim oldDocument As ContextDocument = _loadedContextDocuments(i)
+                Dim candidate As String =
+                    System.IO.Path.Combine(legacyPath, oldDocument.FileName)
+
+                If System.IO.File.Exists(candidate) Then
+                    _loadedContextDocuments(i) =
+                        New ContextDocument(
+                            oldDocument.FileName,
+                            oldDocument.Content,
+                            candidate)
+                End If
+            Next
+        End If
+    End Sub
+
+    Private Sub SaveContextSourceManifest()
+        Dim lines As New System.Collections.Generic.List(Of String) From {
+            ContextSourceManifestHeader
+        }
+
+        If HasLoadedIndex() Then
+            If Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath) Then
+                lines.Add(
+                    "I|" &
+                    EncodeContextManifestValue(_loadedIndexSourcePath))
+            End If
+        Else
+            For Each doc As ContextDocument In _loadedContextDocuments
+                If Not String.IsNullOrWhiteSpace(doc.SourcePath) Then
+                    lines.Add(
+                        "D|" &
+                        EncodeContextManifestValue(doc.SourcePath))
+                End If
+            Next
+        End If
+
+        Try
+            My.Settings.ChatContextPath =
+                String.Join(vbLf, lines.ToArray())
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub ClearContextSourceManifest()
+        Try
+            My.Settings.ChatContextPath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Async Function RestoreLoadedDocumentsFromSourcePathsAsync(
+        documentPaths As System.Collections.Generic.List(Of String)
+    ) As System.Threading.Tasks.Task(Of Integer)
+
+        If documentPaths Is Nothing OrElse documentPaths.Count = 0 Then
+            Return 0
+        End If
+
+        Dim restoredDocuments As New System.Collections.Generic.List(Of ContextDocument)
+
+        For Each sourcePath As String In documentPaths
+            If String.IsNullOrWhiteSpace(sourcePath) OrElse
+               Not System.IO.File.Exists(sourcePath) Then
+                Continue For
+            End If
+
+            Dim result =
+                Await LoadSingleContextFileAsync(
+                    sourcePath,
+                    False)
+
+            If String.IsNullOrWhiteSpace(result.Content) OrElse
+               result.Content.StartsWith(
+                   "Error:",
+                   System.StringComparison.OrdinalIgnoreCase) Then
+                Continue For
+            End If
+
+            restoredDocuments.Add(
+                New ContextDocument(
+                    System.IO.Path.GetFileName(sourcePath),
+                    result.Content,
+                    sourcePath))
+        Next
+
+        If restoredDocuments.Count = 0 Then Return 0
+
+        _loadedContextDocuments = restoredDocuments
+        RebuildLoadedContextContent()
+        _loadedContextPath = "(Saved Context Sources)"
+        _cachedLoadedContextPath = _loadedContextPath
+
+        Return restoredDocuments.Count
+    End Function
+
+    ''' <summary>
+    ''' Rebuilds the combined loaded-context string from the individual documents,
+    ''' always wrapping each in a numbered &lt;documentN name="…"&gt; tag.
+    ''' </summary>
+    Private Sub RebuildLoadedContextContent()
+        If _loadedContextDocuments Is Nothing OrElse _loadedContextDocuments.Count = 0 Then
+            _loadedContextContent = Nothing
+            _cachedLoadedContextContent = Nothing
+            Return
+        End If
+
+        Dim sb As New System.Text.StringBuilder()
+        Dim counter As Integer = 0
+        For Each doc In _loadedContextDocuments
+            counter += 1
+            sb.Append($"<document{counter} name=""{doc.FileName}"">")
+            sb.Append(doc.Content)
+            sb.Append($"</document{counter}>")
+        Next
+
+        _loadedContextContent = sb.ToString()
+        _cachedLoadedContextContent = _loadedContextContent
+    End Sub
+
+    ''' <summary>
+    ''' Populates _loadedContextDocuments by parsing the numbered document tags from
+    ''' _loadedContextContent. Legacy untagged content is treated as a single document.
+    ''' </summary>
+    Private Sub ParseLoadedContextDocuments()
+        _loadedContextDocuments.Clear()
+        If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
+
+        Dim matches = System.Text.RegularExpressions.Regex.Matches(
+            _loadedContextContent,
+            "<document(\d+) name=""(?<name>[^""]*)"">(?<body>[\s\S]*?)</document\1>")
+
+        If matches.Count = 0 Then
+            ' Legacy single-document content without tags: keep it as one entry.
+            _loadedContextDocuments.Add(New ContextDocument("(Loaded Context)", _loadedContextContent))
+            RebuildLoadedContextContent()
+            Return
+        End If
+
+        For Each m As System.Text.RegularExpressions.Match In matches
+            _loadedContextDocuments.Add(New ContextDocument(m.Groups("name").Value, m.Groups("body").Value))
+        Next
+    End Sub
+
+    Private Sub AppendSystemMessage(message As String)
+        Try
+            AppendToChatHistory(Environment.NewLine & "[System] " & message & Environment.NewLine)
+        Catch
+        End Try
+        Try
+            AppendHtml($"<div class='msg system'><span class='content'>{HtmlEncode("[System] " & message)}</span></div>")
+            PersistChatHtml()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Gets the Red Ink storage directory in the user's application data folder
+    ''' (same location convention used by DiscussInky).
+    ''' </summary>
+    Private Function GetRedInkStorageDirectoryPath() As String
+        Dim storageDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "redink")
+        Try
+            If Not System.IO.Directory.Exists(storageDir) Then
+                System.IO.Directory.CreateDirectory(storageDir)
+            End If
+        Catch
+        End Try
+        Return storageDir
+    End Function
+
+    Private Function GetPersistedContextFilePath() As String
+        Return System.IO.Path.Combine(GetRedInkStorageDirectoryPath(), PersistedContextFileName)
+    End Function
+
+    Private Function GetContextDragDropFilter() As String
+        If ThisAddIn.INI_AllowLegacyDocFiles Then
+            Return "Supported Context Files|*.txt;*.rtf;*.doc;*.docx;*.xlsx;*.pdf;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
+        End If
+
+        Return "Supported Context Files|*.txt;*.rtf;*.docx;*.xlsx;*.pdf;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
+    End Function
+
+
+    Private Sub UpdatePersistContextTooltip()
+        If chkPersistContext.Checked Then
+            If HasLoadedIndex() Then
+                _contextToolTip.SetToolTip(chkPersistContext, "Index currently stored in: " & GetPersistedIndexFilePath())
+            Else
+                _contextToolTip.SetToolTip(chkPersistContext, "Currently stored in: " & GetPersistedContextFilePath())
+            End If
+        Else
+            _contextToolTip.SetToolTip(chkPersistContext, "")
+        End If
+    End Sub
+
+    Private Sub DeletePersistedContextFile(showMessage As Boolean)
+        Try
+            Dim persistPath = GetPersistedContextFilePath()
+            If System.IO.File.Exists(persistPath) Then
+                System.IO.File.Delete(persistPath)
+                If showMessage Then
+                    AppendSystemMessage("Persisted context file deleted.")
+                End If
+            End If
+        Catch ex As System.Exception
+            If showMessage Then
+                AppendSystemMessage($"Failed to delete persisted context: {ex.Message}")
+            End If
+        End Try
+    End Sub
+
+    Private Sub PersistLoadedContextToTempFile()
+        If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
+        System.IO.File.WriteAllText(GetPersistedContextFilePath(), _loadedContextContent, System.Text.Encoding.UTF8)
+    End Sub
+
+    ' =========================================================================
+    ' Loaded Semantic Index (either a document context or an index is active)
+    ' =========================================================================
+
+    ''' <summary>Full path of the durably persisted index copy under %AppData%\redink\.</summary>
+    Private Function GetPersistedIndexFilePath() As String
+        Return System.IO.Path.Combine(GetRedInkStorageDirectoryPath(), PersistedIndexFileName)
+    End Function
+
+    ''' <summary>True when a semantic index is currently attached to the session.</summary>
+    Private Function HasLoadedIndex() As Boolean
+        Return Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath) OrElse
+               Not String.IsNullOrWhiteSpace(_loadedIndexDisplayName)
+    End Function
+
+    ''' <summary>
+    ''' Resolves the index file to search: the original source when available, otherwise the
+    ''' durably persisted copy. Returns Nothing when neither is present on disk.
+    ''' </summary>
+    Private Function GetActiveIndexPath() As String
+        If Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath) AndAlso System.IO.File.Exists(_loadedIndexSourcePath) Then
+            Return _loadedIndexSourcePath
+        End If
+
+        Dim persisted As String = GetPersistedIndexFilePath()
+        If System.IO.File.Exists(persisted) Then
+            Return persisted
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>Attaches a semantic index, replacing any loaded document context.</summary>
+    Private Function AttachLoadedIndex(indexPath As String) As Boolean
+        If String.IsNullOrWhiteSpace(indexPath) OrElse Not System.IO.File.Exists(indexPath) Then
+            AppendSystemMessage("The selected index file does not exist.")
+            Return False
+        End If
+
+        ' Loading an index replaces any plain document context (either a document or an index).
+        ClearLoadedContextOnly()
+
+        _loadedIndexSourcePath = indexPath
+        _loadedIndexDisplayName = System.IO.Path.GetFileName(indexPath)
+        _cachedLoadedIndexPath = _loadedIndexSourcePath
+        _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
+        _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
+
+        SaveContextSourceManifest()
+
+        Return True
+    End Function
+
+    ''' <summary>Clears the in-memory document context and its persisted file, leaving the index intact.</summary>
+    Private Sub ClearLoadedContextOnly()
+        _loadedContextContent = Nothing
+        _loadedContextPath = Nothing
+        _cachedLoadedContextContent = Nothing
+        _cachedLoadedContextPath = Nothing
+        _loadedContextDocuments.Clear()
+        DeletePersistedContextFile(False)
+    End Sub
+
+    ''' <summary>Clears the loaded index, its cache, retrieval state, and persisted copy.</summary>
+    Private Sub ClearLoadedIndexOnly()
+        _loadedIndexSourcePath = Nothing
+        _loadedIndexDisplayName = Nothing
+        _cachedLoadedIndexPath = Nothing
+        _cachedLoadedIndexDisplayName = Nothing
+        _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
+        DeletePersistedIndexFile(False)
+    End Sub
+
+    ''' <summary>Deletes the durably persisted index copy under %AppData%\redink\.</summary>
+    Private Sub DeletePersistedIndexFile(showMessage As Boolean)
+        Try
+            Dim persistPath As String = GetPersistedIndexFilePath()
+            If System.IO.File.Exists(persistPath) Then
+                System.IO.File.Delete(persistPath)
+                If showMessage Then
+                    AppendSystemMessage("Persisted index file deleted.")
+                End If
+            End If
+        Catch ex As System.Exception
+            If showMessage Then
+                AppendSystemMessage($"Failed to delete persisted index: {ex.Message}")
+            End If
+        End Try
+    End Sub
+
+    ''' <summary>Copies the active index (exact bytes) into durable %AppData%\redink\ storage.</summary>
+    Private Sub PersistLoadedIndexToAppData()
+        Dim active As String = GetActiveIndexPath()
+        If String.IsNullOrWhiteSpace(active) OrElse Not System.IO.File.Exists(active) Then Return
+
+        Dim persistPath As String = GetPersistedIndexFilePath()
+        If String.Equals(System.IO.Path.GetFullPath(active), System.IO.Path.GetFullPath(persistPath), StringComparison.OrdinalIgnoreCase) Then
+            Return
+        End If
+
+        System.IO.File.Copy(active, persistPath, True)
+    End Sub
+
+    ''' <summary>Offers to persist a newly attached index when persistence is currently off.</summary>
+    Private Sub OfferIndexPersistence()
+        Dim answer = ShowCustomYesNoBox(
+            $"The index '{_loadedIndexDisplayName}' is currently referenced from its original location only. " &
+            "Do you want to persist a copy to durable storage so it is retained across restarts?",
+            "Yes, persist",
+            "No, keep temporary")
+
+        If answer <> 1 Then Return
+
+        _isUpdatingPersistContextCheckbox = True
+        chkPersistContext.Checked = True
+        _isUpdatingPersistContextCheckbox = False
+
+        Try
+            PersistLoadedIndexToAppData()
+            AppendSystemMessage($"Index '{_loadedIndexDisplayName}' persisted to durable storage.")
+        Catch ex As System.Exception
+            AppendSystemMessage($"Failed to persist index: {ex.Message}")
+        End Try
+
+        Try
+            My.Settings.ChatPersistContext = True
+            My.Settings.Save()
+        Catch
+        End Try
+
+        UpdatePersistContextTooltip()
+    End Sub
+
+    ''' <summary>
+    ''' Handles the persist checkbox for the index channel: persists a copy when enabled, or deletes
+    ''' the persisted copy when disabled (falling back to the original source, or warning if gone).
+    ''' </summary>
+    Private Sub HandleIndexPersistenceToggle()
+        Dim persistPath As String = GetPersistedIndexFilePath()
+
+        If chkPersistContext.Checked Then
+            Dim active As String = GetActiveIndexPath()
+            If Not String.IsNullOrWhiteSpace(active) AndAlso System.IO.File.Exists(active) Then
+                Try
+                    PersistLoadedIndexToAppData()
+                    AppendSystemMessage($"Index '{_loadedIndexDisplayName}' persisted to durable storage.")
+                Catch ex As System.Exception
+                    AppendSystemMessage($"Failed to persist index: {ex.Message}")
+                End Try
+            Else
+                AppendSystemMessage("No index available to persist.")
+            End If
+        Else
+            If System.IO.File.Exists(persistPath) Then
+                Dim answer = ShowCustomYesNoBox(
+                    "Do you want to delete the persisted index file? The chatbot will then rely on the original index file, if still available.",
+                    "Yes, delete",
+                    "No, keep it")
+
+                If answer = 1 Then
+                    DeletePersistedIndexFile(True)
+                    If String.IsNullOrWhiteSpace(_loadedIndexSourcePath) OrElse Not System.IO.File.Exists(_loadedIndexSourcePath) Then
+                        _loadedIndexSourcePath = Nothing
+                        _loadedIndexDisplayName = Nothing
+                        _cachedLoadedIndexPath = Nothing
+                        _cachedLoadedIndexDisplayName = Nothing
+                        _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
+
+                        ClearContextSourceManifest()
+
+                        AppendSystemMessage("The original index file is no longer available. The loaded index was removed.")
+                        UpdateLoadContextButtonText()
+                    End If
+                Else
+                    _isUpdatingPersistContextCheckbox = True
+                    chkPersistContext.Checked = True
+                    _isUpdatingPersistContextCheckbox = False
+                    Return
+                End If
+            End If
+        End If
+
+        My.Settings.ChatPersistContext = chkPersistContext.Checked
+        My.Settings.Save()
+        UpdatePersistContextTooltip()
+    End Sub
+
+    ''' <summary>
+    ''' Retrieves the most relevant original excerpts from the loaded index for the current message,
+    ''' reporting per-step progress through the supplied callback (mirrors DiscussInky's behavior).
+    ''' </summary>
+    Private Async Function BuildIndexExcerptAsync(queryText As String,
+                                                  conversation As String,
+                                                  reportStatus As System.Action(Of String)) As Task(Of String)
+        Dim activePath As String = GetActiveIndexPath()
+        If String.IsNullOrWhiteSpace(activePath) OrElse Not System.IO.File.Exists(activePath) Then
+            reportStatus?.Invoke("The loaded index is unavailable.")
+            Return ""
+        End If
+
+        If String.IsNullOrWhiteSpace(queryText) Then Return ""
+
+        reportStatus?.Invoke($"Searching index '{_loadedIndexDisplayName}' ...")
+
+        Try
+            Dim options As New SharedMethods.SemanticSearchRetrievalOptions() With {
+                .SpecialTaskName = "Indexer"
+            }
+
+            Dim retrieval As SharedMethods.SemanticSearchRetrievalResult =
+                Await SharedMethods.RetrieveSemanticSearchAsync(
+                    activePath,
+                    _context,
+                    queryText,
+                    If(conversation, ""),
+                    _semanticConversationState,
+                    options).ConfigureAwait(False)
+
+            If retrieval IsNot Nothing AndAlso
+               retrieval.IsIndexed AndAlso
+               Not String.IsNullOrWhiteSpace(retrieval.ReducedSourceText) Then
+
+                Dim matchCount As Integer =
+                    If(retrieval.SelectedEntryIds IsNot Nothing, retrieval.SelectedEntryIds.Count, 0)
+
+                reportStatus?.Invoke($"Index '{_loadedIndexDisplayName}' — {matchCount:N0} relevant segment(s) found.")
+
+                Dim sb As New StringBuilder()
+                sb.AppendLine($"<document name=""{_loadedIndexDisplayName}"">")
+                sb.AppendLine(retrieval.ReducedSourceText)
+                sb.AppendLine("</document>")
+                Return sb.ToString().TrimEnd()
+            Else
+                reportStatus?.Invoke($"Index '{_loadedIndexDisplayName}' — no relevant material found.")
+                Return ""
+            End If
+        Catch ex As System.Exception
+            reportStatus?.Invoke($"Index retrieval failed: {ex.Message}")
+            Return ""
+        End Try
+    End Function
+
+    Private Async Function LoadSingleContextFileAsync(filePath As String, askUser As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
+        If String.IsNullOrWhiteSpace(filePath) OrElse Not System.IO.File.Exists(filePath) Then
+            Return ("", False)
+        End If
+
+        ' Silent suppresses per-file error boxes; AskUser lets GetFileContentEx handle the OCR prompt itself.
+        Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, True, False, askUser)
+        Return (result.Content, result.PdfMayBeIncomplete)
+    End Function
+
+    Private Async Function LoadContextFromPathAsync(selectedPath As String, interactive As Boolean) As Task(Of (Documents As List(Of ContextDocument), DisplayPath As String, LoadedCount As Integer, Summary As String))
+        Dim isFile As Boolean = System.IO.File.Exists(selectedPath)
+        Dim isDirectory As Boolean = System.IO.Directory.Exists(selectedPath)
+
+        If Not isFile AndAlso Not isDirectory Then
+            Return (New List(Of ContextDocument), "", 0, "Selected path does not exist.")
+        End If
+
+        Dim filesToProcess As New List(Of String)
+        Dim failedFiles As New List(Of String)
+        Dim loadedFiles As New List(Of Tuple(Of String, Integer))
+        Dim pdfsWithPossibleImages As New List(Of String)
+        Dim ignoredCount As Integer = 0
+
+        If isFile Then
+            Dim ext = System.IO.Path.GetExtension(selectedPath).ToLowerInvariant()
+            If Array.IndexOf(SupportedContextExtensions, ext) < 0 Then
+                Return (New List(Of ContextDocument), "", 0, $"The selected file type '{ext}' is not supported for loaded context.")
+            End If
+
+            filesToProcess.Add(selectedPath)
+        Else
+            Dim allFiles = System.IO.Directory.GetFiles(selectedPath, "*.*", System.IO.SearchOption.TopDirectoryOnly)
+
+            For Each f In allFiles
+                Dim ext = System.IO.Path.GetExtension(f).ToLowerInvariant()
+                If Array.IndexOf(SupportedContextExtensions, ext) >= 0 Then
+                    filesToProcess.Add(f)
+                Else
+                    ignoredCount += 1
+                End If
+            Next
+
+            If filesToProcess.Count > 50 Then
+                If interactive Then
+                    Dim truncateAnswer = ShowCustomYesNoBox(
+                        $"The directory contains {filesToProcess.Count} supported files, but the maximum is 50." & vbCrLf & vbCrLf &
+                        "Only the first 50 files will be loaded. Continue?",
+                        "Yes, continue",
+                        "No, abort")
+
+                    If truncateAnswer <> 1 Then
+                        Return (New List(Of ContextDocument), "", 0, "")
+                    End If
+                End If
+
+                filesToProcess = filesToProcess.GetRange(0, 50)
+            ElseIf interactive AndAlso filesToProcess.Count > 10 Then
+                Dim confirmAnswer = ShowCustomYesNoBox(
+                    $"The directory contains {filesToProcess.Count} files to load. Continue?",
+                    "Yes, continue",
+                    "No, abort")
+
+                If confirmAnswer <> 1 Then
+                    Return (New List(Of ContextDocument), "", 0, "")
+                End If
+            End If
+
+            If filesToProcess.Count = 0 Then
+                Return (New List(Of ContextDocument), "", 0, $"No supported files found in directory '{selectedPath}'.")
+            End If
+        End If
+
+        Dim documents As New List(Of ContextDocument)
+
+        For Each filePath In filesToProcess
+            Dim result = Await LoadSingleContextFileAsync(filePath, interactive)
+            Dim content = result.Content
+
+            If result.PdfMayBeIncomplete Then
+                pdfsWithPossibleImages.Add(filePath)
+            End If
+
+            If String.IsNullOrWhiteSpace(content) OrElse content.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                failedFiles.Add(filePath)
+                Continue For
+            End If
+
+            loadedFiles.Add(Tuple.Create(filePath, content.Length))
+            documents.Add(New ContextDocument(System.IO.Path.GetFileName(filePath), content, filePath))
+        Next
+
+        Dim summary As New System.Text.StringBuilder()
+
+        If loadedFiles.Count > 0 Then
+            summary.AppendLine($"Successfully loaded ({loadedFiles.Count} file(s)):")
+            Dim totalChars As Integer = 0
+            For Each item In loadedFiles
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item.Item1)} ({item.Item2:N0} chars)")
+                totalChars += item.Item2
+            Next
+            summary.AppendLine($"  Total: {totalChars:N0} characters")
+            summary.AppendLine()
+        End If
+
+        If failedFiles.Count > 0 Then
+            summary.AppendLine($"Failed to load ({failedFiles.Count} item(s)):")
+            For Each item In failedFiles
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item)}")
+            Next
+            summary.AppendLine()
+        End If
+
+        If pdfsWithPossibleImages.Count > 0 Then
+            summary.AppendLine($"PDFs that may contain images/scans ({pdfsWithPossibleImages.Count} file(s)):")
+            For Each item In pdfsWithPossibleImages
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item)}")
+            Next
+            summary.AppendLine("  (Text extraction may be incomplete because OCR was not performed)")
+            summary.AppendLine()
+        End If
+
+        If ignoredCount > 0 Then
+            summary.AppendLine($"Ignored unsupported files: {ignoredCount}")
+            summary.AppendLine()
+        End If
+
+        Return (
+            documents,
+            If(isFile, selectedPath, selectedPath & " (directory)"),
+            loadedFiles.Count,
+            summary.ToString().TrimEnd()
+        )
+    End Function
+
+    Private Async Function RestoreLoadedContextAsync() As System.Threading.Tasks.Task
+        Dim savedDocumentPaths As System.Collections.Generic.List(Of String) = Nothing
+        Dim savedIndexPath As String = ""
+        Dim legacyPath As String = ""
+
+        ReadContextSourceManifest(
+            savedDocumentPaths,
+            savedIndexPath,
+            legacyPath)
+
+        ' Restore a previously loaded semantic index first (either documents OR an index are active).
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedIndexPath) OrElse
+           Not String.IsNullOrWhiteSpace(_cachedLoadedIndexDisplayName) Then
+
+            _loadedIndexSourcePath = _cachedLoadedIndexPath
+            _loadedIndexDisplayName =
+                If(_cachedLoadedIndexDisplayName, "(Persisted Index)")
+
+            AppendSystemMessage("Index restored from cache.")
+            Return
+        End If
+
+        Dim persistedIndexPath As String = GetPersistedIndexFilePath()
+
+        ' Legacy migration: the old ChatContextPath value may itself be an index.
+        If String.IsNullOrWhiteSpace(savedIndexPath) AndAlso
+           Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.File.Exists(legacyPath) AndAlso
+           SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(legacyPath) Then
+
+            savedIndexPath = legacyPath
+        End If
+
+        Dim savedIndexPathIsIndex As Boolean =
+            Not String.IsNullOrWhiteSpace(savedIndexPath) AndAlso
+            System.IO.File.Exists(savedIndexPath) AndAlso
+            SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(savedIndexPath)
+
+        If chkPersistContext.Checked AndAlso
+           System.IO.File.Exists(persistedIndexPath) Then
+
+            _loadedIndexSourcePath =
+                If(savedIndexPathIsIndex, savedIndexPath, Nothing)
+
+            _loadedIndexDisplayName =
+                If(
+                    Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath),
+                    System.IO.Path.GetFileName(_loadedIndexSourcePath),
+                    "(Persisted Index)")
+
+            _cachedLoadedIndexPath = _loadedIndexSourcePath
+            _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
+
+            SaveContextSourceManifest()
+            AppendSystemMessage("Index restored from persisted storage.")
+            Return
+        End If
+
+        If savedIndexPathIsIndex Then
+            _loadedIndexSourcePath = savedIndexPath
+            _loadedIndexDisplayName =
+                System.IO.Path.GetFileName(savedIndexPath)
+
+            _cachedLoadedIndexPath = _loadedIndexSourcePath
+            _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
+
+            SaveContextSourceManifest()
+            AppendSystemMessage(
+                $"Index restored from saved path: {_loadedIndexDisplayName}.")
+            Return
+        End If
+
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso
+           Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
+
+            _loadedContextContent = _cachedLoadedContextContent
+            _loadedContextPath = _cachedLoadedContextPath
+
+            ParseLoadedContextDocuments()
+            ApplySavedSourcePathsToLoadedDocuments(
+                savedDocumentPaths,
+                legacyPath)
+
+            SaveContextSourceManifest()
+            AppendSystemMessage("Context restored from cache.")
+            Return
+        End If
+
+        If chkPersistContext.Checked Then
+            Dim persistPath As String = GetPersistedContextFilePath()
+
+            If System.IO.File.Exists(persistPath) Then
+                Try
+                    _loadedContextContent =
+                        System.IO.File.ReadAllText(
+                            persistPath,
+                            System.Text.Encoding.UTF8)
+
+                    _loadedContextPath = "(Persisted Context)"
+                    _cachedLoadedContextContent = _loadedContextContent
+                    _cachedLoadedContextPath = _loadedContextPath
+
+                    ParseLoadedContextDocuments()
+                    ApplySavedSourcePathsToLoadedDocuments(
+                        savedDocumentPaths,
+                        legacyPath)
+
+                    SaveContextSourceManifest()
+
+                    AppendSystemMessage(
+                        $"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
+                    Return
+                Catch ex As System.Exception
+                    AppendSystemMessage(
+                        $"Failed to restore persisted context: {ex.Message}")
+                End Try
+            End If
+        End If
+
+        ' With no persisted content, reconstruct the current context from every saved source file.
+        If savedDocumentPaths IsNot Nothing AndAlso
+           savedDocumentPaths.Count > 0 Then
+
+            Dim restoredCount As Integer =
+                Await RestoreLoadedDocumentsFromSourcePathsAsync(
+                    savedDocumentPaths)
+
+            If restoredCount > 0 Then
+                SaveContextSourceManifest()
+
+                If chkPersistContext.Checked Then
+                    Try
+                        PersistLoadedContextToTempFile()
+                    Catch
+                    End Try
+                End If
+
+                AppendSystemMessage(
+                    $"Context restored from saved source list ({restoredCount} document(s)).")
+                Return
+            End If
+        End If
+
+        ' Backward compatibility with the old one-path setting.
+        If String.IsNullOrWhiteSpace(legacyPath) Then Return
+
+        If Not System.IO.File.Exists(legacyPath) AndAlso
+           Not System.IO.Directory.Exists(legacyPath) Then
+
+            ClearContextSourceManifest()
+            Return
+        End If
+
+        Dim restored =
+            Await LoadContextFromPathAsync(
+                legacyPath,
+                False)
+
+        If restored.Documents Is Nothing OrElse
+           restored.Documents.Count = 0 Then
+            Return
+        End If
+
+        _loadedContextDocuments = restored.Documents
+        RebuildLoadedContextContent()
+        _loadedContextPath = restored.DisplayPath
+        _cachedLoadedContextPath = _loadedContextPath
+
+        ' Migrates the old raw ChatContextPath value to the new manifest format.
+        SaveContextSourceManifest()
+
+        If chkPersistContext.Checked Then
+            Try
+                PersistLoadedContextToTempFile()
+            Catch
+            End Try
+        End If
+
+        AppendSystemMessage(
+            $"Context restored from legacy saved path: {System.IO.Path.GetFileName(legacyPath)}.")
+    End Function
+
+    Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
+        If HasLoadedIndex() OrElse (_loadedContextDocuments IsNot Nothing AndAlso _loadedContextDocuments.Count > 0) Then
+            Await ManageLoadedContextAsync()
+        Else
+            Await PromptForLoadedContextAsync()
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Presents a small management dialog for the loaded context, letting the user add
+    ''' documents, remove an individual document, or remove all loaded material.
+    ''' </summary>
+    Private Async Function ManageLoadedContextAsync() As System.Threading.Tasks.Task
+        Const ActionAdd As Integer = -1
+        Const ActionRemoveAll As Integer = -2
+
+        Dim items As New List(Of SharedMethods.SelectionItem)
+        items.Add(New SharedMethods.SelectionItem("Add document(s) …", ActionAdd))
+
+        If HasLoadedIndex() Then
+            items.Add(New SharedMethods.SelectionItem($"Remove loaded index '{_loadedIndexDisplayName}'", ActionRemoveAll))
+        Else
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                ' Document choices use 1-based values so the dialog's cancel result (0) never collides.
+                items.Add(New SharedMethods.SelectionItem(
+                    $"Remove {i + 1} - {_loadedContextDocuments(i).FileName}", i + 1))
+            Next
+            If _loadedContextDocuments.Count > 1 Then
+                items.Add(New SharedMethods.SelectionItem("Remove all documents", ActionRemoveAll))
+            End If
+        End If
+
+        Dim wasTopMost As Boolean = Me.TopMost
+        Dim choice As Integer
+        Try
+            Me.TopMost = False
+            choice = SharedMethods.SelectValue(
+                items,
+                ActionAdd,
+                "Choose what to do with the loaded context:",
+                "Manage Context",
+                Me,
+                "Close",
+                0)
+        Finally
+            Me.TopMost = wasTopMost
+        End Try
+
+        Select Case choice
+            Case 0
+                ' Cancel / Close: no change.
+                Return
+
+            Case ActionAdd
+                If HasLoadedIndex() Then
+                    Dim confirm = ShowCustomYesNoBox(
+                        "Adding documents will replace the currently loaded index. Continue?",
+                        "Yes, add documents",
+                        "No, keep index")
+                    If confirm <> 1 Then Return
+                End If
+                Await PromptForLoadedContextAsync(appendMode:=Not HasLoadedIndex())
+
+            Case ActionRemoveAll
+                RemoveLoadedContext()
+
+            Case Else
+                Dim docIndex As Integer = choice - 1
+                If Not HasLoadedIndex() AndAlso docIndex >= 0 AndAlso docIndex < _loadedContextDocuments.Count Then
+                    RemoveContextDocument(docIndex)
+                End If
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' Removes a single document from the loaded context, rebuilds the combined content,
+    ''' and re-persists the remaining context (or removes everything if none remain).
+    ''' </summary>
+    Private Sub RemoveContextDocument(index As Integer)
+        If index < 0 OrElse index >= _loadedContextDocuments.Count Then Return
+
+        Dim removedName As String = _loadedContextDocuments(index).FileName
+        _loadedContextDocuments.RemoveAt(index)
+
+        If _loadedContextDocuments.Count = 0 Then
+            RemoveLoadedContext()
+            Return
+        End If
+
+        RebuildLoadedContextContent()
+        SaveContextSourceManifest()
+
+        If chkPersistContext.Checked Then
+            Try
+                PersistLoadedContextToTempFile()
+            Catch ex As System.Exception
+                AppendSystemMessage($"Failed to update persisted context: {ex.Message}")
+            End Try
+        End If
+
+        AppendSystemMessage($"Removed document '{removedName}' from context. {_loadedContextDocuments.Count} document(s) remain.")
+        UpdateLoadContextButtonText()
+    End Sub
+
+    ''' <summary>
+    ''' Updates the Load Context button caption to reflect whether external context is loaded.
+    ''' </summary>
+    Private Sub UpdateLoadContextButtonText()
+        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent) AndAlso Not HasLoadedIndex(), "Load Context", "Manage Context")
+    End Sub
+
+    ''' <summary>
+    ''' Removes any loaded external context (in-memory, cache, persisted file, and saved path).
+    ''' </summary>
+    Private Sub RemoveLoadedContext()
+        Dim hadIndex As Boolean = HasLoadedIndex()
+
+        _loadedContextContent = Nothing
+        _loadedContextPath = Nothing
+        _cachedLoadedContextContent = Nothing
+        _cachedLoadedContextPath = Nothing
+        _loadedContextDocuments.Clear()
+        DeletePersistedContextFile(False)
+
+        ' Removing the context also removes any loaded index and its persisted files.
+        ClearLoadedIndexOnly()
+
+        ClearContextSourceManifest()
+
+        AppendSystemMessage(If(hadIndex, "Loaded index removed.", "Loaded context removed."))
+        UpdateLoadContextButtonText()
+    End Sub
+
+    Private Async Function PromptForLoadedContextAsync(Optional appendMode As Boolean = False) As System.Threading.Tasks.Task
+        Try
+            Globals.ThisAddIn.DragDropFormLabel = "... a file or folder you want to use as external context, or click Browse"
+            Globals.ThisAddIn.DragDropFormFilter = GetContextDragDropFilter()
+
+            Dim selectedPath As String = ""
+
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+                Dim __safeDialogOwner5998 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner5998 IsNot Nothing, frm.ShowDialog(__safeDialogOwner5998), frm.ShowDialog()) = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
+
+            Globals.ThisAddIn.DragDropFormLabel = ""
+            Globals.ThisAddIn.DragDropFormFilter = ""
+
+            If String.IsNullOrWhiteSpace(selectedPath) Then
+                Return
+            End If
+
+            ' If the selected file is already a semantic-search index, attach it as an index source
+            ' instead of inlining its bytes (the Word Chatbot uses either a document OR an index).
+            If System.IO.File.Exists(selectedPath) AndAlso
+               SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(selectedPath) Then
+
+                If AttachLoadedIndex(selectedPath) Then
+                    If chkPersistContext.Checked Then
+                        Try
+                            PersistLoadedIndexToAppData()
+                            AppendSystemMessage($"Index '{_loadedIndexDisplayName}' loaded and persisted. It will be searched for each message.")
+                        Catch ex As System.Exception
+                            AppendSystemMessage($"Index '{_loadedIndexDisplayName}' loaded but failed to persist: {ex.Message}")
+                        End Try
+                    Else
+                        AppendSystemMessage($"Index '{_loadedIndexDisplayName}' loaded. It will be searched for each message.")
+                        OfferIndexPersistence()
+                    End If
+                End If
+
+                UpdateLoadContextButtonText()
+                Return
+            End If
+
+            Dim loaded = Await LoadContextFromPathAsync(selectedPath, True)
+
+            Dim hasLoadedDocuments As Boolean = loaded.Documents IsNot Nothing AndAlso loaded.Documents.Count > 0
+
+            If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso Not hasLoadedDocuments Then
+                Return
+            End If
+
+            If Not String.IsNullOrWhiteSpace(loaded.Summary) Then
+                Dim proceedAnswer = ShowCustomYesNoBox(
+                    loaded.Summary & vbCrLf & vbCrLf & "Do you want to use this context?",
+                    "Yes, proceed",
+                    "No, retry")
+
+                If proceedAnswer <> 1 Then
+                    Await PromptForLoadedContextAsync(appendMode)
+                    Return
+                End If
+            End If
+
+            If Not hasLoadedDocuments Then
+                AppendSystemMessage("Failed to load context or all files are empty.")
+                Return
+            End If
+
+            ' Loading a document context replaces any previously loaded index (either a document or an index).
+            ClearLoadedIndexOnly()
+
+            If Not appendMode Then
+                _loadedContextDocuments.Clear()
+            End If
+            _loadedContextDocuments.AddRange(loaded.Documents)
+            RebuildLoadedContextContent()
+            _loadedContextPath = loaded.DisplayPath
+            _cachedLoadedContextPath = _loadedContextPath
+
+            If chkPersistContext.Checked Then
+                Try
+                    PersistLoadedContextToTempFile()
+                    AppendSystemMessage($"Context loaded and persisted ({_loadedContextContent.Length:N0} characters from {loaded.LoadedCount} file(s)).")
+                Catch ex As System.Exception
+                    AppendSystemMessage($"Context loaded ({_loadedContextContent.Length:N0} characters) but failed to persist: {ex.Message}")
+                End Try
+            Else
+                AppendSystemMessage($"Context loaded: {loaded.LoadedCount} file(s), {_loadedContextContent.Length:N0} characters total.")
+            End If
+
+            SaveContextSourceManifest()
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Error loading context: {ex.Message}")
+        Finally
+            Globals.ThisAddIn.DragDropFormLabel = ""
+            Globals.ThisAddIn.DragDropFormFilter = ""
+            UpdateLoadContextButtonText()
+        End Try
+    End Function
+
+    Private Sub chkPersistContext_CheckedChanged(sender As Object, e As EventArgs)
+        If _isUpdatingPersistContextCheckbox Then Return
+
+        ' When an index is loaded, persistence applies to the index file rather than inlined context.
+        If HasLoadedIndex() Then
+            Try
+                HandleIndexPersistenceToggle()
+            Catch ex As System.Exception
+                AppendSystemMessage($"Error handling persist index setting: {ex.Message}")
+            End Try
+            Return
+        End If
+
+        Try
+            Dim persistPath = GetPersistedContextFilePath()
+
+            If chkPersistContext.Checked Then
+                If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) Then
+                    System.IO.File.WriteAllText(persistPath, _cachedLoadedContextContent, System.Text.Encoding.UTF8)
+                    AppendSystemMessage($"Context persisted to durable storage ({_cachedLoadedContextContent.Length:N0} characters).")
+                Else
+                    AppendSystemMessage("No context loaded to persist. Load context first, then check this box.")
+                End If
+            Else
+                If System.IO.File.Exists(persistPath) Then
+                    Dim answer = ShowCustomYesNoBox(
+                        "Do you want to delete the persisted context file? This cannot be undone if you quit Word.",
+                        "Yes, delete",
+                        "No, keep it")
+
+                    If answer = 1 Then
+                        DeletePersistedContextFile(True)
+                    Else
+                        _isUpdatingPersistContextCheckbox = True
+                        chkPersistContext.Checked = True
+                        _isUpdatingPersistContextCheckbox = False
+                        Return
+                    End If
+                End If
+            End If
+
+            My.Settings.ChatPersistContext = chkPersistContext.Checked
+            My.Settings.Save()
+            UpdatePersistContextTooltip()
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Error handling persist context setting: {ex.Message}")
+        End Try
+    End Sub
 
     ' =========================================================================
     ' Persistence
@@ -4743,7 +6028,16 @@ Partial Public Class frmAIChat
                 Dim scheme = e.Url.Scheme.ToLowerInvariant()
                 If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                     e.Cancel = True
-                    Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                    ' Launch outside the browser navigation event to avoid starting a process
+                    ' from within the WebBrowser COM callback (a re-entrancy / crash risk).
+                    Dim urlToOpen As String = e.Url.ToString()
+                    Me.BeginInvoke(Sub()
+                                       Try
+                                           Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(urlToOpen)
+                                       Catch
+                                           ' Silently ignore errors
+                                       End Try
+                                   End Sub)
                 End If
             End If
         Catch
@@ -4761,7 +6055,16 @@ Partial Public Class frmAIChat
             If doc IsNot Nothing AndAlso doc.ActiveElement IsNot Nothing Then
                 Dim href = doc.ActiveElement.GetAttribute("href")
                 If Not String.IsNullOrWhiteSpace(href) Then
-                    Process.Start(New ProcessStartInfo(href) With {.UseShellExecute = True})
+                    ' Launch outside the browser NewWindow event to avoid starting a process
+                    ' from within the WebBrowser COM callback (a re-entrancy / crash risk).
+                    Dim urlToOpen As String = href
+                    Me.BeginInvoke(Sub()
+                                       Try
+                                           Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(urlToOpen)
+                                       Catch
+                                           ' Silently ignore errors
+                                       End Try
+                                   End Sub)
                 End If
             End If
         Catch
@@ -4848,6 +6151,13 @@ function removeById(id) {{
   var el = document.getElementById(id);
   if (!el || !el.parentNode) return;
   el.parentNode.removeChild(el);
+}}
+function setThinking(id, text) {{
+  var el = document.getElementById(id);
+  if (!el) return;
+  var parts = el.getElementsByClassName ? el.getElementsByClassName('content') : null;
+  if (parts && parts.length > 0) {{ parts[0].innerHTML = text; }}
+  window.scrollTo(0, document.body.scrollHeight);
 }}
 </script>
 </head>
@@ -4962,7 +6272,7 @@ function removeById(id) {{
                 Else
                     ' Assistant message: convert Markdown to HTML
                     Dim md = RemoveCommands(content.ToString())
-                    Dim body = Markdown.ToHtml(md, _mdPipeline)
+                    Dim body = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
                     body = InstrumentLinks(body)
                     Dim t = If(body, "").Trim()
 
@@ -5048,6 +6358,21 @@ function removeById(id) {{
     End Sub
 
     ''' <summary>
+    ''' Updates the text of the current "Thinking..." placeholder to show retrieval progress
+    ''' (used while the loaded semantic index is being searched).
+    ''' </summary>
+    Public Sub UpdateAssistantThinking(statusText As String)
+        If String.IsNullOrEmpty(_lastThinkingId) Then Return
+        Try
+            If wbChat IsNot Nothing AndAlso wbChat.Document IsNot Nothing Then
+                wbChat.Document.InvokeScript("setThinking", New Object() {_lastThinkingId, HtmlEncode(statusText)})
+            End If
+        Catch
+            ' Best-effort; ignore errors
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Appends assistant message by converting Markdown to HTML using Markdig.
     ''' Detects single-paragraph responses for inline rendering optimization.
     ''' </summary>
@@ -5058,7 +6383,7 @@ function removeById(id) {{
     ''' </remarks>
     Public Sub AppendAssistantMarkdown(md As String)
         If md Is Nothing Then md = ""
-        Dim body As String = Markdown.ToHtml(md, _mdPipeline)
+        Dim body As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
         body = InstrumentLinks(body)
         Dim t As String = If(body, "").Trim()
 

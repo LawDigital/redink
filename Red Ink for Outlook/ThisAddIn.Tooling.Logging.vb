@@ -4,11 +4,13 @@
 ' =============================================================================
 ' File: ThisAddIn.Tooling.Logging.vb
 ' Purpose: Reduced file-based logger for tooling operations with nested session depth support.
-'          Writes per-run log file with system prompt snapshots, LLM calls, and diagnostic traces.
+'          Writes per-run log file with system prompt snapshots, LLM calls, diagnostic traces,
+'          and optional caller-supplied archive run bundles for unattended AutoPilot runs.
 '
 ' Architecture:
 '  - Session Management:
-'      - StartSession(): Enables logging (when INI_APIDebug=True) and increments _sessionDepth.
+'      - StartSession(): Enables normal diagnostics logging when configured and can additionally
+'        mirror a top-level unattended run to a caller-supplied archive path.
 '          - Tracks nested tooling sessions (prevents sub-agent runs from tearing down parent log).
 '          - WriteHeader(): Creates stable overwrite-per-run log file on Desktop.
 '  - Logging API:
@@ -73,37 +75,158 @@ Partial Public Class ThisAddIn
         ''' <summary>Stable log filename used for the tooling session log (overwritten each run).</summary>
         Private Shared ReadOnly StableLogFileName As String = $"{AN5}_Tooling_Log.txt"
 
+        ''' <summary>Stable filename used for sub-agent return payloads on Desktop (overwritten each run).</summary>
+        Private Shared ReadOnly StableSubAgentLogFileName As String = $"{AN5}_SubAgent_Returns.txt"
+
+        ''' <summary>Whether the current session writes into the local diagnostics folder (per-skill, keep-last-run).</summary>
+        Private Shared _isDiagnosticsMode As Boolean = False
+
+        ''' <summary>Sanitized name of the top-level skill invoked in this run (used for per-skill log filenames).</summary>
+        Private Shared _topLevelSkillSlug As String = Nothing
+
+        ''' <summary>Timestamp of the current diagnostics run (used to build always-present, rolling log filenames).</summary>
+        Private Shared _diagRunStamp As String = Nothing
+
+        ''' <summary>Optional Desktop mirror path so the stable Desktop log keeps updating even in diagnostics mode when APIDebug is on.</summary>
+        Private Shared _desktopMirrorPath As String = Nothing
+
+        ''' <summary>Optional Desktop mirror path for sub-agent returns so the stable Desktop file keeps updating even in diagnostics mode.</summary>
+        Private Shared _desktopSubAgentMirrorPath As String = Nothing
+
+        ''' <summary>Optional per-run archive mirror used by unattended AutoPilot tooling runs.</summary>
+        Private Shared _archiveMirrorPath As String = Nothing
+
+        ''' <summary>Optional companion archive path for full sub-agent returns belonging to the same AutoPilot run.</summary>
+        Private Shared _archiveSubAgentMirrorPath As String = Nothing
+
+        ''' <summary>Whether the caller-supplied AutoPilot archive is the primary/only log target.</summary>
+        Private Shared _archivePrimaryMode As Boolean = False
+
         ''' <summary>Nested tooling-session depth. Prevents sub-agent runs from tearing down the parent log session.</summary>
         Private Shared _sessionDepth As Integer = 0
 
         ''' <summary>
-        ''' Starts a tooling log session and writes the log header.
-        ''' Logging is enabled only when <c>INI_APIDebug</c> is <c>True</c>.
+        ''' Starts a tooling log session and writes the log header. A top-level caller may additionally
+        ''' provide an archive path. Nested/sub-agent sessions automatically remain in the same log.
         ''' </summary>
-        Public Shared Sub StartSession()
+        ''' <param name="archiveLogPath">Optional absolute archive file path for this top-level run.</param>
+        Public Shared Sub StartSession(Optional archiveLogPath As String = Nothing)
             SyncLock _lock
-                Dim shouldEnable As Boolean = INI_APIDebug
-                If Not shouldEnable Then Return
-
-                _isEnabled = True
-                _sessionDepth += 1
-
-                If _started AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then
+                ' A nested tooling loop must join an already-active parent session even when
+                ' APIDebug/SkillAuthor is off and the nested caller did not repeat the archive path.
+                If _started AndAlso _isEnabled AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then
+                    _sessionDepth += 1
                     WriteLine("STEP", $"Nested tooling session started (depth={_sessionDepth})")
                     Return
                 End If
 
-                Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                _logPath = Path.Combine(desktopPath, StableLogFileName)
+                Dim authorActive As Boolean = SharedLibrary.Agents.SkillAuthorMode.IsActive
+                Dim requestedArchivePath As String = If(archiveLogPath, "").Trim()
+                Dim archiveRequested As Boolean = Not String.IsNullOrWhiteSpace(requestedArchivePath)
+                Dim shouldEnable As Boolean = INI_APIDebug OrElse authorActive OrElse archiveRequested
+                If Not shouldEnable Then Return
+
+                _isEnabled = True
+                _sessionDepth = 1
+                _archiveMirrorPath = Nothing
+                _archiveSubAgentMirrorPath = Nothing
+                _archivePrimaryMode = False
+
+                If archiveRequested Then
+                    Try
+                        requestedArchivePath = Path.GetFullPath(requestedArchivePath)
+                        Dim archiveDirectory As String = Path.GetDirectoryName(requestedArchivePath)
+                        If String.IsNullOrWhiteSpace(archiveDirectory) Then
+                            Throw New System.ArgumentException("The tooling archive path must include a directory.", NameOf(archiveLogPath))
+                        End If
+                        If Not Directory.Exists(archiveDirectory) Then Directory.CreateDirectory(archiveDirectory)
+                        _archiveSubAgentMirrorPath = BuildArchiveSubAgentPath(requestedArchivePath)
+                    Catch
+                        requestedArchivePath = ""
+                        archiveRequested = False
+                        _archiveSubAgentMirrorPath = Nothing
+                    End Try
+                End If
+
+                ' Choose the normal diagnostics/Desktop target. The AutoPilot archive becomes
+                ' the primary target only when no normal diagnostics target is active; otherwise
+                ' it is an additional mirror so existing logging behavior is unchanged.
+                Dim baseDir As String = Nothing
+                _isDiagnosticsMode = False
+
+                If authorActive Then
+                    Dim localRoot As String = SharedLibrary.Agents.AgentResources.ConfiguredLocalPath
+                    If Not String.IsNullOrWhiteSpace(localRoot) Then
+                        Try
+                            Dim diagDir As String = Path.Combine(localRoot, "diagnostics")
+                            If Not Directory.Exists(diagDir) Then Directory.CreateDirectory(diagDir)
+                            baseDir = diagDir
+                            _isDiagnosticsMode = True
+                        Catch
+                            baseDir = Nothing
+                        End Try
+                    End If
+                End If
+
+                If baseDir Is Nothing AndAlso INI_APIDebug Then
+                    baseDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                End If
+
+                _topLevelSkillSlug = Nothing
+                _desktopMirrorPath = Nothing
+                _desktopSubAgentMirrorPath = Nothing
+
+                If baseDir Is Nothing Then
+                    If Not archiveRequested Then
+                        _isEnabled = False
+                        _sessionDepth = 0
+                        Return
+                    End If
+                    _diagRunStamp = Nothing
+                    _logPath = requestedArchivePath
+                    _archivePrimaryMode = True
+                ElseIf _isDiagnosticsMode Then
+                    _diagRunStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss")
+                    _logPath = Path.Combine(baseDir, $"{AN5}_Tooling_Log__{_diagRunStamp}.txt")
+
+                    If INI_APIDebug Then
+                        Try
+                            Dim desktopDir As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                            _desktopMirrorPath = Path.Combine(desktopDir, StableLogFileName)
+                            _desktopSubAgentMirrorPath = Path.Combine(desktopDir, StableSubAgentLogFileName)
+                        Catch
+                            _desktopMirrorPath = Nothing
+                            _desktopSubAgentMirrorPath = Nothing
+                        End Try
+                    End If
+
+                    If archiveRequested AndAlso
+                       Not String.Equals(_logPath, requestedArchivePath, StringComparison.OrdinalIgnoreCase) Then
+                        _archiveMirrorPath = requestedArchivePath
+                    End If
+                Else
+                    _diagRunStamp = Nothing
+                    _logPath = Path.Combine(baseDir, StableLogFileName)
+                    If archiveRequested AndAlso
+                       Not String.Equals(_logPath, requestedArchivePath, StringComparison.OrdinalIgnoreCase) Then
+                        _archiveMirrorPath = requestedArchivePath
+                    End If
+                End If
 
                 Try
                     WriteHeader()
                     _started = True
-                Catch ex As Exception
+                Catch ex As System.Exception
                     _isEnabled = False
                     _started = False
                     _logPath = Nothing
                     _sessionDepth = 0
+                    _isDiagnosticsMode = False
+                    _desktopMirrorPath = Nothing
+                    _desktopSubAgentMirrorPath = Nothing
+                    _archiveMirrorPath = Nothing
+                    _archiveSubAgentMirrorPath = Nothing
+                    _archivePrimaryMode = False
                 End Try
             End SyncLock
         End Sub
@@ -117,11 +240,28 @@ Partial Public Class ThisAddIn
             header.AppendLine($"{AN} - Tooling Log")
             header.AppendLine($"Started: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
             header.AppendLine($"Version: {Version}")
-            header.AppendLine($"File: {StableLogFileName} (overwritten each run)")
+            header.AppendLine($"Primary file: {Path.GetFileName(_logPath)}")
+            If Not String.IsNullOrWhiteSpace(_desktopMirrorPath) Then
+                header.AppendLine($"Desktop mirror: {Path.GetFileName(_desktopMirrorPath)} (overwritten each run)")
+            ElseIf String.Equals(Path.GetFileName(_logPath), StableLogFileName, StringComparison.OrdinalIgnoreCase) Then
+                header.AppendLine($"File: {StableLogFileName} (overwritten each run)")
+            End If
             header.AppendLine("=" & New String("="c, 78))
             header.AppendLine()
 
             File.WriteAllText(_logPath, header.ToString())
+            If Not String.IsNullOrWhiteSpace(_desktopMirrorPath) Then
+                Try
+                    File.WriteAllText(_desktopMirrorPath, header.ToString())
+                Catch
+                End Try
+            End If
+            If Not String.IsNullOrWhiteSpace(_archiveMirrorPath) Then
+                Try
+                    File.WriteAllText(_archiveMirrorPath, header.ToString())
+                Catch
+                End Try
+            End If
         End Sub
 
 
@@ -365,9 +505,19 @@ Partial Public Class ThisAddIn
                 End If
                 WriteLine("END", $"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
 
+                FinalizeDiagnosticsFiles()
+
                 _isEnabled = False
                 _started = False
                 _logPath = Nothing
+                _subAgentLogPath = Nothing
+                _topLevelSkillSlug = Nothing
+                _isDiagnosticsMode = False
+                _desktopMirrorPath = Nothing
+                _desktopSubAgentMirrorPath = Nothing
+                _archiveMirrorPath = Nothing
+                _archiveSubAgentMirrorPath = Nothing
+                _archivePrimaryMode = False
                 _sessionDepth = 0
             End SyncLock
         End Sub
@@ -379,11 +529,23 @@ Partial Public Class ThisAddIn
         ''' <param name="message">Message text.</param>
         Private Shared Sub WriteLine(category As String, message As String)
             SyncLock _lock
+                Dim entry = $"[{DateTime.Now:HH:mm:ss.fff}] [{category}] {message}"
                 Try
-                    Dim entry = $"[{DateTime.Now:HH:mm:ss.fff}] [{category}] {message}"
                     File.AppendAllText(_logPath, entry & Environment.NewLine)
                 Catch
                 End Try
+                If Not String.IsNullOrWhiteSpace(_desktopMirrorPath) Then
+                    Try
+                        File.AppendAllText(_desktopMirrorPath, entry & Environment.NewLine)
+                    Catch
+                    End Try
+                End If
+                If Not String.IsNullOrWhiteSpace(_archiveMirrorPath) Then
+                    Try
+                        File.AppendAllText(_archiveMirrorPath, entry & Environment.NewLine)
+                    Catch
+                    End Try
+                End If
             End SyncLock
         End Sub
 
@@ -399,6 +561,18 @@ Partial Public Class ThisAddIn
                     File.AppendAllText(_logPath, raw)
                 Catch
                 End Try
+                If Not String.IsNullOrWhiteSpace(_desktopMirrorPath) Then
+                    Try
+                        File.AppendAllText(_desktopMirrorPath, raw)
+                    Catch
+                    End Try
+                End If
+                If Not String.IsNullOrWhiteSpace(_archiveMirrorPath) Then
+                    Try
+                        File.AppendAllText(_archiveMirrorPath, raw)
+                    Catch
+                    End Try
+                End If
             End SyncLock
         End Sub
 
@@ -467,20 +641,147 @@ Partial Public Class ThisAddIn
 
                 SyncLock _lock
                     IO.File.AppendAllText(_subAgentLogPath, sb.ToString(), System.Text.Encoding.UTF8)
+                    If Not String.IsNullOrWhiteSpace(_desktopSubAgentMirrorPath) Then
+                        Try
+                            IO.File.AppendAllText(_desktopSubAgentMirrorPath, sb.ToString(), System.Text.Encoding.UTF8)
+                        Catch
+                        End Try
+                    End If
+                    If Not String.IsNullOrWhiteSpace(_archiveSubAgentMirrorPath) AndAlso
+                       Not String.Equals(_subAgentLogPath, _archiveSubAgentMirrorPath, System.StringComparison.OrdinalIgnoreCase) Then
+                        Try
+                            IO.File.AppendAllText(_archiveSubAgentMirrorPath, sb.ToString(), System.Text.Encoding.UTF8)
+                        Catch
+                        End Try
+                    End If
                 End SyncLock
             Catch
                 ' Never throw from logger.
             End Try
         End Sub
 
+        Private Shared Function BuildArchiveSubAgentPath(primaryArchivePath As String) As String
+            If String.IsNullOrWhiteSpace(primaryArchivePath) Then Return Nothing
+            Try
+                Dim directory As String = IO.Path.GetDirectoryName(primaryArchivePath)
+                Dim stem As String = IO.Path.GetFileNameWithoutExtension(primaryArchivePath)
+                If String.IsNullOrWhiteSpace(directory) OrElse String.IsNullOrWhiteSpace(stem) Then Return Nothing
+
+                Const toolingSuffix As String = "__Tooling"
+                If stem.EndsWith(toolingSuffix, System.StringComparison.OrdinalIgnoreCase) Then
+                    stem = stem.Substring(0, stem.Length - toolingSuffix.Length)
+                End If
+
+                Return IO.Path.Combine(directory, stem & "__SubAgent_Returns.txt")
+            Catch
+                Return Nothing
+            End Try
+        End Function
+
         Private Shared Sub EnsureSubAgentLogPath()
             If Not String.IsNullOrEmpty(_subAgentLogPath) Then Return
             If String.IsNullOrEmpty(_logPath) Then Return
             Try
+                If _archivePrimaryMode Then
+                    ' AutoPilot archives are run bundles: keep full sub-agent returns in a companion
+                    ' file sharing the exact same sortable run prefix as the primary tooling log.
+                    _subAgentLogPath = _archiveSubAgentMirrorPath
+                    Return
+                End If
+
                 Dim dir As String = IO.Path.GetDirectoryName(_logPath)
-                _subAgentLogPath = IO.Path.Combine(dir, $"{AN5}_SubAgent_Returns.txt")
+                If _isDiagnosticsMode AndAlso Not String.IsNullOrWhiteSpace(_diagRunStamp) Then
+                    _subAgentLogPath = IO.Path.Combine(dir, $"{AN5}_SubAgent_Returns__{_diagRunStamp}.txt")
+                Else
+                    _subAgentLogPath = IO.Path.Combine(dir, StableSubAgentLogFileName)
+                End If
             Catch
                 ' If the path cannot be resolved, sub-agent returns silently skip.
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Records the top-level skill invoked in this run so diagnostics logs can be
+        ''' finalized under per-skill filenames. Only the first (top-level) skill is kept.
+        ''' </summary>
+        Public Shared Sub SetTopLevelSkillName(skillName As String)
+            SyncLock _lock
+                If Not _isEnabled Then Return
+                If Not String.IsNullOrWhiteSpace(_topLevelSkillSlug) Then Return
+                _topLevelSkillSlug = SanitizeSlug(skillName)
+            End SyncLock
+        End Sub
+
+        ''' <summary>Converts a skill name into a filename-safe slug (letters/digits/-/_).</summary>
+        Private Shared Function SanitizeSlug(name As String) As String
+            If String.IsNullOrWhiteSpace(name) Then Return Nothing
+            Dim sb As New StringBuilder()
+            For Each ch In name.Trim()
+                If Char.IsLetterOrDigit(ch) OrElse ch = "-"c OrElse ch = "_"c Then
+                    sb.Append(ch)
+                ElseIf ch = " "c Then
+                    sb.Append("-"c)
+                End If
+            Next
+            Dim slug As String = sb.ToString().Trim("-"c, "_"c)
+            If slug.Length > 60 Then slug = slug.Substring(0, 60)
+            Return If(slug.Length = 0, Nothing, slug)
+        End Function
+
+        ''' <summary>
+        ''' In diagnostics mode, renames the working tooling and sub-agent log files to
+        ''' per-skill names (keep-last-run, overwritten). No-op outside diagnostics mode or
+        ''' when no top-level skill was recorded.
+        ''' </summary>
+        Private Shared Sub FinalizeDiagnosticsFiles()
+            If Not _isDiagnosticsMode Then Return
+            Try
+                Dim dir As String = Path.GetDirectoryName(_logPath)
+
+                ' The working files already carry the run timestamp, so a log always exists
+                ' even when no skill name was captured. When a top-level skill WAS recorded,
+                ' append its slug so the run is easy to identify.
+                If Not String.IsNullOrWhiteSpace(_topLevelSkillSlug) AndAlso Not String.IsNullOrWhiteSpace(_diagRunStamp) Then
+                    Dim finalLog As String = Path.Combine(dir, $"{AN5}_Tooling_Log__{_diagRunStamp}__{_topLevelSkillSlug}.txt")
+                    MoveOverwrite(_logPath, finalLog)
+
+                    If Not String.IsNullOrEmpty(_subAgentLogPath) AndAlso File.Exists(_subAgentLogPath) Then
+                        Dim finalSub As String = Path.Combine(dir, $"{AN5}_SubAgent_Returns__{_diagRunStamp}__{_topLevelSkillSlug}.txt")
+                        MoveOverwrite(_subAgentLogPath, finalSub)
+                    End If
+                End If
+
+                ' Keep only the newest 5 runs of each kind.
+                PruneDiagnostics(dir, $"{AN5}_Tooling_Log__", 5)
+                PruneDiagnostics(dir, $"{AN5}_SubAgent_Returns__", 5)
+            Catch
+                ' Never throw from logger.
+            End Try
+        End Sub
+
+        ''' <summary>Deletes all but the newest <paramref name="keep"/> files matching a diagnostics prefix.</summary>
+        Private Shared Sub PruneDiagnostics(dir As String, prefix As String, keep As Integer)
+            Try
+                If String.IsNullOrEmpty(dir) OrElse Not Directory.Exists(dir) Then Return
+                Dim stale = New DirectoryInfo(dir).GetFiles(prefix & "*.txt").
+                    OrderByDescending(Function(f) f.LastWriteTimeUtc).
+                    Skip(keep).ToList()
+                For Each f In stale
+                    Try : f.Delete() : Catch : End Try
+                Next
+            Catch
+                ' Never throw from logger.
+            End Try
+        End Sub
+
+        ''' <summary>Moves <paramref name="src"/> to <paramref name="dest"/>, overwriting any existing file.</summary>
+        Private Shared Sub MoveOverwrite(src As String, dest As String)
+            Try
+                If String.IsNullOrEmpty(src) OrElse Not File.Exists(src) Then Return
+                If File.Exists(dest) Then File.Delete(dest)
+                File.Move(src, dest)
+            Catch
+                ' Never throw from logger.
             End Try
         End Sub
 

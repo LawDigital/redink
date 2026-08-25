@@ -64,6 +64,11 @@ Namespace Agents
             Else
                 PathPolicy.SetWorkspaceRoot(Nothing)
             End If
+            ' Mirror the user-configured permissions so every PathPolicy-based tool
+            ' (text_*, file_*) honors the same Read/Write/Move/Delete gates as workspace_*.
+            PathPolicy.SetWorkspacePermissions(
+                _active.AllowRead, _active.AllowWrite,
+                _active.AllowMoveCopyRename, _active.AllowDelete)
         End Sub
 
         Public Shared ReadOnly Property Active As WorkspaceState
@@ -108,11 +113,21 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildAll() As List(Of ModelConfig)
-            Return New List(Of ModelConfig) From {
+            Dim tools As New List(Of ModelConfig) From {
                 BuildGet(), BuildInventory(), BuildRead(), BuildReadMany(), BuildWrite(), BuildSearch(),
                 BuildCopy(), BuildMove(), BuildRename(), BuildDelete(), BuildMakeDir(),
                 BuildExtractText(), BuildExtractTextMany()
             }
+
+            For Each tool As ModelConfig In tools
+                If tool Is Nothing Then Continue For
+                Select Case tool.ToolName
+                    Case ToolCopy, ToolMove, ToolRename
+                        ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
+                End Select
+            Next
+
+            Return tools
         End Function
 
 
@@ -626,6 +641,20 @@ Namespace Agents
             "Use a dedicated binary-producing tool and then copy the real output file into the workspace.")
             End If
 
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+
+            If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                args,
+                ArtifactStorageKind.Unknown,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
+                Return Err_(artifactFailureCode, artifactFailureMessage)
+            End If
+
             Dim dir = Path.GetDirectoryName(target)
             If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then
                 Directory.CreateDirectory(dir)
@@ -647,16 +676,35 @@ Namespace Agents
 
             Dim fi As New FileInfo(target)
 
+            ' Pick up edits to SKILL.md/AGENT.md immediately when writing into a resource root.
+            AgentResources.RefreshIfResourcePath(target)
+
+            If artifactMetadata Is Nothing Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .path = target,
+                    Key .charsWritten = text.Length,
+                    Key .bytesWritten = Encoding.UTF8.GetByteCount(text),
+                    Key .fileSizeBytes = fi.Length,
+                    Key .mode = mode,
+                    Key .usedAliases = aliasesUsed.Count > 0,
+                    Key .aliasesUsed = aliasesUsed,
+                    Key .contentWasEmptyIntentionally = contentProvided AndAlso contentWasEmptyIntentionally
+                })
+            End If
+
             Return JsonConvert.SerializeObject(New With {
-        Key .path = target,
-        Key .charsWritten = text.Length,
-        Key .bytesWritten = Encoding.UTF8.GetByteCount(text),
-        Key .fileSizeBytes = fi.Length,
-        Key .mode = mode,
-        Key .usedAliases = aliasesUsed.Count > 0,
-        Key .aliasesUsed = aliasesUsed,
-        Key .contentWasEmptyIntentionally = contentProvided AndAlso contentWasEmptyIntentionally
-    })
+                Key .path = target,
+                Key .charsWritten = text.Length,
+                Key .bytesWritten = Encoding.UTF8.GetByteCount(text),
+                Key .fileSizeBytes = fi.Length,
+                Key .mode = mode,
+                Key .usedAliases = aliasesUsed.Count > 0,
+                Key .aliasesUsed = aliasesUsed,
+                Key .contentWasEmptyIntentionally = contentProvided AndAlso contentWasEmptyIntentionally,
+                Key .produces_user_deliverable = artifactMetadata.ProducesUserDeliverable,
+                Key .produces_intermediate_data = artifactMetadata.ProducesIntermediateData,
+                Key .artifacts = New System.Object() {artifactMetadata.BuildArtifact(target)}
+            })
         End Function
 
         Private Shared Function ExecuteSearch(args As IDictionary(Of String, Object)) As String
@@ -724,6 +772,17 @@ Namespace Agents
             Dim src = ResolveInsideWorkspace(GetStr(args, "source"))
             Dim dst = ResolveInsideWorkspace(GetStr(args, "destination"))
             If Not File.Exists(src) AndAlso Not Directory.Exists(src) Then Return Err_("not_found", "Source not found.")
+
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+            If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(args, ArtifactStorageKind.ConnectedWorkspace, artifactMetadata, artifactFailureCode, artifactFailureMessage) Then
+                Return Err_(artifactFailureCode, artifactFailureMessage)
+            End If
+            If artifactMetadata IsNot Nothing AndAlso Directory.Exists(src) Then
+                Return Err_("explicit_artifact_requires_single_file", "Explicit artifact metadata is supported only for a single file, not a directory tree.")
+            End If
+
             Dim parent = Path.GetDirectoryName(dst)
             If Not String.IsNullOrWhiteSpace(parent) AndAlso Not Directory.Exists(parent) Then Directory.CreateDirectory(parent)
             If File.Exists(src) Then
@@ -735,7 +794,9 @@ Namespace Agents
                     FileSystem.CopyDirectory(src, dst, UIOption.OnlyErrorDialogs, UICancelOption.ThrowException)
                 End If
             End If
-            Return JsonConvert.SerializeObject(New With {Key .source = src, Key .destination = dst, Key .moved = isMove})
+
+            Dim resultJson As String = JsonConvert.SerializeObject(New With {Key .source = src, Key .destination = dst, Key .moved = isMove})
+            Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, dst)
         End Function
 
         Private Shared Function ExecuteRename(args As IDictionary(Of String, Object)) As String
@@ -747,14 +808,27 @@ Namespace Agents
             Dim parent = Path.GetDirectoryName(src)
             Dim dst = Path.Combine(parent, newName)
             dst = ResolveInsideWorkspace(dst)
+
+            If Not File.Exists(src) AndAlso Not Directory.Exists(src) Then Return Err_("not_found", "Path not found.")
+
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+            If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(args, ArtifactStorageKind.ConnectedWorkspace, artifactMetadata, artifactFailureCode, artifactFailureMessage) Then
+                Return Err_(artifactFailureCode, artifactFailureMessage)
+            End If
+            If artifactMetadata IsNot Nothing AndAlso Directory.Exists(src) Then
+                Return Err_("explicit_artifact_requires_single_file", "Explicit artifact metadata is supported only for a single file, not a directory tree.")
+            End If
+
             If File.Exists(src) Then
                 File.Move(src, dst)
-            ElseIf Directory.Exists(src) Then
-                Directory.Move(src, dst)
             Else
-                Return Err_("not_found", "Path not found.")
+                Directory.Move(src, dst)
             End If
-            Return JsonConvert.SerializeObject(New With {Key .path = dst})
+
+            Dim resultJson As String = JsonConvert.SerializeObject(New With {Key .path = dst})
+            Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, dst)
         End Function
 
         Private Shared Function ExecuteDelete(args As IDictionary(Of String, Object)) As String
@@ -886,7 +960,7 @@ Namespace Agents
             Return New ModelConfig() With {
                 .ToolName = ToolGet, .Tool = True, .ToolPriority = 910, .ToolErrorHandling = "skip",
                 .ModelDescription = "Workspace (info)",
-                .ToolDefinition = "{""name"":""" & ToolGet & """,""description"":""Return current workspace info and permissions. If 'connected' is false, no workspace is configured and writes will go to the user's Desktop."",""parameters"":{""type"":""object"",""properties"":{}}}",
+                .ToolDefinition = "{""name"":""" & ToolGet & """,""description"":""Return current workspace info and permissions. If 'connected' is false, no workspace is configured and writes go to the current session's staging/working area (delivered to the user at the end of the run), or to the Desktop when no session staging area is active."",""parameters"":{""type"":""object"",""properties"":{}}}",
                 .ToolInstructionsPrompt = ToolGet & ": Inspect the current workspace state. Call this once to learn whether a workspace is configured and what permissions you have."
             }
         End Function
@@ -998,8 +1072,9 @@ Namespace Agents
         .ToolPriority = 913,
         .ToolErrorHandling = "skip",
         .ModelDescription = "Workspace (write)",
-        .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Write a UTF-8 text file inside the workspace. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""Workspace-relative target path.""},""text"":{""type"":""string"",""description"":""Content to write. May be intentionally empty.""},""mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create""],""description"":""Write mode. Default 'overwrite'.""}}, ""required"":[""path"",""text""]}}",
-        .ToolInstructionsPrompt = ToolWrite & ": Write a text file inside the workspace. Never use this tool to create or overwrite PDF, Office, image, archive, audio, video, or other binary files."
+        .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Write a UTF-8 text file inside the temporary workspace. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video. Never use this tool to create, install, or modify a Red Ink Skill or Agent: workspace files are temporary and are NOT a skill/agent installation. To create, modify, convert, review, or diagnose a Skill or Agent, use the skill-author skill and the skill filesystem tools (file_make_dir, file_copy, text_write) against the resource root."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""Workspace-relative target path.""},""text"":{""type"":""string"",""description"":""Content to write. May be intentionally empty.""},""mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create""],""description"":""Write mode. Default 'overwrite'.""},""artifact_id"":{""type"":""string""},""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""},""supersedes_artifact_id"":{""type"":""string""},""artifact_state"":{""type"":""string"",""enum"":[""working"",""intermediate"",""final""]},""artifact_delivery_intent"":{""type"":""string"",""enum"":[""none"",""deliver_to_user"",""persist_only"",""deliver_and_persist""]},""storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]},""expected_artifacts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}}, ""required"":[""path"",""text""]}}",
+        .ToolInstructionsPrompt = ToolWrite & ": Write a text file inside the temporary workspace. For an explicit artifact, provide the opaque artifact identity, artifact_state, artifact_delivery_intent and (for a user-facing Final) the complete expected_artifacts set; otherwise legacy behavior is unchanged. Never use this tool to create or overwrite PDF, Office, image, archive, audio, video, or other binary files. Never use this tool to create or modify a Skill or Agent - use the skill-author skill and the skill filesystem tools against the resource root instead.",
+        .CapabilityTags = "artifact_generation"
     }
         End Function
 

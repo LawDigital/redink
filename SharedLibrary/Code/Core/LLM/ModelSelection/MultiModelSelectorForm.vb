@@ -135,6 +135,21 @@ Namespace SharedLibrary
             End Get
         End Property
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            ' This dialog can be spawned in response to activity in a window that
+            ' belongs to another process (e.g. the Local Chat page hosted in Edge).
+            ' When that happens the modal disables the Office host window and would
+            ' otherwise stay hidden behind the foreign foreground window, freezing
+            ' the host. AttachForeignForegroundWatchdog only handles same-process
+            ' foreground stealers, so it cannot surface us in the cross-process case.
+            ' ForceDialogToForeground sets TopMost and forces us to the foreground
+            ' without assigning a cross-thread owner (so it cannot reintroduce the
+            ' modal-close deadlock), mirroring the ask_user dialog behavior.
+            SharedMethods.ForceDialogToForeground(Me)
+            SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
         ''' <summary>
         ''' Initializes a new instance of the multi-model selector dialog.
         ''' </summary>
@@ -308,7 +323,7 @@ Namespace SharedLibrary
         Private Sub InitializeComponent(Optional title As System.String = Nothing, Optional resetChecked As System.Boolean = True, Optional instruction As System.String = "Select one or more alternate models:")
             Me.Text = If(String.IsNullOrWhiteSpace(title), SharedMethods.AN & " - Select Alternate Models", title)
             Me.Icon = Icon.FromHandle((New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
-            Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent
+            Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
             Me.MinimizeBox = True
             Me.MaximizeBox = True
             Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable

@@ -3,17 +3,19 @@
 '
 ' =============================================================================
 ' File: WorkflowContinuity.vb
-' Purpose: Tracks workflow execution state across multiple tool loop iterations,
-'          sub-agents, and source grounding. Enables runtime introspection and
-'          post-completion workflow auditing.
+' Purpose:
+'   Maintains host-agnostic workflow identity and continuity state across tooling-loop
+'   iterations, retries, sub-agents, source grounding and finalization.
 '
-' State Management:
-'  - WorkflowId: unique identifier for a user request (created via CreateWorkflowId).
-'  - HostPipeline: current host (Outlook, Word).
-'  - Runtime state: track active skill, current phase, tool success/failure counts.
-'  - Source records: track web/document sources used in output.
-'  - AsyncLocal scoping: BeginWorkflowScope(...) for per-call isolation.
-'  - Checkpoint serialization: WorkflowCheckpointEnvelope for persistence.
+' Architecture / Function:
+'   - Uses AsyncLocal workflow scope so Word, Outlook and Excel can attach one stable
+'     WorkflowId and runtime state to nested asynchronous operations.
+'   - Tracks tool success/failure, current phase, active skill/agent context, source
+'     references, output references, memory-grounding metadata and unresolved failures.
+'   - Produces checkpoint/log envelopes for diagnostics and recovery without making
+'     host-specific routing decisions itself.
+'   - Shared orchestration components update this state; host loops consume it for
+'     diagnostics, continuation and completion checks.
 ' =============================================================================
 
 

@@ -84,10 +84,13 @@ Partial Public Class ThisAddIn
         Private _lastPartialText As String = ""
 
         Private _suspendSettingsPersistence As Boolean = False
+        Private _selectedAudioSourceMode As String = "MicrophoneOnly"
+        Private _selectedAudioOutputDeviceId As String = ""
         Private _alternateOpenAiConfig As ModelConfig = Nothing
         Private _alternateGoogleConfig As ModelConfig = Nothing
 
         Private _fileTranscribing As Boolean = False
+        Private _fileProgressPercent As Integer = 0
 
         Private _dialogOwnerScope As IDisposable
 
@@ -308,7 +311,7 @@ Partial Public Class ThisAddIn
             AddHandler cboLang.SelectedIndexChanged, Sub() PersistSettings()
 
             AddHandler cboEngine.SelectedIndexChanged, Sub() PersistSettings()
-            AddHandler cboDevice.SelectedIndexChanged, Sub() PersistSettings()
+            AddHandler cboDevice.SelectedIndexChanged, AddressOf OnAudioInputDeviceChanged
 
         End Sub
 
@@ -689,6 +692,7 @@ Partial Public Class ThisAddIn
         End Sub
 
         Private Sub OnEngineChanged(sender As Object, e As EventArgs)
+            Dim previousSuspendSettingsPersistence As Boolean = _suspendSettingsPersistence
             _suspendSettingsPersistence = True
 
             Try
@@ -795,7 +799,7 @@ Partial Public Class ThisAddIn
                     cboLang.SelectedItem = savedLanguage
                 End If
             Finally
-                _suspendSettingsPersistence = False
+                _suspendSettingsPersistence = previousSuspendSettingsPersistence
             End Try
 
             UpdateComboToolTip(cboEngine)
@@ -1016,6 +1020,21 @@ Partial Public Class ThisAddIn
             End If
         End Sub
 
+        Private Sub OnAudioInputDeviceChanged(sender As Object, e As EventArgs)
+            If _suspendSettingsPersistence OrElse Me.IsDisposed Then
+                Return
+            End If
+
+            Try
+                UpdateSelectedMicrophonePreference()
+                My.Settings.LastAudioInputDeviceIndex = cboDevice.SelectedIndex
+                My.Settings.LastEngineOptionsJson = JsonConvert.SerializeObject(_opts)
+                My.Settings.Save()
+            Catch
+                ' Microphone persistence is best-effort and must never break the Transcriptor UI.
+            End Try
+        End Sub
+
         Private Sub UpdateSelectedMicrophonePreference()
             If _opts Is Nothing Then
                 _opts = New TranscriptionOptions()
@@ -1049,7 +1068,7 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Function GetConfiguredSourceMode() As AudioSourceMode
-            Dim raw As String = If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode)
+            Dim raw As String = If(String.IsNullOrWhiteSpace(_selectedAudioSourceMode), "MicrophoneOnly", _selectedAudioSourceMode)
 
             Try
                 Return CType([Enum].Parse(GetType(AudioSourceMode), raw), AudioSourceMode)
@@ -1059,11 +1078,14 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Function GetConfiguredOutputDeviceId() As String
-            Return If(My.Settings.LastAudioOutputDeviceId, "")
+            Return If(_selectedAudioOutputDeviceId, "")
         End Function
 
         Private Sub RestoreSettings()
             Try
+                _selectedAudioSourceMode = If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode)
+                _selectedAudioOutputDeviceId = If(My.Settings.LastAudioOutputDeviceId, "")
+
                 RestoreLastEngineSelection()
 
                 RefreshEngineUi()
@@ -1103,6 +1125,8 @@ Partial Public Class ThisAddIn
                 SaveCurrentEngineSelection()
                 UpdateSelectedMicrophonePreference()
                 My.Settings.LastAudioInputDeviceIndex = cboDevice.SelectedIndex
+                My.Settings.LastAudioSourceMode = If(String.IsNullOrWhiteSpace(_selectedAudioSourceMode), "MicrophoneOnly", _selectedAudioSourceMode)
+                My.Settings.LastAudioOutputDeviceId = If(_selectedAudioOutputDeviceId, "")
                 My.Settings.LastEngineOptionsJson = JsonConvert.SerializeObject(_opts)
                 SaveCurrentLanguageForCurrentEngine()
                 My.Settings.Save()
@@ -1124,7 +1148,7 @@ Partial Public Class ThisAddIn
                 d.DisplayName,
                 _opts,
                 langs,
-                If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode),
+                If(String.IsNullOrWhiteSpace(_selectedAudioSourceMode), "MicrophoneOnly", _selectedAudioSourceMode),
                 GetConfiguredOutputDeviceId(),
                 GetAudioOutputDeviceChoices())
 
@@ -1135,8 +1159,8 @@ Partial Public Class ThisAddIn
                         cboLang.SelectedItem = _opts.LanguageCode
                     End If
 
-                    My.Settings.LastAudioSourceMode = dlg.SelectedSourceMode
-                    My.Settings.LastAudioOutputDeviceId = dlg.SelectedOutputDeviceId
+                    _selectedAudioSourceMode = dlg.SelectedSourceMode
+                    _selectedAudioOutputDeviceId = dlg.SelectedOutputDeviceId
                     PersistSettings()
                     SetLiveState(GetIdleLiveState())
                 End If
@@ -1361,12 +1385,85 @@ Partial Public Class ThisAddIn
             Return _currentEngineDisplayName & ": Transcribing file…"
         End Function
 
+        Private Function GetCancelingFileTranscriptionState() As String
+            If String.IsNullOrWhiteSpace(_currentEngineDisplayName) Then
+                Return "Canceling file transcription…"
+            End If
+
+            Return _currentEngineDisplayName & ": Canceling file transcription…"
+        End Function
+
+        Private Shared Function ClampProgressPercent(value As Integer) As Integer
+            Return Math.Max(0, Math.Min(100, value))
+        End Function
+
+        Private Shared Function TryGetPhaseProgressPercent(statusText As String) As System.Nullable(Of Integer)
+            Dim normalized As String = If(statusText, "").Trim().ToLowerInvariant()
+
+            If String.IsNullOrWhiteSpace(normalized) Then
+                Return Nothing
+            End If
+
+            If normalized.Contains("complete") OrElse normalized.Contains("completed") Then
+                Return 100
+            End If
+
+            If normalized.Contains("finalizing") Then
+                Return 95
+            End If
+
+            If normalized.Contains("parsing") Then
+                Return 90
+            End If
+
+            If normalized.Contains("processing") OrElse
+               normalized.Contains("transcribing file") OrElse
+               normalized.Contains("streaming file") Then
+                Return 65
+            End If
+
+            If normalized.Contains("uploading") Then
+                Return 35
+            End If
+
+            If normalized.Contains("preparing") OrElse
+               normalized.Contains("starting") OrElse
+               normalized.Contains("opening") OrElse
+               normalized.Contains("connecting") Then
+                Return 5
+            End If
+
+            Return Nothing
+        End Function
+
+        Private Sub ReportFileTranscriptionProgress(statusText As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
+            Dim normalizedStatusText As String = If(statusText, "").Trim()
+
+            If String.IsNullOrWhiteSpace(normalizedStatusText) Then
+                normalizedStatusText = GetFileTranscribingState()
+            End If
+
+            Dim effectiveProgressPercent As System.Nullable(Of Integer) = progressPercent
+
+            If Not effectiveProgressPercent.HasValue Then
+                effectiveProgressPercent = TryGetPhaseProgressPercent(normalizedStatusText)
+            End If
+
+            If effectiveProgressPercent.HasValue Then
+                _fileProgressPercent = Math.Max(_fileProgressPercent, ClampProgressPercent(effectiveProgressPercent.Value))
+            End If
+
+            ProgressScope.Report(_fileProgressPercent, 100, normalizedStatusText)
+        End Sub
+
         Private Sub CancelCurrentFileTranscription()
             If Not _fileTranscribing Then
                 Return
             End If
 
-            SetLiveState(_currentEngineDisplayName & ": Canceling file transcription…")
+            Dim cancelingState As String = GetCancelingFileTranscriptionState()
+            SetLiveState(cancelingState)
+            ReportFileTranscriptionProgress(cancelingState)
 
             If _cts IsNot Nothing Then
                 Try
@@ -1682,7 +1779,8 @@ Partial Public Class ThisAddIn
 
             Try
                 Using f As New DragDropForm()
-                    If f.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner1759 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner1759 IsNot Nothing, f.ShowDialog(__safeDialogOwner1759), f.ShowDialog()) = DialogResult.OK Then
                         filePath = f.SelectedFilePath
                     End If
                 End Using
@@ -1701,6 +1799,7 @@ Partial Public Class ThisAddIn
 
             _currentEngineDisplayName = d.DisplayName
             _lastPartialText = ""
+            _fileProgressPercent = 0
             _fileTranscribing = True
             ToggleCaptureUi(False)
             PersistSettings()
@@ -1708,44 +1807,86 @@ Partial Public Class ThisAddIn
 
             Dim engineToDispose As ITranscriptionEngine = Nothing
             Dim ctsToDispose As CancellationTokenSource = Nothing
+            Dim progressCancelWatcher As Task = Nothing
             Dim failed As Boolean = False
             Dim canceled As Boolean = False
             Dim fileTranscriptionException As Exception = Nothing
 
-            Try
-                _engine = Await CreateEngineAsync(d)
-                AttachEngineEvents(_engine)
-                _cts = New CancellationTokenSource()
-                Await _engine.TranscribeFileAsync(filePath, _opts, _cts.Token)
-                canceled = (_cts IsNot Nothing AndAlso _cts.IsCancellationRequested)
-            Catch ex As OperationCanceledException
-                canceled = True
-            Catch ex As Exception
-                failed = True
-                fileTranscriptionException = ex
-            Finally
-                engineToDispose = _engine
-                ctsToDispose = _cts
+            Using progressScope As New ProgressScope(Me.Text, GetFileTranscribingState(), 100)
+                ReportFileTranscriptionProgress(GetFileTranscribingState(), 0)
 
-                _engine = Nothing
-                _cts = Nothing
-                _fileTranscribing = False
-                ToggleCaptureUi(False)
-            End Try
-
-            If ctsToDispose IsNot Nothing Then
                 Try
-                    ctsToDispose.Dispose()
-                Catch
-                End Try
-            End If
+                    _engine = Await CreateEngineAsync(d)
+                    AttachEngineEvents(_engine)
+                    _cts = New CancellationTokenSource()
 
-            If engineToDispose IsNot Nothing Then
-                Try
-                    Await engineToDispose.DisposeAsync()
-                Catch
+                    progressCancelWatcher = Task.Run(
+                        Async Function()
+                            Do While _fileTranscribing
+                                If progressScope.CancelRequested Then
+                                    Dim currentCts As CancellationTokenSource = _cts
+
+                                    If currentCts IsNot Nothing Then
+                                        Try
+                                            currentCts.Cancel()
+                                        Catch
+                                        End Try
+
+                                        Exit Do
+                                    End If
+                                End If
+
+                                Await Task.Delay(150)
+                            Loop
+                        End Function)
+
+                    Await _engine.TranscribeFileAsync(filePath, _opts, _cts.Token)
+                    canceled = (_cts IsNot Nothing AndAlso _cts.IsCancellationRequested) OrElse progressScope.CancelRequested
+                Catch ex As OperationCanceledException
+                    canceled = True
+                Catch ex As Exception
+                    failed = True
+                    fileTranscriptionException = ex
+                Finally
+                    engineToDispose = _engine
+                    ctsToDispose = _cts
+
+                    _engine = Nothing
+                    _cts = Nothing
+                    _fileTranscribing = False
+                    ToggleCaptureUi(False)
                 End Try
-            End If
+
+                If progressCancelWatcher IsNot Nothing Then
+                    Try
+                        Await progressCancelWatcher
+                    Catch ex As OperationCanceledException
+                    Catch
+                    End Try
+                End If
+
+                If ctsToDispose IsNot Nothing Then
+                    Try
+                        ctsToDispose.Dispose()
+                    Catch
+                    End Try
+                End If
+
+                If engineToDispose IsNot Nothing Then
+                    Try
+                        Await engineToDispose.DisposeAsync()
+                    Catch
+                    End Try
+                End If
+
+                If fileTranscriptionException IsNot Nothing Then
+                    ReportFileTranscriptionProgress(_currentEngineDisplayName & ": File transcription failed.")
+                ElseIf canceled Then
+                    ReportFileTranscriptionProgress(_currentEngineDisplayName & ": File transcription canceled.")
+                ElseIf Not failed Then
+                    ReportFileTranscriptionProgress(_currentEngineDisplayName & ": File transcription complete.", 100)
+                End If
+            End Using
 
             If fileTranscriptionException IsNot Nothing Then
                 SetLiveState(_currentEngineDisplayName & ": File transcription failed.")
@@ -1825,11 +1966,19 @@ Partial Public Class ThisAddIn
 
             AddHandler eng.Status,
         Sub(s, ev)
+            Dim friendly As String = GetFriendlyStatusText(_currentEngineDisplayName, ev.Message)
+            If String.IsNullOrWhiteSpace(friendly) Then
+                Return
+            End If
+
+            If _fileTranscribing Then
+                ReportFileTranscriptionProgress(friendly, ev.ProgressPercent)
+                SetLiveState(friendly)
+                Return
+            End If
+
             If String.IsNullOrWhiteSpace(_lastPartialText) Then
-                Dim friendly As String = GetFriendlyStatusText(_currentEngineDisplayName, ev.Message)
-                If Not String.IsNullOrWhiteSpace(friendly) Then
-                    SetLiveState(friendly)
-                End If
+                SetLiveState(friendly)
             End If
         End Sub
         End Sub
@@ -1933,7 +2082,8 @@ Partial Public Class ThisAddIn
 
                 Try
                     Using f As New DragDropForm(DragDropMode.FileOrDirectory)
-                        If f.ShowDialog() = DialogResult.OK Then
+                        Dim __safeDialogOwner2061 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner2061 IsNot Nothing, f.ShowDialog(__safeDialogOwner2061), f.ShowDialog()) = DialogResult.OK Then
                             contextDocumentPath = f.SelectedFilePath
                             contextDocumentIsDirectory = f.IsDirectory
                         End If
@@ -2023,6 +2173,8 @@ Partial Public Class ThisAddIn
             End If
         End Sub
         Private Async Sub OnClosing(sender As Object, e As FormClosingEventArgs)
+            PersistSettings()
+
             If _isStopping Then
                 e.Cancel = True
                 Return

@@ -484,8 +484,10 @@ Partial Public Class ThisAddIn
             Return totalCells
 
         Catch ex As System.Exception
-            MsgBox("Error in SizeOfWorksheet: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in SizeOfWorksheet: " & ex.Message)
         End Try
+
+        Return 0
 
     End Function
 

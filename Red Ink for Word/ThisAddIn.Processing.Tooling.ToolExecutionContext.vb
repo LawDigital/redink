@@ -3,31 +3,19 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.ToolExecutionContext.vb
-' Purpose: Execution state container for tool session lifecycle and diagnostics.
+' Purpose:
+'   Mutable per-run state object for the Word tooling loop, shared by selection,
+'   execution, retry/recovery, finalization and diagnostics phases.
 '
-' Responsibilities:
-'  - Hold per-session state: selected tools, allowed registries, iteration counts.
-'  - Track all tool responses (successful and failed) during session.
-'  - Manage continuation guards and retry prompts for failed turns.
-'  - Log session events with optional UI window display.
-'  - Track duplicate tool execution detection (signature + repeat count).
-'  - Track consecutive tool failures for abort thresholds.
-'  - Hold premature text response retry state.
-'  - Maintain sequencing state (tool ordering, deliverable requirements, memory grounding).
-'  - Expose finalization blocked state and reason codes.
-'  - Integrate with workflow continuity (WorkflowId, RuntimeState).
-'  - Provide diagnostic snapshots for logs.
-'
-' Architecture:
-'  - Mutable state container passed through ExecuteToolingLoop iterations.
-'  - Nested logging via optional LogWindow (WinForms Form).
-'  - External log sink support for sub-agent integration.
-'  - Exposes SequencingState for complex orchestration decisions.
-'
-' External Dependencies:
-'  - SharedLibrary.Agents.ToolCallSequencing for sequencing state.
-'  - SharedLibrary.Agents.WorkflowContinuity for workflow state.
-'  - LogWindow for optional UI logging display.
+' Architecture / Function:
+'   - Holds selected/authorized tool registries, lazy-loading and capability-routing
+'     state, iteration/cancellation state and the complete ToolResponse history.
+'   - Owns sequencing state for memory grounding, explicit operations, sub-agent tasks,
+'     deliverable requirements and retry/fidelity guards, plus workflow-continuity data.
+'   - Preserves required design/template choices across retries where host fidelity must
+'     not silently degrade.
+'   - Centralizes structured logging and finalization-block information; it contains
+'     state only and does not itself execute tools.
 ' =============================================================================
 
 Option Explicit On
@@ -67,6 +55,18 @@ Partial Public Class ThisAddIn
 
         ''' <summary>True when only a lightweight tool index is initially exposed to the model.</summary>
         Public Property LazyToolLoadingEnabled As Boolean
+
+        ''' <summary>Top-level capability-routing gate state.</summary>
+        Public Property CapabilityRoutingRequired As Boolean
+        Public Property CapabilityRoutingResolved As Boolean
+        Public Property CapabilityRoutingKind As String
+        Public Property CapabilityRoutingName As String
+        Public Property CapabilityRoutingEntered As Boolean
+
+        ' Persist an explicitly selected PowerPoint design/template across retries so a
+        ' failed branded attempt cannot silently degrade into a neutral deliverable.
+        Public Property RequiredPowerPointDesignName As String = ""
+        Public Property RequiredPowerPointTemplateAttachmentName As String = ""
 
         ''' <summary>All responses generated during this session (successful and failed).</summary>
         Public Property AllToolResponses As List(Of ToolResponse)
@@ -109,6 +109,18 @@ Partial Public Class ThisAddIn
         Public Property PendingRejectedTurnExplanation As String = ""
 
         Public Const MaxContinuationRetries As Integer = 5
+        Public Const MaxEmptyResponseRetries As Integer = 1
+
+        ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>
+        Public Property ZeroChangeOperationCounts As Dictionary(Of String, Integer) =
+            New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+
+        ''' <summary>Bounded number of no-op attempts against the same target before the edit is marked unresolved.</summary>
+        Public Const ZeroChangeOperationAbortThreshold As Integer = 3
+
+        ''' <summary>Per-run set of already-expanded (ref + range) keys used to suppress repeated no-progress reads.</summary>
+        Public Property ExpandedContextKeys As HashSet(Of String) =
+            New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
         Public Property HostKind As String
         Public Property AllowedToolNames As HashSet(Of String)
@@ -145,6 +157,11 @@ Partial Public Class ThisAddIn
             CurrentIteration = 0
             MaxIterations = INI_ToolingMaximumIterations
             IsCancelled = False
+            CapabilityRoutingRequired = False
+            CapabilityRoutingResolved = True
+            CapabilityRoutingKind = "none"
+            CapabilityRoutingName = ""
+            CapabilityRoutingEntered = True
             LastToolExecutionSignature = ""
             LastToolExecutionRepeatCount = 0
             DuplicateToolExecutionAbortThreshold = 3
@@ -172,6 +189,64 @@ Partial Public Class ThisAddIn
 
         Public Property LogPrefix As String
         Public Property ExternalLogSink As Action(Of String, String)
+        Public Property ProgressSink As Action(Of String)
+
+        Private _lastProgressText As String = ""
+        Private _lastProgressHeading As String = ""
+        Private _lastEmittedProgress As String = ""
+
+        ''' <summary>
+        ''' Forwards the host-derived per-step progress note (A) to the optional progress sink.
+        ''' This channel is always emitted on its own and never depends on a major-step heading (B1)
+        ''' ever being present, so A still reaches the user even if no report_progress call occurs.
+        ''' </summary>
+        Public Sub ReportProgress(text As String)
+            Dim a As String = If(text, "").Trim()
+            If a = "" Then Return
+            _lastProgressText = a
+            EmitProgress()
+        End Sub
+
+        ''' <summary>
+        ''' Records the model-authored major-step heading (B1) emitted via the report_progress tool.
+        ''' The heading is optional: when present it prefixes the current A note; when absent the A note
+        ''' is shown on its own. This method never suppresses the A channel.
+        ''' </summary>
+        Public Sub ReportMajorProgress(heading As String)
+            Dim h As String = If(heading, "").Trim()
+            If h = "" Then Return
+            _lastProgressHeading = h
+            EmitProgress()
+        End Sub
+
+        ''' <summary>
+        ''' Composes and forwards the combined progress line, skipping empty text and consecutive
+        ''' duplicates. When a B1 heading exists it becomes the lead statement and the English A note
+        ''' is shown on the next indented line; otherwise the A note is emitted standalone. Never throws.
+        ''' </summary>
+        Private Sub EmitProgress()
+            If ProgressSink Is Nothing Then Return
+
+            Dim msg As String
+            If _lastProgressHeading <> "" AndAlso _lastProgressText <> "" Then
+                msg = _lastProgressHeading & " [" & _lastProgressText & "]"
+            ElseIf _lastProgressHeading <> "" Then
+                msg = _lastProgressHeading
+            Else
+                msg = _lastProgressText
+            End If
+
+            msg = msg.Trim()
+            If msg = "" Then Return
+            If String.Equals(_lastEmittedProgress, msg, StringComparison.Ordinal) Then Return
+            _lastEmittedProgress = msg
+
+            Try
+                ProgressSink.Invoke(msg)
+            Catch ex As Exception
+                ToolingFileLogger.LogWarn("Failed to forward progress entry.", ex:=ex)
+            End Try
+        End Sub
 
         ''' <summary>
         ''' Appends a message to the in-memory log, debugger output, optional UI log window, and the tooling file log.

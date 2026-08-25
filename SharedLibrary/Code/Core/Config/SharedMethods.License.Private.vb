@@ -75,9 +75,8 @@ Namespace SharedLibrary
                     ' Check grace period
                     If GracePeriodDays > 0 AndAlso Date.Now <= validUntil.AddDays(GracePeriodDays) Then
                         _currentLicenseState = LicenseState.PrivateActive
-                        CheckGracePeriodWarning(context, validUntil, False)
+                        CheckGracePeriodWarning(context, validUntil)
                         LicenseStatus = "Private License"
-                        LicensedTill = validUntil
                         Return True
                     End If
 
@@ -91,14 +90,14 @@ Namespace SharedLibrary
                     Return HandlePrivateReconfirmation(context)
                 End If
 
-                ' License is valid
                 _currentLicenseState = LicenseState.PrivateActive
                 LicenseStatus = "Private License"
-                LicensedTill = validUntil
 
-                ' Show expiry warnings if applicable
-                If Not LicenseNoWarning AndAlso validUntil > Date.Now Then
-                    CheckLicenseExpiryWarnings(context, False)
+                ' Show expiry warnings if applicable. My.Settings.License_ValidUntil is
+                ' authoritative for Private expiry and takes precedence over any config value.
+                Dim expiryDate As Date = My.Settings.License_ValidUntil
+                If Not LicenseNoWarning AndAlso expiryDate > Date.Now Then
+                    CheckLicenseExpiryWarnings(context, expiryDate)
                 End If
 
                 Return True
@@ -235,7 +234,6 @@ Namespace SharedLibrary
                     Dim versionDate = ParseVersionDateFromRDV(context.RDV)
                     Dim newValidUntil = versionDate.AddYears(PrivateLicenseYears)
                     My.Settings.License_ValidUntil = newValidUntil
-                    LicensedTill = newValidUntil
                     LogLicenseEvent("License Extended", $"New ValidUntil={newValidUntil:d} for version {context.RDV}")
                 End If
 
@@ -397,7 +395,6 @@ Namespace SharedLibrary
 
                 ' Update global variables
                 LicenseStatus = "Private License"
-                LicensedTill = validUntil
                 _currentLicenseState = LicenseState.PrivateActive
 
                 ' Clear any legacy license data

@@ -49,6 +49,10 @@ Partial Public Class ThisAddIn
     Private Const AP_CleanupDeleteAfterUtcProperty As String =
         "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoDeleteAfterUtc"
 
+    ' When True, an auto-delete cleanup pass runs immediately at AutoPilot startup.
+    ' Default False: cleanup runs only on the periodic timer.
+    Private Const AP_RunAutoDeleteCleanupOnStartup As Boolean = False
+
     Private Const AP_AutoDeleteTimerIntervalSeconds As Integer = 6 * 60 * 60
     Private Const AP_AutoDeleteUiYieldItemInterval As Integer = 100
     Private Const AP_AutoDeleteUiYieldFolderInterval As Integer = 10
@@ -96,6 +100,7 @@ Partial Public Class ThisAddIn
         Try
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
+
             Await RunAutoDeleteCleanupAsync(ct.Value, "timer")
         Catch ex As OperationCanceledException
             ' Expected during shutdown
@@ -363,6 +368,97 @@ Partial Public Class ThisAddIn
     End Sub
 
 
+    ''' <summary>
+    ''' Schedules an auto-reply/out-of-office mail for auto-deletion by stamping it with
+    ''' the cleanup group ID of its originating AutoPilot conversation. Such mails are not
+    ''' processed, but should still be removed by the retention timer alongside the group.
+    ''' </summary>
+    Friend Sub TagAutoReplyOrOofForCleanup(oofMail As MailItem)
+        If oofMail Is Nothing Then Return
+        If _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return
+
+        Dim groupId = TryGetCleanupGroupIdFromConversation(oofMail)
+        If String.IsNullOrWhiteSpace(groupId) Then Return
+
+        Dim deleteAfterUtc = GetAutoDeleteCutoffUtc()
+        If Not deleteAfterUtc.HasValue Then Return
+
+        StampCleanupMetadata(
+            oofMail,
+            groupId,
+            isEligible:=True,
+            answeredUtc:=DateTime.UtcNow,
+            deleteAfterUtc:=deleteAfterUtc,
+            saveItem:=True)
+
+        ApDashboardLog(
+            $"🗑 Auto-delete scheduled for auto-reply/OOF in group {groupId} in {_apConfig.AutoDeleteAfterHours}h.",
+            "step")
+    End Sub
+
+    ''' <summary>
+    ''' Finds an existing cleanup group ID for a mail by inspecting the item itself and then
+    ''' walking its conversation thread for a sibling that already carries a group ID.
+    ''' </summary>
+    Private Function TryGetCleanupGroupIdFromConversation(mi As MailItem) As String
+        If mi Is Nothing Then Return Nothing
+
+        ' 1. The item itself may already carry a group id.
+        Dim ownGroupId = GetCleanupGroupId(mi)
+        If Not String.IsNullOrWhiteSpace(ownGroupId) Then Return ownGroupId
+
+        ' 2. Walk the conversation thread to find a sibling with a cleanup group id.
+        Dim conversation As Conversation = Nothing
+        Try
+            conversation = mi.GetConversation()
+        Catch
+            ' GetConversation can fail on some store types
+        End Try
+
+        If conversation IsNot Nothing Then
+            Try
+                Dim rootItems As SimpleItems = conversation.GetRootItems()
+                If rootItems IsNot Nothing Then
+                    For Each rootItem As Object In rootItems
+                        Dim found = FindCleanupGroupIdInConversationNode(conversation, rootItem, 0)
+                        If Not String.IsNullOrWhiteSpace(found) Then Return found
+                    Next
+                End If
+            Catch
+                ' Conversation API can throw on certain store types
+            End Try
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>Recursively searches conversation tree nodes for an existing cleanup group ID.</summary>
+    Private Function FindCleanupGroupIdInConversationNode(conv As Conversation,
+                                                          item As Object,
+                                                          depth As Integer) As String
+        If depth > AP_MaxThreadDepth Then Return Nothing
+
+        Try
+            Dim nodeMail = TryCast(item, MailItem)
+            If nodeMail IsNot Nothing Then
+                Dim gid = GetCleanupGroupId(nodeMail)
+                If Not String.IsNullOrWhiteSpace(gid) Then Return gid
+            End If
+
+            Dim children As SimpleItems = conv.GetChildren(item)
+            If children IsNot Nothing Then
+                For Each child As Object In children
+                    Dim found = FindCleanupGroupIdInConversationNode(conv, child, depth + 1)
+                    If Not String.IsNullOrWhiteSpace(found) Then Return found
+                Next
+            End If
+        Catch
+            ' Ignore individual node errors
+        End Try
+
+        Return Nothing
+    End Function
+
     Friend Sub MarkMailGroupAsAnsweredAndEligible(originalMail As MailItem)
         If originalMail Is Nothing Then Return
 
@@ -390,6 +486,25 @@ Partial Public Class ThisAddIn
             "step")
     End Sub
 
+    Friend Sub MarkMailGroupRepliesAsAnsweredAndEligible(originalMail As MailItem)
+        If originalMail Is Nothing Then Return
+
+        Dim deleteAfterUtc = GetAutoDeleteCutoffUtc()
+        If Not deleteAfterUtc.HasValue Then Return
+
+        Dim groupId = GetOrCreateCleanupGroupId(originalMail)
+        If String.IsNullOrWhiteSpace(groupId) Then Return
+
+        Dim answeredUtc = DateTime.UtcNow
+        Dim stampedCount As Integer = 0
+
+        ApplyEligibilityToGroupInAllStores(groupId, answeredUtc, deleteAfterUtc.Value, stampedCount)
+
+        ApDashboardLog(
+            $"🗑 Auto-delete scheduled for sent replies in group {groupId} in {_apConfig.AutoDeleteAfterHours}h ({stampedCount} item(s) marked).",
+            "step")
+    End Sub
+
     Private Sub ApplyEligibilityToGroupInAllStores(groupId As String,
                                                    answeredUtc As DateTime,
                                                    deleteAfterUtc As DateTime,
@@ -405,29 +520,19 @@ Partial Public Class ThisAddIn
 
             For i As Integer = 1 To session.Stores.Count
                 Dim store As Store = Nothing
-                Dim sentItems As MAPIFolder = Nothing
-                Dim deletedItems As MAPIFolder = Nothing
+                Dim rootFolder As MAPIFolder = Nothing
 
                 Try
                     store = session.Stores(i)
                     If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
 
                     Try
-                        sentItems = store.GetDefaultFolder(OlDefaultFolders.olFolderSentMail)
-                        ApplyEligibilityToGroupInFolderTree(sentItems, groupId, answeredUtc, deleteAfterUtc, stampedCount)
+                        rootFolder = store.GetRootFolder()
+                        ApplyEligibilityToGroupInFolderTree(rootFolder, groupId, answeredUtc, deleteAfterUtc, stampedCount)
                     Catch
                     Finally
-                        If sentItems IsNot Nothing Then Try : Marshal.ReleaseComObject(sentItems) : Catch : End Try
-                        sentItems = Nothing
-                    End Try
-
-                    Try
-                        deletedItems = store.GetDefaultFolder(OlDefaultFolders.olFolderDeletedItems)
-                        ApplyEligibilityToGroupInFolderTree(deletedItems, groupId, answeredUtc, deleteAfterUtc, stampedCount)
-                    Catch
-                    Finally
-                        If deletedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(deletedItems) : Catch : End Try
-                        deletedItems = Nothing
+                        If rootFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(rootFolder) : Catch : End Try
+                        rootFolder = Nothing
                     End Try
 
                     Exit For
@@ -443,6 +548,85 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+    ''' <summary>
+    ''' Robustly identifies the Outbox/Drafts using the store's own default-folder objects and a
+    ''' name fallback, avoiding the fragile long-vs-short-term EntryID comparison. This is the
+    ''' authoritative gate used to keep the cleanup sweeps out of transmission folders.
+    ''' </summary>
+    Private Function IsTransmissionFolderByType(folder As MAPIFolder) As Boolean
+        If folder Is Nothing Then Return False
+
+        Dim store As Store = Nothing
+        Try
+            Try : store = folder.Store : Catch : End Try
+
+            If store IsNot Nothing Then
+                For Each special In {OlDefaultFolders.olFolderOutbox, OlDefaultFolders.olFolderDrafts}
+                    Dim specialFolder As MAPIFolder = Nothing
+                    Try
+                        specialFolder = store.GetDefaultFolder(special)
+                        If specialFolder IsNot Nothing Then
+                            ' Compare by name AND by EntryID: either match is sufficient.
+                            Dim sameName As Boolean = String.Equals(specialFolder.Name, folder.Name, StringComparison.OrdinalIgnoreCase)
+                            Dim sameId As Boolean = False
+                            Try : sameId = String.Equals(specialFolder.EntryID, folder.EntryID, StringComparison.OrdinalIgnoreCase) : Catch : End Try
+                            If sameName OrElse sameId Then Return True
+                        End If
+                    Catch
+                    Finally
+                        If specialFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(specialFolder) : Catch : End Try
+                    End Try
+                Next
+            End If
+        Catch
+        Finally
+            If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
+        End Try
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Returns True if the folder is the Outbox or Drafts of its store. These folders hold
+    ''' items in a pending/transmittable state whose submit flag must not be disturbed by a
+    ''' .Save() from the cleanup sweep, so they are always excluded from auto-delete scanning.
+    ''' </summary>
+    Private Function IsTransmissionFolder(folder As MAPIFolder) As Boolean
+        If folder Is Nothing Then Return False
+
+        Dim store As Store = Nothing
+        Try
+            store = folder.Store
+            If store Is Nothing Then Return False
+
+            Dim folderId As String = Nothing
+            Try : folderId = folder.EntryID : Catch : End Try
+            If String.IsNullOrEmpty(folderId) Then Return False
+
+            For Each special In {OlDefaultFolders.olFolderOutbox, OlDefaultFolders.olFolderDrafts}
+                Dim specialFolder As MAPIFolder = Nothing
+                Try
+                    specialFolder = store.GetDefaultFolder(special)
+                    If specialFolder IsNot Nothing AndAlso
+                       String.Equals(specialFolder.EntryID, folderId, StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                Catch
+                    ' Not every store exposes every special folder (e.g. some IMAP/PST stores).
+                Finally
+                    If specialFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(specialFolder) : Catch : End Try
+                End Try
+            Next
+        Catch
+            Return False
+        Finally
+            If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
+        End Try
+
+        Return False
+    End Function
+
     Private Function IsAutoDeleteMailFolder(folder As MAPIFolder) As Boolean
         If folder Is Nothing Then Return False
 
@@ -451,6 +635,15 @@ Partial Public Class ThisAddIn
         Catch
             Return False
         End Try
+
+        ' NEVER scan transmission folders (Outbox / Drafts). A reply is stamped with its cleanup
+        ' group ID before .Send() and is briefly present in the Outbox with its submit flag set.
+        ' If the eligibility sweep touches it there and calls StampCleanupMetadata(saveItem:=True),
+        ' the resulting mi.Save() clears PR_SUBMIT_FLAGS — demoting the item to a non-italic saved
+        ' message that Send/Receive ignores, leaving it stuck in the Outbox until manually opened
+        ' and re-sent. Excluding these folders prevents that regression and also avoids ever
+        ' deleting a pending outbound item.
+        If IsTransmissionFolder(folder) Then Return False
 
         ' A folder that defaults to mail items can still report a blank or non-"IPM.Note"
         ' DefaultMessageClass. This is common for Deleted Items and for some Sent Items /
@@ -479,6 +672,10 @@ Partial Public Class ThisAddIn
                                                     ByRef stampedCount As Integer)
 
         If folder Is Nothing Then Return
+
+        If IsTransmissionFolderByType(folder) Then
+            Return
+        End If
 
         Dim items As Items = Nothing
         Dim subFolders As Folders = Nothing

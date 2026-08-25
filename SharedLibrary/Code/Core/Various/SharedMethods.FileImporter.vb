@@ -419,12 +419,13 @@ Namespace SharedLibrary
         ''' <param name="ocrAdditionalInstruction">Additional instructions for OCR processing when reading PDF files.</param>
         ''' <returns>A PdfReadResult containing the extracted text and whether OCR was skipped despite being suggested.</returns>
         Public Shared Async Function ReadPdfAsTextEx(ByVal pdfPath As String,
-                                            Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
-                                            Optional ByVal DoOCR As Boolean = False,
-                                            Optional ByVal AskUser As Boolean = True,
-                                            Optional ByVal context As ISharedContext = Nothing,
-                                            Optional ByVal ocrAdditionalInstruction As String = Nothing,
-                                            Optional ByVal ShowOcrProgressWindow As Boolean = False) As Task(Of PdfReadResult)
+                                                     Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
+                                                     Optional ByVal DoOCR As Boolean = False,
+                                                     Optional ByVal AskUser As Boolean = True,
+                                                     Optional ByVal context As ISharedContext = Nothing,
+                                                     Optional ByVal ocrAdditionalInstruction As String = Nothing,
+                                                     Optional ByVal ShowOcrProgressWindow As Boolean = False,
+                                                     Optional ByVal ReturnMarkdown As Boolean = False) As Task(Of PdfReadResult)
 
             Dim result As New PdfReadResult()
 
@@ -568,7 +569,12 @@ Namespace SharedLibrary
                                 "The extracted text may be incomplete.")
                         End If
                     End If
-                    result.Content = extractedText
+
+                    If ReturnMarkdown Then
+                        result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                    Else
+                        result.Content = extractedText
+                    End If
                     Return result
                 End If
 
@@ -588,7 +594,11 @@ Namespace SharedLibrary
                                 "The extracted text may be incomplete.")
                         End If
 
-                        result.Content = extractedText
+                        If ReturnMarkdown Then
+                            result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                        Else
+                            result.Content = extractedText
+                        End If
                         Return result
                     End If
 
@@ -601,7 +611,11 @@ Namespace SharedLibrary
                         Dim userChoice As Integer = ShowCustomYesNoBox(msg, "Yes, try OCR", "No, use what you have")
                         If userChoice <> 1 Then
                             result.OcrWasSkippedDueToHeuristics = True
-                            result.Content = extractedText
+                            If ReturnMarkdown Then
+                                result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                            Else
+                                result.Content = extractedText
+                            End If
                             Return result
                         End If
                     End If
@@ -617,7 +631,11 @@ Namespace SharedLibrary
                     End If
                 End If
 
-                result.Content = extractedText
+                If ReturnMarkdown Then
+                    result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                Else
+                    result.Content = extractedText
+                End If
                 Return result
 
             Catch ex As System.Exception
@@ -630,19 +648,21 @@ Namespace SharedLibrary
         ''' Reads a PDF using PdfPig and returns extracted text (backward compatible wrapper).
         ''' </summary>
         Public Shared Async Function ReadPdfAsText(ByVal pdfPath As String,
-                                            Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
-                                            Optional ByVal DoOCR As Boolean = False,
-                                            Optional ByVal AskUser As Boolean = True,
-                                            Optional ByVal context As ISharedContext = Nothing,
-                                            Optional ByVal ocrAdditionalInstruction As String = Nothing,
-                                            Optional ByVal ShowOcrProgressWindow As Boolean = False) As Task(Of String)
+                                                   Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
+                                                   Optional ByVal DoOCR As Boolean = False,
+                                                   Optional ByVal AskUser As Boolean = True,
+                                                   Optional ByVal context As ISharedContext = Nothing,
+                                                   Optional ByVal ocrAdditionalInstruction As String = Nothing,
+                                                   Optional ByVal ShowOcrProgressWindow As Boolean = False,
+                                                   Optional ByVal ReturnMarkdown As Boolean = False) As Task(Of String)
             Dim result = Await ReadPdfAsTextEx(pdfPath,
                                                ReturnErrorInsteadOfEmpty,
                                                DoOCR,
                                                AskUser,
                                                context,
                                                ocrAdditionalInstruction,
-                                               ShowOcrProgressWindow)
+                                               ShowOcrProgressWindow,
+                                               ReturnMarkdown)
             Return result.Content
         End Function
 
@@ -732,52 +752,6 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
-        ''' <summary>
-        ''' Performs OCR on a PDF by invoking an LLM call with the PDF path as a binary object input.
-        ''' </summary>
-        ''' <param name="pdfPath">Path to the PDF file to OCR.</param>
-        ''' <param name="context">Shared context containing model and API configuration.</param>
-        ''' <param name="askUser">If False, suppresses all UI dialogs (for non-interactive callers like AutoPilot).</param>
-        ''' <param name="additionalInstruction">Additional instructions to include in the system prompt for OCR processing.</param>
-        ''' <returns>OCR result text, or an empty string if OCR is not available or fails.</returns>
-        Private Shared Async Function oldPerformOCR(ByVal pdfPath As String,
-                                                 context As ISharedContext,
-                                                 Optional askUser As Boolean = True,
-                                                 Optional additionalInstruction As String = Nothing) As Task(Of String)
-            If Not IsOcrAvailable(context) Then
-                If askUser Then
-                    ShowCustomMessageBox("OCR is not available with your current model configuration.")
-                End If
-                Return ""
-            End If
-
-            Dim scope = CaptureModelConfigScope(context)
-
-            Try
-                Dim useSecondAPI As Boolean = False
-                Dim timeOut = context.INI_Timeout
-
-                If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) AndAlso
-                   GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") Then
-
-                    useSecondAPI = True
-                    timeOut = context.INI_Timeout_2
-                End If
-
-                Dim systemPrompt As String = context.SP_InsertClipboard
-                If Not String.IsNullOrWhiteSpace(additionalInstruction) Then
-                    systemPrompt &= Environment.NewLine & Environment.NewLine & additionalInstruction.Trim()
-                End If
-
-                Dim result As String =
-                    Await LLM(context, systemPrompt, "", "", "", timeOut * 2, useSecondAPI, Not askUser, "", pdfPath)
-
-                Return If(result, "")
-
-            Finally
-                RestoreModelConfigScope(context, scope)
-            End Try
-        End Function
 
 
         Private Shared Async Function PerformOCR(ByVal pdfPath As String,
@@ -1404,7 +1378,7 @@ Namespace SharedLibrary
                     refreshTimer.Start()
                     localForm.Opacity = 1
 
-                    Dim owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     Dim ownerScope As System.IDisposable = Nothing
 
                     Try

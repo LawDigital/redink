@@ -188,6 +188,66 @@ Partial Public Class ThisAddIn
         }
     End Function
 
+    ''' <summary>Internal tool name used by the model to announce a major step (B1).</summary>
+    Public Const InternalProgressReportToolName As String = "report_progress"
+
+    ''' <summary>Returns True when the tool name is the internal report_progress tool.</summary>
+    Public Function IsReportProgressToolName(toolName As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(toolName) AndAlso
+               toolName.Trim().Equals(InternalProgressReportToolName, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ''' <summary>
+    ''' Model-facing instruction describing when to call report_progress. Major steps only;
+    ''' the note is authored in the dialogue language; it may be batched with real tool calls.
+    ''' </summary>
+    Public Function BuildMajorStepProgressToolInstruction() As String
+        Return "PROGRESS REPORTING RULE: You MUST call the report_progress tool before the first substantive tool action of every tooling run and again whenever you begin a materially different major phase of work. Do this whether or not the user explicitly asked for progress updates. Use exactly one short, user-facing sentence in the dialogue language. Call it only for major steps, not for every minor step. You may include report_progress in the same turn as the real tool calls that follow it. Do NOT write progress as plain text. Do NOT serialize tool calls as text or JSON text. Use only native tool calls. A major work phase must not begin silently without a preceding report_progress call."
+    End Function
+
+    ''' <summary>Canonical JSON definition for the internal report_progress tool.</summary>
+    Private Function BuildInternalProgressReportToolDefinition() As String
+        Dim definition As New JObject(
+            New JProperty("name", InternalProgressReportToolName),
+            New JProperty("description",
+                "Announces a single major step to the user in the dialogue language. " &
+                "Use only at the start of a significant new phase of work, not on every turn. " &
+                "Performs no other work and returns immediately."),
+            New JProperty("parameters",
+                New JObject(
+                    New JProperty("type", "object"),
+                    New JProperty("properties",
+                        New JObject(
+                            New JProperty("note",
+                                New JObject(
+                                    New JProperty("type", "string"),
+                                    New JProperty("description", "One short, user-facing sentence in the dialogue language describing the major step you are about to start. Do not reveal tool names, arguments, or internal reasoning.")
+                                )
+                            )
+                        )
+                    ),
+                    New JProperty("required", New JArray("note")),
+                    New JProperty("additionalProperties", False)
+                )
+            )
+        )
+
+        Return definition.ToString(Formatting.None)
+    End Function
+
+    ''' <summary>Creates the built-in report_progress tool configuration (B1 major-step channel).</summary>
+    Public Function GetInternalProgressReportTool() As ModelConfig
+        Return New ModelConfig() With {
+            .ToolName = InternalProgressReportToolName,
+            .ToolInstructionsPrompt = BuildMajorStepProgressToolInstruction(),
+            .ToolDefinition = BuildInternalProgressReportToolDefinition(),
+            .ModelDescription = "Progress Update" & InternalToolSuffix,
+            .Tool = True,
+            .ToolPriority = 995,
+            .ToolErrorHandling = "skip"
+        }
+    End Function
+
     Private Function GetSafeDownloadRoot() As String
         Try
             Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
@@ -201,18 +261,23 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        Try
-            Dim policyRoot = SharedLibrary.Agents.PathPolicy.WorkspaceRoot
+        ' Do not fall back to PathPolicy.WorkspaceRoot here. WorkspaceTools.Active is the
+        ' authoritative permission-bearing state; using the mirrored path alone would allow
+        ' download_web_files to bypass a read-only workspace.
 
-            If Not String.IsNullOrWhiteSpace(policyRoot) AndAlso Directory.Exists(policyRoot) Then
-                Return Path.GetFullPath(policyRoot)
+        ' No explicit writable workspace: use the host-owned per-run staging root. This keeps
+        ' downloaded inputs/outputs inside the same bounded run area that ArtifactDelivery
+        ' observes and later publishes to Desktop\Inky\<timestamp>.
+        Try
+            Dim stagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+            If Not String.IsNullOrWhiteSpace(stagingRoot) AndAlso Directory.Exists(stagingRoot) Then
+                Return Path.GetFullPath(stagingRoot)
             End If
         Catch
         End Try
 
         Throw New InvalidOperationException(
-            "No writable workspace is available for download_web_files. " &
-            "Connect a writable workspace first, or provide an explicit absolute target_directory.")
+            "No writable workspace or session staging area is available for download_web_files.")
     End Function
 
     Private Function ResolveDownloadTargetDirectory(requestedDirectory As String) As String
@@ -222,24 +287,27 @@ Partial Public Class ThisAddIn
             Return workspaceRoot
         End If
 
-        If Path.IsPathRooted(requestedDirectory) Then
-            Dim absoluteTarget = Path.GetFullPath(requestedDirectory)
-            Dim absoluteDir = Path.GetDirectoryName(absoluteTarget)
+        Dim root As String = GetSafeDownloadRoot()
 
-            If String.IsNullOrWhiteSpace(absoluteDir) Then
-                Throw New UnauthorizedAccessException("The absolute target_directory is invalid.")
+        If Path.IsPathRooted(requestedDirectory) Then
+            Dim absoluteTarget As String = Path.GetFullPath(requestedDirectory)
+
+            If Not absoluteTarget.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
+               Not absoluteTarget.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
+
+                Throw New UnauthorizedAccessException(
+                    "Absolute target_directory is outside the active writable workspace/session staging root.")
             End If
 
             If Not Directory.Exists(absoluteTarget) Then Directory.CreateDirectory(absoluteTarget)
             Return absoluteTarget
         End If
 
-        Dim root As String = GetSafeDownloadRoot()
         Dim fullPath As String = Path.GetFullPath(Path.Combine(root, requestedDirectory))
 
         If Not fullPath.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
            Not fullPath.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
-            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace root.")
+            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace/session staging root.")
         End If
 
         If Not Directory.Exists(fullPath) Then Directory.CreateDirectory(fullPath)

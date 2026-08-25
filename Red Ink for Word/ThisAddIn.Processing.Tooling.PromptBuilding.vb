@@ -381,6 +381,12 @@ Partial Public Class ThisAddIn
             sb.AppendLine("Continue with any remaining requested deliverables. Do not finalize until the full request is complete, or explain briefly why it cannot be completed.")
         End If
 
+        Dim consolidationGuidance As String =
+            SharedLibrary.Agents.ToolCallSequencing.BuildConsolidatableToolGuidance(context.SequencingState)
+        If Not String.IsNullOrWhiteSpace(consolidationGuidance) Then
+            sb.AppendLine(consolidationGuidance)
+        End If
+
         sb.AppendLine("[/HOST REQUEST CONTINUITY]")
         Return sb.ToString().TrimEnd()
     End Function
@@ -452,12 +458,31 @@ Partial Public Class ThisAddIn
             Return result
         End If
 
+        ' Always expose the internal report_progress tool so the model can announce major
+        ' steps (B1) via a real tool call. Host-derived progress (A) is independent of this.
+        Dim progressReportTool As ModelConfig = GetInternalProgressReportTool()
+        If progressReportTool IsNot Nothing Then
+            result.Add(progressReportTool)
+        End If
+
         Dim deduplicatedTools As List(Of ModelConfig) =
             allowedTools.
                 Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                Where(Function(t) Not IsReportProgressToolName(t.ToolName)).
                 GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
                 Select(Function(g) g.First()).
                 ToList()
+
+        Dim routingManifests As List(Of SharedLibrary.Agents.ToolManifest) = Nothing
+        If allowedRegistry IsNot Nothing Then
+            routingManifests = allowedRegistry.ListManifests().
+                Where(Function(m) m IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(m.Name)).
+                ToList()
+            Dim capabilityRouter As ModelConfig = SharedLibrary.Agents.CapabilityRoutingTool.Build(routingManifests)
+            If capabilityRouter IsNot Nothing Then
+                result.Add(capabilityRouter)
+            End If
+        End If
 
         If Not SharedLibrary.Agents.ToolLoaderTool.ShouldUseLazyLoading(deduplicatedTools) Then
             result.AddRange(deduplicatedTools)

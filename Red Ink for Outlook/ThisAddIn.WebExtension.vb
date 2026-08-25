@@ -13,21 +13,23 @@
 '   converts markdown responses to HTML for browser rendering.
 '
 ' Key Responsibilities:
-'   - Serve UI (GET `InkyUiRoute`) and JSON API (POST `InkyApiRoute`) under `/inky`.
+'   - Serve UI (GET `InkyUiRoute`) and authenticated JSON API (POST `InkyApiRoute`) under `/inky`.
 '   - Route commands (`inky_*`) and fall back to legacy dispatcher commands.
 '   - Persist per-chat state (chat 1/2) via `InkyState`/`ChatTurn` in application settings.
 '   - Run LLM requests as background jobs (`LlmJob`) with cancellation + TTL cleanup.
-'   - Support optional file uploads (DataURL) and inline extraction for known types.
+'   - Support optional file uploads (DataURL) and inline extraction for known types,
+'     with bounded transport, per-file, aggregate-size, and file-count limits.
 '   - Render markdown to HTML via Markdig (inline CSS/JS; no external assets).
 '   - Marshal Office/UI work back onto the UI thread where required.
 '   - Guard operations during suspend/resume and update watchdog progress counters.
 '   - Sanitize model output (strip role markers) prior to browser display.
 '
 ' Architecture:
-'   - HTTP Layer: one `HttpListener` (prefix `/inky`) serving:
+'   - HTTP Layer: one loopback `HttpListener` serving authenticated local-chat and
+'     explicitly approved browser-extension traffic:
 '       * UI HTML (GET `/inky`)
 '       * JSON API (POST `/inky/api`)
-'       * CORS preflight (OPTIONS)
+'       * restricted CORS preflight (OPTIONS) for approved extension origins
 '   - Routing Constants: `InkyBasePath`, `InkyUiRoute`, `InkyApiRoute`.
 '   - State: `InkyState` + `ChatTurn`, stored per chat id in `My.Settings`.
 '   - Jobs: `ConcurrentDictionary(Of String, LlmJob)` + TTL (`JobTtlMinutes`).
@@ -136,6 +138,9 @@ Partial Public Class ThisAddIn
         Public Property ChatId As Integer = 1
         Public Property ScheduledTaskId As String = ""
 
+        ''' <summary>Latest user-facing progress note for the running job (local chat only).</summary>
+        Public Property StatusMessage As String = ""
+
         Public Sub Dispose() Implements IDisposable.Dispose
             Try
                 Cts?.Cancel()
@@ -223,6 +228,7 @@ Partial Public Class ThisAddIn
         Dim isLocalChatRequest As System.Boolean =
             System.String.Equals(requestPath, "/", System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, "/inky/ping", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPairRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, InkyUiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, InkyUiRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
@@ -240,7 +246,7 @@ Partial Public Class ThisAddIn
                     res,
                     requestId,
                     "Local chat and InkyPlay are disabled by WebServerBlock.",
-                    addCors:=True)
+                    addCors:=False)
                 Return
             End If
 
@@ -249,9 +255,11 @@ Partial Public Class ThisAddIn
                     res,
                     requestId,
                     "The Edge extension receiver is disabled by WebServerBlock.",
-                    addCors:=True)
+                    addCors:=False)
                 Return
             End If
+
+            If Not EnsureLocalLoopbackRequest(req, res, requestId) Then Return
 
             If debugEnabled Then
                 Dim rawUrl As System.String = ""
@@ -333,14 +341,43 @@ Partial Public Class ThisAddIn
                     msgBytes,
                     requestId,
                     "resumeCooldown",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
 
             If requestMethod.Equals("OPTIONS", System.StringComparison.OrdinalIgnoreCase) Then
-                res.AddHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-                res.AddHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                If isLegacyWebExtensionRequest Then
+                    Dim approvedOrigin As System.String =
+                        Await EnsureApprovedBrowserExtensionOriginAsync(req).ConfigureAwait(False)
+
+                    If System.String.IsNullOrWhiteSpace(approvedOrigin) Then
+                        Dim forbiddenBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Forbidden browser origin.")
+                        SendBufferedHttpResponse(
+                            res,
+                            403,
+                            "text/plain; charset=utf-8",
+                            forbiddenBytes,
+                            requestId,
+                            "legacy-options-origin-rejected",
+                            addCors:=False)
+                        Return
+                    End If
+
+                    AddExplicitCorsOrigin(res, approvedOrigin)
+                    res.AddHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+                    res.AddHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+                    SendBufferedHttpResponse(
+                        res,
+                        204,
+                        "text/plain; charset=utf-8",
+                        New System.Byte() {},
+                        requestId,
+                        "legacy-options",
+                        addCors:=False)
+                    Return
+                End If
 
                 SendBufferedHttpResponse(
                     res,
@@ -349,8 +386,7 @@ Partial Public Class ThisAddIn
                     New System.Byte() {},
                     requestId,
                     "options",
-                    addCors:=True)
-
+                    addCors:=False)
                 Return
             End If
 
@@ -387,7 +423,7 @@ Partial Public Class ThisAddIn
                     pingBytes,
                     requestId,
                     "ping",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -401,7 +437,16 @@ Partial Public Class ThisAddIn
                     AppendInkyServerLog("REQ " & requestId & " BuildInkyHtmlPage begin.")
                 End If
 
-                Dim html As System.String = BuildInkyHtmlPage()
+                Dim browserCredential As System.String = System.String.Empty
+                Dim html As System.String
+
+                If GetLocalHttpSecurity().TryValidateBrowserCredential(req.Headers("Cookie"), browserCredential) Then
+                    Dim csrfToken As System.String = GetLocalHttpSecurity().CreateCsrfToken(browserCredential)
+                    html = BuildInkyHtmlPage(csrfToken)
+                Else
+                    html = BuildLocalBrowserPairingPage()
+                End If
+
                 Dim bufUi() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
 
                 If debugEnabled Then
@@ -412,6 +457,8 @@ Partial Public Class ThisAddIn
                         "; htmlBytes=" &
                         bufUi.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 End If
+
+                AddLocalUiSecurityHeaders(res)
 
                 SendBufferedHttpResponse(
                     res,
@@ -433,7 +480,16 @@ Partial Public Class ThisAddIn
                     AppendInkyServerLog("REQ " & requestId & " BuildInkyPlayHtmlPage begin.")
                 End If
 
-                Dim html As System.String = BuildInkyPlayHtmlPage()
+                Dim browserCredential As System.String = System.String.Empty
+                Dim html As System.String
+
+                If GetLocalHttpSecurity().TryValidateBrowserCredential(req.Headers("Cookie"), browserCredential) Then
+                    Dim csrfToken As System.String = GetLocalHttpSecurity().CreateCsrfToken(browserCredential)
+                    html = BuildInkyPlayHtmlPage(csrfToken)
+                Else
+                    html = BuildLocalBrowserPairingPage()
+                End If
+
                 Dim bufPlay() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
 
                 If debugEnabled Then
@@ -444,6 +500,8 @@ Partial Public Class ThisAddIn
                         "; htmlBytes=" &
                         bufPlay.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 End If
+
+                AddLocalUiSecurityHeaders(res)
 
                 SendBufferedHttpResponse(
                     res,
@@ -458,8 +516,33 @@ Partial Public Class ThisAddIn
             End If
 
             If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               System.String.Equals(requestPath, InkyPairRoute, System.StringComparison.OrdinalIgnoreCase) Then
+
+                Await HandleLocalBrowserPairRequestAsync(req, res, requestId).ConfigureAwait(False)
+                Return
+            End If
+
+            If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
                (System.String.Equals(requestPath, LegacyWebExtensionRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
                 System.String.Equals(requestPath, LegacyWebExtensionRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim approvedOrigin As System.String =
+                    Await EnsureApprovedBrowserExtensionOriginAsync(req).ConfigureAwait(False)
+
+                If System.String.IsNullOrWhiteSpace(approvedOrigin) Then
+                    Dim forbiddenBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Forbidden browser origin.")
+                    SendBufferedHttpResponse(
+                        res,
+                        403,
+                        "text/plain; charset=utf-8",
+                        forbiddenBytes,
+                        requestId,
+                        "legacy-origin-rejected",
+                        addCors:=False)
+                    Return
+                End If
+
+                AddExplicitCorsOrigin(res, approvedOrigin)
 
                 Dim body As System.String = System.String.Empty
                 Dim cmd As System.String = ""
@@ -469,15 +552,15 @@ Partial Public Class ThisAddIn
                         AppendInkyServerLog("REQ " & requestId & " reading legacy POST body.")
                     End If
 
-                    Using rdr As New System.IO.StreamReader(
-                        req.InputStream,
-                        System.Text.Encoding.UTF8,
-                        detectEncodingFromByteOrderMarks:=False,
-                        bufferSize:=8192,
-                        leaveOpen:=False)
-
-                        body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
-                    End Using
+                    Try
+                        body = Await SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.ReadUtf8RequestBodyBoundedAsync(
+                            req,
+                            SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxStandardRequestBytes).ConfigureAwait(False)
+                    Catch exTooLarge As SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.LocalHttpRequestTooLargeException
+                        Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large.")
+                        SendBufferedHttpResponse(res, 413, "text/plain; charset=utf-8", tooLargeBytes, requestId, "legacy-request-too-large", addCors:=False)
+                        Return
+                    End Try
                 End If
 
                 If debugEnabled Then
@@ -527,7 +610,7 @@ Partial Public Class ThisAddIn
                     buf,
                     requestId,
                     "legacy-redink",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -535,6 +618,16 @@ Partial Public Class ThisAddIn
             If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
                (System.String.Equals(requestPath, InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
                 System.String.Equals(requestPath, InkyApiRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim browserCredential As System.String = System.String.Empty
+                If Not TryAuthorizeLocalChatRequest(
+                    req,
+                    res,
+                    requestId,
+                    requireCsrf:=True,
+                    browserCredential:=browserCredential) Then
+                    Return
+                End If
 
                 Dim body As System.String = System.String.Empty
                 Dim cmd As System.String = ""
@@ -544,15 +637,15 @@ Partial Public Class ThisAddIn
                         AppendInkyServerLog("REQ " & requestId & " reading POST body.")
                     End If
 
-                    Using rdr As New System.IO.StreamReader(
-                        req.InputStream,
-                        System.Text.Encoding.UTF8,
-                        detectEncodingFromByteOrderMarks:=False,
-                        bufferSize:=8192,
-                        leaveOpen:=False)
-
-                        body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
-                    End Using
+                    Try
+                        body = Await SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.ReadUtf8RequestBodyBoundedAsync(
+                            req,
+                            SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadRequestBytes).ConfigureAwait(False)
+                    Catch exTooLarge As SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.LocalHttpRequestTooLargeException
+                        Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large.")
+                        SendBufferedHttpResponse(res, 413, "text/plain; charset=utf-8", tooLargeBytes, requestId, "inky-request-too-large", addCors:=False)
+                        Return
+                    End Try
                 End If
 
                 If debugEnabled Then
@@ -566,6 +659,15 @@ Partial Public Class ThisAddIn
                         "; bodyExcerpt=" & ClipForInkyServerLog(body, 1200))
 
                     AppendInkyServerLog("REQ " & requestId & " ProcessRequestInAddIn begin. cmd=" & cmd)
+                End If
+
+                Dim requestCommand As System.String = TryGetJsonCommandForInkyServerLog(body)
+                Dim bodyByteCount As System.Int64 = System.Text.Encoding.UTF8.GetByteCount(body)
+                If bodyByteCount > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxStandardRequestBytes AndAlso
+                   Not requestCommand.Equals("inky_upload", System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large for this command.")
+                    SendBufferedHttpResponse(res, 413, "text/plain; charset=utf-8", tooLargeBytes, requestId, "inky-standard-request-too-large", addCors:=False)
+                    Return
                 End If
 
                 Dim responseText As System.String =
@@ -602,7 +704,7 @@ Partial Public Class ThisAddIn
                     buf,
                     requestId,
                     "inky-api",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -620,7 +722,7 @@ Partial Public Class ThisAddIn
                     buf405,
                     requestId,
                     "405",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -635,7 +737,7 @@ Partial Public Class ThisAddIn
                 buf404,
                 requestId,
                 "404",
-                addCors:=True)
+                addCors:=False)
 
             Return
 
@@ -668,7 +770,7 @@ Partial Public Class ThisAddIn
                     bufErr,
                     requestId,
                     "fallback-500",
-                    addCors:=True)
+                    addCors:=False)
 
                 If debugEnabled Then
                     AppendInkyServerLog("REQ " & requestId & " fallback 500 written from HandleHttpRequest catch.")
@@ -732,9 +834,8 @@ Partial Public Class ThisAddIn
         Try
             res.StatusCode = statusCode
 
-            If addCors Then
-                res.AddHeader("Access-Control-Allow-Origin", "*")
-            End If
+            ' Wildcard CORS is intentionally not emitted. Privileged browser-extension
+            ' routes add an explicitly approved origin before this writer is called.
 
             If Not System.String.IsNullOrWhiteSpace(contentType) Then
                 res.ContentType = contentType
@@ -1398,23 +1499,9 @@ Partial Public Class ThisAddIn
         Try
             ' Maximum markdown functionality + soft line breaks as <br/>
             Dim pipeline As Markdig.MarkdownPipeline =
-                New Markdig.MarkdownPipelineBuilder().
-                    UseAdvancedExtensions().
-                    UseSoftlineBreakAsHardlineBreak().
-                    UsePipeTables().
-                    UseGridTables().
-                    UseListExtras().
-                    UseFootnotes().
-                    UseDefinitionLists().
-                    UseAbbreviations().
-                    UseAutoLinks().
-                    UseTaskLists().
-                    UseMathematics().
-                    UseFigures().
-                    UseGenericAttributes().
-                    Build()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            Return Markdig.Markdown.ToHtml(md, pipeline)
+            Return Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), pipeline)
         Catch ex As System.Exception
             ' Fallback: safely encode and preserve line breaks
             Return System.Net.WebUtility.HtmlEncode(md).Replace(vbLf, "<br>")
@@ -1716,7 +1803,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Generates full HTML (inline CSS + JS) for the chat UI page.
     ''' </summary>
-    Private Function BuildInkyHtmlPage() As System.String
+    Private Function BuildInkyHtmlPage(ByVal csrfToken As System.String) As System.String
         Dim botName As String = GetBotName()
         Dim brandName As String = If(Not String.IsNullOrWhiteSpace(AN), AN, botName)
         Dim logoUrl As String = GetLogoDataUrl()
@@ -1815,9 +1902,21 @@ Partial Public Class ThisAddIn
         html.AppendLine("#agentFiles .file-tag-remove{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--muted);font-size:.9rem;line-height:1;cursor:pointer;} ")
         html.AppendLine("#agentFiles .file-tag-remove:hover{background:var(--card);color:var(--fg);} ")
         html.AppendLine("#agentWorkspace{font-size:.7rem;color:var(--muted);padding:0 1rem .35rem;display:none;border-top:1px solid var(--border);background:var(--bg);} ")
+        html.AppendLine("#agentWorkspace .ws-main{display:flex;align-items:center;gap:4px;flex-wrap:wrap;} ")
         html.AppendLine("#agentWorkspace .ws-title{font-weight:600;color:var(--fg);margin-right:6px;} ")
         html.AppendLine("#agentWorkspace .ws-path{opacity:.8;word-break:break-all;} ")
         html.AppendLine("#agentWorkspace button{font-size:.65rem;padding:2px 6px;margin-left:4px;} ")
+        html.AppendLine("#agentWorkspace .ws-presets{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;} ")
+        html.AppendLine("#agentWorkspace .ws-presets-label{font-size:.68rem;color:var(--muted);font-weight:600;} ")
+        html.AppendLine("#agentWorkspace .ws-preset-group{display:inline-flex;align-items:center;gap:2px;} ")
+        html.AppendLine("#agentWorkspace .ws-chip{margin-left:0;padding:3px 8px;border-radius:999px;min-width:34px;background:var(--elev);color:var(--fg);} ")
+        html.AppendLine("#agentWorkspace .ws-chip.empty{opacity:.55;} ")
+        html.AppendLine("#agentWorkspace .ws-chip.missing{border-color:#8f3d3d;color:#ffb3b3;} ")
+        html.AppendLine(":root.light #agentWorkspace .ws-chip.missing{color:#8a2b2b;} ")
+        html.AppendLine("#agentWorkspace .ws-chip.active{background:#1a5276;border-color:#2980b9;color:#fff;box-shadow:inset 0 0 0 1px #2980b9;} ")
+        html.AppendLine(":root.light #agentWorkspace .ws-chip.active{background:#d4e6f1;border-color:#2980b9;color:#1a5276;box-shadow:inset 0 0 0 1px #2980b9;} ")
+        html.AppendLine("#agentWorkspace .ws-chip-clear{margin-left:0;padding:1px 6px;border-radius:999px;min-width:0;background:transparent;color:var(--muted);line-height:1.1;} ")
+        html.AppendLine("#agentWorkspace .ws-chip-clear:hover{color:var(--fg);background:var(--elev);} ")
         html.AppendLine(".inky-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:50;padding:20px;} ")
         html.AppendLine(".inky-modal-backdrop.show{display:flex;} ")
         html.AppendLine(".inky-modal{width:min(560px,96vw);max-height:90vh;overflow:auto;background:var(--card);color:var(--fg);border:1px solid var(--border-strong);border-radius:14px;box-shadow:0 18px 48px rgba(0,0,0,.35);} ")
@@ -1947,6 +2046,7 @@ Partial Public Class ThisAddIn
         ' JS
         html.AppendLine("<script>")
         html.AppendLine("window.__botName=" & Newtonsoft.Json.JsonConvert.SerializeObject(botName) & ";")
+        html.AppendLine("const __redInkCsrf=" & Newtonsoft.Json.JsonConvert.SerializeObject(If(csrfToken, System.String.Empty)) & ";")
         html.AppendLine("let __supportsFiles=false;")
         html.AppendLine("let __pendingFilePath='';")
         html.AppendLine("let dark=false;")
@@ -1964,7 +2064,7 @@ Partial Public Class ThisAddIn
         ' Helpers
         html.AppendLine("function copyText(t){if(navigator.clipboard){return navigator.clipboard.writeText(t);}return new Promise((res,rej)=>{try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();res();}catch(e){rej(e);}});}")
         html.AppendLine("function enhanceCodeBlocks(scope){(scope||document).querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const btn=document.createElement('button');btn.type='button';btn.className='code-copy-btn';btn.innerHTML='<svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""9"" y=""9"" width=""13"" height=""13"" rx=""2"" ry=""2""/><path d=""M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1""/></svg>';btn.addEventListener('click',()=>{const code=pre.querySelector('code');const txt=code?code.innerText:pre.innerText;copyText(txt).then(()=>{btn.classList.add('copied');setTimeout(()=>btn.classList.remove('copied'),1500);});});pre.appendChild(btn);pre.dataset.enhanced='1';});}")
-        html.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({Command:cmd},data))});const txt=await r.text();try{return JSON.parse(txt);}catch{return{ok:false,error:txt}}}catch(e){return{ok:false,error:e.message||'Network error'}}};")
+        html.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json','X-RedInk-CSRF':__redInkCsrf},body:JSON.stringify(Object.assign({Command:cmd},data))});const txt=await r.text();try{return JSON.parse(txt);}catch{return{ok:false,error:txt}}}catch(e){return{ok:false,error:e.message||'Network error'}}};")
         html.AppendLine("function isPromptLibrarySlashTrigger(){const pos=msgEl.selectionStart||0;if(pos<=0)return true;const prev=msgEl.value.charAt(pos-1);return /\s/.test(prev);} ")
         html.AppendLine("function insertPromptIntoMessage(text){const start=msgEl.selectionStart||0;const end=msgEl.selectionEnd||start;msgEl.setRangeText(String(text||''),start,end,'end');msgEl.focus();} ")
         html.AppendLine("async function openPromptLibrary(){const r=await api('inky_promptlibpick');if(!r||!r.ok){if(r&&r.error)alert(r.error||'Prompt library failed');return;}if(r.prompt){insertPromptIntoMessage(r.prompt);}};")
@@ -2029,6 +2129,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function startElapsedTimer(){stopElapsedTimer();__jobStartTs=Date.now();__elapsedTimer=setInterval(updateElapsed,1000);}")
         html.AppendLine("function stopElapsedTimer(){if(__elapsedTimer){clearInterval(__elapsedTimer);__elapsedTimer=null;}const el=document.getElementById('typingElapsed');if(el)el.style.display='none';}")
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
+        html.AppendLine("function setTypingStatus(text){if(!__typingBubbleId)return;const row=document.getElementById(__typingBubbleId);if(!row)return;let el=row.querySelector('.typing-status');const c=row.querySelector('.tmpContent');if(!c)return;if(!el){el=document.createElement('div');el.className='typing-status';el.style.opacity='.75';el.style.fontStyle='italic';el.style.marginTop='4px';el.style.whiteSpace='pre-wrap';c.appendChild(el);}el.textContent=String(text||'');}")
 
         ' Boot        
         html.AppendLine("async function claimScheduledTask(){const r=await api('inky_claimscheduledtask');if(!r||!r.ok)return null;return r.task||null;}")
@@ -2037,7 +2138,7 @@ Partial Public Class ThisAddIn
         ' Poll job
         html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
         html.AppendLine("function ensureJobResultVisible(st,r){const hist=(st&&Array.isArray(st.history))?st.history.slice():[];const turn=buildAssistantTurnFromJobResult(r);if(!turn)return hist;const activeChat=Number((st&&st.activeChat)||1);const resultChat=Number((r&&r.chat)||activeChat);if(activeChat!==resultChat)return hist;const last=hist.length?hist[hist.length-1]:null;const lastMd=String((last&&last.markdown)||'').trim();if(last&&last.role==='assistant'&&lastMd===turn.markdown)return hist;hist.push(turn);return hist;}")
-        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
+        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;cancelBtn.disabled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){if(s.statusText){setTypingStatus(s.statusText);}else if(__jobCanceled){setTypingStatus('Cancelling…');}continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.disabled=false;cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
         html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
@@ -2062,7 +2163,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("msgEl.addEventListener('keydown',async e=>{if(e.ctrlKey&&e.key.toLowerCase()==='p'){e.preventDefault();if(__lastPrompt){insertPromptIntoMessage(__lastPrompt);}return;}if(e.key==='/'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&isPromptLibrarySlashTrigger()){e.preventDefault();if(__currentJobId)return;await openPromptLibrary();return;}if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();return;}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
-        html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
+        html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId||__jobCanceled)return;__jobCanceled=true;cancelBtn.disabled=true;setTypingStatus('Cancelling…');await api('inky_cancel',{Job:__currentJobId});});")
         html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
         html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
@@ -2083,12 +2184,13 @@ Partial Public Class ThisAddIn
         html.AppendLine("memoryEditLnk.addEventListener('click',async(e)=>{e.preventDefault();const r=await api('inky_editmemory');if(!r.ok)alert(r.error||'Could not open memory editor');});")
 
         ' Agent files display
-        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
-        html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
+        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"" data-open-file=""${esc(name)}"" title=""Open this file"" style=""cursor:pointer"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-download"" data-download-file=""${esc(name)}"" title=""Save a copy to the Desktop Inky folder"">⤓</button><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
+        html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const openEl=e.target&&e.target.closest&&e.target.closest('[data-open-file]');if(openEl){e.preventDefault();const fileName=openEl.getAttribute('data-open-file')||'';if(!fileName)return;const r=await api('inky_agentopenfile',{Name:fileName});if(!r||!r.ok)alert(r&&r.error||'Failed to open file');return;}const dl=e.target&&e.target.closest&&e.target.closest('[data-download-file]');if(dl){e.preventDefault();const fileName=dl.getAttribute('data-download-file')||'';if(!fileName)return;dl.disabled=true;try{const r=await api('inky_agentdownloadfile',{Name:fileName});if(!r||!r.ok){alert(r&&r.error||'Failed to download file');return;}addTempAssistantBubble('Saved a copy to: '+esc(r.savedPath||''));}finally{dl.disabled=false;}return;}const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
         html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
         html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
         html.AppendLine("function esc(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('""','&quot;');}")
-        html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__advancedToolsEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button>';bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button>';bindWorkspaceButtons();}")
+        html.AppendLine("function buildWorkspacePresetChipsHtml(ws){const presets=Array.isArray(ws&&ws.presets)?ws.presets:[];const bySlot=new Map();for(const p of presets){const slot=Number(p&&p.slot||0);if(slot>=1&&slot<=5)bySlot.set(slot,p);}let h='<div class=""ws-presets""><span class=""ws-presets-label"">Memories:</span>';for(let slot=1;slot<=5;slot++){const p=bySlot.get(slot)||{slot:slot,assigned:false,exists:false,label:'',path:''};const assigned=!!p.assigned;const exists=(p.exists!==false);const active=!!p.active;const label=assigned?String(p.label||'').trim():'';const text=(assigned&&label)?`${slot} ${esc(label)}`:String(slot);const cls=['ws-chip'];if(active)cls.push('active');if(!assigned)cls.push('empty');if(assigned&&!exists)cls.push('missing');const title=assigned?(exists?String(p.path||''):('Missing: '+String(p.path||''))):('Empty memory '+slot);h+='<span class=""ws-preset-group"">';h+=`<button type=""button"" class=""${cls.join(' ')}"" data-ws-preset-slot=""${slot}"" ${!assigned||!exists?'disabled':''} title=""${esc(title)}"">${text}</button>`;if(assigned){h+=`<button type=""button"" class=""ws-chip-clear"" data-ws-preset-clear=""${slot}"" title=""Clear memory ${slot}"" aria-label=""Clear memory ${slot}"">×</button>`;}h+='</span>';}h+='</div>';return h;}")
+        html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__advancedToolsEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';const presetHtml=buildWorkspacePresetChipsHtml(ws||{});if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<div class=""ws-main""><span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button></div>'+presetHtml;bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<div class=""ws-main""><span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button></div>'+presetHtml;bindWorkspaceButtons();}")
         html.AppendLine("async function refreshWorkspace(){const r=await api('inky_agentworkspace_get');if(r&&r.ok)updateAgentWorkspaceDisplay(r.workspace);}")
 
         html.AppendLine("function closeWorkspaceModal(){workspaceModalBackdrop.classList.remove('show');workspaceModalBody.innerHTML='';workspaceModalOkBtn.textContent='Save';workspaceModalCancelBtn.style.display='';__workspaceDialogMode='';}")
@@ -2096,13 +2198,18 @@ Partial Public Class ThisAddIn
         html.AppendLine("function showWorkspaceModalMessage(title,message,isError){const html='<div class=""inky-form-row""><div class=""inky-message-box'+(isError===true?' error':'')+'"">'+esc(message||'Unexpected error.')+'</div></div>';openWorkspaceModal(title||'Agent Workspace',html,'OK','message',false);}")
         html.AppendLine("function showWorkspaceError(message,title){showWorkspaceModalMessage(title||'Workspace Error',message||'Unexpected error.',true);}")
         html.AppendLine("function getWorkspaceDialogValues(){return{persistUntilRevoked:!!document.getElementById('wsPersistUntilRevoked')?.checked,allowRead:!!document.getElementById('wsAllowRead')?.checked,allowWrite:!!document.getElementById('wsAllowWrite')?.checked,allowMoveCopyRename:!!document.getElementById('wsAllowMoveCopyRename')?.checked,allowDelete:!!document.getElementById('wsAllowDelete')?.checked,saveDroppedFilesToWorkspace:!!document.getElementById('wsSaveDroppedFiles')?.checked,includeHiddenSystem:!!document.getElementById('wsIncludeHiddenSystem')?.checked};}")
-        html.AppendLine("function buildWorkspaceDialogHtml(ws,mode){const connected=!!(ws&&ws.connected);const root=connected?('<div class=""inky-form-row""><label class=""hd"">Current workspace</label><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'';const persist=!!(ws&&ws.persistUntilRevoked);const allowRead=ws&&typeof ws.allowRead==='boolean'?!!ws.allowRead:true;const allowWrite=ws&&typeof ws.allowWrite==='boolean'?!!ws.allowWrite:true;const allowMoveCopyRename=ws&&typeof ws.allowMoveCopyRename==='boolean'?!!ws.allowMoveCopyRename:true;const allowDelete=ws&&typeof ws.allowDelete==='boolean'?!!ws.allowDelete:false;const saveDrops=ws&&typeof ws.saveDroppedFilesToWorkspace==='boolean'?!!ws.saveDroppedFilesToWorkspace:false;const includeHidden=ws&&typeof ws.includeHiddenSystem==='boolean'?!!ws.includeHiddenSystem:false;let intro='';if(mode==='connect'){intro='<div class=""inky-form-row inky-help"">Select how the Local Agent should use the workspace after you choose the folder.</div>';}else if(mode==='revoke'){return '<div class=""inky-form-row""><div class=""inky-help"">Revoke access to the current Local Agent workspace?</div></div>'+(connected?('<div class=""inky-form-row""><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'');}return intro+root+'<div class=""inky-form-row""><label class=""hd"">Access duration</label><div class=""inky-radio-list""><label><input type=""radio"" name=""wsDuration"" id=""wsPersistSessionOnly"" '+(!persist?'checked':'')+'> <span>This session only</span></label><label><input type=""radio"" name=""wsDuration"" id=""wsPersistUntilRevoked"" '+(persist?'checked':'')+'> <span>Until revoked</span></label></div><div class=""inky-help"">Session access disappears when Outlook is closed. Persistent access remains until the user revokes it.</div></div><div class=""inky-form-row""><label class=""hd"">Allowed operations</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsAllowRead"" '+(allowRead?'checked':'')+'> <span>Read and list workspace files</span></label><label><input type=""checkbox"" id=""wsAllowWrite"" '+(allowWrite?'checked':'')+'> <span>Create and overwrite workspace files</span></label><label><input type=""checkbox"" id=""wsAllowMoveCopyRename"" '+(allowMoveCopyRename?'checked':'')+'> <span>Copy, move, and rename files</span></label><label><input type=""checkbox"" id=""wsAllowDelete"" '+(allowDelete?'checked':'')+'> <span class=""inky-danger"">Delete files and remove folders</span></label></div></div><div class=""inky-form-row""><label class=""hd"">Additional options</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsSaveDroppedFiles"" '+(saveDrops?'checked':'')+'> <span>Also save drag-and-drop uploads into the workspace</span></label><label><input type=""checkbox"" id=""wsIncludeHiddenSystem"" '+(includeHidden?'checked':'')+'> <span>Include hidden/system files</span></label></div></div>'; }")
+        html.AppendLine("function buildWorkspacePresetSaveButtonsHtml(ws){const presets=Array.isArray(ws&&ws.presets)?ws.presets:[];const bySlot=new Map();for(const p of presets){const slot=Number(p&&p.slot||0);if(slot>=1&&slot<=5)bySlot.set(slot,p);}let buttons='';for(let slot=1;slot<=5;slot++){const p=bySlot.get(slot)||{};const label=String(p&&p.label||'').trim();buttons+=`<button type=""button"" data-ws-save-slot=""${slot}"" title=""Save current workspace to memory ${slot}"">${slot}${label?' '+esc(label):''}</button>`;}return '<div class=""inky-form-row""><label class=""hd"">Workspace memories</label><div class=""inky-inline-actions"">'+buttons+'</div><div class=""inky-help"">Save the current workspace to one of the five memory chips (presets). Labels are refreshed automatically on reassignment.</div></div>';}")
+        html.AppendLine("function refreshWorkspacePresetSaveButtonsFromWorkspace(ws){const presets=Array.isArray(ws&&ws.presets)?ws.presets:[];const bySlot=new Map();for(const p of presets){const slot=Number(p&&p.slot||0);if(slot>=1&&slot<=5)bySlot.set(slot,p);}workspaceModalBody.querySelectorAll('[data-ws-save-slot]').forEach(btn=>{const slot=Number(btn.getAttribute('data-ws-save-slot')||'0');const p=bySlot.get(slot)||{};const label=String(p&&p.label||'').trim();btn.textContent=label?`${slot} ${label}`:String(slot);});}")
+        html.AppendLine("function buildWorkspaceDialogHtml(ws,mode){const connected=!!(ws&&ws.connected);const root=connected?('<div class=""inky-form-row""><label class=""hd"">Current workspace</label><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'';const persist=!!(ws&&ws.persistUntilRevoked);const allowRead=ws&&typeof ws.allowRead==='boolean'?!!ws.allowRead:true;const allowWrite=ws&&typeof ws.allowWrite==='boolean'?!!ws.allowWrite:true;const allowMoveCopyRename=ws&&typeof ws.allowMoveCopyRename==='boolean'?!!ws.allowMoveCopyRename:true;const allowDelete=ws&&typeof ws.allowDelete==='boolean'?!!ws.allowDelete:" & If(SharedMethods.WorkspaceDeleteByDefaultOn, "true", "false") & ";const saveDrops=ws&&typeof ws.saveDroppedFilesToWorkspace==='boolean'?!!ws.saveDroppedFilesToWorkspace:false;const includeHidden=ws&&typeof ws.includeHiddenSystem==='boolean'?!!ws.includeHiddenSystem:false;const presetRow=(mode==='permissions'&&connected)?buildWorkspacePresetSaveButtonsHtml(ws):'';let intro='';if(mode==='connect'){intro='<div class=""inky-form-row inky-help"">Select how the Local Agent should use the workspace after you choose the folder.</div>';}else if(mode==='revoke'){return '<div class=""inky-form-row""><div class=""inky-help"">Revoke access to the current Local Agent workspace?</div></div>'+(connected?('<div class=""inky-form-row""><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'');}return intro+root+'<div class=""inky-form-row""><label class=""hd"">Access duration</label><div class=""inky-radio-list""><label><input type=""radio"" name=""wsDuration"" id=""wsPersistSessionOnly"" '+(!persist?'checked':'')+'> <span>This session only</span></label><label><input type=""radio"" name=""wsDuration"" id=""wsPersistUntilRevoked"" '+(persist?'checked':'')+'> <span>Until revoked</span></label></div><div class=""inky-help"">Session access disappears when Outlook is closed. Persistent access remains until the user revokes it.</div></div><div class=""inky-form-row""><label class=""hd"">Allowed operations</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsAllowRead"" '+(allowRead?'checked':'')+'> <span>Read and list workspace files</span></label><label><input type=""checkbox"" id=""wsAllowWrite"" '+(allowWrite?'checked':'')+'> <span>Create and overwrite workspace files</span></label><label><input type=""checkbox"" id=""wsAllowMoveCopyRename"" '+(allowMoveCopyRename?'checked':'')+'> <span>Copy, move, and rename files</span></label><label><input type=""checkbox"" id=""wsAllowDelete"" '+(allowDelete?'checked':'')+'> <span class=""inky-danger"">Delete files and remove folders</span></label></div></div><div class=""inky-form-row""><label class=""hd"">Additional options</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsSaveDroppedFiles"" '+(saveDrops?'checked':'')+'> <span>Also save drag-and-drop uploads into the workspace</span></label><label><input type=""checkbox"" id=""wsIncludeHiddenSystem"" '+(includeHidden?'checked':'')+'> <span>Include hidden/system files</span></label></div></div>'+presetRow;}")
         html.AppendLine("async function connectWorkspace(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace state','Connect Agent Workspace');return;}openWorkspaceModal('Connect Agent Workspace',buildWorkspaceDialogHtml(st.workspace||{},'connect'),'Choose folder…','connect');}")
         html.AppendLine("async function changeWorkspaceDirect(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace state','Change Agent Workspace');return;}const ws=st.workspace||{};const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:!!ws.persistUntilRevoked});if(!r||!r.ok){if(r&&r.error==='No workspace folder selected.')return;showWorkspaceError(r&&r.error||'Failed to select workspace','Change Agent Workspace');return;}updateAgentWorkspaceDisplay(r.workspace);}")
         html.AppendLine("async function editWorkspacePermissions(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace permissions','Workspace Permissions');return;}openWorkspaceModal('Workspace Permissions',buildWorkspaceDialogHtml(st.workspace||{},'permissions'),'Save','permissions');}")
         html.AppendLine("async function confirmWorkspaceRevoke(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace state','Revoke Workspace Access');return;}openWorkspaceModal('Revoke Workspace Access',buildWorkspaceDialogHtml(st.workspace||{},'revoke'),'Revoke','revoke');}")
+        html.AppendLine("async function saveWorkspaceToPreset(slot){const r=await api('inky_agentworkspace_presetsave',{Slot:slot});if(!r||!r.ok){showWorkspaceError(r&&r.error||'Failed to save workspace memory','Workspace Permissions');return false;}updateAgentWorkspaceDisplay(r.workspace);refreshWorkspacePresetSaveButtonsFromWorkspace(r.workspace||{});addTempAssistantBubble('Saved current workspace to memory '+slot+'.');return true;}")
         html.AppendLine("async function saveWorkspaceDialog(){if(__workspaceDialogMode==='message'){closeWorkspaceModal();return;}if(__workspaceDialogMode==='revoke'){const r=await api('inky_agentworkspace_revoke');if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{showWorkspaceError(r&&r.error||'Failed to revoke workspace','Revoke Workspace Access');}return;}const values=getWorkspaceDialogValues();if(!values.allowRead){showWorkspaceError('Workspace read/list permission must remain enabled.','Workspace Permissions');return;}if(__workspaceDialogMode==='connect'){const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:values.persistUntilRevoked});if(!r||!r.ok){if(r&&r.error==='No workspace folder selected.')return;showWorkspaceError(r&&r.error||'Failed to select workspace','Connect Agent Workspace');return;}const p=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(!p||!p.ok){showWorkspaceError(p&&p.error||'Failed to save workspace permissions','Connect Agent Workspace');return;}closeWorkspaceModal();updateAgentWorkspaceDisplay(p.workspace);}else if(__workspaceDialogMode==='permissions'){const r=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{showWorkspaceError(r&&r.error||'Failed to update permissions','Workspace Permissions');}}}")
         html.AppendLine("function bindWorkspaceButtons(){const c=document.getElementById('wsConnectBtn');if(c)c.onclick=connectWorkspace;const ch=document.getElementById('wsChangeBtn');if(ch)ch.onclick=changeWorkspaceDirect;const o=document.getElementById('wsOpenBtn');if(o)o.onclick=async()=>{const r=await api('inky_agentworkspace_open');if(!r.ok)showWorkspaceError(r.error||'Could not open workspace','Agent Workspace');};const rv=document.getElementById('wsRevokeBtn');if(rv)rv.onclick=confirmWorkspaceRevoke;const p=document.getElementById('wsPermBtn');if(p)p.onclick=editWorkspacePermissions;}")
+        html.AppendLine("agentWorkspaceEl.addEventListener('click',async e=>{const clearBtn=e.target&&e.target.closest&&e.target.closest('[data-ws-preset-clear]');if(clearBtn){e.preventDefault();e.stopPropagation();if(__currentJobId)return;const clearSlot=Number(clearBtn.getAttribute('data-ws-preset-clear')||'0');if(!clearSlot)return;clearBtn.disabled=true;try{const r=await api('inky_agentworkspace_presetclear',{Slot:clearSlot});if(!r||!r.ok){alert(r&&r.error||'Failed to clear workspace memory');return;}updateAgentWorkspaceDisplay(r.workspace);}finally{clearBtn.disabled=false;}return;}const chip=e.target&&e.target.closest&&e.target.closest('[data-ws-preset-slot]');if(!chip)return;e.preventDefault();if(__currentJobId)return;const slot=Number(chip.getAttribute('data-ws-preset-slot')||'0');if(!slot)return;chip.disabled=true;try{const r=await api('inky_agentworkspace_presetactivate',{Slot:slot});if(!r||!r.ok){alert(r&&r.error||'Failed to activate workspace memory');return;}updateAgentWorkspaceDisplay(r.workspace);}finally{chip.disabled=false;}});")
+        html.AppendLine("workspaceModalBody.addEventListener('click',async e=>{const btn=e.target&&e.target.closest&&e.target.closest('[data-ws-save-slot]');if(!btn)return;e.preventDefault();const slot=Number(btn.getAttribute('data-ws-save-slot')||'0');if(!slot)return;btn.disabled=true;try{await saveWorkspaceToPreset(slot);}finally{btn.disabled=false;}});")
         html.AppendLine("workspaceModalCancelBtn.addEventListener('click',closeWorkspaceModal);")
         html.AppendLine("workspaceModalCloseBtn.addEventListener('click',closeWorkspaceModal);")
         html.AppendLine("workspaceModalOkBtn.addEventListener('click',saveWorkspaceDialog);")
@@ -2150,18 +2257,86 @@ Partial Public Class ThisAddIn
     ''' Central dispatcher for browser API commands under InkyApiRoute; handles chat operations,
     ''' job control, model selection, theme toggle, file upload, and falls back to legacy commands.
     ''' </summary>
+    Private ReadOnly _inkyUploadQuotaGate As New System.Object()
+
+    Private Function TryWriteInkyUploadWithinQuota(
+        ByVal targetPath As System.String,
+        ByVal bytes() As System.Byte,
+        ByRef errorMessage As System.String
+    ) As System.Boolean
+        errorMessage = System.String.Empty
+        If bytes Is Nothing Then
+            errorMessage = "Missing file data."
+            Return False
+        End If
+
+        If bytes.LongLength > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes Then
+            errorMessage = "The selected file is too large. The maximum file size is 150 MB."
+            Return False
+        End If
+
+        Dim uploadDirectory As System.String = System.IO.Path.GetDirectoryName(targetPath)
+        If System.String.IsNullOrWhiteSpace(uploadDirectory) Then
+            errorMessage = "The upload destination is invalid."
+            Return False
+        End If
+
+        SyncLock _inkyUploadQuotaGate
+            Try
+                If Not System.IO.Directory.Exists(uploadDirectory) Then System.IO.Directory.CreateDirectory(uploadDirectory)
+
+                Dim files() As System.String = System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
+                If files.Length >= SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadFileCount Then
+                    errorMessage = "Too many uploaded files are active. The maximum is 50 files."
+                    Return False
+                End If
+
+                Dim totalBytes As System.Int64 = 0L
+                For Each filePath As System.String In files
+                    Try
+                        totalBytes += New System.IO.FileInfo(filePath).Length
+                    Catch ex As System.Exception
+                        errorMessage = "The upload storage quota could not be verified. Please try again."
+                        Return False
+                    End Try
+                Next
+
+                If totalBytes > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadTotalBytes - bytes.LongLength Then
+                    errorMessage = "The Red Ink upload cache is full. Remove uploaded files before adding more files."
+                    Return False
+                End If
+
+                System.IO.File.WriteAllBytes(targetPath, bytes)
+                Return True
+            Catch ex As System.Exception
+                errorMessage = "Upload failed: " & ex.Message
+                Return False
+            End Try
+        End SyncLock
+    End Function
+
     Private Async Function ProcessRequestInAddIn(
         body As System.String,
         rawUrl As System.String) As System.Threading.Tasks.Task(Of System.String)
 
         ' If this is a browser POST to our Inky API, j may be JSON; otherwise keep your existing flow
         If rawUrl IsNot Nothing AndAlso rawUrl.StartsWith(InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) Then
+            Dim requestRunIsolationOwned As System.Boolean = False
             Try
                 Dim j As Newtonsoft.Json.Linq.JObject = If(
                     Not System.String.IsNullOrWhiteSpace(body),
                     Newtonsoft.Json.Linq.JObject.Parse(body),
                     New Newtonsoft.Json.Linq.JObject())
                 Dim cmd As System.String = j("Command")?.ToString()
+
+                If System.String.Equals(cmd, "inky_send", System.StringComparison.OrdinalIgnoreCase) Then
+                    ' Protect Local Agent request preparation as well as the background run.
+                    ' The request builds model/workspace/file context from process-global host
+                    ' fields; without this scope a concurrent AutoPilot/Scheduler run could
+                    ' temporarily expose another run's workspace state to this request.
+                    Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync().ConfigureAwait(False)
+                    requestRunIsolationOwned = True
+                End If
 
                 If INI_APIDebug Then
                     AppendInkyServerLog(
@@ -2435,6 +2610,42 @@ Partial Public Class ThisAddIn
                             Return JsonErr("Failed to add files: " & ex.Message)
                         End Try
 
+                    Case "inky_agentdownloadfile"
+                        Try
+                            Dim fileName As String = j("Name")?.ToString()
+                            If String.IsNullOrWhiteSpace(fileName) Then
+                                Return JsonErr("No file name provided.")
+                            End If
+
+                            Dim savedPath As String = ChatAgentDownloadFileToDesktop(fileName)
+                            If String.IsNullOrWhiteSpace(savedPath) Then
+                                Return JsonErr("The file could not be found in the current agent session.")
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .savedPath = savedPath
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to download file: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentopenfile"
+                        Try
+                            Dim fileName As String = j("Name")?.ToString()
+                            If String.IsNullOrWhiteSpace(fileName) Then
+                                Return JsonErr("No file name provided.")
+                            End If
+
+                            If Not ChatAgentOpenFileInDefaultApp(fileName) Then
+                                Return JsonErr("The file could not be found in the current agent session.")
+                            End If
+
+                            Return JsonOk(New With {.ok = True})
+                        Catch ex As Exception
+                            Return JsonErr("Failed to open file: " & ex.Message)
+                        End Try
+
                     Case "inky_agentremovefile"
                         Try
                             If _chatAgentActive Then
@@ -2479,6 +2690,79 @@ Partial Public Class ThisAddIn
                             Return JsonErr("Failed to get workspace state: " & ex.Message)
                         End Try
 
+                    Case "inky_agentworkspace_presetactivate"
+                        Try
+                            If Not GetEffectiveToolingEnabled() Then Return JsonErr("Agents are not enabled.")
+                            If IsChatAgentBlocked() Then Return JsonErr("Agent mode is not available while AutoPilot is running.")
+
+                            Dim slot As Integer = 0
+                            If Not Integer.TryParse(j("Slot")?.ToString(), slot) Then
+                                Return JsonErr("Invalid workspace memory slot.")
+                            End If
+
+                            Dim presetError As String = ChatAgentWorkspaceApplyPreset(slot)
+                            If Not String.IsNullOrWhiteSpace(presetError) Then
+                                Return JsonErr(presetError)
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .workspace = GetAgentWorkspaceForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to activate workspace memory: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentworkspace_presetsave"
+                        Try
+                            If Not GetEffectiveToolingEnabled() Then Return JsonErr("Agents are not enabled.")
+                            If IsChatAgentBlocked() Then Return JsonErr("Agent mode is not available while AutoPilot is running.")
+
+                            Dim slot As Integer = 0
+                            If Not Integer.TryParse(j("Slot")?.ToString(), slot) Then
+                                Return JsonErr("Invalid workspace memory slot.")
+                            End If
+
+                            Dim presetError As String =
+                                Await ChatAgentWorkspaceSaveCurrentPresetAsync(slot).ConfigureAwait(False)
+
+                            If Not String.IsNullOrWhiteSpace(presetError) Then
+                                Return JsonErr(presetError)
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .workspace = GetAgentWorkspaceForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to save workspace memory: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentworkspace_presetclear"
+                        Try
+                            If Not GetEffectiveToolingEnabled() Then Return JsonErr("Agents are not enabled.")
+                            If IsChatAgentBlocked() Then Return JsonErr("Agent mode is not available while AutoPilot is running.")
+
+                            Dim slot As Integer = 0
+                            If Not Integer.TryParse(j("Slot")?.ToString(), slot) Then
+                                Return JsonErr("Invalid workspace memory slot.")
+                            End If
+
+                            Dim presetError As String =
+                                Await ChatAgentWorkspaceClearPresetAsync(slot).ConfigureAwait(False)
+
+                            If Not String.IsNullOrWhiteSpace(presetError) Then
+                                Return JsonErr(presetError)
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .workspace = GetAgentWorkspaceForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to clear workspace memory: " & ex.Message)
+                        End Try
+
                     Case "inky_agentworkspace_select"
                         Try
                             If Not GetEffectiveToolingEnabled() Then Return JsonErr("Agents are not enabled.")
@@ -2491,7 +2775,8 @@ Partial Public Class ThisAddIn
                                                  Using dlg As New DragDropForm(DragDropMode.DirectoryOnly)
                                                      dlg.Text = "Select Agent Workspace Folder"
                                                      dlg.SetInstructionText("Drag and drop the workspace folder here, or click Browse. The Local Agent will only be allowed to access this folder and its subfolders.")
-                                                     If dlg.ShowDialog() = DialogResult.OK Then
+                                                     Dim __safeDialogOwner2621 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                                     If If(__safeDialogOwner2621 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner2621), dlg.ShowDialog()) = DialogResult.OK Then
                                                          selectedPath = dlg.SelectedFilePath
                                                      End If
                                                  End Using
@@ -2520,7 +2805,7 @@ Partial Public Class ThisAddIn
                                 CBool(If(j("AllowRead"), True)),
                                 CBool(If(j("AllowWrite"), True)),
                                 CBool(If(j("AllowMoveCopyRename"), True)),
-                                CBool(If(j("AllowDelete"), False)),
+                                CBool(If(j("AllowDelete"), SharedMethods.WorkspaceDeleteByDefaultOn)),
                                 CBool(If(j("SaveDroppedFilesToWorkspace"), False)),
                                 CBool(If(j("IncludeHiddenSystem"), False)))
 
@@ -2589,8 +2874,8 @@ Partial Public Class ThisAddIn
                     Case "inky_settoolinglog"
                         Try
                             Dim enabled As Boolean = CBool(j("Enabled"))
-                            INI_ToolingLogWindow = enabled
-                            Return JsonOk(New With {.ok = True, .enabled = enabled})
+                            SetToolingLogWindowOverride(enabled)
+                            Return JsonOk(New With {.ok = True, .enabled = GetEffectiveToolingLogWindowSetting()})
                         Catch ex As Exception
                             Return JsonErr("Failed to toggle tooling log: " & ex.Message)
                         End Try
@@ -2803,7 +3088,7 @@ Partial Public Class ThisAddIn
                                     .activeChat = activeChatId,
                                     .toolingEnabled = toolingEnabled,
                                     .supportsTooling = supportsTooling,
-                                    .toolingLogEnabled = INI_ToolingLogWindow,
+                                    .toolingLogEnabled = GetEffectiveToolingLogWindowSetting(),
                                     .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
                                     .advancedToolsEnabled = st.AgentModeEnabled,
                                     .agentFiles = GetAgentFileListForBrowser(),
@@ -2915,21 +3200,33 @@ Partial Public Class ThisAddIn
                             Dim commaIx As System.Int32 = dataUrl.IndexOf(","c)
                             If commaIx < 0 Then Return JsonErr("Bad DataURL.")
                             Dim b64 As System.String = dataUrl.Substring(commaIx + 1)
+                            Dim estimatedDecodedBytes As System.Int64 = (CLng(b64.Length) * 3L) \ 4L
+                            If estimatedDecodedBytes > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes + 2L Then
+                                Return JsonErr("The selected file is too large. The maximum file size is 150 MB.")
+                            End If
+
                             Dim bytes() As System.Byte
                             Try
                                 bytes = System.Convert.FromBase64String(b64)
                             Catch exB64 As System.Exception
                                 Return JsonErr("Invalid base64: " & exB64.Message)
                             End Try
+                            If bytes.LongLength > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes Then
+                                Return JsonErr("The selected file is too large. The maximum file size is 150 MB.")
+                            End If
+
                             Dim dir As System.String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "InkyUploads")
-                            If Not System.IO.Directory.Exists(dir) Then System.IO.Directory.CreateDirectory(dir)
+
                             Dim safeName As System.String = System.IO.Path.GetFileName(name)
                             For Each c As System.Char In System.IO.Path.GetInvalidFileNameChars()
                                 safeName = safeName.Replace(c, "_"c)
                             Next
                             Dim unique As System.String = System.Guid.NewGuid().ToString("N")
                             Dim target As System.String = System.IO.Path.Combine(dir, unique & "_" & safeName)
-                            System.IO.File.WriteAllBytes(target, bytes)
+                            Dim quotaError As System.String = System.String.Empty
+                            If Not TryWriteInkyUploadWithinQuota(target, bytes, quotaError) Then
+                                Return JsonErr(quotaError)
+                            End If
                             Return JsonOk(New With {.ok = True, .supported = True, .path = target, .name = safeName, .size = bytes.LongLength})
                         Catch exUp As System.Exception
                             Return JsonErr("Upload failed: " & exUp.Message)
@@ -3165,6 +3462,18 @@ Partial Public Class ThisAddIn
                                 End If
                             End If
                         End If
+
+                        Dim scheduledTaskPreparedForJob As System.Boolean = False
+                        If Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            If Not SchedulerPrepareLocalBrowserTaskForExecution(scheduledTaskId) Then
+                                Return JsonErr("Scheduled Local Agent task is not available to this browser session.")
+                            End If
+                            scheduledTaskPreparedForJob = True
+                            ' Preparation may switch the active scheduled-chat state; reload it
+                            ' before building the prompt/job snapshot.
+                            st = LoadInkyState()
+                        End If
+
                         ' ------------------ (C) Append user turn immediately ------------------
                         Dim userTurn As New ChatTurn With {
                             .Role = "user",
@@ -3286,6 +3595,9 @@ Partial Public Class ThisAddIn
                                     }
                         If Not jobMap.TryAdd(jobId, job) Then
                             jobCts.Dispose()
+                            If scheduledTaskPreparedForJob AndAlso Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                                SchedulerFailLocalBrowserTask(scheduledTaskId, "Failed to register Local Agent background job.")
+                            End If
                             Return JsonErr("Failed to register job.")
                         End If
                         Threading.Interlocked.Increment(activeJobs)
@@ -3298,6 +3610,11 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
                         llmOperationCts = jobCts
+
+                        ' Ensure the tooling-log-window setting reflects any user override
+                        ' (e.g. the "tooling log" toggle) before the background job reads
+                        ' INI_ToolingLogWindow to decide whether to show the log window.
+                        ApplyEffectiveToolingLogWindowSettingToContext()
 
                         If Not String.IsNullOrWhiteSpace(scheduledTaskId) Then
                             SchedulerMarkLocalTaskRunning(scheduledTaskId)
@@ -3314,7 +3631,13 @@ Partial Public Class ThisAddIn
                                 Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
                                 Dim agentOutputFiles As List(Of String) = Nothing
                                 Dim scheduledTaskFinalized As Boolean = False
+                                Dim runIsolationOwned As Boolean = False
                                 Try
+                                    ' Serialize the complete Local Agent run because model configuration,
+                                    ' current attachments, PathPolicy and delivery state are shared host state.
+                                    SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(jobCts.Token).GetAwaiter().GetResult()
+                                    runIsolationOwned = True
+
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
                                         Try
@@ -3370,7 +3693,7 @@ Partial Public Class ThisAddIn
 
                                     Try
                                         If useToolTrigger AndAlso selectedToolsForJob IsNot Nothing AndAlso selectedToolsForJob.Count > 0 Then
-                                            ' (t) trigger path: use ToolDefaultModel with selected sources
+                                            ' (ag) trigger path: use ToolDefaultModel with selected sources
                                             ' Respects INI_ToolingLogWindow (same as Form1.vb chkShowToolingLog)
                                             localOutput = ExecuteToolingLoop(
                                                     sysPromptBase,
@@ -3386,7 +3709,8 @@ Partial Public Class ThisAddIn
                                                     True,
                                                     Not INI_ToolingLogWindow,
                                                     False,
-                                                    jobCts.Token
+                                                    jobCts.Token,
+                                                    progressSink:=Sub(s) job.StatusMessage = s
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3397,30 +3721,24 @@ Partial Public Class ThisAddIn
                                                 snapshotTaken = False
                                             End If
                                         ElseIf useAgentMode AndAlso agentToolsForJob IsNot Nothing AndAlso agentToolsForJob.Count > 0 Then
-                                            ' Match AutoPilot's iteration limit for agent/tool mode
-                                            Dim previousMaxIterations = INI_ToolingMaximumIterations
-                                            INI_ToolingMaximumIterations = AP_MaxToolIterations
-                                            Try
-                                                localOutput = ExecuteToolingLoop(
-                                                    sysPromptBase,
-                                                    "",
-                                                    agentToolsForJob,
-                                                    useSecondApiLocal,
-                                                    finalFileObject,
-                                                    False, "",
-                                                    False, False, "",
-                                                    False, "",
-                                                    False, "", "", "",
-                                                    sbDialog.ToString(),
-                                                    True,
-                                                    Not INI_ToolingLogWindow,
-                                                    False,
-                                                    jobCts.Token,
-                                                    _chatAgentTempDir
-                                                ).GetAwaiter().GetResult()
-                                            Finally
-                                                INI_ToolingMaximumIterations = previousMaxIterations
-                                            End Try
+                                            localOutput = ExecuteToolingLoop(
+                                                sysPromptBase,
+                                                "",
+                                                agentToolsForJob,
+                                                useSecondApiLocal,
+                                                finalFileObject,
+                                                False, "",
+                                                False, False, "",
+                                                False, "",
+                                                False, "", "", "",
+                                                sbDialog.ToString(),
+                                                True,
+                                                Not INI_ToolingLogWindow,
+                                                False,
+                                                jobCts.Token,
+                                                _chatAgentTempDir,
+                                                progressSink:=Sub(s) job.StatusMessage = s
+                                            ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
                                             If snapshotTaken Then
@@ -3452,7 +3770,9 @@ Partial Public Class ThisAddIn
                                             If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso
                                                agentOutputFiles IsNot Nothing AndAlso
                                                agentOutputFiles.Count > 0 Then
-                                                SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles)
+                                                If Not SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles) Then
+                                                    Throw New System.IO.IOException("One or more Local Agent scheduled-task outputs could not be persisted to the task workspace.")
+                                                End If
                                             End If
 
                                             If agentAbortDetected Then
@@ -3484,7 +3804,8 @@ Partial Public Class ThisAddIn
                                                     True,
                                                     Not INI_ToolingLogWindow,
                                                     False,
-                                                    jobCts.Token
+                                                    jobCts.Token,
+                                                    progressSink:=Sub(s) job.StatusMessage = s
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3586,6 +3907,12 @@ Partial Public Class ThisAddIn
                                     Catch
                                         ' Ignore restore errors
                                     End Try
+
+                                    If runIsolationOwned Then
+                                        SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                                        runIsolationOwned = False
+                                    End If
+
                                     Threading.Interlocked.Decrement(activeJobs)
                                 End Try
                             End Sub)
@@ -3758,7 +4085,7 @@ Partial Public Class ThisAddIn
                         End If
                         Dim t = job.Tcs.Task
                         If Not t.IsCompleted Then
-                            Return JsonOk(New With {.ok = True, .job = jobId, .status = "running"})
+                            Return JsonOk(New With {.ok = True, .job = jobId, .status = "running", .statusText = If(job.StatusMessage, "")})
                         End If
                         If t.IsCanceled Then
                             Return JsonOk(New With {.ok = True, .job = jobId, .status = "canceled"})
@@ -4020,6 +4347,11 @@ Partial Public Class ThisAddIn
                 End If
 
                 Return JsonErr("Bad request: " & ex.Message)
+            Finally
+                If requestRunIsolationOwned Then
+                    SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                    requestRunIsolationOwned = False
+                End If
             End Try
         End If
 
@@ -4165,14 +4497,14 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(My.Settings.LastPrompt) Then sb.Append("; ctrl-p for your last prompt")
                 sb.Append(":")
                 Dim promptMsg As String = sb.ToString()
-                Dim OptionalButtons As System.Tuple(Of String, String, String)()
+                Dim OptionalButtons As System.Tuple(Of String, String, String)() = Nothing
                 If wordInstalled Then
                     OptionalButtons = {
                         System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix)
                     }
                 End If
                 OtherPrompt = Await SwitchToUi(Function()
-                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, If(wordInstalled, OptionalButtons, Nothing), Context:=_context)
+                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, OptionalButtons, Context:=_context)
                                                End Function)
                 Dim doMarkupFlag As Boolean = False
                 Dim doInsertFlag As Boolean = False

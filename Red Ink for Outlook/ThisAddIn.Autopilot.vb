@@ -33,11 +33,15 @@
 '      * Attachment-based category classification (text/light/heavy-doc/heavy-pdf).
 '      * Rolling timing estimates and queue position notifications for delayed jobs.
 '      * Active-job progress notifications for long-running tool executions.
+'      * Voicemail preprocessing treats empty/unusable transcription output as a failed contract and always notifies a mapped caller.
+'      * AutoPilot tooling runs archive the latest 50 logical run bundles under %APPDATA%\RedInk\autopilot-logs.
 '  - Tooling integration:
 '      * Uses existing `ExecuteToolingLoop` and AutoPilot internal tools.
 '      * Supports per-mail `#model:` override with tooling-capability checks.
+'      * Archives the most recent AutoPilot tooling runs under `%APPDATA%\RedInk\autopilot-logs`.
 '  - Reply handling:
 '      * Sends HTML replies with optional generated attachments.
+'      * Oversized attachment sets are delivered by the central outgoing-delivery pipeline as attachment-only follow-up mails under a conservative 30 MB target.
 '      * Optional approval dialog and "Sources used" footer.
 '      * Moves AutoPilot replies to Sent Items\Inky Replies.
 '  - Web grounding:
@@ -50,7 +54,8 @@
 '  - Voicemail processing:
 '      * When enabled, incoming voicemails are identified by sender address,
 '        transcribed via the model's audio capability, and processed as instructions.
-'        Responses are delivered to the mapped e-mail address from the caller ID CSV.
+'        Empty/unusable transcription output generates a user-facing failure notice instead of
+'        silently abandoning the voicemail. Responses are delivered to the mapped e-mail address from the caller ID CSV.
 '
 ' Security Model for Attachments:
 '  - Per-mail isolated temp directory under `%TEMP%` (GUID-based).
@@ -108,10 +113,148 @@ Partial Public Class ThisAddIn
     Private Const AP_CategoryName As String = "Inky AutoPilot"
     Private Const AP_SentSubfolder As String = "Inky Replies"
     Private Const AP_MaxThreadDepth As Integer = 20
-    Private Const AP_DefaultCooldownSeconds As Integer = 60
+    Private Const AP_DefaultCooldownSeconds As Integer = 45
     Private Const AP_DefaultMaxRepliesPerSession As Integer = 200
     Private Const AP_DefaultMaxAttachmentBytes As Long = 10 * 1024 * 1024
     Private Const AP_TempPrefix As String = AN2 & "_autopilot_"
+
+
+    ''' <summary>Maximum number of archived unattended AutoPilot tooling logs retained per user profile.</summary>
+    Private Const AP_ToolingLogArchiveRetentionCount As Integer = 50
+
+    ''' <summary>Maximum filename segment length used for user/subject labels in archived tooling logs.</summary>
+    Private Const AP_ToolingLogArchiveSegmentMaxLength As Integer = 80
+
+    ''' <summary>
+    ''' Builds a per-run AutoPilot tooling-log archive path under the current user's roaming AppData.
+    ''' The sortable timestamp is first, followed by sanitized user and subject labels. Old archives
+    ''' are pruned before the new run so that at most 50 completed/current run bundles remain.
+    ''' Failure to prepare the archive is non-fatal and returns <c>Nothing</c>.
+    ''' </summary>
+    Private Function BuildAutoPilotToolingLogArchivePath(userLabel As String,
+                                                         subjectLabel As String) As String
+        Try
+            Dim appDataRoot As String =
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData)
+            If String.IsNullOrWhiteSpace(appDataRoot) Then Return Nothing
+
+            Dim archiveDirectory As String =
+                System.IO.Path.Combine(appDataRoot, "RedInk", "autopilot-logs")
+            If Not System.IO.Directory.Exists(archiveDirectory) Then
+                System.IO.Directory.CreateDirectory(archiveDirectory)
+            End If
+
+            PruneAutoPilotToolingLogArchives(archiveDirectory, AP_ToolingLogArchiveRetentionCount - 1)
+
+            Dim safeUser As String = SanitizeAutoPilotToolingLogFileSegment(userLabel, "unknown-user")
+            Dim safeSubject As String = SanitizeAutoPilotToolingLogFileSegment(subjectLabel, "no-subject")
+            Dim stamp As String = System.DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", Globalization.CultureInfo.InvariantCulture)
+            Dim baseName As String = $"{stamp}__{safeUser}__{safeSubject}"
+            Dim candidate As String = System.IO.Path.Combine(archiveDirectory, baseName & "__Tooling.txt")
+
+            If System.IO.File.Exists(candidate) Then
+                candidate = System.IO.Path.Combine(
+                    archiveDirectory,
+                    baseName & "__" & System.Guid.NewGuid().ToString("N").Substring(0, 8) & "__Tooling.txt")
+            End If
+
+            Return candidate
+        Catch ex As System.Exception
+            ApDashboardLog("AutoPilot tooling-log archive unavailable: " & ex.Message, "warn")
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>Normalizes a human-readable value so it is safe and bounded inside a Windows filename.</summary>
+    Private Shared Function SanitizeAutoPilotToolingLogFileSegment(value As String,
+                                                                   fallbackValue As String) As String
+        Dim text As String = If(value, "").Trim()
+        If String.IsNullOrWhiteSpace(text) Then text = fallbackValue
+
+        Dim invalidChars As System.Collections.Generic.HashSet(Of Char) =
+            New System.Collections.Generic.HashSet(Of Char)(System.IO.Path.GetInvalidFileNameChars())
+        Dim sb As New System.Text.StringBuilder(text.Length)
+
+        For Each ch As Char In text
+            If invalidChars.Contains(ch) OrElse System.Char.IsControl(ch) Then
+                sb.Append("_"c)
+            ElseIf System.Char.IsWhiteSpace(ch) Then
+                sb.Append("_"c)
+            Else
+                sb.Append(ch)
+            End If
+        Next
+
+        Dim normalized As String = System.Text.RegularExpressions.Regex.Replace(sb.ToString(), "_+", "_").Trim("_"c, "."c)
+        If String.IsNullOrWhiteSpace(normalized) Then normalized = fallbackValue
+        If normalized.Length > AP_ToolingLogArchiveSegmentMaxLength Then
+            normalized = normalized.Substring(0, AP_ToolingLogArchiveSegmentMaxLength).TrimEnd("_"c, "."c)
+        End If
+        Return normalized
+    End Function
+
+    ''' <summary>
+    ''' Best-effort retention cleanup for AutoPilot tooling-log archives. Retention counts logical
+    ''' runs, not files: a run consists of its __Tooling log plus any companion __SubAgent_Returns log.
+    ''' </summary>
+    Private Shared Sub PruneAutoPilotToolingLogArchives(archiveDirectory As String,
+                                                        keepExistingRunCount As Integer)
+        Try
+            Dim keepCount As Integer = System.Math.Max(0, keepExistingRunCount)
+            Dim existingFiles As System.Collections.Generic.List(Of System.IO.FileInfo) =
+                New System.IO.DirectoryInfo(archiveDirectory).
+                    GetFiles("*.txt", System.IO.SearchOption.TopDirectoryOnly).
+                    OrderByDescending(Function(fileInfo) fileInfo.Name, System.StringComparer.OrdinalIgnoreCase).
+                    ThenByDescending(Function(fileInfo) fileInfo.LastWriteTimeUtc).
+                    ToList()
+
+            Dim runGroups As New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.List(Of System.IO.FileInfo))(System.StringComparer.OrdinalIgnoreCase)
+            For Each fileInfo As System.IO.FileInfo In existingFiles
+                Dim runKey As String = GetAutoPilotToolingLogRunKey(fileInfo.Name)
+                Dim group As System.Collections.Generic.List(Of System.IO.FileInfo) = Nothing
+                If Not runGroups.TryGetValue(runKey, group) Then
+                    group = New System.Collections.Generic.List(Of System.IO.FileInfo)()
+                    runGroups(runKey) = group
+                End If
+                group.Add(fileInfo)
+            Next
+
+            Dim orderedRuns As System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of String, System.Collections.Generic.List(Of System.IO.FileInfo))) =
+                runGroups.
+                    OrderByDescending(Function(pair) pair.Key, System.StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+            For runIndex As Integer = keepCount To orderedRuns.Count - 1
+                For Each fileInfo As System.IO.FileInfo In orderedRuns(runIndex).Value
+                    Try
+                        fileInfo.Delete()
+                    Catch
+                    End Try
+                Next
+            Next
+        Catch
+            ' Retention is best-effort and must never block AutoPilot execution.
+        End Try
+    End Sub
+
+    ''' <summary>Returns the shared sortable run prefix for a tooling/sub-agent archive filename.</summary>
+    Private Shared Function GetAutoPilotToolingLogRunKey(fileName As String) As String
+        Dim stem As String = System.IO.Path.GetFileNameWithoutExtension(If(fileName, ""))
+        If String.IsNullOrWhiteSpace(stem) Then Return ""
+
+        Const toolingSuffix As String = "__Tooling"
+        Const subAgentSuffix As String = "__SubAgent_Returns"
+
+        If stem.EndsWith(toolingSuffix, System.StringComparison.OrdinalIgnoreCase) Then
+            Return stem.Substring(0, stem.Length - toolingSuffix.Length)
+        End If
+        If stem.EndsWith(subAgentSuffix, System.StringComparison.OrdinalIgnoreCase) Then
+            Return stem.Substring(0, stem.Length - subAgentSuffix.Length)
+        End If
+
+        ' Legacy single-file archives from earlier builds are treated as one logical run each.
+        Return stem
+    End Function
 
     ''' <summary>Maximum recursion depth for unpacking nested embedded mails.</summary>
     Private Const AP_MaxEmbeddedMailDepth As Integer = 5
@@ -125,6 +268,85 @@ Partial Public Class ThisAddIn
     ''' <summary>Maximum recursion depth for nested archives.</summary>
     Private Const AP_MaxArchiveDepth As Integer = 3
 
+    ''' <summary>
+    ''' Extensions that must not be sent as bare attachments. Files with these extensions
+    ''' are repackaged into a .zip before delivery so recipients' mail systems do not block
+    ''' or quarantine them. Matches the common executable/script set plus source files.
+    ''' </summary>
+    Private Shared ReadOnly AP_ZipBeforeSendExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".exe", ".com", ".bat", ".cmd", ".msi", ".scr", ".pif", ".cpl", ".jar",
+        ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta",
+        ".sh", ".zsh", ".py", ".pyw", ".rb", ".pl", ".php", ".reg", ".dll"
+    }
+
+    ''' <summary>
+    ''' Returns a delivery-safe copy of <paramref name="resultAttachments"/>. Any file whose
+    ''' extension is in <see cref="AP_ZipBeforeSendExtensions"/> is compressed into an individual
+    ''' .zip in a temporary directory and the .zip path is substituted for the original. All other
+    ''' files pass through unchanged. If required ZIP materialization fails, delivery preparation
+    ''' fails closed; a file in the protected extension set is never silently sent bare.
+    ''' </summary>
+    Private Function SanitizeOutgoingAttachmentsForDelivery(resultAttachments As List(Of String)) As List(Of String)
+        Dim sanitized As New List(Of String)()
+        If resultAttachments Is Nothing Then Return sanitized
+
+        For Each attachPath In resultAttachments
+            Try
+                If String.IsNullOrWhiteSpace(attachPath) Then
+                    Throw New System.IO.IOException("A requested outgoing deliverable has an empty path.")
+                End If
+
+                If Not File.Exists(attachPath) Then
+                    Throw New System.IO.FileNotFoundException(
+                        "A requested outgoing deliverable no longer exists.",
+                        attachPath)
+                End If
+
+                Dim ext As String = Path.GetExtension(attachPath)
+                If Not AP_ZipBeforeSendExtensions.Contains(ext) Then
+                    sanitized.Add(attachPath)
+                    Continue For
+                End If
+
+                ' Keep transport-only ZIPs inside the same caller-managed staging tree as
+                ' the source attachment. Standard AutoPilot, voicemail and deferred-approval
+                ' paths all clean that tree after send/failure, so no orphan AP zip_* temp
+                ' directories accumulate outside the run lifecycle.
+                Dim zipDir As String = Path.GetDirectoryName(Path.GetFullPath(attachPath))
+                If String.IsNullOrWhiteSpace(zipDir) OrElse Not Directory.Exists(zipDir) Then
+                    Throw New System.IO.DirectoryNotFoundException(
+                        "The outgoing deliverable staging directory is unavailable for ZIP materialization.")
+                End If
+
+                Dim zipPath As String =
+                    Path.Combine(
+                        zipDir,
+                        Path.GetFileNameWithoutExtension(attachPath) &
+                        "_delivery_" &
+                        Guid.NewGuid().ToString("N") &
+                        ".zip")
+
+                Using archive = ZipFile.Open(zipPath, ZipArchiveMode.Create)
+                    archive.CreateEntryFromFile(attachPath, Path.GetFileName(attachPath), CompressionLevel.Optimal)
+                End Using
+
+                ApDashboardLog($"  📦 Zipped attachment for delivery: {Path.GetFileName(attachPath)} → {Path.GetFileName(zipPath)}", "info")
+                sanitized.Add(zipPath)
+            Catch ex As System.IO.FileNotFoundException
+                Throw
+            Catch ex As System.IO.IOException When String.IsNullOrWhiteSpace(attachPath)
+                Throw
+            Catch ex As System.Exception
+                ApDashboardLog($"  ❌ Failed to prepare protected attachment '{Path.GetFileName(If(attachPath, ""))}' for ZIP delivery: {ex.Message}", "error")
+                Throw New System.IO.IOException(
+                    "A protected outgoing deliverable could not be materialized as a ZIP attachment. Delivery was aborted.",
+                    ex)
+            End Try
+        Next
+
+        Return sanitized
+    End Function
+
 
     ''' <summary>Command prefix scanned in the first few lines of the latest e-mail body.</summary>
     Private Const AP_ModelCommandPrefix As String = "#model:"
@@ -134,11 +356,18 @@ Partial Public Class ThisAddIn
 
     Private Const SP_AutoPilot_HoldingResponse As String =
         "Thank you for your message. This is an automated acknowledgement — your request has not yet been processed. " &
-        "I will respond with a substantive reply once your request has been handled. " &
+        "I will respond with a substantive reply once your request has been handled. {StatusMessage} " &
         "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly. " &
         "— " & AN6
 
-    Private Const AP_MaxToolIterations As Integer = 50
+    Private Const SP_AutoPilot_HoldingResponseStatus As String = "To check the current system status, click on {MonitorLink}."
+
+    Private Const SP_AutoPilot_RejectionResponse As String =
+        "Thank you for your message. After review, your request has not been approved for automated processing, and no substantive reply will be sent. " &
+        "If you believe this is in error or require assistance, please contact us directly. " &
+        "— " & AN6
+
+    Private Const AP_MaxToolIterations As Integer = Agents.ToolingConstants.DefaultMaxToolIterations
 
     ''' <summary>
     ''' Product IDs whose Pro license holders are permitted to use AutoPilot.
@@ -150,21 +379,32 @@ Partial Public Class ThisAddIn
         "1727",
         "1827",
         "2040",
-        "2058",
-        "2059",
-        "2060",
-        "2061",
-        "2062",
-        "2063"
+        "2257",
+        "2258",
+        "2259",
+        "2260",
+        "2261",
+        "2262",
+        "2263",
+        "3141",
+        "3142",
+        "3143",
+        "3144",
+        "3145",
+        "3146",
+        "3184"
     }
 
-    '  1702 Pro Special
+    '  1702 Pro Special -- NO (Temporary yes)
     '  1727 Pro Test Tec
     '  1827 Pro Test
     '  2040 Pro Support
     '  2150 Pro Special 2 -- NO
     '  1693 Pro -- NO
-    '  2058-2063 Special License for AutoPilot
+    '  2056
+    '  2257-2263, 3141-3146 Red Ink AutoPilot
+    '  3184 Red Ink Autopilot Special
+    '  3185 Red Ink Autopilot Special
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -175,12 +415,30 @@ Partial Public Class ThisAddIn
     Private _apConfig As AutoPilotConfig = Nothing
     Private _apCts As CancellationTokenSource = Nothing
     Private _apDashboard As LogWindow = Nothing
+    Private _apDashboardDisplaySettingsHooked As Boolean = False
     Private ReadOnly _apSenderLastMailSentUtc As New ConcurrentDictionary(Of String, DateTime)(StringComparer.OrdinalIgnoreCase)
     Private _apSessionReplyCount As Integer = 0
     Private ReadOnly _apMailQueue As New ConcurrentQueue(Of String)()
+
+    ''' <summary>
+    ''' EntryIDs currently queued or actively being processed.
+    ''' Prevents the same mail from being queued twice when it is seen both by
+    ''' startup catch-up and Application.NewMailEx.
+    ''' The EntryID remains here until processing has completely finished.
+    ''' </summary>
+    Private ReadOnly _apQueuedOrProcessingEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+
+    ' Serializes AutoPilot mail processing and scheduler task execution so they never overlap.
     Private ReadOnly _apProcessingSemaphore As New SemaphoreSlim(1, 1)
+
     Private _apSelectedTools As List(Of ModelConfig) = Nothing
     Private _apUseSecondApi As Boolean = False
+
+    ''' <summary>
+    ''' Nesting counter used to mirror AutoPilot internal-tool progress into the
+    ''' Local Chat tooling log only while an internal AutoPilot tool is executing.
+    ''' </summary>
+    Private _apMirrorDashboardLogToLocalToolingDepth As Integer = 0
 
     ''' <summary>
     ''' Paths of knowledge-store source files copied into the temp directory.
@@ -257,6 +515,25 @@ Partial Public Class ThisAddIn
     ''' <summary>Guard to prevent overlapping notification checks.</summary>
     Private _apNotificationCheckRunning As Integer = 0
 
+    ''' <summary>Interval (seconds) at which the heartbeat status file is refreshed. Mirrors the notification timer cadence.</summary>
+    Private Const AP_HeartbeatIntervalSeconds As Integer = 15
+
+    ''' <summary>Last error message recorded for the heartbeat status report (Nothing when no error has occurred).</summary>
+    Private _apLastError As String = Nothing
+
+    ''' <summary>UTC time of the last recorded error for the heartbeat status report.</summary>
+    Private _apLastErrorUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>UTC time at which the currently-processing job started (DateTime.MinValue when idle).</summary>
+    Private _apCurrentJobStartUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>UTC time of the last observed progress signal for the current job (tool call, log step, or LLM turn).
+    ''' Used to distinguish a slow-but-progressing job from a hung one.</summary>
+    Private _apCurrentJobLastActivityUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>Seconds without any observed progress after which the current job is flagged as potentially stalled.</summary>
+    Private Const AP_JobStallThresholdSeconds As Integer = 20 * 60  ' 20 minutes
+
     ''' <summary>Cached HelpMeInky manual text, loaded once per AutoPilot session.</summary>
     Private _apHelpMeManualCache As String = Nothing
     Private _apHelpMeManualCacheLoaded As Boolean = False
@@ -278,6 +555,18 @@ Partial Public Class ThisAddIn
     ''' These mails bypass cooldown because the operator (or unattended mode) explicitly chose them.</summary>
     Private ReadOnly _apCatchUpEntryIds As New ConcurrentDictionary(Of String, Boolean)()
 
+    ''' <summary>Pre-processing approval queue: EntryID → pending request info. Mails registered here
+    ''' have NOT been processed and are NOT tagged as processed, so a restart's catch-up scan
+    ''' re-discovers them and re-queues them for approval.</summary>
+    Private ReadOnly _apPendingApprovals As New ConcurrentDictionary(Of String, AutoPilotPendingApproval)()
+
+    ''' <summary>EntryIDs the operator has approved for processing. Presence bypasses the approval
+    ''' gate on the next pump pass so the mail is processed and auto-sent.</summary>
+    Private ReadOnly _apApprovedEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+
+    ''' <summary>Dashboard button surfacing the pending-approval count; created when approval is enabled.</summary>
+    Private _apApprovalsButton As Button = Nothing
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PUBLIC ENTRY POINTS
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -287,12 +576,18 @@ Partial Public Class ThisAddIn
         If Not _apActive Then Return
         _apActive = False
         Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
+        Try : SaveAutoPilotDashboardBounds(_apDashboard) : Catch : End Try
         Try
             If _apDashboard IsNot Nothing Then
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 RemoveHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                RemoveHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
             End If
         Catch : End Try
+        If _apDashboardDisplaySettingsHooked Then
+            Try : RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf AutoPilot_DashboardDisplaySettingsChanged : Catch : End Try
+            _apDashboardDisplaySettingsHooked = False
+        End If
         Try : _apNotificationTimer?.Dispose() : Catch : End Try
         _apNotificationTimer = Nothing
         StopAutoDeleteTimer()
@@ -316,6 +611,7 @@ Partial Public Class ThisAddIn
         _apProcessedConversations.Clear()
         _apQueueNotifiedEntryIds.Clear()
         _apQueueEnqueueTimes.Clear()
+        _apQueuedOrProcessingEntryIds.Clear()
         _apCategoryTimings.Clear()
         _apCurrentProcessingStopwatch = Nothing
         _apCurrentProcessingCategory = Nothing
@@ -323,6 +619,9 @@ Partial Public Class ThisAddIn
         _apHelpMeManualCacheLoaded = False
         _apHoldingOnlyEntryIds.Clear()
         _apCatchUpEntryIds.Clear()
+        _apPendingApprovals.Clear()
+        _apApprovedEntryIds.Clear()
+        _apApprovalsButton = Nothing
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
         _apVoicemailCallerIdMap = Nothing
@@ -332,6 +631,7 @@ Partial Public Class ThisAddIn
         End If
 
         WebGrounding = ""
+        WriteAutoPilotHeartbeat("stopped")
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -345,8 +645,11 @@ Partial Public Class ThisAddIn
             Sub()
                 Try
                     If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+                    EnsureAutoPilotDashboardVisible()
                     _apDashboard.Show()
+                    EnsureAutoPilotDashboardVisible()
                     _apDashboard.BringToFront()
+                    _apDashboard.Activate()
                 Catch
                 End Try
             End Sub
@@ -399,6 +702,16 @@ Partial Public Class ThisAddIn
     ''' <summary>Starts AutoPilot with an explicit configuration instance.</summary>
     Private Sub StartAutoPilotWithConfig(config As AutoPilotConfig)
         _apConfig = config
+
+        ' Always persist the effective configuration on every start, regardless of which
+        ' entry point was used. This guarantees My.Settings (and the registry backup) are
+        ' refreshed each time AutoPilot starts. Best-effort: never block startup on failure.
+        Try
+            SaveAutoPilotConfigToSettings(config)
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to persist config on start: {ex.Message}")
+        End Try
+
         StopLocalSchedulerRuntime()
         _apActive = True
         _apCts = New CancellationTokenSource()
@@ -455,8 +768,19 @@ Partial Public Class ThisAddIn
                 _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
                 AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                AddHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
                 _apDashboard.ShowAbortJobButton(True)
+                RestoreAutoPilotDashboardBounds()
                 _apDashboard.Show()
+                EnsureAutoPilotDashboardVisible()
+
+                Try
+                    If Not _apDashboardDisplaySettingsHooked Then
+                        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf AutoPilot_DashboardDisplaySettingsChanged
+                        _apDashboardDisplaySettingsHooked = True
+                    End If
+                Catch
+                End Try
 
                 ' Add Scheduler dashboard button if scheduler is enabled
                 If config.EnableScheduler Then
@@ -491,6 +815,26 @@ Partial Public Class ThisAddIn
                             }
                             AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
                             buttonPanel.Controls.Add(btnUserStorage)
+                        End If
+                    Catch
+                    End Try
+                End If
+
+                ' Add Approvals button (pre-processing approval queue) when manual approval is enabled.
+                If config.RequireApprovalForNonWhitelisted Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
+
+                        If buttonPanel IsNot Nothing Then
+                            _apApprovalsButton = New Button() With {
+                                .Text = "Approvals (0)",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5),
+                                .Enabled = False
+                            }
+                            AddHandler _apApprovalsButton.Click, Sub(s, e) ShowPendingApprovalsReview()
+                            buttonPanel.Controls.Add(_apApprovalsButton)
                         End If
                     Catch
                     End Try
@@ -566,10 +910,27 @@ Partial Public Class ThisAddIn
         End If
 
         ApDashboardLog($"Filters: {config.FilterRules.Count} rule(s) active", "info")
-        ApDashboardLog($"Mode: {If(config.RequireApprovalForNonWhitelisted, "CoPilot (approval for non-whitelisted)", "AutoPilot (auto-send all)")}", "info")
+        ApDashboardLog(
+    $"Mode: {If(config.RequireApprovalForNonWhitelisted, "CoPilot (approval for non-whitelisted)", "AutoPilot (auto-send all)")}",
+    "info")
+
+        ' IMPORTANT:
+        ' Install the live NewMailEx listener BEFORE catch-up scanning or displaying
+        ' the catch-up/reprocess dialog. Otherwise mail arriving during startup or
+        ' while the modal dialog is open is never observed by AutoPilot.
+        AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
+
+        ' Start the processing pump immediately as well. This allows genuinely new
+        ' mail to be processed even while the operator leaves the catch-up/reprocess
+        ' dialog open.
+        Task.Run(Function() AutoPilotProcessingPump(_apCts.Token))
+
         ApDashboardLog("Watching for new mail...", "info")
 
-        CatchUpMissedMails()
+        ' Scan historical/missed mail only after the live listener is active.
+        ' Run asynchronously so the catch-up selection window does not block
+        ' Outlook's UI/STA thread or live NewMailEx processing.
+        Dim ignoredCatchUpTask As System.Threading.Tasks.Task = CatchUpMissedMailsAsync()
 
         ' Start scheduler if enabled
         If config.EnableScheduler Then
@@ -582,24 +943,51 @@ Partial Public Class ThisAddIn
         End If
 
         If config.AutoDeleteAfterHours > 0 Then
-            ApDashboardLog($"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).", "info")
+            ApDashboardLog(
+        $"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).",
+        "info")
+
             StartAutoDeleteTimer()
-            RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
+
+            If AP_RunAutoDeleteCleanupOnStartup Then
+                ApDashboardLog(
+            "🗑 Auto-delete startup cleanup enabled — running initial pass.",
+            "step")
+
+                RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
+            Else
+                ApDashboardLog(
+            "🗑 Auto-delete startup cleanup disabled — cleanup runs on the periodic timer only.",
+            "step")
+            End If
         Else
             ApDashboardLog("🗑 Auto-delete disabled.", "info")
         End If
 
-        AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
-        Task.Run(Function() AutoPilotProcessingPump(_apCts.Token))
+        If config.ThreadRetentionDays > 0 Then
+            ApDashboardLog($"🗂 Conversation attachment retention enabled ({config.ThreadRetentionDays} day(s), whitelisted senders only).", "info")
+            Task.Run(Sub()
+                         Try
+                             PurgeExpiredThreadRetention()
+                         Catch
+                         End Try
+                     End Sub)
+        End If
 
         ' Start a periodic timer for queue holding notifications.
         ' This runs independently of the processing pump so notifications
         ' can fire even while a long tool execution blocks the pump.
         _apNotificationTimer = New System.Threading.Timer(
-            AddressOf NotificationTimerCallback,
-            Nothing,
-            dueTime:=TimeSpan.FromSeconds(15),
-            period:=TimeSpan.FromSeconds(15))
+    AddressOf NotificationTimerCallback,
+    Nothing,
+    dueTime:=TimeSpan.FromSeconds(15),
+    period:=TimeSpan.FromSeconds(15))
+
+        ' Emit an initial heartbeat immediately so the external monitor sees "running"
+        ' without waiting for the first timer tick.
+        _apLastError = Nothing
+        _apLastErrorUtc = DateTime.MinValue
+        WriteAutoPilotHeartbeat("running")
 
     End Sub
 
@@ -619,6 +1007,140 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
+    ''' <summary>Restores the AutoPilot dashboard position and size from <c>My.Settings</c>.</summary>
+    Private Sub RestoreAutoPilotDashboardBounds()
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            Dim savedX As Integer = My.Settings.AP_DashboardWindowX
+            Dim savedY As Integer = My.Settings.AP_DashboardWindowY
+            Dim savedW As Integer = My.Settings.AP_DashboardWindowW
+            Dim savedH As Integer = My.Settings.AP_DashboardWindowH
+
+            Dim minWidth As Integer = Math.Max(_apDashboard.MinimumSize.Width, 1)
+            Dim minHeight As Integer = Math.Max(_apDashboard.MinimumSize.Height, 1)
+            Dim hasSavedBounds As Boolean = savedW >= minWidth AndAlso savedH >= minHeight
+
+            If hasSavedBounds Then
+                _apDashboard.StartPosition = FormStartPosition.Manual
+                _apDashboard.SetBounds(savedX, savedY, savedW, savedH)
+            End If
+        Catch
+        End Try
+
+        EnsureAutoPilotDashboardVisible()
+    End Sub
+
+    ''' <summary>Saves the AutoPilot dashboard position and size into <c>My.Settings</c>.</summary>
+    Private Sub SaveAutoPilotDashboardBounds(Optional dashboard As Form = Nothing)
+        Dim target As Form = If(dashboard, _apDashboard)
+        If target Is Nothing OrElse target.IsDisposed Then Return
+
+        Try
+            My.Settings.AP_DashboardWindowX = target.Left
+            My.Settings.AP_DashboardWindowY = target.Top
+            My.Settings.AP_DashboardWindowW = target.Width
+            My.Settings.AP_DashboardWindowH = target.Height
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>Ensures the AutoPilot dashboard remains reachable on a visible screen.</summary>
+    Private Sub EnsureAutoPilotDashboardVisible()
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            SharedMethods.EnsureVisibleOnScreen(_apDashboard)
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>Saves dashboard bounds when the current dashboard window is closed.</summary>
+    Private Sub AutoPilot_DashboardFormClosing(sender As Object, e As FormClosingEventArgs)
+        If Not ReferenceEquals(sender, _apDashboard) Then Return
+        SaveAutoPilotDashboardBounds(_apDashboard)
+    End Sub
+
+    ''' <summary>Repositions the dashboard after monitor or resolution changes.</summary>
+    Private Sub AutoPilot_DashboardDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            If _apDashboard.InvokeRequired Then
+                _apDashboard.BeginInvoke(New MethodInvoker(AddressOf EnsureAutoPilotDashboardVisible))
+            Else
+                EnsureAutoPilotDashboardVisible()
+            End If
+        Catch
+        End Try
+    End Sub
+
+
+    Private Function IsAutoPilotMailAlreadyProcessedByEntryId(entryId As String) As Boolean
+        If String.IsNullOrWhiteSpace(entryId) Then Return False
+
+        Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
+        Dim obj As Object = Nothing
+        Dim mi As MailItem = Nothing
+
+        Try
+            ns = Application.GetNamespace("MAPI")
+            obj = ns.GetItemFromID(entryId)
+            mi = TryCast(obj, MailItem)
+
+            If mi Is Nothing Then
+                Return True
+            End If
+
+            Try
+                Dim cats As String = mi.Categories
+
+                If Not String.IsNullOrWhiteSpace(cats) AndAlso
+               cats.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+                    Return True
+                End If
+            Catch
+            End Try
+
+            Try
+                If HasSubstantiveAutoPilotReply(mi) Then
+                    Return True
+                End If
+            Catch
+            End Try
+
+            Return False
+
+        Catch
+            ' If Outlook cannot resolve the EntryID anymore, do not queue a stale item.
+            Return True
+
+        Finally
+            If mi IsNot Nothing Then
+                Try
+                    Marshal.ReleaseComObject(mi)
+                Catch
+                End Try
+            End If
+
+            If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then
+                Try
+                    Marshal.ReleaseComObject(obj)
+                Catch
+                End Try
+            End If
+
+            If ns IsNot Nothing Then
+                Try
+                    Marshal.ReleaseComObject(ns)
+                Catch
+                End Try
+            End If
+        End Try
+    End Function
+
     ''' <summary>
     ''' Scans the Inbox (or monitored folder) for mails that arrived after the last
     ''' processed timestamp, applies the full filter/trigger logic, and shows a
@@ -628,259 +1150,470 @@ Partial Public Class ThisAddIn
     ''' When ReprocessLookbackHours > 0, already-processed mails within that window are
     ''' also shown, allowing the operator to select them for reprocessing.
     ''' </summary>
-    Private Sub CatchUpMissedMails()
+    Private Async Function CatchUpMissedMailsAsync() As System.Threading.Tasks.Task
         Try
             Dim lastProcessed As DateTime = My.Settings.AP_LastProcessedTime
             Dim isFirstRun As Boolean = False
 
-            If lastProcessed = DateTime.MinValue OrElse lastProcessed = New DateTime(1, 1, 1) Then
+            If lastProcessed = DateTime.MinValue OrElse
+           lastProcessed = New DateTime(1, 1, 1) Then
+
                 ' No previous session timestamp — default to 24 hours ago in local time.
-                ' We use local time directly because MailItem.ReceivedTime is always local,
-                ' and we want exactly 24 hours of local-time coverage.
                 lastProcessed = DateTime.Now.AddHours(-24)
                 isFirstRun = True
-                ApDashboardLog("No previous session timestamp — scanning last 24 hours for relevant mails.", "info")
+
+                ApDashboardLog(
+                "No previous session timestamp — scanning last 24 hours for relevant mails.",
+                "info")
             End If
 
-            ' For persisted values: ensure we treat the stored value as UTC
-            ' (it was saved as DateTime.UtcNow) and convert to local for comparison.
-            ' For the first-run fallback: already local, skip conversion.
+            ' For persisted values: treat the stored value as UTC and convert to local.
             Dim lastProcessedLocal As DateTime
+
             If isFirstRun Then
                 lastProcessedLocal = lastProcessed
             Else
                 If lastProcessed.Kind = DateTimeKind.Unspecified Then
-                    lastProcessed = DateTime.SpecifyKind(lastProcessed, DateTimeKind.Utc)
+                    lastProcessed =
+                    DateTime.SpecifyKind(
+                        lastProcessed,
+                        DateTimeKind.Utc)
                 End If
+
                 lastProcessedLocal = lastProcessed.ToLocalTime()
 
-                ' Cap: never look back more than 24 hours even if the saved timestamp is older
-                Dim maxLookback = DateTime.Now.AddHours(-24)
+                ' Cap: never look back more than 24 hours.
+                Dim maxLookback As DateTime = DateTime.Now.AddHours(-24)
+
                 If lastProcessedLocal < maxLookback Then
                     lastProcessedLocal = maxLookback
-                    ApDashboardLog("Saved timestamp is older than 24 hours — capping lookback to 24h.", "info")
+
+                    ApDashboardLog(
+                    "Saved timestamp is older than 24 hours — capping lookback to 24h.",
+                    "info")
                 End If
             End If
 
-            ' Determine the reprocess lookback cutoff (for already-processed mails)
-            Dim reprocessLookbackHours = If(_apConfig IsNot Nothing, _apConfig.ReprocessLookbackHours, 0)
+            ' Determine reprocess lookback.
+            Dim reprocessLookbackHours As Integer =
+            If(
+                _apConfig IsNot Nothing,
+                _apConfig.ReprocessLookbackHours,
+                0)
+
             Dim reprocessCutoffLocal As DateTime = DateTime.MinValue
+
             If reprocessLookbackHours > 0 Then
-                reprocessCutoffLocal = DateTime.Now.AddHours(-reprocessLookbackHours)
-                ApDashboardLog($"Reprocess lookback: {reprocessLookbackHours}h (mails since {reprocessCutoffLocal:yyyy-MM-dd HH:mm:ss})", "info")
+                reprocessCutoffLocal =
+                DateTime.Now.AddHours(-reprocessLookbackHours)
+
+                ApDashboardLog(
+                $"Reprocess lookback: {reprocessLookbackHours}h " &
+                $"(mails since {reprocessCutoffLocal:yyyy-MM-dd HH:mm:ss})",
+                "info")
             End If
 
-            ' Use the earlier of the two cutoffs for the scan window
+            ' Use the earlier cutoff.
             Dim scanCutoffLocal As DateTime
-            If reprocessLookbackHours > 0 AndAlso reprocessCutoffLocal < lastProcessedLocal Then
+
+            If reprocessLookbackHours > 0 AndAlso
+           reprocessCutoffLocal < lastProcessedLocal Then
+
                 scanCutoffLocal = reprocessCutoffLocal
             Else
                 scanCutoffLocal = lastProcessedLocal
             End If
 
             If isFirstRun Then
-                ApDashboardLog($"Scanning for mails received after: {scanCutoffLocal:yyyy-MM-dd HH:mm:ss} (local)", "info")
+                ApDashboardLog(
+                $"Scanning for mails received after: " &
+                $"{scanCutoffLocal:yyyy-MM-dd HH:mm:ss} (local)",
+                "info")
             Else
-                ApDashboardLog($"Last processed: {lastProcessedLocal:yyyy-MM-dd HH:mm:ss} (local) / {lastProcessed:yyyy-MM-dd HH:mm:ss} (UTC)", "info")
+                ApDashboardLog(
+                $"Last processed: {lastProcessedLocal:yyyy-MM-dd HH:mm:ss} (local) / " &
+                $"{lastProcessed:yyyy-MM-dd HH:mm:ss} (UTC)",
+                "info")
             End If
+
             ApDashboardLog("Scanning inbox for newer mails...", "info")
 
-            Dim ns = Application.GetNamespace("MAPI")
+            Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
             Dim inbox As MAPIFolder = Nothing
-
-            ' Resolve the correct inbox when a specific mailbox is monitored
-            If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
-                Try
-                    For i As Integer = 1 To ns.Accounts.Count
-                        Dim acct = ns.Accounts(i)
-                        If acct.SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then
-                            Dim deliveryStore = acct.DeliveryStore
-                            If deliveryStore IsNot Nothing Then
-                                inbox = deliveryStore.GetDefaultFolder(OlDefaultFolders.olFolderInbox)
-                            End If
-                            Exit For
-                        End If
-                    Next
-                Catch
-                End Try
-            End If
-
-            ' Fallback to default inbox
-            If inbox Is Nothing Then
-                inbox = ns.GetDefaultFolder(OlDefaultFolders.olFolderInbox)
-            End If
-
-            ' Sort descending so we process newest first and can stop early
-            ' once we hit mails older than scanCutoffLocal.
-            Dim allItems = inbox.Items
-            allItems.Sort("[ReceivedTime]", Descending:=True)
+            Dim allItems As Items = Nothing
 
             Dim candidates As New List(Of CatchUpCandidate)()
+
             Dim skippedAlreadyProcessed As Integer = 0
             Dim skippedOther As Integer = 0
             Dim totalScanned As Integer = 0
             Dim reprocessCandidateCount As Integer = 0
 
-            For Each item As Object In allItems
-                If Not TypeOf item Is MailItem Then Continue For
-                Dim mi = DirectCast(item, MailItem)
-                Try
+            Try
+                ns = Application.GetNamespace("MAPI")
 
-                    ' MailItem.ReceivedTime is always local time.
-                    ' Stop scanning once we've gone past the scan cutoff.
-                    If mi.ReceivedTime <= scanCutoffLocal Then
-                        Exit For
-                    End If
-
-                    totalScanned += 1
-
-                    ' 1. Skip our own auto-replies (header on the mail itself)
+                ' Resolve monitored mailbox Inbox.
+                If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
                     Try
-                        Dim prop = mi.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
-                        If prop IsNot Nothing AndAlso prop.ToString() = AP_LoopHeaderValue Then
+                        For i As Integer = 1 To ns.Accounts.Count
+                            Dim acct As Microsoft.Office.Interop.Outlook.Account = Nothing
+                            Dim deliveryStore As Store = Nothing
+
+                            Try
+                                acct = ns.Accounts.Item(i)
+
+                                If acct IsNot Nothing AndAlso
+                               Not String.IsNullOrWhiteSpace(acct.SmtpAddress) AndAlso
+                               acct.SmtpAddress.Equals(
+                                   _apConfig.MonitoredMailbox,
+                                   StringComparison.OrdinalIgnoreCase) Then
+
+                                    deliveryStore = acct.DeliveryStore
+
+                                    If deliveryStore IsNot Nothing Then
+                                        inbox =
+                                        deliveryStore.GetDefaultFolder(
+                                            OlDefaultFolders.olFolderInbox)
+                                    End If
+
+                                    Exit For
+                                End If
+
+                            Finally
+                                If deliveryStore IsNot Nothing Then
+                                    Try
+                                        Marshal.ReleaseComObject(deliveryStore)
+                                    Catch
+                                    End Try
+                                End If
+
+                                If acct IsNot Nothing Then
+                                    Try
+                                        Marshal.ReleaseComObject(acct)
+                                    Catch
+                                    End Try
+                                End If
+                            End Try
+                        Next
+                    Catch
+                    End Try
+                End If
+
+                If inbox Is Nothing Then
+                    inbox =
+                    ns.GetDefaultFolder(
+                        OlDefaultFolders.olFolderInbox)
+                End If
+
+                allItems = inbox.Items
+                allItems.Sort("[ReceivedTime]", Descending:=True)
+
+                For i As Integer = 1 To allItems.Count
+                    Dim obj As Object = Nothing
+                    Dim mi As MailItem = Nothing
+
+                    Try
+                        obj = allItems.Item(i)
+                        mi = TryCast(obj, MailItem)
+
+                        If mi Is Nothing Then
                             Continue For
                         End If
-                    Catch
-                    End Try
 
-                    ' 2. Check if already processed (AP category tag or substantive reply)
-                    Dim isAlreadyProcessed As Boolean = False
-
-                    Try
-                        Dim cats = mi.Categories
-                        If cats IsNot Nothing AndAlso cats.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) >= 0 Then
-                            isAlreadyProcessed = True
+                        If mi.ReceivedTime <= scanCutoffLocal Then
+                            Exit For
                         End If
-                    Catch
-                    End Try
 
-                    If Not isAlreadyProcessed Then
+                        totalScanned += 1
+
+                        ' 1. Skip our own substantive AutoPilot replies.
                         Try
-                            If HasSubstantiveAutoPilotReply(mi) Then
+                            Dim prop As Object =
+                            mi.PropertyAccessor.GetProperty(
+                                AP_LoopHeaderProperty)
+
+                            If prop IsNot Nothing AndAlso
+                           prop.ToString().Equals(
+                               AP_LoopHeaderValue,
+                               StringComparison.OrdinalIgnoreCase) Then
+
+                                Continue For
+                            End If
+                        Catch
+                        End Try
+
+                        ' 2. Determine whether already processed.
+                        Dim isAlreadyProcessed As Boolean = False
+
+                        Try
+                            Dim cats As String = mi.Categories
+
+                            If Not String.IsNullOrWhiteSpace(cats) AndAlso
+                           cats.IndexOf(
+                               AP_CategoryName,
+                               StringComparison.OrdinalIgnoreCase) >= 0 Then
+
                                 isAlreadyProcessed = True
                             End If
                         Catch
                         End Try
-                    End If
 
-                    ' If already processed: only include if within the reprocess lookback window
-                    If isAlreadyProcessed Then
-                        If reprocessLookbackHours > 0 AndAlso mi.ReceivedTime > reprocessCutoffLocal Then
-                            ' Falls within reprocess window — allow it through as a reprocess candidate
-                            ' (don't skip, let it pass the filter checks below)
-                        Else
-                            skippedAlreadyProcessed += 1
-                            Continue For
-                        End If
-                    End If
-
-                    ' Full pre-filter: same logic as ProcessIncomingMailAsync
-                    Dim mailInfo = ExtractMailInfo(mi)
-                    If mailInfo Is Nothing Then Continue For
-
-                    ' ── Voicemail detection (bypasses normal filter pipeline, same as ProcessIncomingMailAsync) ──
-                    Dim isVoicemail As Boolean = IsVoicemailFromRegisteredSender(mailInfo)
-
-                    If Not isVoicemail Then
-                        If mailInfo.HasAutoReplyHeader Then Continue For
-                        If IsAutoReplyOrOof(mailInfo) Then
-                            skippedOther += 1
-                            Continue For
-                        End If
-                        If Not MatchesFilterRules(mailInfo) Then
-                            skippedOther += 1
-                            Continue For
-                        End If
-                        If MatchesNegativeFilters(mailInfo) Then
-                            skippedOther += 1
-                            Continue For
+                        If Not isAlreadyProcessed Then
+                            Try
+                                If HasSubstantiveAutoPilotReply(mi) Then
+                                    isAlreadyProcessed = True
+                                End If
+                            Catch
+                            End Try
                         End If
 
-                        ' Subject trigger word check
-                        If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
-                            If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
-                                skippedOther += 1
+                        If isAlreadyProcessed Then
+                            If reprocessLookbackHours > 0 AndAlso
+                           mi.ReceivedTime > reprocessCutoffLocal Then
+
+                                ' Explicit reprocess candidate.
+                            Else
+                                skippedAlreadyProcessed += 1
                                 Continue For
                             End If
                         End If
-                    End If
 
-                    Dim displayLabel As String = Nothing
-                    If isVoicemail Then
-                        displayLabel = "[VOICEMAIL] " & New CatchUpCandidate() With {
+                        Dim mailInfo As AutoPilotMailInfo =
+                        ExtractMailInfo(mi)
+
+                        If mailInfo Is Nothing Then
+                            Continue For
+                        End If
+
+                        Dim isVoicemail As Boolean =
+                        IsVoicemailFromRegisteredSender(mailInfo)
+
+                        If Not isVoicemail Then
+                            If mailInfo.HasAutoReplyHeader Then
+                                Continue For
+                            End If
+
+                            If IsAutoReplyOrOof(mailInfo) Then
+                                skippedOther += 1
+                                Continue For
+                            End If
+
+                            If Not MatchesFilterRules(mailInfo) Then
+                                skippedOther += 1
+                                Continue For
+                            End If
+
+                            If MatchesNegativeFilters(mailInfo) Then
+                                skippedOther += 1
+                                Continue For
+                            End If
+
+                            If Not String.IsNullOrWhiteSpace(
+                            _apConfig.SubjectTriggerWord) Then
+
+                                If mailInfo.Subject.IndexOf(
+                                _apConfig.SubjectTriggerWord,
+                                StringComparison.OrdinalIgnoreCase) < 0 Then
+
+                                    skippedOther += 1
+                                    Continue For
+                                End If
+                            End If
+                        End If
+
+                        Dim displayLabel As String = Nothing
+
+                        If isVoicemail Then
+                            displayLabel =
+                            "[VOICEMAIL] " &
+                            New CatchUpCandidate() With {
+                                .SenderName = mailInfo.SenderName,
+                                .SenderEmail = mailInfo.SenderEmail,
+                                .Subject = mailInfo.Subject,
+                                .ReceivedTime = mailInfo.ReceivedTime
+                            }.ToDisplayLabel()
+
+                        ElseIf isAlreadyProcessed Then
+                            reprocessCandidateCount += 1
+
+                            displayLabel =
+                            "[REPROCESS] " &
+                            New CatchUpCandidate() With {
+                                .SenderName = mailInfo.SenderName,
+                                .SenderEmail = mailInfo.SenderEmail,
+                                .Subject = mailInfo.Subject,
+                                .ReceivedTime = mailInfo.ReceivedTime
+                            }.ToDisplayLabel()
+                        End If
+
+                        candidates.Add(
+                        New CatchUpCandidate() With {
+                            .EntryID = mi.EntryID,
                             .SenderName = mailInfo.SenderName,
                             .SenderEmail = mailInfo.SenderEmail,
                             .Subject = mailInfo.Subject,
-                            .ReceivedTime = mailInfo.ReceivedTime
-                        }.ToDisplayLabel()
-                    ElseIf isAlreadyProcessed Then
-                        reprocessCandidateCount += 1
-                        displayLabel = "[REPROCESS] " & New CatchUpCandidate() With {
-                            .SenderName = mailInfo.SenderName,
-                            .SenderEmail = mailInfo.SenderEmail,
-                            .Subject = mailInfo.Subject,
-                            .ReceivedTime = mailInfo.ReceivedTime
-                        }.ToDisplayLabel()
-                    End If
+                            .ReceivedTime = mailInfo.ReceivedTime,
+                            .IsReprocessCandidate = isAlreadyProcessed,
+                            .CustomDisplayLabel = displayLabel
+                        })
 
-                    candidates.Add(New CatchUpCandidate() With {
-                        .EntryID = mi.EntryID,
-                        .SenderName = mailInfo.SenderName,
-                        .SenderEmail = mailInfo.SenderEmail,
-                        .Subject = mailInfo.Subject,
-                        .ReceivedTime = mailInfo.ReceivedTime,
-                        .IsReprocessCandidate = isAlreadyProcessed,
-                        .CustomDisplayLabel = displayLabel
-                    })
-                Finally
-                    Try : Marshal.ReleaseComObject(mi) : Catch : End Try
-                End Try
-            Next
+                    Finally
+                        If mi IsNot Nothing Then
+                            Try
+                                Marshal.ReleaseComObject(mi)
+                            Catch
+                            End Try
+                        End If
 
-            ApDashboardLog($"Scan complete: {totalScanned} mail(s) scanned, {skippedAlreadyProcessed} already processed (outside reprocess window), {skippedOther} filtered out.", "step")
+                        If obj IsNot Nothing AndAlso
+                       Not ReferenceEquals(obj, mi) Then
+
+                            Try
+                                Marshal.ReleaseComObject(obj)
+                            Catch
+                            End Try
+                        End If
+                    End Try
+                Next
+
+            Finally
+                If allItems IsNot Nothing Then
+                    Try
+                        Marshal.ReleaseComObject(allItems)
+                    Catch
+                    End Try
+                End If
+
+                If inbox IsNot Nothing Then
+                    Try
+                        Marshal.ReleaseComObject(inbox)
+                    Catch
+                    End Try
+                End If
+
+                If ns IsNot Nothing Then
+                    Try
+                        Marshal.ReleaseComObject(ns)
+                    Catch
+                    End Try
+                End If
+            End Try
+
+            ApDashboardLog(
+            $"Scan complete: {totalScanned} mail(s) scanned, " &
+            $"{skippedAlreadyProcessed} already processed (outside reprocess window), " &
+            $"{skippedOther} filtered out.",
+            "step")
+
             If reprocessCandidateCount > 0 Then
-                ApDashboardLog($"Reprocess candidates: {reprocessCandidateCount} already-processed mail(s) within {reprocessLookbackHours}h lookback", "info")
+                ApDashboardLog(
+                $"Reprocess candidates: {reprocessCandidateCount} " &
+                $"already-processed mail(s) within {reprocessLookbackHours}h lookback",
+                "info")
             End If
 
             If candidates.Count = 0 Then
-                ApDashboardLog("No missed mails found matching filters.", "step")
+                ApDashboardLog(
+                "No missed mails found matching filters.",
+                "step")
                 Return
             End If
 
-            ' Re-sort candidates oldest-first for processing order
-            candidates.Sort(Function(a, b) a.ReceivedTime.CompareTo(b.ReceivedTime))
+            candidates.Sort(
+            Function(a, b)
+                Return a.ReceivedTime.CompareTo(b.ReceivedTime)
+            End Function)
 
-            ApDashboardLog($"Found {candidates.Count} mail(s) matching filters ({candidates.Count - reprocessCandidateCount} new, {reprocessCandidateCount} reprocess).", "info")
+            ApDashboardLog(
+            $"Found {candidates.Count} mail(s) matching filters " &
+            $"({candidates.Count - reprocessCandidateCount} new, " &
+            $"{reprocessCandidateCount} reprocess).",
+            "info")
 
             Dim selectedEntryIds As List(Of String) = Nothing
 
             If _apConfig.IsUnattended Then
-                ' Unattended auto-start: skip the preview dialog, process all candidates
-                ' but exclude reprocess candidates in unattended mode (only operator should choose those)
-                selectedEntryIds = candidates.Where(Function(c) Not c.IsReprocessCandidate).Select(Function(c) c.EntryID).ToList()
-                ApDashboardLog($"Unattended mode — auto-selecting {selectedEntryIds.Count} new catch-up mail(s) (skipping {reprocessCandidateCount} reprocess candidates).", "info")
+                selectedEntryIds =
+                candidates.
+                Where(Function(c) Not c.IsReprocessCandidate).
+                Select(Function(c) c.EntryID).
+                ToList()
+
+                ApDashboardLog(
+                $"Unattended mode — auto-selecting {selectedEntryIds.Count} " &
+                $"new catch-up mail(s) " &
+                $"(skipping {reprocessCandidateCount} reprocess candidate(s)).",
+                "info")
             Else
-                ' Show preview dialog using MultiModelSelectorForm pattern
-                ' Pre-select only NEW (unprocessed) mails; reprocess candidates are unchecked by default
-                selectedEntryIds = ShowCatchUpPreviewDialog(candidates, lastProcessed)
+                ' IMPORTANT:
+                ' This is MODELLESS and awaited asynchronously.
+                ' Outlook's UI thread is free while the operator leaves this window open.
+                selectedEntryIds =
+                Await ShowCatchUpPreviewDialogAsync(
+                    candidates,
+                    lastProcessed)
             End If
 
-            If selectedEntryIds IsNot Nothing AndAlso selectedEntryIds.Count > 0 Then
-                For Each entryId In selectedEntryIds
-                    _apMailQueue.Enqueue(entryId)
-                    _apQueueEnqueueTimes.TryAdd(entryId, DateTime.UtcNow)
+            If selectedEntryIds IsNot Nothing AndAlso
+           selectedEntryIds.Count > 0 Then
+
+                Dim queuedCount As Integer = 0
+                Dim alreadyQueuedCount As Integer = 0
+                Dim alreadyProcessedLiveCount As Integer = 0
+
+                For Each entryId As String In selectedEntryIds
+
+                    Dim selectedCandidate As CatchUpCandidate =
+                    candidates.FirstOrDefault(
+                        Function(c)
+                            Return String.Equals(
+                                c.EntryID,
+                                entryId,
+                                StringComparison.OrdinalIgnoreCase)
+                        End Function)
+
+                    Dim isExplicitReprocess As Boolean =
+                    selectedCandidate IsNot Nothing AndAlso
+                    selectedCandidate.IsReprocessCandidate
+
+                    ' Live intake may have processed this NEW mail while the
+                    ' catch-up window was open.
+                    If Not isExplicitReprocess AndAlso
+                   IsAutoPilotMailAlreadyProcessedByEntryId(entryId) Then
+
+                        alreadyProcessedLiveCount += 1
+                        Continue For
+                    End If
+
                     _apCatchUpEntryIds.TryAdd(entryId, True)
+
+                    If EnqueueAutoPilotMail(entryId) Then
+                        queuedCount += 1
+                    Else
+                        alreadyQueuedCount += 1
+                    End If
                 Next
-                ApDashboardLog($"Queued {selectedEntryIds.Count} of {candidates.Count} mail(s) for processing.", "info")
+
+                ApDashboardLog(
+                $"Catch-up selection: {queuedCount} queued, " &
+                $"{alreadyQueuedCount} already queued/processing, " &
+                $"{alreadyProcessedLiveCount} already handled by live intake.",
+                "info")
             Else
-                ApDashboardLog("Operator skipped catch-up processing.", "step")
+                ApDashboardLog(
+                "Operator skipped catch-up processing.",
+                "step")
             End If
 
         Catch ex As System.Exception
-            ApDashboardLog($"Catch-up scan error: {ex.Message}", "warn")
-            Debug.WriteLine($"[AutoPilot] CatchUpMissedMails error: {ex}")
+            ApDashboardLog(
+            $"Catch-up scan error: {ex.Message}",
+            "warn")
+
+            Debug.WriteLine(
+            $"[AutoPilot] CatchUpMissedMailsAsync error: {ex}")
         End Try
-    End Sub
+    End Function
 
     ''' <summary>
     ''' Checks whether a mail already has a SUBSTANTIVE AutoPilot reply in its conversation.
@@ -984,58 +1717,141 @@ Partial Public Class ThisAddIn
     ''' New (unprocessed) items are pre-checked. Reprocess candidates are unchecked by default.
     ''' Returns the list of EntryIDs for checked items, or Nothing if cancelled.
     ''' </summary>
-    Private Function ShowCatchUpPreviewDialog(candidates As List(Of CatchUpCandidate), lastProcessed As DateTime) As List(Of String)
-        ' Build ModelConfig list to feed into MultiModelSelectorForm
-        ' We repurpose ModelDescription as the display label and Model as the EntryID
+    Private Function ShowCatchUpPreviewDialogAsync(
+        candidates As List(Of CatchUpCandidate),
+        lastProcessed As DateTime) As System.Threading.Tasks.Task(Of List(Of String))
+
+        Dim completion As New System.Threading.Tasks.TaskCompletionSource(Of List(Of String))()
+
+        ' Everything below is plain managed data. Do not pass Outlook COM objects
+        ' to the dialog thread.
         Dim items As New List(Of ModelConfig)()
-        For Each c In candidates
-            items.Add(New ModelConfig() With {
+
+        For Each c As CatchUpCandidate In candidates
+            items.Add(
+            New ModelConfig() With {
                 .ModelDescription = c.ToDisplayLabel(),
                 .Model = c.EntryID
             })
         Next
 
-        ' Pre-select only NEW (unprocessed) items — reprocess candidates are unchecked
-        Dim preselectLabels = candidates.Where(Function(c) Not c.IsReprocessCandidate).
-            Select(Function(c) c.ToDisplayLabel()).ToList()
+        ' New/unprocessed items are preselected.
+        ' Explicit [REPROCESS] candidates remain unchecked by default.
+        Dim preselectLabels As List(Of String) =
+        candidates.
+        Where(Function(c) Not c.IsReprocessCandidate).
+        Select(Function(c) c.ToDisplayLabel()).
+        ToList()
 
-        Dim reprocessCount = candidates.Where(Function(c) c.IsReprocessCandidate).Count()
-        Dim instructionText = $"The following {candidates.Count} mail(s) arrived while AutoPilot was inactive. Select the mails to process:"
+        Dim reprocessCount As Integer =
+        candidates.Where(Function(c) c.IsReprocessCandidate).Count()
+
+        Dim instructionText As String =
+        $"The following {candidates.Count} mail(s) arrived while AutoPilot was inactive. " &
+        "Select the mails to process:"
+
         If reprocessCount > 0 Then
-            instructionText &= $" ({reprocessCount} already-processed mail(s) marked [REPROCESS] are unchecked by default.)"
+            instructionText &=
+            $" ({reprocessCount} already-processed mail(s) marked [REPROCESS] " &
+            "are unchecked by default.)"
         End If
 
-        Using dlg As New SharedLibrary.SharedLibrary.MultiModelSelectorForm(
-            items, Nothing,
-            title:=$"{AN6} AutoPilot — Catch-Up ({candidates.Count} mail(s) since {lastProcessed:yyyy-MM-dd HH:mm})",
-            resetChecked:=False,
-            preselectMany:=preselectLabels,
-            instruction:=instructionText)
+        Dim dialogTitle As String =
+        $"{AN6} AutoPilot — Catch-Up " &
+        $"({candidates.Count} mail(s) since {lastProcessed:yyyy-MM-dd HH:mm})"
 
-            ' Center on screen since there is no parent form in this context
-            dlg.StartPosition = FormStartPosition.CenterScreen
+        ' IMPORTANT:
+        ' Run the modal catch-up window on a dedicated STA UI thread.
+        '
+        ' This deliberately keeps ShowDialog(), so MultiModelSelectorForm retains
+        ' its normal OK / Cancel / DialogResult behaviour.
+        '
+        ' Outlook's own UI/STA thread is NOT blocked by this dialog, which allows
+        ' NewMailEx and SwitchToUi processing to continue while the window is open.
+        Dim dialogThread As New System.Threading.Thread(
+        Sub()
+            Try
+                Using dlg As New SharedLibrary.SharedLibrary.MultiModelSelectorForm(
+                    items,
+                    Nothing,
+                    title:=dialogTitle,
+                    resetChecked:=False,
+                    preselectMany:=preselectLabels,
+                    instruction:=instructionText)
 
-            If dlg.ShowDialog() = DialogResult.OK Then
-                Dim selected = dlg.SelectedModels
-                If selected IsNot Nothing AndAlso selected.Count > 0 Then
-                    Return selected.Select(Function(m) m.Model).ToList()
-                End If
-                Return New List(Of String)()
-            End If
-        End Using
+                    dlg.StartPosition = FormStartPosition.CenterScreen
 
-        Return Nothing
+                    Dim __safeDialogOwner1641 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    Dim result As DialogResult = If(__safeDialogOwner1641 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner1641), dlg.ShowDialog())
+
+                    If result = DialogResult.OK Then
+                        Dim selected = dlg.SelectedModels
+
+                        If selected IsNot Nothing AndAlso
+                           selected.Count > 0 Then
+
+                            Dim selectedEntryIds As List(Of String) =
+                                selected.
+                                Select(Function(m) m.Model).
+                                ToList()
+
+                            completion.TrySetResult(selectedEntryIds)
+                        Else
+                            completion.TrySetResult(New List(Of String)())
+                        End If
+                    Else
+                        completion.TrySetResult(Nothing)
+                    End If
+                End Using
+
+            Catch ex As System.Exception
+                completion.TrySetException(ex)
+            End Try
+        End Sub)
+
+        dialogThread.IsBackground = True
+        dialogThread.Name = "AutoPilot Catch-Up Dialog"
+        dialogThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        dialogThread.Start()
+
+        Return completion.Task
     End Function
+
+
+    ''' <summary>
+    ''' Queues an AutoPilot mail exactly once.
+    ''' Returns True when the mail was newly queued, False when it was already
+    ''' queued or currently being processed.
+    ''' </summary>
+    Private Function EnqueueAutoPilotMail(entryId As String) As Boolean
+        If String.IsNullOrWhiteSpace(entryId) Then Return False
+
+        entryId = entryId.Trim()
+
+        ' Atomic deduplication across NewMailEx, catch-up and other queue sources.
+        If Not _apQueuedOrProcessingEntryIds.TryAdd(entryId, True) Then
+            Return False
+        End If
+
+        _apMailQueue.Enqueue(entryId)
+        _apQueueEnqueueTimes.TryAdd(entryId, DateTime.UtcNow)
+
+        Return True
+    End Function
+
 
 
     ''' <summary>Queues newly received mail entry IDs for processing.</summary>
     Private Sub AutoPilot_NewMailEx(ByVal EntryIDCollection As String)
         If Not _apActive Then Return
-        For Each id In EntryIDCollection.Split(","c)
-            Dim trimmed = id.Trim()
-            If trimmed.Length > 0 Then
-                _apMailQueue.Enqueue(trimmed)
-                _apQueueEnqueueTimes.TryAdd(trimmed, DateTime.UtcNow)
+        If String.IsNullOrWhiteSpace(EntryIDCollection) Then Return
+
+        For Each id As String In EntryIDCollection.Split(","c)
+            Dim entryId As String = id.Trim()
+            If entryId.Length = 0 Then Continue For
+
+            If EnqueueAutoPilotMail(entryId) Then
+                ApDashboardLog("📥 New mail queued for AutoPilot processing.", "step")
             End If
         Next
     End Sub
@@ -1051,6 +1867,7 @@ Partial Public Class ThisAddIn
         If Interlocked.CompareExchange(_apNotificationCheckRunning, 1, 0) <> 0 Then Return
 
         Try
+            WriteAutoPilotHeartbeat("running")
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
             Await SendQueuePositionNotificationsAsync(ct.Value)
@@ -1068,74 +1885,107 @@ Partial Public Class ThisAddIn
     Private Async Function AutoPilotProcessingPump(ct As CancellationToken) As Task
         Try
             While Not ct.IsCancellationRequested
-                Dim entryId As String = Nothing
-                If _apMailQueue.TryDequeue(entryId) Then
-                    ' Clean up enqueue time tracking for this mail
-                    Dim dummy As DateTime
-                    _apQueueEnqueueTimes.TryRemove(entryId, dummy)
-                    ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
-                    ' ProcessIncomingMailAsync needs to check it for the holding-notice
-                    ' cooldown bypass. It is cleaned up after processing completes.
-
-                    ' Track the active job for progress notifications
-                    _apCurrentProcessingEntryId = entryId
-                    _apActiveJobLastNotifiedUtc = DateTime.MinValue
-
-                    Dim pending = _apMailQueue.Count
-                    If pending > 0 Then
-                        ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
-                    End If
-
-                    ' Classify and time the current mail
-                    Try
-                        _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
-                                                                            Try
-                                                                                Dim ns = Application.GetNamespace("MAPI")
-                                                                                Dim obj = ns.GetItemFromID(entryId)
-                                                                                If TypeOf obj Is MailItem Then
-                                                                                    Dim mi = DirectCast(obj, MailItem)
-                                                                                    Try : Return ClassifyMailCategory(mi)
-                                                                                    Finally : Marshal.ReleaseComObject(mi) : End Try
-                                                                                End If
-                                                                            Catch : End Try
-                                                                            Return AP_Cat_TextOnly
-                                                                        End Function)
-                    Catch
-                        _apCurrentProcessingCategory = AP_Cat_TextOnly
-                    End Try
-
-                    ' Create a per-job CancellationTokenSource linked to the session CTS
-                    _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
-                    Dim jobCt = _apCurrentJobCts.Token
-
-                    _apCurrentProcessingStopwatch = Stopwatch.StartNew()
-                    Try
-                        Await ProcessIncomingMailAsync(entryId, jobCt)
-                    Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
-                        ' Job-level abort (not session-level) — log and continue to next mail
-                        ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
-                    Finally
-                        _apCurrentProcessingStopwatch.Stop()
-                        UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
-                        ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
-                        _apCurrentProcessingStopwatch = Nothing
-                        _apCurrentProcessingCategory = Nothing
-                        _apCurrentProcessingEntryId = Nothing
-                        _apActiveJobLastNotifiedUtc = DateTime.MinValue
-                        ' Clean up notification and catch-up tracking AFTER processing is complete
-                        _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
-                        Dim dummyCatchUp As Boolean
-                        _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
-                        Try : _apCurrentJobCts?.Dispose() : Catch : End Try
-                        _apCurrentJobCts = Nothing
-                    End Try
-                Else
+                If _apMailQueue.IsEmpty Then
                     Await Task.Delay(1000, ct)
+                    Continue While
                 End If
+
+                If Not _apProcessingSemaphore.Wait(0) Then
+                    Await Task.Delay(1000, ct)
+                    Continue While
+                End If
+
+                Try
+                    Dim entryId As String = Nothing
+                    If _apMailQueue.TryDequeue(entryId) Then
+
+                        'ApDashboardLog(
+                        '    $"📤 Pump DEQUEUED EntryID={entryId.Substring(0, Math.Min(24, entryId.Length))}... " &
+                        '    $"RemainingQueue={_apMailQueue.Count}",
+                        '    "warn")
+
+                        ' Clean up enqueue time tracking for this mail
+                        Dim dummy As DateTime
+                        _apQueueEnqueueTimes.TryRemove(entryId, dummy)
+                        ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
+                        ' ProcessIncomingMailAsync needs to check it for the holding-notice
+                        ' cooldown bypass. It is cleaned up after processing completes.
+
+                        ' Track the active job for progress notifications
+                        _apCurrentProcessingEntryId = entryId
+                        _apActiveJobLastNotifiedUtc = DateTime.MinValue
+
+                        ' Start the job-liveness clocks for hang/stall detection in the heartbeat.
+                        _apCurrentJobStartUtc = DateTime.UtcNow
+                        _apCurrentJobLastActivityUtc = DateTime.UtcNow
+
+                        Dim pending = _apMailQueue.Count
+                        If pending > 0 Then
+                            ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
+                        End If
+
+                        ' Classify and time the current mail
+                        Try
+                            _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
+                                                                                Try
+                                                                                    Dim ns = Application.GetNamespace("MAPI")
+                                                                                    Dim obj = ns.GetItemFromID(entryId)
+                                                                                    If TypeOf obj Is MailItem Then
+                                                                                        Dim mi = DirectCast(obj, MailItem)
+                                                                                        Try : Return ClassifyMailCategory(mi)
+                                                                                        Finally : Marshal.ReleaseComObject(mi) : End Try
+                                                                                    End If
+                                                                                Catch : End Try
+                                                                                Return AP_Cat_TextOnly
+                                                                            End Function)
+                        Catch
+                            _apCurrentProcessingCategory = AP_Cat_TextOnly
+                        End Try
+
+                        ' Create a per-job CancellationTokenSource linked to the session CTS
+                        _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
+                        Dim jobCt = _apCurrentJobCts.Token
+
+                        _apCurrentProcessingStopwatch = Stopwatch.StartNew()
+                        Try
+                            Await ProcessIncomingMailAsync(entryId, jobCt)
+                        Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
+                            ' Job-level abort (not session-level) — log and continue to next mail
+                            ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
+                        Finally
+                            _apCurrentProcessingStopwatch.Stop()
+                            UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
+                            ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
+                            _apCurrentProcessingStopwatch = Nothing
+                            _apCurrentProcessingCategory = Nothing
+                            _apCurrentProcessingEntryId = Nothing
+                            _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                            _apCurrentJobStartUtc = DateTime.MinValue
+                            _apCurrentJobLastActivityUtc = DateTime.MinValue
+                            ' Clean up notification and catch-up tracking AFTER processing is complete.
+                            _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
+
+                            Dim dummyCatchUp As Boolean
+                            _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
+
+                            ' Only now may this EntryID be accepted into the queue again.
+                            ' Keeping it registered during processing prevents NewMailEx/catch-up races
+                            ' from creating a second concurrent processing pass for the same message.
+                            Dim dummyQueuedOrProcessing As Boolean
+                            _apQueuedOrProcessingEntryIds.TryRemove(entryId, dummyQueuedOrProcessing)
+
+                            Try : _apCurrentJobCts?.Dispose() : Catch : End Try
+                            _apCurrentJobCts = Nothing
+                        End Try
+                    End If
+                Finally
+                    _apProcessingSemaphore.Release()
+                End Try
             End While
         Catch ex As OperationCanceledException
             ApDashboardLog("AutoPilot cancelled.", "step")
         Catch ex As System.Exception
+            RecordAutoPilotError("Pump error: " & ex.Message)
             ApDashboardLog("AutoPilot pump error: " & ex.Message, "error")
         End Try
     End Function
@@ -1323,6 +2173,31 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Builds the "system status" sentence containing the configured monitor link,
+    ''' or an empty string when no valid link is configured. Scheme-less values
+    ''' (e.g. "www.example.com/status") are normalized to https so a configured link
+    ''' is always surfaced. Used by every sender-facing auto-response notice.
+    ''' </summary>
+    Private Function BuildMonitorLinkStatusMessage() As String
+        Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
+        If String.IsNullOrWhiteSpace(monitorLink) Then Return ""
+
+        Dim normalizedMonitorLink As String = monitorLink
+        If normalizedMonitorLink.IndexOf("://", StringComparison.Ordinal) < 0 Then
+            normalizedMonitorLink = "https://" & normalizedMonitorLink
+        End If
+
+        Dim monitorUri As System.Uri = Nothing
+        If System.Uri.TryCreate(normalizedMonitorLink, System.UriKind.Absolute, monitorUri) AndAlso
+           (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
+            String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+            Return SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", normalizedMonitorLink)
+        End If
+
+        Return ""
+    End Function
+
+    ''' <summary>
     ''' Runs the full AutoPilot pre-filter pipeline against a mail item to determine
     ''' whether it will actually be processed. This is the same set of checks performed
     ''' at the top of ProcessIncomingMailAsync, extracted here so that queue notifications
@@ -1507,16 +2382,19 @@ Partial Public Class ThisAddIn
 
                     Dim isRepeat = (lastNotifiedUtc <> DateTime.MinValue)
 
+                    Dim monitorStatus = BuildMonitorLinkStatusMessage()
+                    Dim monitorStatusText = If(String.IsNullOrEmpty(monitorStatus), "", monitorStatus & " ")
+
                     Dim holdingMessage As String
                     If isRepeat Then
                         holdingMessage =
                             $"Thank you for your continued patience. This is an automated queue status update — your request is still awaiting processing. " &
-                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} " &
+                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} {monitorStatusText}" &
                             $"I will get back to you with a substantive reply as soon as possible. — {AN6}"
                     Else
                         holdingMessage =
                             $"Thank you for your message. This is an automated queue status notification — your request has not yet been processed in substance. " &
-                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} " &
+                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} {monitorStatusText}" &
                             $"I will get back to you with a substantive reply as soon as possible. — {AN6}"
                     End If
 
@@ -1581,11 +2459,14 @@ Partial Public Class ThisAddIn
                 Dim senderLabel = If(mailInfo IsNot Nothing, mailInfo.SenderEmail, "unknown")
 
                 Dim elapsedMinutes = CInt(Math.Floor(elapsedSeconds / 60))
+                Dim monitorStatus = BuildMonitorLinkStatusMessage()
+                Dim monitorStatusText = If(String.IsNullOrEmpty(monitorStatus), "", monitorStatus & " ")
+
                 Dim progressMessage As String =
                     $"Thank you for your continued patience. This is an automated progress update — your request is currently being processed and has been running for approximately {elapsedMinutes} minutes. " &
                     $"Some requests, particularly those involving document processing, may take considerable time to complete. " &
                     $"I will get back to you with the final result as soon as processing is finished. " &
-                    $"If you need immediate assistance, you can also use the {AN} add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. " &
+                    $"If you need immediate assistance, you can also use the {AN} add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. {monitorStatusText}" &
                     $"— {AN6}"
 
                 Await SwitchToUi(Sub() SendReplyToSender(mi, progressMessage, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
@@ -1613,8 +2494,14 @@ Partial Public Class ThisAddIn
         Dim mailInfoForAbort As AutoPilotMailInfo = Nothing
         Dim tempDirForAbort As String = Nothing
         Dim attachmentPathsForAbort As List(Of AutoPilotAttachmentInfo) = Nothing
+        Dim runIsolationOwned As Boolean = False
 
         Try
+            ' Hold the global agent owner scope for the entire mail run because current
+            ' attachment/workspace/tool-delivery fields are shared by the Outlook host.
+            Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
+            runIsolationOwned = True
+
             mi = Await SwitchToUi(Function() As MailItem
                                       Try
                                           Dim ns = Application.GetNamespace("MAPI")
@@ -1680,7 +2567,13 @@ Partial Public Class ThisAddIn
                 isExistingConversation = IsPartOfAutoPilotConversation(mi)
             Catch : End Try
 
-            If IsAutoReplyOrOof(mailInfo) Then : ApDashboardLog("SKIP (auto-reply/OOF): " & mailInfo.Subject, "step") : Return : End If
+            If IsAutoReplyOrOof(mailInfo) Then
+                ' Do not process auto-replies/OOF, but schedule them for auto-deletion
+                ' as part of their originating AutoPilot conversation group.
+                Await SwitchToUi(Sub() TagAutoReplyOrOofForCleanup(mi))
+                ApDashboardLog("SKIP (auto-reply/OOF): " & mailInfo.Subject, "step")
+                Return
+            End If
 
             ' SECURITY: Filter rules (domain/sender) are NEVER bypassed — they are the trust boundary.
             ' An attacker could spoof a ConversationID (same subject line) to join an existing thread,
@@ -1751,11 +2644,46 @@ Partial Public Class ThisAddIn
             Dim isWhitelisted As Boolean = IsSenderWhitelisted(mailInfo.SenderEmail)
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
             Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation)
+
+            ' ── Pre-processing approval gate ──
+            ' If this mail was previously held and the operator has since approved it, consume the
+            ' approval flag and process it normally (auto-send). This must be evaluated BEFORE any
+            ' expensive work (temp extraction / LLM) so a held mail costs nothing until approved.
+            Dim isOperatorApproved As Boolean = False
+            Dim consumedApproval As Boolean
+            If _apApprovedEntryIds.TryRemove(entryId, consumedApproval) Then
+                isOperatorApproved = True
+                requiresApproval = False
+            End If
+
             ApDashboardLog("━━━ PROCESSING ━━━", "info")
             SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Mail) invoked")
             ApDashboardLog($"From: {mailInfo.SenderName} <{mailInfo.SenderEmail}>", "info")
             ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
-            ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(requiresApproval, " [approval required]", " [auto-send]"), "info")
+            ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(isOperatorApproved, " [operator-approved]", If(requiresApproval, " [approval required]", " [auto-send]")), "info")
+
+            ' Hold non-whitelisted senders for MANUAL approval before processing (attended mode only).
+            ' We send a manual-approval notice, register the mail in the dashboard approval queue, and
+            ' return WITHOUT tagging it as processed — so a restart's catch-up scan re-discovers it.
+            ' The pump is never blocked: we return immediately and continue with the next mail.
+            If requiresApproval AndAlso Not _apConfig.IsUnattended Then
+                If _apPendingApprovals.TryAdd(entryId, New AutoPilotPendingApproval() With {
+                        .EntryID = entryId,
+                        .SenderName = mailInfo.SenderName,
+                        .SenderEmail = mailInfo.SenderEmail,
+                        .Subject = mailInfo.Subject,
+                        .ReceivedTime = mailInfo.ReceivedTime,
+                        .BodyPreview = BuildApprovalBodyPreview(mailInfo.Body)}) Then
+                    Dim approvalNotice As String = BuildManualApprovalNotice()
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, approvalNotice, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+                    UpdateApprovalsDashboardButton()
+                    ApDashboardLog($"⏸ Held for manual approval (see Approvals in dashboard): {mailInfo.SenderEmail} — {mailInfo.Subject}", "step")
+                Else
+                    ApDashboardLog($"⏸ Already awaiting approval: {mailInfo.SenderEmail}", "step")
+                End If
+                Return
+            End If
 
             ' Check for #model: command
             Dim modelOverrideConfig As ModelConfig = Nothing
@@ -1771,6 +2699,8 @@ Partial Public Class ThisAddIn
             Dim tempDir As String = Path.Combine(Path.GetTempPath(), AP_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(tempDir)
             Dim attachmentPaths As New List(Of AutoPilotAttachmentInfo)()
+            Dim preparedDeliverablesPresent As Boolean = False
+            Dim deliverableHandoffCompletedOrDiscarded As Boolean = False
 
             ' Store references for abort handler
             mailInfoForAbort = mailInfo
@@ -1842,6 +2772,25 @@ Partial Public Class ThisAddIn
                     ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit", "info")
                 End If
 
+                ' ── Inject retained files from an earlier message in this conversation ──
+                ' Whitelisted senders only; opt-in via ThreadRetentionDays. Files are copied
+                ' into the per-mail temp dir and registered as attachments so the model can
+                ' continue the discussion. Do NOT re-filter oversized rejection on these.
+                Try
+                    Dim retainedLoaded As Integer =
+                        LoadRetainedThreadFiles(mailInfo, tempDir, attachmentPaths, isWhitelisted)
+                    If retainedLoaded > 0 Then
+                        processableAttachments = attachmentPaths.Where(Function(a) Not a.IsOverSizeLimit).ToList()
+                    End If
+                Catch exRetain As System.Exception
+                    ApDashboardLog($"⚠ Could not load retained conversation files: {exRetain.Message}", "warn")
+                End Try
+
+                ' This mail owns its delivery state. Never let a no-tool mail fall back
+                ' to the completed registry of the previous AutoPilot mail/dialog.
+                _lastCompletedToolingRunState = Nothing
+                _lastCompletedToolResponses = New List(Of ToolResponse)()
+
                 ' Initialize tool call log for this e-mail
                 _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
 
@@ -1853,6 +2802,13 @@ Partial Public Class ThisAddIn
                     userPrompt &= oversizedNote
                 End If
                 Dim systemPrompt As String = InterpolateAtRuntime(SP_AutoPilot)
+
+                ' ── Inject per-sender policy system-prompt instruction (hard, in-code) ──
+                Dim senderPromptAddition As String = ResolveSystemPromptAdditionForSender(mailInfo.SenderEmail)
+                If Not String.IsNullOrWhiteSpace(senderPromptAddition) Then
+                    systemPrompt &= vbLf & vbLf & "[PER-SENDER POLICY INSTRUCTION]" & vbLf & senderPromptAddition
+                    ApDashboardLog("Applied per-sender system-prompt instruction.", "step")
+                End If
 
                 ' ── Inject per-user memory into system prompt ──
                 If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(mailInfo.SenderEmail) Then
@@ -1884,13 +2840,27 @@ Partial Public Class ThisAddIn
                 _apCurrentAttachments = attachmentPaths
                 _apCurrentMailInfo = mailInfo
 
+                Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = _chatAgentWorkspace
+                Dim previousChatAgentWorkspaceLoaded As Boolean = _chatAgentWorkspaceLoaded
+                Dim previousWorkspaceOnlyMode As Boolean = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
+                Dim previousSessionStagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+
                 Dim response As String
 
                 ' ── Set AutoPilot-specific max tool iterations ──
-                Dim previousMaxToolIterations = MaxToolIterations
-                MaxToolIterations = AP_MaxToolIterations
+                Dim previousMaxToolIterations = INI_ToolingMaximumIterations
+                INI_ToolingMaximumIterations = AP_MaxToolIterations
 
                 Try
+                    ' Establish the per-mail workspace inside the guarded scope so any
+                    ' setup failure still restores the previous Local-Agent/AutoPilot state.
+                    _chatAgentWorkspace = BuildAutoPilotTempWorkspaceState()
+                    _chatAgentWorkspaceLoaded = _chatAgentWorkspace IsNot Nothing
+                    SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
+                    SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(_apCurrentTempDir)
+                    SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
+                    SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({_apCurrentTempDir})
+
                     ApDashboardLog("Calling AI model...", "llm")
 
                     ' Re-apply the base model config captured at startup.
@@ -1946,7 +2916,10 @@ Partial Public Class ThisAddIn
                             binaryOutputDirectory:=_apCurrentTempDir,
                             workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
                             memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
-                            memoryGroundingModeIsExplicit:=True)
+                            memoryGroundingModeIsExplicit:=True,
+                            toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
+                                If(String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
+                                mailInfo.Subject))
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -1971,7 +2944,13 @@ Partial Public Class ThisAddIn
                     _apCurrentTempDir = Nothing
                     _apCurrentAttachments = Nothing
                     _apCurrentMailInfo = Nothing
-                    MaxToolIterations = previousMaxToolIterations
+                    _chatAgentWorkspace = previousChatAgentWorkspace
+                    _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
+                    SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
+                    SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
+                    SyncWorkspaceToPathPolicy()
+                    SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(previousSessionStagingRoot)
+                    INI_ToolingMaximumIterations = previousMaxToolIterations
                     ClearAttachmentCaches()
                 End Try
 
@@ -1988,8 +2967,13 @@ Partial Public Class ThisAddIn
 
                 ' ── Handle job abort ──
                 If jobAborted Then
-                    Dim resultAttachmentsAbort = CollectResultAttachments(tempDir, attachmentPaths)
+                    Dim resultAttachmentsAbort =
+                        CollectResultAttachments(
+                            tempDir,
+                            attachmentPaths,
+                            allowIncompleteExpectedContract:=True)
                     Dim hasPartialOutput = (resultAttachmentsAbort IsNot Nothing AndAlso resultAttachmentsAbort.Count > 0)
+                    If hasPartialOutput Then preparedDeliverablesPresent = True
 
                     Dim abortChoice = Await SwitchToUi(Function() As Integer
                                                            Dim msg = "The current job has been aborted."
@@ -2017,11 +3001,16 @@ Partial Public Class ThisAddIn
 
                         Dim attachmentsToSend = If(hasPartialOutput, resultAttachmentsAbort, Nothing)
                         Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True))
-                        ' Do NOT tag as processed — allow catch-up to pick it up again
+                        deliverableHandoffCompletedOrDiscarded = True
+                        Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
+                        ' Do NOT tag the original mail as processed — allow catch-up to pick it up again.
+                        ' Only the sent reply copies are promoted to cleanup-eligible status.
                         Interlocked.Increment(_apSessionReplyCount)
                         RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                         ApDashboardLog($"✉ Abort notice sent to: {mailInfo.SenderEmail}" & If(hasPartialOutput, $" (with {resultAttachmentsAbort.Count} partial attachment(s))", ""), "info")
                     Else
+                        ' The operator explicitly chose to discard any partial output.
+                        deliverableHandoffCompletedOrDiscarded = True
                         ' Do NOT tag as processed, do NOT record last processed time
                         ApDashboardLog($"Job aborted and discarded for: {mailInfo.SenderEmail}", "step")
                     End If
@@ -2068,8 +3057,9 @@ Partial Public Class ThisAddIn
                 ' Remove knowledge-store source files not cited by the LLM
                 RemoveUncitedKnowledgeSourceCopies(response)
 
-                ' Collect result attachments from OutputFiles
+                ' Collect registry-backed and bounded legacy-compatible result attachments.
                 Dim resultAttachments As List(Of String) = CollectResultAttachments(tempDir, attachmentPaths)
+                preparedDeliverablesPresent = (resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0)
 
                 If resultAttachments.Count > 0 Then
                     ApDashboardLog($"Result attachments to send: {resultAttachments.Count}", "info")
@@ -2083,29 +3073,76 @@ Partial Public Class ThisAddIn
 
                 ' ── Approval or auto-send ──
                 If requiresApproval AndAlso Not _apConfig.IsUnattended Then
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, SP_AutoPilot_HoldingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    Dim holdingResponse As String = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", "")
+                    Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
+
+                    If Not String.IsNullOrWhiteSpace(monitorLink) Then
+                        ' Accept scheme-less values (e.g. "www.example.com/status") by defaulting
+                        ' to https, so a configured monitor link is always surfaced to the sender.
+                        Dim normalizedMonitorLink As String = monitorLink
+                        If normalizedMonitorLink.IndexOf("://", StringComparison.Ordinal) < 0 Then
+                            normalizedMonitorLink = "https://" & normalizedMonitorLink
+                        End If
+
+                        Dim monitorUri As System.Uri = Nothing
+                        If System.Uri.TryCreate(normalizedMonitorLink, System.UriKind.Absolute, monitorUri) AndAlso
+                           (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
+                            String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+                            Dim statusMessage As String = SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", normalizedMonitorLink)
+                            holdingResponse = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", " " & statusMessage)
+                        Else
+                            ApDashboardLog($"⚠ MonitorLink '{monitorLink}' is not a valid http/https URL — omitted from holding notice.", "warn")
+                        End If
+                    End If
+
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+
                     ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")
 
-                    Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
-                    If approved Then
-                        Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
-                        Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
-                        Interlocked.Increment(_apSessionReplyCount)
-                        RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
-                        RecordLastProcessedTime()
-                        Dim dummyBool As Boolean
-                        _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
-                        ApDashboardLog("✓ APPROVED & SENT reply to: " & mailInfo.SenderEmail, "info")
-                    Else
-                        ApDashboardLog("REJECTED reply for: " & mailInfo.Subject, "step")
-                    End If
+                    ' ── Non-blocking approval ──
+                    ' The operator approval dialog must NEVER run on the processing pump, or it
+                    ' would hold _apProcessingSemaphore and block the entire queue until answered.
+                    ' We therefore stage the result attachments (the per-mail temp dir is deleted
+                    ' when this method returns) and hand approval + final send to a detached task,
+                    ' then return immediately so the pump is free for the next mail.
+                    Dim deferredAttachments As List(Of String) = CopyAttachmentsForDeferredApproval(resultAttachments)
+                    Dim deferredMailInfo As AutoPilotMailInfo = mailInfo
+                    Dim deferredResponse As String = response
+                    Dim deferredSourcesHtml As String = sourcesHtml
+                    Dim deferredEntryId As String = entryId
+                    Dim deferredMailSentUtc As DateTime = mailSentUtc
+
+                    RunDeferredApprovalAsync(deferredEntryId, deferredMailInfo, deferredResponse,
+                                             deferredAttachments, deferredSourcesHtml, deferredMailSentUtc)
+
+                    ' The per-mail originals can now be cleaned: every prepared deliverable
+                    ' has been copied into the deferred-approval staging directory, whose own
+                    ' lifecycle preserves it on approval/send failure.
+                    deliverableHandoffCompletedOrDiscarded = True
+
+                    ApDashboardLog($"Reply for {mailInfo.SenderEmail} is awaiting operator approval — queue continues.", "info")
                 Else
                     If requiresApproval AndAlso _apConfig.IsUnattended Then
                         ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
                     End If
                     Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                    deliverableHandoffCompletedOrDiscarded = True
                     Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+
+                    ' ── Retain this mail's inbound attachments for follow-up discussion ──
+                    ' Whitelisted senders only; opt-in via ThreadRetentionDays. Refreshes the
+                    ' retention clock so an active discussion keeps the files alive.
+                    Try
+                        PersistInboundAttachmentsToThread(mailInfo, attachmentPaths, isWhitelisted)
+                    Catch exPersist As System.Exception
+                        ApDashboardLog($"⚠ Could not retain conversation files: {exPersist.Message}", "warn")
+                    End Try
+
+                    Await Task.Delay(1500)
+                    Await SwitchToUi(Sub() ResendOutboxAutoPilotItemsUnconditional())
+
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                     RecordLastProcessedTime()
@@ -2115,11 +3152,26 @@ Partial Public Class ThisAddIn
                     ApDashboardLog($"✓ SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
                 End If
             Finally
-                ' ── SECURITY: Clean up temp directory ──
-                Try
-                    If Directory.Exists(tempDir) Then Directory.Delete(tempDir, recursive:=True)
-                Catch
-                End Try
+                ' ── SECURITY / RECOVERY: clean only after a successful handoff/discard,
+                ' or when no known generated deliverable remains in this per-mail staging
+                ' directory. A send/materialization/finalization failure must not destroy
+                ' files that the tooling run already produced.
+                Dim preserveTempDirForRecovery As Boolean =
+                    Not deliverableHandoffCompletedOrDiscarded AndAlso
+                    (preparedDeliverablesPresent OrElse
+                     AutoPilotTempContainsRecoverableDeliverables(tempDir, attachmentPaths))
+
+                If preserveTempDirForRecovery Then
+                    ApDashboardLog(
+                        "⚠ AutoPilot deliverables preserved for recovery after incomplete delivery: " & tempDir,
+                        "warn")
+                Else
+                    Try
+                        If Directory.Exists(tempDir) Then Directory.Delete(tempDir, recursive:=True)
+                    Catch
+                    End Try
+                End If
+
                 _apCurrentToolCallLog = Nothing
                 _apKnowledgeSourceCopies.Clear()
             End Try
@@ -2127,10 +3179,257 @@ Partial Public Class ThisAddIn
         Catch ex As OperationCanceledException
             Throw
         Catch ex As System.Exception
+            RecordAutoPilotError("Processing error: " & ex.Message)
             ApDashboardLog("ERROR: " & ex.Message, "error")
             Debug.WriteLine("AutoPilot ProcessIncomingMailAsync error: " & ex.ToString())
         Finally
             If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+
+            If runIsolationOwned Then
+                SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                runIsolationOwned = False
+            End If
+        End Try
+    End Function
+
+
+    ''' <summary>
+    ''' Re-submits AutoPilot's own items currently in the Outbox by calling .Send() again,
+    ''' mirroring the manual "open item → Send" action that is known to transmit stuck items.
+    ''' Does NOT depend on PR_SUBMIT_FLAGS (which is not readable on this store). Only AutoPilot-
+    ''' tagged items are touched. Must run on the UI thread.
+    ''' </summary>
+    Friend Sub ResendOutboxAutoPilotItemsUnconditional()
+        Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
+        Dim outbox As MAPIFolder = Nothing
+        Dim items As Items = Nothing
+        Try
+            ns = Application.GetNamespace("MAPI")
+            outbox = ns.GetDefaultFolder(OlDefaultFolders.olFolderOutbox)
+            If outbox Is Nothing Then Return
+            items = outbox.Items
+
+            ' Iterate backwards: a successful .Send() removes the item from the Outbox collection.
+            For i As Integer = items.Count To 1 Step -1
+                Dim obj As Object = Nothing
+                Dim mi As MailItem = Nothing
+                Try
+                    obj = items(i)
+                    mi = TryCast(obj, MailItem)
+                    If mi Is Nothing Then Continue For
+
+                    Dim cats As String = Nothing
+                    Try : cats = mi.Categories : Catch : End Try
+                    If String.IsNullOrEmpty(cats) OrElse
+                       cats.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) < 0 Then Continue For
+
+                    Dim toAddr As String = Nothing
+                    Try : toAddr = mi.To : Catch : End Try
+
+                    Try
+                        mi.Send()
+                        ApDashboardLog($"✉ Re-submitted Outbox item via .Send() → {If(toAddr, "(unknown)")}", "warn")
+                    Catch exSend As System.Exception
+                        ApDashboardLog($"✉ Re-submit .Send() failed for '{If(toAddr, "(unknown)")}': {exSend.Message}", "warn")
+                    End Try
+                Finally
+                    If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+                    If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then Try : Marshal.ReleaseComObject(obj) : Catch : End Try
+                End Try
+            Next
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] ResendOutboxAutoPilotItemsUnconditional error: {ex.Message}")
+        Finally
+            If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
+            If outbox IsNot Nothing Then Try : Marshal.ReleaseComObject(outbox) : Catch : End Try
+            If ns IsNot Nothing Then Try : Marshal.ReleaseComObject(ns) : Catch : End Try
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Copies result attachments into a dedicated temp directory owned by the deferred
+    ''' approval task. This is required because the per-mail temp directory is deleted as
+    ''' soon as <see cref="ProcessIncomingMailAsync"/> returns, which happens before the
+    ''' operator answers the (non-blocking) approval dialog. The returned files live in a
+    ''' directory the deferred task deletes when it completes.
+    ''' </summary>
+    Private Function CopyAttachmentsForDeferredApproval(resultAttachments As List(Of String)) As List(Of String)
+        Dim copied As New List(Of String)()
+        If resultAttachments Is Nothing OrElse resultAttachments.Count = 0 Then Return copied
+
+        Dim stagingDir As String =
+            Path.Combine(
+                Path.GetTempPath(),
+                AP_TempPrefix & "approval_" & Guid.NewGuid().ToString("N"))
+
+        Try
+            Directory.CreateDirectory(stagingDir)
+
+            For Each src As String In resultAttachments
+                If String.IsNullOrWhiteSpace(src) Then
+                    Throw New System.IO.IOException(
+                        "An outgoing deliverable has an empty path while staging deferred approval attachments.")
+                End If
+
+                If Not File.Exists(src) Then
+                    Throw New System.IO.FileNotFoundException(
+                        "An outgoing deliverable disappeared before deferred approval staging.",
+                        src)
+                End If
+
+                Dim dest As String = Path.Combine(stagingDir, Path.GetFileName(src))
+                Dim counter As Integer = 1
+
+                While File.Exists(dest)
+                    dest =
+                        Path.Combine(
+                            stagingDir,
+                            Path.GetFileNameWithoutExtension(src) &
+                            $"_{counter}" &
+                            Path.GetExtension(src))
+                    counter += 1
+                End While
+
+                File.Copy(src, dest, True)
+                copied.Add(dest)
+            Next
+
+            If copied.Count <> resultAttachments.Count Then
+                Throw New System.IO.IOException(
+                    "Deferred approval attachment staging completed only partially.")
+            End If
+
+            Return copied
+
+        Catch ex As System.Exception
+            Try
+                If Directory.Exists(stagingDir) Then
+                    Directory.Delete(stagingDir, recursive:=True)
+                End If
+            Catch cleanupEx As System.Exception
+                ApDashboardLog(
+                    $"⚠ Failed to clean partial deferred-approval staging directory: {cleanupEx.Message}",
+                    "warn")
+            End Try
+
+            ApDashboardLog(
+                $"ERROR staging attachments for deferred approval: {ex.Message}",
+                "error")
+            Throw
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Runs the CoPilot operator approval workflow OFF the processing pump so the mail
+    ''' queue is never blocked while awaiting a decision. Shows the approval dialog and, if
+    ''' approved, re-resolves the original mail by EntryID and sends the substantive reply.
+    ''' Fire-and-forget: all errors are handled internally and never propagate to the pump.
+    ''' </summary>
+    Private Async Function RunDeferredApprovalAsync(entryId As String,
+                                                    mailInfo As AutoPilotMailInfo,
+                                                    response As String,
+                                                    resultAttachments As List(Of String),
+                                                    sourcesHtml As String,
+                                                    mailSentUtc As DateTime) As Task
+        Dim stagingDir As String = Nothing
+        If resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0 Then
+            Try : stagingDir = Path.GetDirectoryName(resultAttachments(0)) : Catch : End Try
+        End If
+
+        ' Default to preserving generated files until the operator explicitly rejects
+        ' them or an approved substantive send succeeds.
+        Dim cleanupDeferredStaging As Boolean = String.IsNullOrWhiteSpace(stagingDir)
+
+        Try
+            Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
+
+            If Not approved Then
+                cleanupDeferredStaging = True
+                ApDashboardLog("REJECTED reply for: " & mailInfo.Subject, "step")
+
+                ' Inform the sender that their request was rejected. Best-effort:
+                ' failure to notify must never disrupt the approval workflow.
+                Try
+                    Dim rejectEntryId As String = entryId
+                    Dim rejectMail As MailItem = Await SwitchToUi(Function() As MailItem
+                                                                      Try
+                                                                          Dim ns = Application.GetNamespace("MAPI")
+                                                                          Dim obj = ns.GetItemFromID(rejectEntryId)
+                                                                          If TypeOf obj Is MailItem Then Return DirectCast(obj, MailItem)
+                                                                      Catch
+                                                                      End Try
+                                                                      Return Nothing
+                                                                  End Function)
+                    If rejectMail IsNot Nothing Then
+                        Try
+                            Await SwitchToUi(Sub() SendReplyToSender(rejectMail, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True))
+                            Await SwitchToUi(Sub() TagOriginalMailAsProcessed(rejectMail))
+                            RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                            RecordLastProcessedTime()
+                            Dim rejectDummy As Boolean
+                            _apHoldingOnlyEntryIds.TryRemove(entryId, rejectDummy)
+                            ApDashboardLog("✉ Sent rejection notice to: " & mailInfo.SenderEmail, "step")
+                        Finally
+                            Try : Marshal.ReleaseComObject(rejectMail) : Catch : End Try
+                        End Try
+                    Else
+                        ApDashboardLog($"⚠ Rejection notice could not be sent — original mail no longer available: {mailInfo.SenderEmail}", "warn")
+                    End If
+                Catch rejectEx As System.Exception
+                    ApDashboardLog("⚠ Failed to send rejection notice: " & rejectEx.Message, "warn")
+                End Try
+
+                Return
+            End If
+
+            ' Re-resolve the original mail; it may have been moved or deleted meanwhile.
+            Dim mi As MailItem = Await SwitchToUi(Function() As MailItem
+                                                      Try
+                                                          Dim ns = Application.GetNamespace("MAPI")
+                                                          Dim obj = ns.GetItemFromID(entryId)
+                                                          If TypeOf obj Is MailItem Then Return DirectCast(obj, MailItem)
+                                                      Catch
+                                                      End Try
+                                                      Return Nothing
+                                                  End Function)
+            If mi Is Nothing Then
+                ApDashboardLog($"⚠ Approved reply could not be sent — original mail no longer available: {mailInfo.SenderEmail}", "warn")
+                If Not String.IsNullOrWhiteSpace(stagingDir) Then
+                    ApDashboardLog("⚠ Deferred deliverables preserved for recovery: " & stagingDir, "warn")
+                End If
+                Return
+            End If
+
+            Try
+                Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                cleanupDeferredStaging = True
+                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                Interlocked.Increment(_apSessionReplyCount)
+                RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                RecordLastProcessedTime()
+                Dim dummyBool As Boolean
+                _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
+                ApDashboardLog($"✓ APPROVED & SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
+            Finally
+                If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+            End Try
+        Catch ex As System.Exception
+            RecordAutoPilotError("Deferred approval error: " & ex.Message)
+            ApDashboardLog("Deferred approval error: " & ex.Message, "warn")
+        Finally
+            If Not cleanupDeferredStaging AndAlso
+               Not String.IsNullOrWhiteSpace(stagingDir) AndAlso
+               Directory.Exists(stagingDir) Then
+
+                ApDashboardLog("⚠ Deferred deliverables preserved for recovery: " & stagingDir, "warn")
+            Else
+                Try
+                    If Not String.IsNullOrEmpty(stagingDir) AndAlso Directory.Exists(stagingDir) Then
+                        Directory.Delete(stagingDir, recursive:=True)
+                    End If
+                Catch
+                End Try
+            End If
         End Try
     End Function
 
@@ -2142,6 +3441,7 @@ Partial Public Class ThisAddIn
         If _apCurrentAttachments IsNot Nothing Then
             For Each att In _apCurrentAttachments
                 att.CachedText = Nothing
+                att.CachedMarkdownText = Nothing
                 att.CachedDocxHint = Nothing
             Next
         End If
@@ -2208,6 +3508,7 @@ Partial Public Class ThisAddIn
                 info.SenderEmail = If(mi.SenderEmailAddress, "")
             End Try
             info.Body = If(mi.Body, "")
+            info.FormattingAwareBody = BuildFormattingAwareMailBody(mi, info.Body)
             Try
                 Dim propVal = mi.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
                 info.HasAutoReplyHeader = (propVal IsNot Nothing AndAlso (propVal.ToString() = AP_LoopHeaderValue OrElse propVal.ToString() = AP_LoopHeaderValueHolding))
@@ -2250,6 +3551,11 @@ Partial Public Class ThisAddIn
                 Dim headers = mi.PropertyAccessor.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x007D001F")
                 info.InternetHeaders = If(headers?.ToString(), "")
             Catch
+            End Try
+            Try
+                info.ConversationID = If(mi.ConversationID, "")
+            Catch
+                info.ConversationID = ""
             End Try
             Return info
         Catch ex As System.Exception
@@ -3100,7 +4406,15 @@ Partial Public Class ThisAddIn
         sb.AppendLine()
 
         Try
-            Dim body = If(mi.Body, "")
+            Dim plainBody As String = If(mi.Body, "")
+            Dim body As String = BuildFormattingAwareMailBody(mi, plainBody)
+
+            If String.IsNullOrWhiteSpace(body) Then
+                body = plainBody
+            Else
+                sb.AppendLine("[FORMATTING-AWARE MARKDOWN EMBEDDED EMAIL BODY]")
+            End If
+
             If body.Length > 50000 Then body = body.Substring(0, 50000) & vbCrLf & "[... body truncated at 50,000 characters ...]"
             sb.Append(body)
         Catch : End Try
@@ -3182,68 +4496,911 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
-    ''' Collects output files produced by tools. Uses the OutputFiles lists on each
-    ''' attachment info AND falls back to scanning for new files in tempDir.
-    ''' Only files within tempDir are eligible (security: path prefix check).
+    ''' Returns True only when the current per-mail temp tree contains a known user-delivery
+    ''' candidate that would otherwise be destroyed by cleanup after a failed handoff.
+    ''' This is a recovery decision only: it does not promote legacy paths to Final and it
+    ''' does not make filesystem location part of artifact identity.
     ''' </summary>
-    Private Function CollectResultAttachments(tempDir As String, originalAttachments As List(Of AutoPilotAttachmentInfo)) As List(Of String)
-        Dim results As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        Dim tempDirFull = Path.GetFullPath(tempDir)
+    Private Function AutoPilotTempContainsRecoverableDeliverables(
+        tempDir As String,
+        originalAttachments As List(Of AutoPilotAttachmentInfo)) As Boolean
 
-        ' Files already surfaced in a previous turn (or pre-existing user uploads)
-        ' MUST NOT be returned again. The set is populated by
-        ' ResetChatAgentDeliverableTrackingForNewTurn() at the start of each turn.
+        If String.IsNullOrWhiteSpace(tempDir) OrElse Not Directory.Exists(tempDir) Then
+            Return False
+        End If
+
+        Dim tempRoot As String
+
+        Try
+            tempRoot =
+                Path.GetFullPath(tempDir).
+                    TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) &
+                Path.DirectorySeparatorChar
+        Catch ex As System.Exception
+            Return False
+        End Try
+
+        Dim runState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState = Nothing
+
+        If _activeToolingContext IsNot Nothing AndAlso
+           _activeToolingContext.SequencingState IsNot Nothing Then
+
+            runState = _activeToolingContext.SequencingState
+        Else
+            runState = _lastCompletedToolingRunState
+        End If
+
+        If runState IsNot Nothing AndAlso
+           runState.RegisteredDeliverableArtifacts IsNot Nothing Then
+
+            For Each artifact As SharedLibrary.Agents.ToolCallSequencing.DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                If artifact Is Nothing OrElse String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
+
+                Dim isKnownDeliveryCandidate As Boolean = False
+
+                If artifact.IsExplicitContract Then
+                    isKnownDeliveryCandidate =
+                        artifact.LifecycleState = SharedLibrary.Agents.ArtifactLifecycleState.Final AndAlso
+                        artifact.IsFinalDeliverable AndAlso
+                        (artifact.DeliveryIntent = SharedLibrary.Agents.ArtifactDeliveryIntent.DeliverToUser OrElse
+                         artifact.DeliveryIntent = SharedLibrary.Agents.ArtifactDeliveryIntent.DeliverAndPersist)
+                ElseIf artifact.LegacyCompatibilityEligible AndAlso
+                       artifact.LifecycleState = SharedLibrary.Agents.ArtifactLifecycleState.Intermediate AndAlso
+                       runState.DeliverableCapableToolNames IsNot Nothing AndAlso
+                       runState.DeliverableCapableToolNames.Count > 0 AndAlso
+                       runState.DeliverableCapableToolNames.Contains(If(artifact.SourceTool, "").Trim()) Then
+
+                    isKnownDeliveryCandidate = True
+                End If
+
+                If Not isKnownDeliveryCandidate Then Continue For
+
+                Try
+                    Dim fullPath As String = Path.GetFullPath(artifact.SessionPath)
+                    If File.Exists(fullPath) AndAlso
+                       fullPath.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase) Then
+
+                        Return True
+                    End If
+                Catch ex As System.Exception
+                End Try
+            Next
+        End If
+
+        If originalAttachments IsNot Nothing Then
+            For Each attachment As AutoPilotAttachmentInfo In originalAttachments
+                If attachment Is Nothing OrElse attachment.OutputFiles Is Nothing Then Continue For
+
+                For Each outputPath As String In attachment.OutputFiles
+                    Try
+                        Dim fullPath As String = Path.GetFullPath(If(outputPath, ""))
+                        If File.Exists(fullPath) AndAlso
+                           fullPath.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase) Then
+
+                            Return True
+                        End If
+                    Catch ex As System.Exception
+                    End Try
+                Next
+            Next
+        End If
+
+        If runState IsNot Nothing AndAlso _chatAgentForcedDeliverables IsNot Nothing Then
+            For Each forcedPath As String In _chatAgentForcedDeliverables
+                Try
+                    Dim fullPath As String = Path.GetFullPath(If(forcedPath, ""))
+                    If File.Exists(fullPath) AndAlso
+                       fullPath.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase) Then
+
+                        Return True
+                    End If
+                Catch ex As System.Exception
+                End Try
+            Next
+        End If
+
+        Return False
+    End Function
+
+
+    ''' <summary>
+    ''' Resolves current user-deliverable artifacts for Outlook Local Agent / AutoPilot.
+    '''
+    ''' Explicit current Finals from the shared artifact registry are authoritative.
+    ''' Until every legacy file-producing host tool has adopted artifacts[], a bounded
+    ''' compatibility path is also required for direct Outlook/AutoPilot tools that are
+    ''' explicitly declared deliverable-capable by HostToolRegistration but still emit
+    ''' files only as host-side staging side effects.
+    '''
+    ''' IMPORTANT: The compatibility path never registers path-derived artifact identity,
+    ''' never promotes a staging file to an ArtifactDelivery Final, and is disabled whenever
+    ''' an expected-artifact contract has been explicitly declared, including the intentional empty contract [].
+    ''' </summary>
+    Private Function CollectResultAttachments(
+        tempDir As String,
+        originalAttachments As List(Of AutoPilotAttachmentInfo),
+        Optional allowIncompleteExpectedContract As Boolean = False) As List(Of String)
+
+        Dim runState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState = Nothing
+
+        If _activeToolingContext IsNot Nothing AndAlso
+           _activeToolingContext.SequencingState IsNot Nothing Then
+
+            runState = _activeToolingContext.SequencingState
+        Else
+            runState = _lastCompletedToolingRunState
+        End If
+
+        Dim resolvedPaths As List(Of String) =
+            SharedLibrary.Agents.ArtifactDelivery.ResolvePathsForDelivery(
+                runState,
+                legacyCandidates:=Nothing,
+                allowIncompleteExpectedContract:=allowIncompleteExpectedContract)
+
+        Dim deliveryPaths As New List(Of String)()
+        Dim registryDeliveryPathSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim deliveryErrors As New List(Of String)()
+
+        For Each resolvedPath As String In resolvedPaths
+            If String.IsNullOrWhiteSpace(resolvedPath) Then
+                deliveryErrors.Add("A registered final deliverable resolved to an empty path.")
+                Continue For
+            End If
+
+            If Not File.Exists(resolvedPath) Then
+                deliveryErrors.Add("Registered final deliverable no longer exists: " & resolvedPath)
+                Continue For
+            End If
+
+            Dim finalPath As String = resolvedPath
+
+            ' AutoPilot keeps its strict per-mail staging security boundary.
+            ' Local Agent does not need this materialization and may deliver
+            ' a registered workspace final directly.
+            If _apActive Then
+                finalPath =
+                    MaterializeAutoPilotDeliveryPath(
+                        resolvedPath,
+                        tempDir)
+            End If
+
+            If String.IsNullOrWhiteSpace(finalPath) OrElse
+               Not File.Exists(finalPath) Then
+
+                deliveryErrors.Add(
+                    "Failed to materialize registered final deliverable for delivery: " &
+                    resolvedPath)
+                Continue For
+            End If
+
+            Try
+                Dim normalizedFinalPath As String = Path.GetFullPath(finalPath)
+                Dim normalizedResolvedPath As String = Path.GetFullPath(resolvedPath)
+
+                ' Preserve one transport entry per explicit current Final. Two genuine
+                ' sibling artifacts are not collapsed merely because they point at the
+                ' same physical path. Both source and transport paths are excluded from
+                ' path-only compatibility collection so registry + legacy never doubles
+                ' the same physical output after workspace materialization.
+                deliveryPaths.Add(normalizedFinalPath)
+                registryDeliveryPathSet.Add(normalizedResolvedPath)
+                registryDeliveryPathSet.Add(normalizedFinalPath)
+            Catch ex As System.Exception
+                deliveryErrors.Add(
+                    "Failed to normalize registered final deliverable path '" &
+                    finalPath &
+                    "': " &
+                    ex.Message)
+            End Try
+        Next
+
+        If deliveryErrors.Count > 0 Then
+            Throw New System.IO.IOException(
+                "One or more registered final deliverables could not be prepared for delivery: " &
+                String.Join(" | ", deliveryErrors))
+        End If
+
+        ' A path claimed by an explicit artifacts[] payload is owned by that protocol even
+        ' when registration failed. Suppress only the legacy path fallback for such paths;
+        ' valid registered Finals above remain authoritative and are already in deliveryPaths.
+        If runState IsNot Nothing AndAlso
+           runState.ExplicitArtifactProtocolOwnedPaths IsNot Nothing Then
+
+            registryDeliveryPathSet.UnionWith(runState.ExplicitArtifactProtocolOwnedPaths)
+        End If
+
+        ' Compatibility boundary for host tools such as process_word_document that are
+        ' explicitly declared deliverable-capable but have not yet adopted artifacts[].
+        ' Any explicitly declared expected-artifact contract is authoritative, including [].
+        ' It must NEVER be supplemented by path-discovered compatibility outputs.
+        Dim hasAuthoritativeExpectedContract As Boolean = False
+
+        If runState IsNot Nothing Then
+            hasAuthoritativeExpectedContract = runState.HasExpectedDeliverableContract
+        End If
+
+        If Not hasAuthoritativeExpectedContract Then
+            Dim legacyCompatibilityPaths As List(Of String) =
+                CollectLegacyHostCompatibilityOutputs(
+                    tempDir,
+                    originalAttachments,
+                    runState,
+                    registryDeliveryPathSet)
+
+            Dim legacyDeliveryPathSet As New HashSet(Of String)(
+                registryDeliveryPathSet,
+                StringComparer.OrdinalIgnoreCase)
+
+            For Each legacyPath As String In legacyCompatibilityPaths
+                If String.IsNullOrWhiteSpace(legacyPath) Then Continue For
+
+                Try
+                    Dim normalizedLegacyPath As String = Path.GetFullPath(legacyPath)
+
+                    If File.Exists(normalizedLegacyPath) AndAlso
+                       legacyDeliveryPathSet.Add(normalizedLegacyPath) Then
+
+                        deliveryPaths.Add(normalizedLegacyPath)
+                    End If
+                Catch
+                End Try
+            Next
+
+            If legacyCompatibilityPaths.Count > 0 Then
+                ApDashboardLog(
+                    $"Legacy deliverable compatibility surfaced {legacyCompatibilityPaths.Count} file(s) from explicitly deliverable-capable host tooling. Migrate these tools to artifacts[] when practical.",
+                    "warn")
+            End If
+        End If
+
         Dim alreadySurfaced As HashSet(Of String) = _chatAgentSurfacedFiles
         If alreadySurfaced Is Nothing Then
-            alreadySurfaced = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            alreadySurfaced =
+                New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         End If
 
-        ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs).
-        '    OutputFiles for the current turn are accumulated as tools run; prior-turn
-        '    entries were cleared by ResetChatAgentDeliverableTrackingForNewTurn().
-        If originalAttachments IsNot Nothing Then
-            For Each att In originalAttachments
-                If att.OutputFiles IsNot Nothing Then
-                    For Each outputPath In att.OutputFiles
-                        If Not String.IsNullOrEmpty(outputPath) AndAlso File.Exists(outputPath) Then
-                            Dim fullOut As String = Path.GetFullPath(outputPath)
-                            ' Security: only include files inside the per-turn temp dir.
-                            If Not fullOut.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then Continue For
-                            ' Bleed protection: skip files already surfaced in a previous turn.
-                            If alreadySurfaced.Contains(fullOut) Then Continue For
-                            results.Add(fullOut)
-                        End If
-                    Next
-                End If
-            Next
-        End If
-
-        ' 2. Fallback: scan for files in tempDir that are (a) not in the original
-        '    upload set, AND (b) not in the already-surfaced set from prior turns.
-        If Directory.Exists(tempDir) Then
-            Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-            If originalAttachments IsNot Nothing Then
-                For Each att In originalAttachments
-                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(Path.GetFullPath(att.TempFilePath))
-                Next
-            End If
-            For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)
-                Dim full As String = Path.GetFullPath(filePath)
-                If originalPaths.Contains(full) Then Continue For
-                If alreadySurfaced.Contains(full) Then Continue For
-                results.Add(full)
-            Next
-        End If
-
-        ' Promote everything returned this turn into the "already surfaced" set so
-        ' the next turn does not pick it up again — even if the OutputFiles tracking
-        ' on uploads is not perfectly cleared by the next reset.
-        For Each surfaced In results
+        For Each surfaced As String In deliveryPaths
             alreadySurfaced.Add(surfaced)
         Next
+
         _chatAgentSurfacedFiles = alreadySurfaced
 
-        Return results.ToList()
+        Return deliveryPaths
+    End Function
+
+    ''' <summary>
+    ''' Compatibility collector for direct host tools that pre-date artifacts[].
+    '''
+    ''' Only exact path-only telemetry already attributed to a successful, explicitly
+    ''' deliverable-capable legacy tool is accepted, plus explicit OutputFiles/forced
+    ''' host declarations. There is deliberately no recursive end-of-run staging scan.
+    ''' This preserves legacy AutoPilot/Local-Agent delivery without weakening the shared
+    ''' ArtifactDelivery registry or inventing opaque artifact identity from filesystem data.
+    ''' </summary>
+    Private Function CollectLegacyHostCompatibilityOutputs(
+        tempDir As String,
+        originalAttachments As List(Of AutoPilotAttachmentInfo),
+        runState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState,
+        excludedDeliveryPaths As HashSet(Of String)) As List(Of String)
+
+        Dim candidates As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim tempDirFull As String = ""
+
+        If Not String.IsNullOrWhiteSpace(tempDir) Then
+            Try
+                tempDirFull =
+                    Path.GetFullPath(tempDir).
+                        TrimEnd(
+                            Path.DirectorySeparatorChar,
+                            Path.AltDirectorySeparatorChar) &
+                    Path.DirectorySeparatorChar
+            Catch
+                tempDirFull = ""
+            End Try
+        End If
+
+        Dim alreadySurfaced As HashSet(Of String) = _chatAgentSurfacedFiles
+        If alreadySurfaced Is Nothing Then
+            alreadySurfaced =
+                New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        End If
+
+        Dim forcedDeliverables As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If runState IsNot Nothing AndAlso _chatAgentForcedDeliverables IsNot Nothing Then
+            For Each forcedPath As String In _chatAgentForcedDeliverables
+                If String.IsNullOrWhiteSpace(forcedPath) Then Continue For
+
+                Try
+                    Dim normalizedForcedPath As System.String = System.IO.Path.GetFullPath(forcedPath)
+
+                    ' AutoPilot forced/legacy outputs are session-local by definition. Never
+                    ' materialize a path originating from Local Chat, a prior mail, or another
+                    ' temp root merely because it remained in a shared tracking set.
+                    If _apActive Then
+                        If System.String.IsNullOrWhiteSpace(tempDirFull) OrElse
+                           Not normalizedForcedPath.StartsWith(tempDirFull, System.StringComparison.OrdinalIgnoreCase) Then
+
+                            ToolingFileLogger.LogWarn(
+                                "Rejected cross-session forced deliverable path for AutoPilot.",
+                                details:=$"file={System.IO.Path.GetFileName(normalizedForcedPath)}")
+                            Continue For
+                        End If
+                    End If
+
+                    forcedDeliverables.Add(normalizedForcedPath)
+                Catch ex As System.Exception
+                End Try
+            Next
+        End If
+
+        Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim processedLegacySourcePaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If originalAttachments IsNot Nothing Then
+            For Each att As AutoPilotAttachmentInfo In originalAttachments
+                If att Is Nothing OrElse
+                   String.IsNullOrWhiteSpace(att.TempFilePath) OrElse
+                   att.IsToolOutput OrElse
+                   att.IsRetentionLoaded Then
+
+                    Continue For
+                End If
+
+                Try
+                    originalPaths.Add(Path.GetFullPath(att.TempFilePath))
+                Catch
+                End Try
+            Next
+        End If
+
+        ' First use exact path-only telemetry already attributed by ToolCallSequencing to
+        ' one successful deliverable-capable legacy tool. This covers output_file_path /
+        ' output_files and per-tool file-delta fallback without scanning unrelated temp files.
+        Dim registryLegacyPaths As List(Of String) =
+            SharedLibrary.Agents.ArtifactDelivery.ResolveLegacyCompatibilityPaths(
+                runState,
+                excludedDeliveryPaths)
+
+        For Each legacySourcePath As String In registryLegacyPaths
+            If String.IsNullOrWhiteSpace(legacySourcePath) Then Continue For
+
+            Dim normalizedSourcePath As String = ""
+
+            Try
+                normalizedSourcePath = Path.GetFullPath(legacySourcePath)
+            Catch
+                Continue For
+            End Try
+
+            ' Original inbound attachments are not emitted again merely because a legacy
+            ' tool echoed their path. Explicit host-side forced delivery remains the narrow
+            ' exception for a deliberate in-place edit.
+            If originalPaths.Contains(normalizedSourcePath) AndAlso
+               Not forcedDeliverables.Contains(normalizedSourcePath) AndAlso
+               Not SharedLibrary.Agents.ArtifactDelivery.WasObservedLegacyCompatibilityFileDelta(
+                   runState,
+                   normalizedSourcePath) Then
+
+                Continue For
+            End If
+
+            If _apKnowledgeSourceCopies IsNot Nothing AndAlso
+               _apKnowledgeSourceCopies.Contains(normalizedSourcePath) Then
+
+                Continue For
+            End If
+
+            AddLegacyCompatibilitySourceCandidate(
+                candidates,
+                normalizedSourcePath,
+                tempDir,
+                tempDirFull,
+                alreadySurfaced,
+                excludedDeliveryPaths,
+                processedLegacySourcePaths)
+        Next
+
+        ' Explicit legacy declarations remain valid compatibility evidence.
+        If originalAttachments IsNot Nothing Then
+            For Each att As AutoPilotAttachmentInfo In originalAttachments
+                If att Is Nothing OrElse att.OutputFiles Is Nothing Then Continue For
+
+                For Each outputPath As String In att.OutputFiles
+                    AddLegacyCompatibilitySourceCandidate(
+                        candidates,
+                        outputPath,
+                        tempDir,
+                        tempDirFull,
+                        alreadySurfaced,
+                        excludedDeliveryPaths,
+                        processedLegacySourcePaths)
+                Next
+            Next
+        End If
+
+        ' Explicit host-side forced delivery supports legitimate in-place edits of an
+        ' inbound attachment; those paths would otherwise be excluded as originals.
+        For Each forcedPath As String In forcedDeliverables
+            AddLegacyCompatibilitySourceCandidate(
+                candidates,
+                forcedPath,
+                tempDir,
+                tempDirFull,
+                alreadySurfaced,
+                excludedDeliveryPaths,
+                processedLegacySourcePaths)
+        Next
+
+        ' IMPORTANT: no recursive end-of-run temp-directory scan here. Files are eligible
+        ' only when tied to exact legacy tool telemetry, a per-tool file delta, or an
+        ' explicit host-side OutputFiles/forced-deliverable declaration.
+        Return candidates.ToList()
+    End Function
+
+    Private Sub AddLegacyCompatibilitySourceCandidate(
+        candidates As HashSet(Of String),
+        sourcePath As String,
+        tempDir As String,
+        tempDirFull As String,
+        alreadySurfaced As HashSet(Of String),
+        excludedDeliveryPaths As HashSet(Of String),
+        processedSourcePaths As HashSet(Of String))
+
+        If String.IsNullOrWhiteSpace(sourcePath) OrElse Not File.Exists(sourcePath) Then Return
+
+        Dim normalizedSourcePath As String
+
+        Try
+            normalizedSourcePath = Path.GetFullPath(sourcePath)
+        Catch ex As System.Exception
+            Return
+        End Try
+
+        If excludedDeliveryPaths IsNot Nothing AndAlso
+           excludedDeliveryPaths.Contains(normalizedSourcePath) Then
+
+            Return
+        End If
+
+        If _apKnowledgeSourceCopies IsNot Nothing AndAlso
+           _apKnowledgeSourceCopies.Contains(normalizedSourcePath) Then
+
+            Return
+        End If
+
+        If processedSourcePaths IsNot Nothing AndAlso
+           Not processedSourcePaths.Add(normalizedSourcePath) Then
+
+            Return
+        End If
+
+        Dim transportPath As String = normalizedSourcePath
+
+        If _apActive Then
+            transportPath = MaterializeAutoPilotDeliveryPath(normalizedSourcePath, tempDir)
+
+            If String.IsNullOrWhiteSpace(transportPath) OrElse
+               Not File.Exists(transportPath) Then
+
+                Throw New System.IO.IOException(
+                    "Failed to materialize a legacy compatibility deliverable for AutoPilot delivery: " &
+                    normalizedSourcePath)
+            End If
+        End If
+
+        AddLegacyCompatibilityCandidate(
+            candidates,
+            transportPath,
+            tempDirFull,
+            alreadySurfaced,
+            excludedDeliveryPaths,
+            requireInsideTempDir:=_apActive)
+    End Sub
+
+    Private Sub AddLegacyCompatibilityCandidate(
+        candidates As HashSet(Of String),
+        candidatePath As String,
+        tempDirFull As String,
+        alreadySurfaced As HashSet(Of String),
+        excludedDeliveryPaths As HashSet(Of String),
+        requireInsideTempDir As Boolean)
+
+        If candidates Is Nothing OrElse
+           String.IsNullOrWhiteSpace(candidatePath) OrElse
+           Not File.Exists(candidatePath) Then
+
+            Return
+        End If
+
+        Try
+            Dim fullPath As String = Path.GetFullPath(candidatePath)
+
+            If requireInsideTempDir Then
+                If String.IsNullOrWhiteSpace(tempDirFull) OrElse
+                   Not fullPath.StartsWith(
+                       tempDirFull,
+                       StringComparison.OrdinalIgnoreCase) Then
+
+                    Return
+                End If
+            End If
+
+            If alreadySurfaced IsNot Nothing AndAlso
+               alreadySurfaced.Contains(fullPath) Then
+
+                Return
+            End If
+
+            If excludedDeliveryPaths IsNot Nothing AndAlso
+               excludedDeliveryPaths.Contains(fullPath) Then
+
+                Return
+            End If
+
+            If _apKnowledgeSourceCopies IsNot Nothing AndAlso
+               _apKnowledgeSourceCopies.Contains(fullPath) Then
+
+                Return
+            End If
+
+            candidates.Add(fullPath)
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Materializes one resolved AutoPilot deliverable inside the current per-mail
+    ''' temp directory. Filename collision handling is physical transport only and
+    ''' never changes the artifact's logical identity or output slot.
+    ''' </summary>
+    Private Function MaterializeAutoPilotDeliveryPath(
+        sourcePath As String,
+        tempDir As String) As String
+
+        If String.IsNullOrWhiteSpace(sourcePath) OrElse
+           Not File.Exists(sourcePath) Then
+
+            Return Nothing
+        End If
+
+        If String.IsNullOrWhiteSpace(tempDir) Then
+            Return Nothing
+        End If
+
+        Dim sourceFull As String
+        Dim tempFull As String
+
+        Try
+            sourceFull = Path.GetFullPath(sourcePath)
+
+            tempFull =
+                Path.GetFullPath(tempDir).
+                    TrimEnd(
+                        Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar) &
+                Path.DirectorySeparatorChar
+        Catch
+            Return Nothing
+        End Try
+
+        If sourceFull.StartsWith(
+            tempFull,
+            StringComparison.OrdinalIgnoreCase) Then
+
+            Return sourceFull
+        End If
+
+        If Not Directory.Exists(tempDir) Then
+            Directory.CreateDirectory(tempDir)
+        End If
+
+        Dim target As String =
+            Path.Combine(
+                tempDir,
+                Path.GetFileName(sourceFull))
+
+        Dim i As Integer = 1
+
+        While File.Exists(target)
+            target =
+                Path.Combine(
+                    tempDir,
+                    Path.GetFileNameWithoutExtension(sourceFull) &
+                    "_" &
+                    i.ToString() &
+                    Path.GetExtension(sourceFull))
+
+            i += 1
+        End While
+
+        File.Copy(
+            sourceFull,
+            target,
+            overwrite:=False)
+
+        Return target
+    End Function
+
+    ''' <summary>
+    ''' Builds a safe Markdown representation of an incoming Outlook message while preserving
+    ''' formatting semantics that users commonly refer to (for example yellow highlighting or bold text).
+    ''' The raw HTML is never sent to the model. Standard emphasis is represented as Markdown; formatting
+    ''' without a reliable Markdown equivalent uses bounded semantic markers. Returns an empty string when
+    ''' no relevant formatting was detected so callers can retain the existing plain-text fallback.
+    ''' </summary>
+    Private Shared Function BuildFormattingAwareMailBody(mi As MailItem, plainBody As String) As String
+        If mi Is Nothing Then Return ""
+
+        Dim html As String = ""
+
+        Try
+            html = If(mi.HTMLBody, "")
+        Catch ex As System.Exception
+            Return ""
+        End Try
+
+        If String.IsNullOrWhiteSpace(html) Then Return ""
+
+        Return BuildFormattingAwareMailBodyFromHtml(html, plainBody)
+    End Function
+
+    ''' <summary>
+    ''' Converts Outlook HTML into safe Markdown plus bounded semantic markers. The output is not HTML,
+    ''' so active content, CSS and arbitrary markup are not exposed to the LLM.
+    ''' </summary>
+    Private Shared Function BuildFormattingAwareMailBodyFromHtml(html As String, plainBody As String) As String
+        If String.IsNullOrWhiteSpace(html) Then Return ""
+
+        Try
+            Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
+            htmlDoc.OptionFixNestedTags = True
+            htmlDoc.LoadHtml(html)
+
+            Dim root As HtmlAgilityPack.HtmlNode = htmlDoc.DocumentNode.SelectSingleNode("//body")
+            If root Is Nothing Then root = htmlDoc.DocumentNode
+
+            Dim sb As New StringBuilder()
+            Dim relevantFormattingFound As Boolean = False
+
+            AppendFormattingAwareHtmlNode(root, sb, relevantFormattingFound)
+
+            If Not relevantFormattingFound Then Return ""
+
+            Dim result As String = NormalizeFormattingAwareMailText(sb.ToString())
+            If String.IsNullOrWhiteSpace(result) Then Return ""
+
+            ' Fail closed to the already trusted Outlook plain-text body if the conversion unexpectedly
+            ' produced almost no readable content. This prevents a malformed HTML body from replacing
+            ' the established Body-based prompt with an empty formatting map.
+            Dim plain As String = If(plainBody, "").Trim()
+            Dim readable As String = Regex.Replace(result, "\[[^\]]+\]", "").Trim()
+            If plain.Length >= 40 AndAlso readable.Length < Math.Min(20, plain.Length \ 10) Then
+                Return ""
+            End If
+
+            Return result
+
+        Catch ex As System.Exception
+            Return ""
+        End Try
+    End Function
+
+    Private Shared Sub AppendFormattingAwareHtmlNode(
+        node As HtmlAgilityPack.HtmlNode,
+        sb As StringBuilder,
+        ByRef relevantFormattingFound As Boolean)
+
+        If node Is Nothing Then Return
+
+        If node.NodeType = HtmlAgilityPack.HtmlNodeType.Text Then
+            Dim rawText As String = If(node.InnerText, "")
+            If rawText.Length = 0 Then Return
+
+            Dim decoded As String = System.Net.WebUtility.HtmlDecode(rawText)
+            decoded = decoded.Replace(ChrW(160), " "c)
+            sb.Append(decoded)
+            Return
+        End If
+
+        If node.NodeType <> HtmlAgilityPack.HtmlNodeType.Element AndAlso
+           node.NodeType <> HtmlAgilityPack.HtmlNodeType.Document Then
+            Return
+        End If
+
+        Dim tag As String = If(node.Name, "").ToLowerInvariant()
+
+        If tag = "script" OrElse tag = "style" OrElse tag = "head" OrElse tag = "meta" OrElse tag = "link" Then
+            Return
+        End If
+
+        If tag = "br" Then
+            sb.AppendLine()
+            Return
+        End If
+
+        Dim isBlock As Boolean =
+            tag = "p" OrElse tag = "div" OrElse tag = "section" OrElse tag = "article" OrElse
+            tag = "header" OrElse tag = "footer" OrElse tag = "blockquote" OrElse
+            tag = "h1" OrElse tag = "h2" OrElse tag = "h3" OrElse tag = "h4" OrElse
+            tag = "h5" OrElse tag = "h6" OrElse tag = "tr"
+
+        If isBlock AndAlso sb.Length > 0 Then EnsureFormattingAwareLineBreak(sb)
+
+        If tag = "li" Then
+            If sb.Length > 0 Then EnsureFormattingAwareLineBreak(sb)
+            sb.Append("- ")
+        ElseIf tag = "td" OrElse tag = "th" Then
+            If sb.Length > 0 AndAlso sb(sb.Length - 1) <> ControlChars.Tab AndAlso
+               sb(sb.Length - 1) <> ControlChars.Lf Then
+                sb.Append(ControlChars.Tab)
+            End If
+        End If
+
+        Dim style As String = node.GetAttributeValue("style", "")
+        Dim markerOpen As New List(Of String)()
+        Dim markerClose As New List(Of String)()
+
+        Dim highlightColor As String = GetMailHtmlHighlightColor(tag, style, node.GetAttributeValue("bgcolor", ""))
+        If Not String.IsNullOrWhiteSpace(highlightColor) Then
+            markerOpen.Add("[HIGHLIGHT color=" & highlightColor & "]")
+            markerClose.Insert(0, "[/HIGHLIGHT]")
+            relevantFormattingFound = True
+        End If
+
+        If IsMailHtmlBold(tag, style) Then
+            markerOpen.Add("**")
+            markerClose.Insert(0, "**")
+            relevantFormattingFound = True
+        End If
+
+        If IsMailHtmlItalic(tag, style) Then
+            markerOpen.Add("*")
+            markerClose.Insert(0, "*")
+            relevantFormattingFound = True
+        End If
+
+        If IsMailHtmlUnderline(tag, style) Then
+            markerOpen.Add("[UNDERLINE]")
+            markerClose.Insert(0, "[/UNDERLINE]")
+            relevantFormattingFound = True
+        End If
+
+        If IsMailHtmlStrikethrough(tag, style) Then
+            markerOpen.Add("~~")
+            markerClose.Insert(0, "~~")
+            relevantFormattingFound = True
+        End If
+
+        Dim textColor As String = GetMailHtmlTextColor(style, node.GetAttributeValue("color", ""))
+        If Not String.IsNullOrWhiteSpace(textColor) Then
+            markerOpen.Add("[TEXT-COLOR color=" & textColor & "]")
+            markerClose.Insert(0, "[/TEXT-COLOR]")
+            relevantFormattingFound = True
+        End If
+
+        For Each opening As String In markerOpen
+            sb.Append(opening)
+        Next
+
+        For Each child As HtmlAgilityPack.HtmlNode In node.ChildNodes
+            AppendFormattingAwareHtmlNode(child, sb, relevantFormattingFound)
+        Next
+
+        For Each closing As String In markerClose
+            sb.Append(closing)
+        Next
+
+        If tag = "li" OrElse isBlock Then EnsureFormattingAwareLineBreak(sb)
+    End Sub
+
+    Private Shared Function IsMailHtmlBold(tag As String, style As String) As Boolean
+        If tag = "b" OrElse tag = "strong" Then Return True
+        If String.IsNullOrWhiteSpace(style) Then Return False
+
+        Dim match As Match = Regex.Match(style, "(?:^|;)\s*font-weight\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+        If Not match.Success Then Return False
+
+        Dim value As String = match.Groups(1).Value.Trim().ToLowerInvariant()
+        If value = "bold" OrElse value = "bolder" Then Return True
+
+        Dim numericWeight As Integer
+        Return Integer.TryParse(Regex.Match(value, "\d+").Value, numericWeight) AndAlso numericWeight >= 600
+    End Function
+
+    Private Shared Function IsMailHtmlItalic(tag As String, style As String) As Boolean
+        If tag = "i" OrElse tag = "em" Then Return True
+        Return Regex.IsMatch(If(style, ""), "(?:^|;)\s*font-style\s*:\s*(italic|oblique)\b", RegexOptions.IgnoreCase)
+    End Function
+
+    Private Shared Function IsMailHtmlUnderline(tag As String, style As String) As Boolean
+        If tag = "u" Then Return True
+        Return Regex.IsMatch(If(style, ""), "(?:^|;)\s*text-decoration(?:-line)?\s*:[^;]*\bunderline\b", RegexOptions.IgnoreCase)
+    End Function
+
+    Private Shared Function IsMailHtmlStrikethrough(tag As String, style As String) As Boolean
+        If tag = "s" OrElse tag = "strike" OrElse tag = "del" Then Return True
+        Return Regex.IsMatch(If(style, ""), "(?:^|;)\s*text-decoration(?:-line)?\s*:[^;]*\bline-through\b", RegexOptions.IgnoreCase)
+    End Function
+
+    Private Shared Function GetMailHtmlHighlightColor(tag As String, style As String, bgcolor As String) As String
+        If tag = "mark" Then
+            Dim markColor As String = NormalizeMailHtmlColor(bgcolor)
+            If String.IsNullOrWhiteSpace(markColor) Then markColor = "yellow"
+            Return markColor
+        End If
+
+        Dim value As String = ""
+        Dim match As Match = Regex.Match(If(style, ""), "(?:^|;)\s*mso-highlight\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+        If match.Success Then value = match.Groups(1).Value
+
+        If String.IsNullOrWhiteSpace(value) Then
+            match = Regex.Match(If(style, ""), "(?:^|;)\s*background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+            If match.Success Then value = match.Groups(1).Value
+        End If
+
+        If String.IsNullOrWhiteSpace(value) Then value = bgcolor
+
+        Return NormalizeMailHtmlColor(value)
+    End Function
+
+    Private Shared Function GetMailHtmlTextColor(style As String, colorAttribute As String) As String
+        Dim value As String = ""
+        Dim match As Match = Regex.Match(If(style, ""), "(?:^|;)\s*color\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+        If match.Success Then value = match.Groups(1).Value
+        If String.IsNullOrWhiteSpace(value) Then value = colorAttribute
+        Return NormalizeMailHtmlColor(value)
+    End Function
+
+    Private Shared Function NormalizeMailHtmlColor(value As String) As String
+        Dim normalized As String = If(value, "").Trim().Trim("'"c, ChrW(34)).ToLowerInvariant()
+        If normalized.Length = 0 Then Return ""
+
+        If normalized = "transparent" OrElse normalized = "none" OrElse normalized = "inherit" OrElse
+           normalized = "initial" OrElse normalized = "unset" OrElse normalized = "window" OrElse
+           normalized = "#ffffff" OrElse normalized = "#fff" OrElse normalized = "white" OrElse
+           normalized = "rgb(255,255,255)" OrElse normalized = "rgb(255, 255, 255)" OrElse
+           normalized = "#000000" OrElse normalized = "#000" OrElse normalized = "black" OrElse
+           normalized = "rgb(0,0,0)" OrElse normalized = "rgb(0, 0, 0)" Then
+            Return ""
+        End If
+
+        If normalized = "#ffff00" OrElse normalized = "#ff0" OrElse
+           normalized = "rgb(255,255,0)" OrElse normalized = "rgb(255, 255, 0)" Then
+            Return "yellow"
+        End If
+
+        If normalized = "#ff0000" OrElse normalized = "#f00" OrElse
+           normalized = "rgb(255,0,0)" OrElse normalized = "rgb(255, 0, 0)" Then
+            Return "red"
+        End If
+
+        normalized = Regex.Replace(normalized, "\s+", " ")
+        If normalized.Length > 40 Then normalized = normalized.Substring(0, 40)
+
+        Return normalized.Replace("[", "").Replace("]", "")
+    End Function
+
+    Private Shared Sub EnsureFormattingAwareLineBreak(sb As StringBuilder)
+        If sb Is Nothing OrElse sb.Length = 0 Then Return
+
+        While sb.Length > 0 AndAlso (sb(sb.Length - 1) = " "c OrElse sb(sb.Length - 1) = ControlChars.Tab)
+            sb.Length -= 1
+        End While
+
+        If sb.Length > 0 AndAlso sb(sb.Length - 1) <> ControlChars.Lf Then sb.AppendLine()
+    End Sub
+
+    Private Shared Function NormalizeFormattingAwareMailText(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return ""
+
+        Dim normalized As String = value.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        normalized = Regex.Replace(normalized, "[ \t]+\n", vbLf)
+        normalized = Regex.Replace(normalized, "\n[ \t]+", vbLf)
+        normalized = Regex.Replace(normalized, "[ \t]{2,}", " ")
+        normalized = Regex.Replace(normalized, "\n{3,}", vbLf & vbLf)
+        normalized = normalized.Trim()
+
+        Return normalized.Replace(vbLf, vbCrLf)
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -3258,11 +5415,37 @@ Partial Public Class ThisAddIn
         sb.AppendLine($"Subject: {info.Subject}")
         sb.AppendLine($"Received: {info.ReceivedTime:yyyy-MM-dd HH:mm}")
         sb.AppendLine()
-        sb.AppendLine("[EMAIL BODY]")
-        Dim body = info.Body
-        If body.Length > 25000 Then body = body.Substring(0, 25000) & vbCrLf & "[... truncated ...]"
+        Dim body As String = If(info.FormattingAwareBody, "")
+        Dim hasFormattingMap As Boolean = Not String.IsNullOrWhiteSpace(body)
+
+        If Not hasFormattingMap Then
+            body = If(info.Body, "")
+        End If
+
+        If body.Length > 25000 Then
+            body = body.Substring(0, 25000) & vbCrLf & "[... truncated ...]"
+        End If
+
+        If hasFormattingMap Then
+            sb.AppendLine("[EMAIL BODY - FORMATTING AWARE MARKDOWN]")
+            sb.AppendLine("This is the single canonical LLM representation of the incoming e-mail body. " &
+                          "Standard emphasis is Markdown: **bold**, *italic*, ~~strikethrough~~. " &
+                          "Formatting without a reliable Markdown equivalent uses semantic markers, for example " &
+                          "[HIGHLIGHT color=yellow]...[/HIGHLIGHT], [UNDERLINE]...[/UNDERLINE], " &
+                          "and [TEXT-COLOR color=red]...[/TEXT-COLOR]. " &
+                          "Treat references such as 'the yellow highlighted text', 'the bold passage', or 'the underlined text' " &
+                          "as references to the corresponding formatted spans.")
+        Else
+            sb.AppendLine("[EMAIL BODY]")
+        End If
+
         sb.AppendLine(body)
-        sb.AppendLine("[/EMAIL BODY]")
+
+        If hasFormattingMap Then
+            sb.AppendLine("[/EMAIL BODY - FORMATTING AWARE MARKDOWN]")
+        Else
+            sb.AppendLine("[/EMAIL BODY]")
+        End If
         If attachments IsNot Nothing AndAlso attachments.Count > 0 Then
             sb.AppendLine()
             sb.AppendLine("[ATTACHMENTS]")
@@ -3271,6 +5454,9 @@ Partial Public Class ThisAddIn
                 Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
                 Dim statusStr = If(att.IsOverSizeLimit,
                     $" [OVER SIZE LIMIT — max {AP_DefaultMaxAttachmentBytes / 1024 / 1024:F0} MB, cannot process]", "")
+                If att.IsRetentionLoaded Then
+                    statusStr &= " [RETAINED FROM EARLIER MESSAGE IN THIS CONVERSATION — not attached to the current e-mail]"
+                End If
                 Dim dateStr As String = ""
                 If att.LastModifiedTime.HasValue Then
                     dateStr &= $", modified: {att.LastModifiedTime.Value:yyyy-MM-dd HH:mm:ss} UTC"
@@ -3301,45 +5487,57 @@ Partial Public Class ThisAddIn
     '  REPLY SENDING (sourcesHtml parameter)
     ' ═══════════════════════════════════════════════════════════════════════════
 
-    ''' <summary>Sends a reply to the original sender, optionally with attachments and sources.</summary>
-    Private Sub SendReplyToSender(originalMail As MailItem, responseText As String,
-                                  resultAttachments As List(Of String),
-                                  Optional tagAsAutoReply As Boolean = True,
-                                  Optional sourcesHtml As String = "",
-                                  Optional isHoldingOnly As Boolean = False)
+
+    Private Sub SendReplyToSender(originalMail As MailItem,
+                              responseText As String,
+                              resultAttachments As List(Of String),
+                              Optional tagAsAutoReply As Boolean = True,
+                              Optional sourcesHtml As String = "",
+                              Optional isHoldingOnly As Boolean = False)
+
         Dim reply As MailItem = Nothing
+        Dim sendAccount As Microsoft.Office.Interop.Outlook.Account = Nothing
+
         Try
             reply = originalMail.Reply()
+
             reply.CC = ""
             reply.BCC = ""
 
-            ' SECURITY: Explicitly set reply.To to the envelope sender address.
-            ' This prevents Reply-To header manipulation where an attacker sets
-            ' Reply-To: victim@other.com to redirect AutoPilot responses.
-            ' We also clear ReplyRecipients to ensure Outlook doesn't silently
-            ' re-add a Reply-To address when the mail is sent.
+            ' SECURITY:
+            ' Explicitly send to the envelope sender rather than trusting Reply-To.
             Dim senderAddr As String = If(originalMail.SenderEmailAddress, "")
+
             If String.IsNullOrWhiteSpace(senderAddr) Then
                 senderAddr = If(originalMail.SenderName, "")
             End If
 
-            ' Detect and log Reply-To mismatch for operator awareness
+            ' Detect and log Reply-To mismatch.
             Try
                 Dim replyToAddr As String = ""
-                If originalMail.ReplyRecipients IsNot Nothing AndAlso originalMail.ReplyRecipients.Count > 0 Then
+
+                If originalMail.ReplyRecipients IsNot Nothing AndAlso
+               originalMail.ReplyRecipients.Count > 0 Then
+
                     replyToAddr = originalMail.ReplyRecipients(1).Address
                 End If
+
                 If Not String.IsNullOrWhiteSpace(replyToAddr) AndAlso
-                   Not replyToAddr.Equals(senderAddr, StringComparison.OrdinalIgnoreCase) Then
-                    ApDashboardLog($"⚠ SECURITY: Reply-To mismatch detected! From={senderAddr}, Reply-To={replyToAddr}. Replying to From address only.", "warn")
+               Not replyToAddr.Equals(
+                   senderAddr,
+                   StringComparison.OrdinalIgnoreCase) Then
+
+                    ApDashboardLog(
+                    $"⚠ SECURITY: Reply-To mismatch detected! From={senderAddr}, Reply-To={replyToAddr}. Replying to From address only.",
+                    "warn")
                 End If
             Catch
-                ' ReplyRecipients may not be available on all mail types
+                ' ReplyRecipients may not be available on all mail types.
             End Try
 
             reply.To = senderAddr
 
-            ' Clear any Reply-To recipients that Outlook's .Reply() may have populated
+            ' Clear any Reply-To recipients populated by Outlook.Reply().
             Try
                 While reply.ReplyRecipients.Count > 0
                     reply.ReplyRecipients.Remove(1)
@@ -3347,39 +5545,76 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
+            ' Resolve recipient before doing the send.
+            Dim toResolved As Boolean
+
+            Try
+                toResolved = reply.Recipients.ResolveAll()
+            Catch ex As System.Exception
+                Throw New System.InvalidOperationException(
+                    $"Recipient resolution failed for '{senderAddr}'.",
+                    ex)
+            End Try
+
+            If Not toResolved Then
+                Throw New System.InvalidOperationException(
+                    $"Recipient '{senderAddr}' could not be resolved; reply was not sent.")
+            End If
+
             reply.BodyFormat = OlBodyFormat.olFormatHTML
 
             Dim originalThread As String = If(reply.HTMLBody, "")
+            Dim contentHtml As String = ConvertResponseToHtml(responseText)
 
-            ' Build HTML body: response + sources used footer + branded footer
-            Dim htmlBody = ConvertResponseToHtml(responseText)
-
-            ' Append "Sources used:" section
             If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
-                htmlBody &= sourcesHtml
+                contentHtml &= sourcesHtml
             End If
 
-            htmlBody &= BuildAutoPilotFooter()
-            reply.HTMLBody = htmlBody & originalThread
+            Dim footerHtml As String = BuildAutoPilotFooter()
+            Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
+                PrepareAutoPilotOutgoingDelivery(contentHtml & footerHtml & originalThread, resultAttachments)
 
-            ' Add result attachments
-            If resultAttachments IsNot Nothing Then
-                For Each attachPath In resultAttachments
-                    If File.Exists(attachPath) Then
-                        reply.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
-                    End If
-                Next
-            End If
+            contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            contentHtml &= footerHtml
+
+            reply.HTMLBody = contentHtml & originalThread
+
+            ' Add result attachments when the complete message remains within the safe
+            ' transport target. Oversized deliveries put all result attachments into
+            ' separately sized follow-up messages instead.
+            For Each attachPath As String In deliveryPlan.PrimaryAttachments
+                If String.IsNullOrWhiteSpace(attachPath) OrElse Not File.Exists(attachPath) Then
+                    Throw New System.IO.FileNotFoundException(
+                        "An outgoing deliverable disappeared before Outlook attachment creation.",
+                        If(attachPath, ""))
+                End If
+
+                reply.Attachments.Add(
+                    attachPath,
+                    OlAttachmentType.olByValue,
+                    ,
+                    Path.GetFileName(attachPath))
+            Next
 
             If tagAsAutoReply Then
                 Try
-                    ' Use "holding" value for holding-only notices so the catch-up scan
-                    ' can distinguish them from substantive replies (value "true").
-                    Dim headerValue = If(isHoldingOnly, AP_LoopHeaderValueHolding, AP_LoopHeaderValue)
-                    reply.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, headerValue)
-                Catch : End Try
+                    Dim headerValue As String =
+                    If(
+                        isHoldingOnly,
+                        AP_LoopHeaderValueHolding,
+                        AP_LoopHeaderValue)
+
+                    reply.PropertyAccessor.SetProperty(
+                    AP_LoopHeaderProperty,
+                    headerValue)
+                Catch
+                End Try
             End If
-            Try : reply.Categories = AP_CategoryName : Catch : End Try
+
+            Try
+                reply.Categories = AP_CategoryName
+            Catch
+            End Try
 
             Dim cleanupGroupId As String = Nothing
             Dim cleanupIsEligible As Boolean = False
@@ -3388,33 +5623,176 @@ Partial Public Class ThisAddIn
 
             Try
                 cleanupGroupId = GetOrCreateCleanupGroupId(originalMail)
+
                 If Not String.IsNullOrWhiteSpace(cleanupGroupId) Then
-                    cleanupDeleteAfterUtc = If(isHoldingOnly, CType(Nothing, DateTime?), GetAutoDeleteCutoffUtc())
-                    cleanupAnsweredUtc = If(isHoldingOnly, CType(Nothing, DateTime?), DateTime.UtcNow)
-                    cleanupIsEligible = Not isHoldingOnly AndAlso cleanupDeleteAfterUtc.HasValue
+
+                    cleanupDeleteAfterUtc =
+                    If(
+                        isHoldingOnly,
+                        CType(Nothing, DateTime?),
+                        GetAutoDeleteCutoffUtc())
+
+                    cleanupAnsweredUtc =
+                    If(
+                        isHoldingOnly,
+                        CType(Nothing, DateTime?),
+                        DateTime.UtcNow)
+
+                    cleanupIsEligible =
+                    Not isHoldingOnly AndAlso
+                    cleanupDeleteAfterUtc.HasValue
 
                     StampCleanupMetadata(
-                        reply,
-                        cleanupGroupId,
-                        isEligible:=cleanupIsEligible,
-                        answeredUtc:=cleanupAnsweredUtc,
-                        deleteAfterUtc:=cleanupDeleteAfterUtc,
-                        saveItem:=False)
+                    reply,
+                    cleanupGroupId,
+                    isEligible:=cleanupIsEligible,
+                    answeredUtc:=cleanupAnsweredUtc,
+                    deleteAfterUtc:=cleanupDeleteAfterUtc,
+                    saveItem:=False)
                 End If
+
             Catch ex As System.Exception
-                Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on reply: {ex.Message}")
+                Debug.WriteLine(
+                $"[AutoPilot] Failed to stamp cleanup metadata on reply: {ex.Message}")
             End Try
 
+
+            ' =====================================================================
+            ' EXPLICIT SEND ACCOUNT
+            '
+            ' Outlook normally lets .Send() choose the session's default account.
+            ' AutoPilot deliberately binds the outgoing reply to the configured
+            ' monitored mailbox instead.
+            '
+            ' On the current machine there is only one account, but doing this
+            ' explicitly removes Outlook's implicit account-selection step.
+            ' =====================================================================
+
+            Dim accounts As Microsoft.Office.Interop.Outlook.Accounts = Nothing
+
+            Try
+                accounts = Application.Session.Accounts
+
+                If accounts Is Nothing OrElse accounts.Count = 0 Then
+                    Throw New System.InvalidOperationException(
+                    "Outlook reports no configured sending accounts.")
+                End If
+
+                ' Prefer the configured monitored mailbox when available.
+                If _apConfig IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+
+                    For i As Integer = 1 To accounts.Count
+                        Dim candidate As Microsoft.Office.Interop.Outlook.Account = Nothing
+
+                        Try
+                            candidate = accounts.Item(i)
+
+                            If candidate IsNot Nothing AndAlso
+                           Not String.IsNullOrWhiteSpace(candidate.SmtpAddress) AndAlso
+                           candidate.SmtpAddress.Equals(
+                               _apConfig.MonitoredMailbox,
+                               StringComparison.OrdinalIgnoreCase) Then
+
+                                sendAccount = candidate
+                                candidate = Nothing
+                                Exit For
+                            End If
+
+                        Finally
+                            If candidate IsNot Nothing Then
+                                Try
+                                    Marshal.ReleaseComObject(candidate)
+                                Catch
+                                End Try
+                            End If
+                        End Try
+                    Next
+                End If
+
+                ' Fallback:
+                ' if no monitored-mailbox match was found, use the sole Outlook
+                ' account when exactly one account exists.
+                If sendAccount Is Nothing AndAlso accounts.Count = 1 Then
+                    sendAccount = accounts.Item(1)
+                End If
+
+                If sendAccount Is Nothing Then
+                    Throw New System.InvalidOperationException(
+                    "Could not determine the Outlook account for the AutoPilot reply.")
+                End If
+
+                reply.SendUsingAccount = sendAccount
+
+                ApDashboardLog(
+                $"✉ Sending through Outlook account: {sendAccount.SmtpAddress}",
+                "step")
+
+            Finally
+                If accounts IsNot Nothing Then
+                    Try
+                        Marshal.ReleaseComObject(accounts)
+                    Catch
+                    End Try
+                End If
+            End Try
+
+
+            ' =====================================================================
+            ' SEND
+            ' =====================================================================
+
+            Dim sentPrimarySubject As String = reply.Subject
+            Dim sentPrimaryTo As String = reply.To
             reply.Send()
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
+
+
+            ' Keep existing Sent Items / Inky Replies handling.
+            Try
+                MoveLastSentToInkyReplies(
+                cleanupGroupId,
+                cleanupIsEligible,
+                cleanupAnsweredUtc,
+                cleanupDeleteAfterUtc,
+                sentPrimarySubject,
+                sentPrimaryTo)
+            Catch
+            End Try
+
+            ' If the result attachments would have exceeded the conservative transport
+            ' target, deliver them only after the primary reply has been submitted.
+            SendAutoPilotAttachmentFollowUps(
+                New String() {senderAddr},
+                sentPrimarySubject,
+                deliveryPlan,
+                sendAccount,
+                cleanupGroupId,
+                cleanupIsEligible,
+                cleanupAnsweredUtc,
+                cleanupDeleteAfterUtc)
 
         Catch ex As System.Exception
-            ApDashboardLog($"ERROR sending reply: {ex.Message}", "error")
+            ApDashboardLog(
+                $"ERROR sending reply: {ex.Message}",
+                "error")
+            Throw
+
         Finally
-            If reply IsNot Nothing Then Try : Marshal.ReleaseComObject(reply) : Catch : End Try
+            If sendAccount IsNot Nothing Then
+                Try
+                    Marshal.ReleaseComObject(sendAccount)
+                Catch
+                End Try
+            End If
+
+            If reply IsNot Nothing Then
+                Try
+                    Marshal.ReleaseComObject(reply)
+                Catch
+                End Try
+            End If
         End Try
     End Sub
-
     ''' <summary>Builds the HTML footer appended to AutoPilot replies.</summary>
     Private Function BuildAutoPilotFooter() As String
         Dim logoBase64 As String = ""
@@ -3442,14 +5820,9 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Converts a Markdown response to HTML for Outlook.</summary>
     Private Function ConvertResponseToHtml(responseMarkdown As String) As String
-        Dim builder As New Markdig.MarkdownPipelineBuilder()
-        builder.UsePipeTables().UseGridTables().UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras().UseFootnotes().UseDefinitionLists()
-        builder.UseAbbreviations().UseAutoLinks().UseTaskLists()
-        builder.UseMathematics().UseFigures()
-        builder.UseAdvancedExtensions().UseGenericAttributes()
-        Dim pipeline = builder.Build()
-        Dim htmlBody As String = Markdig.Markdown.ToHtml(responseMarkdown, pipeline)
+        Dim pipeline As Markdig.MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
+        Dim htmlBody As String = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(responseMarkdown), pipeline)
         Return "<div style='font-family:Arial,sans-serif;font-size:11pt;'>" & htmlBody & "</div>"
     End Function
 
@@ -3457,7 +5830,9 @@ Partial Public Class ThisAddIn
     Private Sub MoveLastSentToInkyReplies(Optional groupId As String = Nothing,
                                           Optional isEligible As Boolean = False,
                                           Optional answeredUtc As DateTime? = Nothing,
-                                          Optional deleteAfterUtc As DateTime? = Nothing)
+                                          Optional deleteAfterUtc As DateTime? = Nothing,
+                                          Optional expectedSubject As String = Nothing,
+                                          Optional expectedTo As String = Nothing)
         Try
             Dim ns = Application.GetNamespace("MAPI")
             Dim sentFolder = ns.GetDefaultFolder(OlDefaultFolders.olFolderSentMail)
@@ -3484,14 +5859,58 @@ Partial Public Class ThisAddIn
                         If mi2 Is Nothing Then Continue For
                         If mi2.Categories Is Nothing OrElse Not mi2.Categories.Contains(AP_CategoryName) Then Continue For
 
-                        ' When a cleanup group id is supplied, bind the move/stamp to the
-                        ' exact reply we just sent for this group instead of blindly taking
-                        ' the most recent categorized item. This prevents an older AutoPilot
-                        ' reply from being picked (and the just-sent reply from being left in
-                        ' Sent Items without persisted cleanup metadata, so it is never deleted).
-                        If Not String.IsNullOrWhiteSpace(groupId) AndAlso
-                           Not String.Equals(GetCleanupGroupId(mi2), groupId, StringComparison.OrdinalIgnoreCase) Then
-                            Continue For
+                        ' Never move/save an item whose submit flag is still set (i.e. it is a
+                        ' pending outbound copy that has not yet fully transmitted). Moving or
+                        ' saving it here would clear PR_SUBMIT_FLAGS and strand it. Only operate
+                        ' on genuinely sent copies.
+                        Try
+                            Const PR_SUBMIT_FLAGS As String = "http://schemas.microsoft.com/mapi/proptag/0x0E0B0003"
+                            Dim submitFlags As Integer = CInt(mi2.PropertyAccessor.GetProperty(PR_SUBMIT_FLAGS))
+                            If (submitFlags And 1) <> 0 Then Continue For
+                        Catch
+                            ' Property unavailable on this store type — fall through and rely on
+                            ' the Sent Items folder scope to keep this safe.
+                        End Try
+
+                        If Not String.IsNullOrWhiteSpace(groupId) Then
+                            Dim itemGroupId = GetCleanupGroupId(mi2)
+
+                            If Not String.Equals(itemGroupId, groupId, StringComparison.OrdinalIgnoreCase) Then
+                                Dim isFallbackMatch As Boolean = False
+
+                                If String.IsNullOrWhiteSpace(itemGroupId) AndAlso HasAutoReplyHeader(mi2) Then
+                                    Dim subjectMatches As Boolean = True
+                                    If Not String.IsNullOrWhiteSpace(expectedSubject) Then
+                                        subjectMatches = String.Equals(
+                                            If(mi2.Subject, ""),
+                                            expectedSubject,
+                                            StringComparison.OrdinalIgnoreCase)
+                                    End If
+
+                                    Dim toMatches As Boolean = True
+                                    If Not String.IsNullOrWhiteSpace(expectedTo) Then
+                                        Dim toValue As String = ""
+                                        Try
+                                            toValue = If(mi2.To, "")
+                                        Catch
+                                        End Try
+
+                                        If Not String.IsNullOrWhiteSpace(toValue) Then
+                                            toMatches = toValue.IndexOf(expectedTo, StringComparison.OrdinalIgnoreCase) >= 0
+                                        End If
+                                    End If
+
+                                    isFallbackMatch = subjectMatches AndAlso toMatches
+                                End If
+
+                                If Not isFallbackMatch Then
+                                    Continue For
+                                End If
+
+                                ApDashboardLog(
+                                    "🗑 Auto-delete fallback matched sent copy without persisted cleanup group metadata; stamping after move.",
+                                    "warn")
+                            End If
                         End If
 
                         movedObj = mi2.Move(inkyFolder)
@@ -3544,6 +5963,197 @@ Partial Public Class ThisAddIn
         Return ShowCustomYesNoBox(displayText, "Send Reply", "Discard", header:=$"{AN6} AutoPilot — Approve Reply") = 1
     End Function
 
+    ''' <summary>Pending pre-processing approval request shown in the dashboard approval queue.</summary>
+    Private Class AutoPilotPendingApproval
+        Public Property EntryID As String
+        Public Property SenderName As String
+        Public Property SenderEmail As String
+        Public Property Subject As String
+        Public Property ReceivedTime As DateTime
+
+        ''' <summary>Truncated, plain-text excerpt of the request body shown to the operator.</summary>
+        Public Property BodyPreview As String
+    End Class
+
+    ''' <summary>Maximum number of body characters shown in the approval dialog.</summary>
+    Private Const AP_ApprovalBodyPreviewChars As Integer = 3000
+
+    ''' <summary>
+    ''' Produces a compact, single-block plain-text excerpt of the request body for operator
+    ''' review. Collapses runs of blank lines and truncates to <see cref="AP_ApprovalBodyPreviewChars"/>
+    ''' characters with an explicit truncation marker so the operator knows more text exists.
+    ''' </summary>
+    Private Function BuildApprovalBodyPreview(body As String) As String
+        If String.IsNullOrWhiteSpace(body) Then Return "(no request text)"
+
+        Dim text As String = body.Replace(vbCr & vbLf, vbLf).Replace(vbCr, vbLf).Trim()
+
+        ' Collapse 3+ consecutive newlines down to a single blank line to keep the preview compact.
+        Do While text.Contains(vbLf & vbLf & vbLf)
+            text = text.Replace(vbLf & vbLf & vbLf, vbLf & vbLf)
+        Loop
+
+        If text.Length > AP_ApprovalBodyPreviewChars Then
+            text = text.Substring(0, AP_ApprovalBodyPreviewChars).TrimEnd() &
+                   vbLf & vbLf & "… [request truncated for preview]"
+        End If
+
+        Return text
+    End Function
+
+    ''' <summary>
+    ''' Builds the sender-facing notice telling the caller that their request has been received
+    ''' but requires manual approval before it can be processed. Includes the configured monitor
+    ''' link (when valid) via the shared helper, consistent with all other auto-response notices.
+    ''' </summary>
+    Private Function BuildManualApprovalNotice() As String
+        Dim statusMsg As String = BuildMonitorLinkStatusMessage()
+        Dim statusText As String = If(String.IsNullOrEmpty(statusMsg), "", statusMsg & " ")
+        Return "Thank you for your message. This is an automated acknowledgement — your request has been received but requires manual approval before it can be processed. " &
+               "You will receive a substantive reply once your request has been approved and handled, or a notice if it cannot be processed. " &
+               statusText &
+               "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. " &
+               "— " & AN6
+    End Function
+
+    ''' <summary>
+    ''' Refreshes the dashboard "Approvals (N)" button text/enabled state. Thread-safe: marshals
+    ''' to the UI thread when required. No-op if the button has not been created.
+    ''' </summary>
+    Private Sub UpdateApprovalsDashboardButton()
+        Try
+            Dim dash = _apDashboard
+            If dash Is Nothing OrElse dash.IsDisposed Then Return
+            If dash.InvokeRequired Then
+                If dash.IsHandleCreated Then dash.BeginInvoke(New MethodInvoker(AddressOf UpdateApprovalsDashboardButton))
+                Return
+            End If
+            If _apApprovalsButton Is Nothing OrElse _apApprovalsButton.IsDisposed Then Return
+            Dim count As Integer = _apPendingApprovals.Count
+            _apApprovalsButton.Text = $"Approvals ({count})"
+            _apApprovalsButton.Enabled = count > 0
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Operator review of the pending pre-processing approval queue. For each pending request the
+    ''' operator can Approve &amp; Process (re-queues the mail for normal processing) or Reject (sends
+    ''' a rejection notice and marks the mail processed). Closing the dialog leaves the remainder
+    ''' pending. Runs on the UI thread (invoked from the dashboard button click).
+    ''' </summary>
+    Private Sub ShowPendingApprovalsReview()
+        Dim snapshot = _apPendingApprovals.Values.OrderBy(Function(p) p.ReceivedTime).ToList()
+        If snapshot.Count = 0 Then
+            UpdateApprovalsDashboardButton()
+            Return
+        End If
+
+        For Each pending In snapshot
+            ' Skip entries already resolved during this review pass.
+            If Not _apPendingApprovals.ContainsKey(pending.EntryID) Then Continue For
+
+            Dim details As String =
+                $"From: {pending.SenderName} <{pending.SenderEmail}>" & vbCrLf &
+                $"Subject: {pending.Subject}" & vbCrLf &
+                $"Received: {pending.ReceivedTime:yyyy-MM-dd HH:mm}" & vbCrLf & vbCrLf &
+                "── Request ──" & vbCrLf &
+                If(pending.BodyPreview, "(no request text)") & vbCrLf & vbCrLf &
+                "Approve this request for automated processing, reject it, or delay the decision. " &
+                "Delaying (or closing this dialog) leaves the request pending for later review."
+
+            ' A local flag lets the ""Delay"" extra button be distinguished from a plain close,
+            ' because the shared dialog only sets its result for button1/button2.
+            Dim delayed As Boolean = False
+
+            Dim choice As Integer = ShowCustomYesNoBox(
+                details, "Approve & Process", "Reject",
+                header:=$"{AN6} AutoPilot — Approval ({_apPendingApprovals.Count} pending)",
+                extraButtonText:="Delay",
+                extraButtonAction:=Sub() delayed = True,
+                CloseAfterExtra:=True)
+
+            If delayed Then
+                ApDashboardLog($"⏳ Approval delayed (left pending): {pending.SenderEmail} — {pending.Subject}", "step")
+                Continue For
+            End If
+
+            If choice = 1 Then
+                ApprovePendingRequest(pending.EntryID)
+            ElseIf choice = 2 Then
+                RejectPendingRequest(pending.EntryID)
+            Else
+                ' Dialog closed/cancelled — stop reviewing and leave the rest pending.
+                Exit For
+            End If
+        Next
+
+        UpdateApprovalsDashboardButton()
+    End Sub
+
+    ''' <summary>Approves a pending request: re-queues it for normal processing (auto-send).</summary>
+    Private Async Sub ApprovePendingRequest(entryId As String)
+        Dim removed As AutoPilotPendingApproval = Nothing
+        _apPendingApprovals.TryRemove(entryId, removed)
+
+        _apApprovedEntryIds.TryAdd(entryId, True)
+
+        ' The previous processing pass may still be unwinding.
+        ' Wait until it has released the queue/processing marker.
+        For attempt As Integer = 1 To 50
+            If Not _apQueuedOrProcessingEntryIds.ContainsKey(entryId) Then
+                Exit For
+            End If
+
+            Await System.Threading.Tasks.Task.Delay(50)
+        Next
+
+        If EnqueueAutoPilotMail(entryId) Then
+            ApDashboardLog(
+            $"✅ Approved for processing: {If(removed IsNot Nothing, removed.SenderEmail, entryId)}",
+            "success")
+        Else
+            ApDashboardLog(
+            $"⚠ Approved mail could not be re-queued because it is still queued/processing: {If(removed IsNot Nothing, removed.SenderEmail, entryId)}",
+            "warn")
+        End If
+    End Sub
+
+    ''' <summary>Rejects a pending request: sends a rejection notice and marks the mail processed.</summary>
+    Private Sub RejectPendingRequest(entryId As String)
+        Dim removed As AutoPilotPendingApproval = Nothing
+        _apPendingApprovals.TryRemove(entryId, removed)
+        Dim senderLabel As String = If(removed IsNot Nothing, removed.SenderEmail, entryId)
+
+        Try
+            Dim mi As MailItem = Nothing
+            Try
+                Dim ns = Application.GetNamespace("MAPI")
+                Dim obj = ns.GetItemFromID(entryId)
+                If TypeOf obj Is MailItem Then mi = DirectCast(obj, MailItem)
+            Catch
+            End Try
+
+            If mi Is Nothing Then
+                ApDashboardLog($"🚫 Rejected (sender not notified — mail no longer available): {senderLabel}", "warn")
+                Return
+            End If
+
+            Try
+                SendReplyToSender(mi, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True)
+                TagOriginalMailAsProcessed(mi)
+                RecordLastProcessedTime()
+                Dim removedHolding As Boolean
+                _apHoldingOnlyEntryIds.TryRemove(entryId, removedHolding)
+                ApDashboardLog($"🚫 Rejected & notified sender: {senderLabel}", "step")
+            Finally
+                Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+            End Try
+        Catch ex As System.Exception
+            ApDashboardLog($"⚠ Failed to process rejection for {senderLabel}: {ex.Message}", "warn")
+        End Try
+    End Sub
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DASHBOARD LOG — date+time, no duplicate timestamp
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -3554,9 +6164,15 @@ Partial Public Class ThisAddIn
     ''' Does NOT prepend a timestamp here because LogWindow.AppendLogInternal
     ''' already adds [HH:mm:ss]. Instead we prepend the date-only portion so the
     ''' dashboard shows [HH:mm:ss] [dd-MMM] message.
+    ''' During Local Chat execution of AutoPilot internal tools, progress entries
+    ''' are also mirrored into the active tooling log window.
     ''' </summary>
-    Private Sub ApDashboardLog(message As String, level As String)
+    Private Sub ApDashboardLog(message As String,
+                               level As String,
+                               Optional mirrorToLocalToolingLog As Boolean = False)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
+
+        MarkAutoPilotJobActivity()
 
         Try
             If _apDashboard IsNot Nothing Then
@@ -3572,9 +6188,21 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' Intentionally do not mirror AutoPilot dashboard entries into the Local Chat
-        ' tooling log. Local Chat already receives direct context.Log(...) messages,
-        ' and mirroring here creates duplicate entries such as web_grounding progress.
+        Dim shouldMirrorToLocalToolingLog As Boolean =
+            _chatAgentActive AndAlso
+            Not _apActive AndAlso
+            _activeToolingContext IsNot Nothing AndAlso
+            (mirrorToLocalToolingLog OrElse
+             System.Threading.Interlocked.CompareExchange(_apMirrorDashboardLogToLocalToolingDepth, 0, 0) > 0)
+
+        If Not shouldMirrorToLocalToolingLog Then
+            Return
+        End If
+
+        Try
+            _activeToolingContext.MirrorVisibleLog(message, level)
+        Catch
+        End Try
     End Sub
 
     ''' <summary>Marks the dashboard operation as complete.</summary>
@@ -3603,6 +6231,107 @@ Partial Public Class ThisAddIn
             My.Settings.Save()
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] Failed to save last processed time: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Records the most recent error for inclusion in the heartbeat status report.
+    ''' Best-effort and must never throw.
+    ''' </summary>
+    Private Sub RecordAutoPilotError(message As String)
+        Try
+            _apLastError = message
+            _apLastErrorUtc = DateTime.UtcNow
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Records a progress signal for the currently-processing job so the heartbeat can
+    ''' distinguish a slow-but-advancing job from a hung one. Best-effort; must never throw.
+    ''' </summary>
+    Private Sub MarkAutoPilotJobActivity()
+        Try
+            If Not String.IsNullOrEmpty(_apCurrentProcessingEntryId) Then
+                _apCurrentJobLastActivityUtc = DateTime.UtcNow
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Writes an atomic JSON heartbeat/status report into the configured log directory
+    ''' (<c>INI_LogPath</c>) so an external monitor can detect whether AutoPilot is alive.
+    ''' The file is refreshed on the notification timer cadence; a stale file (older than a
+    ''' few multiples of <see cref="AP_HeartbeatIntervalSeconds"/>) indicates that AutoPilot
+    ''' is no longer running. Best-effort and must never throw.
+    ''' </summary>
+    ''' <param name="status">High-level lifecycle state, e.g. "running" or "stopped".</param>
+    Private Sub WriteAutoPilotHeartbeat(status As String)
+        Try
+            Dim logDir As String = _context.INI_LogPath
+            If String.IsNullOrWhiteSpace(logDir) Then Return
+
+            Dim payload As New Newtonsoft.Json.Linq.JObject()
+            payload("schemaVersion") = 1
+            payload("product") = AN6
+            payload("machine") = Environment.MachineName
+            payload("user") = Environment.UserName
+            payload("status") = status
+            payload("active") = _apActive
+            payload("timestampUtc") = DateTime.UtcNow.ToString("o", Globalization.CultureInfo.InvariantCulture)
+            payload("heartbeatIntervalSeconds") = AP_HeartbeatIntervalSeconds
+            payload("queueLength") = _apMailQueue.Count
+            payload("sessionReplyCount") = _apSessionReplyCount
+            payload("currentlyProcessing") = Not String.IsNullOrEmpty(_apCurrentProcessingEntryId)
+            payload("currentCategory") = If(_apCurrentProcessingCategory, "")
+
+            ' ── Current-job liveness (hang / overrun detection) ──
+            Dim jobActive As Boolean = Not String.IsNullOrEmpty(_apCurrentProcessingEntryId) AndAlso
+                                       _apCurrentJobStartUtc <> DateTime.MinValue
+            payload("jobStallThresholdSeconds") = AP_JobStallThresholdSeconds
+            If jobActive Then
+                Dim nowUtc As DateTime = DateTime.UtcNow
+                Dim elapsedSeconds As Double = (nowUtc - _apCurrentJobStartUtc).TotalSeconds
+                Dim sinceActivitySeconds As Double =
+                    If(_apCurrentJobLastActivityUtc = DateTime.MinValue,
+                       elapsedSeconds,
+                       (nowUtc - _apCurrentJobLastActivityUtc).TotalSeconds)
+                Dim estimateSeconds As Double = GetCategoryEstimate(
+                    If(_apCurrentProcessingCategory, AP_Cat_TextOnly))
+
+                payload("jobElapsedSeconds") = Math.Round(elapsedSeconds, 1)
+                payload("jobEstimateSeconds") = Math.Round(estimateSeconds, 1)
+                payload("jobSecondsSinceActivity") = Math.Round(sinceActivitySeconds, 1)
+                payload("jobStalled") = (sinceActivitySeconds >= AP_JobStallThresholdSeconds)
+                payload("jobOverrun") = (estimateSeconds > 0 AndAlso elapsedSeconds > (estimateSeconds * 5))
+            Else
+                payload("jobElapsedSeconds") = 0
+                payload("jobEstimateSeconds") = 0
+                payload("jobSecondsSinceActivity") = 0
+                payload("jobStalled") = False
+                payload("jobOverrun") = False
+            End If
+            payload("hasError") = Not String.IsNullOrEmpty(_apLastError)
+            payload("lastError") = If(_apLastError, "")
+            payload("lastErrorUtc") = If(_apLastErrorUtc = DateTime.MinValue, "",
+                                         _apLastErrorUtc.ToString("o", Globalization.CultureInfo.InvariantCulture))
+
+            Dim fileName As String = $"{AN3}-autopilot-status-{Environment.MachineName}.json"
+            Dim fullPath As String = Path.Combine(logDir, fileName)
+            Dim tempPath As String = fullPath & ".tmp"
+
+            Directory.CreateDirectory(logDir)
+            File.WriteAllText(tempPath, payload.ToString(Newtonsoft.Json.Formatting.Indented), New UTF8Encoding(False))
+
+            ' Atomic replace so an external reader never observes a partially written file.
+            If File.Exists(fullPath) Then
+                File.Replace(tempPath, fullPath, Nothing)
+            Else
+                File.Move(tempPath, fullPath)
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] WriteAutoPilotHeartbeat error: {ex.Message}")
         End Try
     End Sub
 
@@ -3705,6 +6434,8 @@ Partial Public Class ThisAddIn
                                        wasSuccessful As Boolean, resultExcerpt As String,
                                        elapsed As TimeSpan,
                                        Optional urls As List(Of String) = Nothing)
+        MarkAutoPilotJobActivity()
+
         If _apCurrentToolCallLog Is Nothing Then Return
 
         _apCurrentToolCallLog.Add(New AutoPilotToolCallEntry() With {
@@ -4238,6 +6969,61 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
+    Private Shared Function BuildAutoPilotHelpMeQuestion(
+            mailInfo As AutoPilotMailInfo,
+            failureReason As String) As String
+
+        Dim builder As New StringBuilder()
+        Dim subjectText As String = If(mailInfo IsNot Nothing, mailInfo.Subject, "")
+        Dim bodyText As String = If(mailInfo IsNot Nothing, mailInfo.Body, "")
+
+        builder.AppendLine("The user sent an e-mail request that AutoPilot could not fulfill automatically.")
+        builder.AppendLine("Task: " & subjectText)
+
+        If Not String.IsNullOrWhiteSpace(bodyText) Then
+            builder.AppendLine("Details: " & If(bodyText.Length > 500, bodyText.Substring(0, 500), bodyText))
+        End If
+
+        If Not String.IsNullOrWhiteSpace(failureReason) Then
+            builder.AppendLine("Failure reason: " & failureReason)
+        End If
+
+        If mailInfo IsNot Nothing AndAlso
+           mailInfo.AttachmentNames IsNot Nothing AndAlso
+           mailInfo.AttachmentNames.Count > 0 Then
+
+            builder.AppendLine("Attachments: " & String.Join(", ", mailInfo.AttachmentNames))
+        End If
+
+        builder.AppendLine("Question: Which Red Ink feature could help the user accomplish this task directly, and how should they use it?")
+
+        Return builder.ToString().Trim()
+    End Function
+
+    Private Shared Function BuildAutoPilotHelpMeRetrievalOptions() As SharedMethods.SemanticSearchRetrievalOptions
+        Return New SharedMethods.SemanticSearchRetrievalOptions() With {
+            .MinimumSelectedSegments = 1,
+            .MaximumSelectedSegments = 8,
+            .MaximumTotalSegments = 24,
+            .ContextBytesBefore = 2048,
+            .ContextBytesAfter = 2048,
+            .MergeGapBytes = 0,
+            .SpecialTaskName = "HelpMe",
+            .IncludePreviouslyUsedIds = False,
+            .MaximumPreviouslyUsedIds = 0,
+            .IncludeAdjacentToPreviouslyUsedIds = False,
+            .EnableFullScanFallback = True,
+            .ForceFullScan = False,
+            .FallbackWhenPotentiallyMissing = True,
+            .MinimumSelectionRelevance = 0.35R,
+            .FullScanMinimumRelevance = 0.5R,
+            .MaximumFullScanSegments = 8,
+            .MaximumReloadRounds = 0,
+            .MaximumLlmAttempts = 2,
+            .MaximumConversationCharacters = 12000
+        }
+    End Function
+
     ''' <summary>
     ''' Calls the LLM with the HelpMeInky manual to suggest how the user could
     ''' accomplish the task using the Red Ink add-ins. Returns a brief suggestion
@@ -4251,22 +7037,64 @@ Partial Public Class ThisAddIn
             failureReason As String,
             ct As CancellationToken) As Task(Of String)
 
-        ' Load the HelpMeInky manual (cached per session)
-        If Not _apHelpMeManualCacheLoaded Then
-            _apHelpMeManualCacheLoaded = True
-            Try
-                Dim manualPath = INI_HelpMeInkyPath
-                If Not String.IsNullOrWhiteSpace(manualPath) Then
-                    manualPath = ExpandEnvironmentVariables(manualPath)
-                    _apHelpMeManualCache = Await LoadManualTextAsync(manualPath, ct)
-                    ApDashboardLog($"Loaded HelpMe manual for fallback suggestions ({If(_apHelpMeManualCache IsNot Nothing, _apHelpMeManualCache.Length.ToString() & " chars", "not available")})", "step")
+        Dim manualPath As String = ExpandEnvironmentVariables(INI_HelpMeInkyPath)
+        If String.IsNullOrWhiteSpace(manualPath) Then Return Nothing
+
+        manualPath = ExpandEnvironmentVariables(manualPath)
+
+        Dim questionForManual As String = BuildAutoPilotHelpMeQuestion(mailInfo, failureReason)
+        Dim manualText As String = ""
+        Dim usingIndexedManual As Boolean = False
+
+        Dim isRemote As Boolean =
+            manualPath.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+            manualPath.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+
+        If Not isRemote AndAlso
+           SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(manualPath) Then
+
+            Dim retrieval As SharedMethods.SemanticSearchRetrievalResult =
+                Await SharedMethods.RetrieveSemanticSearchAsync(
+                    manualPath,
+                    _context,
+                    questionForManual,
+                    "",
+                    options:=BuildAutoPilotHelpMeRetrievalOptions(),
+                    cancellationToken:=ct).ConfigureAwait(False)
+
+            If retrieval IsNot Nothing AndAlso retrieval.IsIndexed Then
+                manualText = If(retrieval.ReducedSourceText, "").Trim()
+                usingIndexedManual = True
+
+                If retrieval.SelectedEntryIds IsNot Nothing AndAlso retrieval.SelectedEntryIds.Count > 0 Then
+                    ApDashboardLog(
+                        "Red Ink suggestion semantic source IDs: " &
+                        String.Join(", ", retrieval.SelectedEntryIds),
+                        "step")
                 End If
-            Catch ex As System.Exception
-                ApDashboardLog($"Failed to load HelpMe manual: {ex.Message}", "warn")
-            End Try
+
+                If String.IsNullOrWhiteSpace(manualText) Then
+                    ApDashboardLog("Red Ink suggestion semantic retrieval found no relevant indexed excerpts", "step")
+                    Return Nothing
+                End If
+            End If
         End If
 
-        If String.IsNullOrWhiteSpace(_apHelpMeManualCache) Then Return Nothing
+        If Not usingIndexedManual Then
+            If Not _apHelpMeManualCacheLoaded Then
+                _apHelpMeManualCacheLoaded = True
+                Try
+                    _apHelpMeManualCache = Await LoadManualTextAsync(manualPath, ct)
+                    ApDashboardLog($"Loaded HelpMe manual for fallback suggestions ({If(_apHelpMeManualCache IsNot Nothing, _apHelpMeManualCache.Length.ToString() & " chars", "not available")})", "step")
+                Catch ex As System.Exception
+                    ApDashboardLog($"Failed to load HelpMe manual: {ex.Message}", "warn")
+                End Try
+            End If
+
+            manualText = If(_apHelpMeManualCache, "").Trim()
+        End If
+
+        If String.IsNullOrWhiteSpace(manualText) Then Return Nothing
 
         ' Use the SP_HelpMe system prompt (same as HelpMeInky) with an AutoPilot-specific addendum
         Dim systemPrompt As String = _context.SP_HelpMe &
@@ -4275,6 +7103,14 @@ Partial Public Class ThisAddIn
             $"Based on the manual, suggest in 4-10 SHORT sentences what {AN} feature could help, " &
             $"how to use it, and tell the user to open 'Help me, {AN8}' inside the add-in for more guidance. " &
             $"If no {AN} feature applies, reply with exactly one word: NONE)"
+
+        If usingIndexedManual Then
+            systemPrompt &=
+                " Answer exclusively from the supplied original SOURCE excerpts. " &
+                "Do not invent functions, steps or UI elements. Preserve exact UI terms, " &
+                "prerequisites, restrictions and warnings. If the excerpts are insufficient, " &
+                "state that clearly. Do not expose internal SOURCE IDs or append a 'Sources:' line."
+        End If
 
         ' Build user prompt in the same structure as HelpMeInky.SendAsync
         Dim userPrompt As New StringBuilder()
@@ -4288,7 +7124,7 @@ Partial Public Class ThisAddIn
         userPrompt.AppendLine($"What {AN} feature could help the user accomplish this task directly?")
         userPrompt.AppendLine()
         userPrompt.AppendLine("Manual:")
-        userPrompt.AppendLine(_apHelpMeManualCache)
+        userPrompt.AppendLine(manualText)
 
         ' Try to use the dedicated HelpMe model (same as HelpMeInky.CallHelpMeLlmAsync)
         Dim backupConfig = GetCurrentConfig(_context)
@@ -4584,6 +7420,9 @@ Partial Public Class ThisAddIn
         ' ── Save audio to temp ──
         Dim tempDir As String = IO.Path.Combine(IO.Path.GetTempPath(), AP_TempPrefix & Guid.NewGuid().ToString("N"))
         IO.Directory.CreateDirectory(tempDir)
+        Dim voicemailAttachmentsForRecovery As List(Of AutoPilotAttachmentInfo) = Nothing
+        Dim voicemailPreparedDeliverablesPresent As Boolean = False
+        Dim voicemailDeliverableHandoffCompleted As Boolean = False
 
         Try
             Dim audioTempPath As String = Nothing
@@ -4625,7 +7464,66 @@ Partial Public Class ThisAddIn
                 EnsureUI:=False)
 
             If String.IsNullOrWhiteSpace(transcription) Then
-                ApDashboardLog("SKIP (voicemail: transcription returned empty)", "warn")
+                If ct.IsCancellationRequested Then
+                    Throw New System.OperationCanceledException(ct)
+                End If
+
+                ' The LLM abstraction intentionally remains provider/model agnostic here.
+                ' An empty/unusable transcription is a failed transcription contract, regardless
+                ' of whether the upstream cause was policy rejection, malformed provider output,
+                ' no speech, or another provider-side condition.
+                ApDashboardLog("ERROR (voicemail: transcription returned no usable text)", "error")
+
+                Dim failureMailInfo As New AutoPilotMailInfo() With {
+                    .EntryID = entryId,
+                    .Subject = $"Voicemail from {rawCallerId}",
+                    .SenderName = recipientName,
+                    .SenderEmail = recipientEmail,
+                    .Body = "",
+                    .ReceivedTime = mailInfo.ReceivedTime,
+                    .SentOn = mailInfo.SentOn,
+                    .HasAutoReplyHeader = False,
+                    .ThreadAIReplyCount = 0,
+                    .AttachmentCount = 1,
+                    .AttachmentNames = New List(Of String) From {audioFileName},
+                    .FolderPath = mailInfo.FolderPath,
+                    .MessageClass = mailInfo.MessageClass,
+                    .InternetHeaders = ""
+                }
+
+                Dim failureResponse As String = Nothing
+                Try
+                    failureResponse = Await GenerateHelpfulFailureResponseAsync(
+                        failureMailInfo,
+                        Nothing,
+                        "The voicemail audio could not be transcribed into usable text.",
+                        ct)
+                Catch ex As System.Exception
+                    ApDashboardLog("Voicemail failure-response generation error: " & ex.Message, "warn")
+                End Try
+
+                If String.IsNullOrWhiteSpace(failureResponse) Then
+                    failureResponse =
+                        $"I'm sorry, but I could not transcribe the voicemail, so I was unable to process the request. " &
+                        $"Please try the voicemail again or contact the operator for assistance. — {AN6}"
+                End If
+
+                Await SwitchToUi(
+                    Sub()
+                        SendVoicemailReply(
+                            mi,
+                            recipientEmail,
+                            recipientName,
+                            failureMailInfo.Subject,
+                            failureResponse,
+                            Nothing,
+                            "",
+                            $"This notice relates to a voicemail received on {mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}.")
+                    End Sub)
+                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                Interlocked.Increment(_apSessionReplyCount)
+                RecordLastProcessedTime()
+                ApDashboardLog($"✓ SENT voicemail transcription-failure notice to: {recipientEmail} (caller: {rawCallerId})", "warn")
                 Return
             End If
 
@@ -4651,24 +7549,54 @@ Partial Public Class ThisAddIn
                 .InternetHeaders = ""
             }
 
+            ' This voicemail owns its delivery state. Never reuse a completed
+            ' registry from the previous AutoPilot item when no tooling run occurs.
+            _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolResponses = New List(Of ToolResponse)()
+
             ' ── Initialize tool call log ──
             _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
             _apCurrentTempDir = tempDir
             _apCurrentAttachments = New List(Of AutoPilotAttachmentInfo)()
             _apCurrentMailInfo = voicemailMailInfo
 
+            ' Voicemail is a full AutoPilot tooling run and therefore requires the same
+            ' per-mail workspace isolation as a normal incoming message. Never inherit a
+            ' Local-Agent/previous-mail workspace or PathPolicy boundary into this run.
+            Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = _chatAgentWorkspace
+            Dim previousChatAgentWorkspaceLoaded As Boolean = _chatAgentWorkspaceLoaded
+            Dim previousWorkspaceOnlyMode As Boolean = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
+            Dim previousSessionStagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+
             Dim response As String
 
-            Dim previousMaxToolIterations = MaxToolIterations
-            MaxToolIterations = AP_MaxToolIterations
+            Dim previousMaxToolIterations = INI_ToolingMaximumIterations
+            INI_ToolingMaximumIterations = AP_MaxToolIterations
 
             ' Save references before Finally clears them
             Dim savedAttachments = _apCurrentAttachments
+            voicemailAttachmentsForRecovery = savedAttachments
 
             Try
+                ' Establish the per-voicemail workspace inside the guarded scope so a
+                ' setup exception cannot leak workspace/PathPolicy state into later runs.
+                _chatAgentWorkspace = BuildAutoPilotTempWorkspaceState()
+                _chatAgentWorkspaceLoaded = _chatAgentWorkspace IsNot Nothing
+                SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
+                SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(_apCurrentTempDir)
+                SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
+                SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({_apCurrentTempDir})
+
                 ' Build prompt with the transcription as the "email body"
                 Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing)
                 Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+
+                ' ── Inject per-sender policy system-prompt instruction (keyed on the caller's mapped email) ──
+                Dim senderPromptAddition As String = ResolveSystemPromptAdditionForSender(recipientEmail)
+                If Not String.IsNullOrWhiteSpace(senderPromptAddition) Then
+                    systemPrompt &= vbLf & vbLf & "[PER-SENDER POLICY INSTRUCTION]" & vbLf & senderPromptAddition
+                    ApDashboardLog("Applied per-sender system-prompt instruction (voicemail).", "step")
+                End If
 
                 ' ── Inject per-user memory into system prompt (keyed on recipientEmail, not voicemail system) ──
                 If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(recipientEmail) Then
@@ -4712,7 +7640,8 @@ Partial Public Class ThisAddIn
                         binaryOutputDirectory:=tempDir,
                         workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
                         memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
-                        memoryGroundingModeIsExplicit:=True)
+                        memoryGroundingModeIsExplicit:=True,
+                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(recipientName, voicemailMailInfo.Subject))
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
                     response = Await LLM(effectiveSystemPrompt, userPrompt,
@@ -4725,12 +7654,49 @@ Partial Public Class ThisAddIn
                 _apCurrentTempDir = Nothing
                 _apCurrentAttachments = Nothing
                 _apCurrentMailInfo = Nothing
-                MaxToolIterations = previousMaxToolIterations
+                _chatAgentWorkspace = previousChatAgentWorkspace
+                _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
+                SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
+                SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
+                SyncWorkspaceToPathPolicy()
+                SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(previousSessionStagingRoot)
+                INI_ToolingMaximumIterations = previousMaxToolIterations
                 ClearAttachmentCaches()
             End Try
 
             If String.IsNullOrWhiteSpace(response) Then
-                ApDashboardLog("WARNING: LLM returned empty response for voicemail", "warn")
+                ApDashboardLog("WARNING: LLM/tooling returned empty response for voicemail", "warn")
+                Dim errorMessage As String = Nothing
+                Try
+                    errorMessage = Await GenerateHelpfulFailureResponseAsync(
+                        voicemailMailInfo,
+                        savedAttachments,
+                        "The voicemail was transcribed, but the subsequent AI processing returned no usable response.",
+                        ct)
+                Catch ex As System.Exception
+                    ApDashboardLog("Voicemail processing failure-response generation error: " & ex.Message, "warn")
+                End Try
+                If String.IsNullOrWhiteSpace(errorMessage) Then
+                    errorMessage =
+                        $"I'm sorry, but I could not complete the processing of your voicemail. " &
+                        $"Please try again or contact the operator for assistance. — {AN6}"
+                End If
+                Await SwitchToUi(
+                    Sub()
+                        SendVoicemailReply(
+                            mi,
+                            recipientEmail,
+                            recipientName,
+                            voicemailMailInfo.Subject,
+                            errorMessage,
+                            Nothing,
+                            "",
+                            $"This notice relates to a voicemail received on {mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}.")
+                    End Sub)
+                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                Interlocked.Increment(_apSessionReplyCount)
+                RecordLastProcessedTime()
+                ApDashboardLog($"✓ SENT voicemail processing-failure notice to: {recipientEmail} (caller: {rawCallerId})", "warn")
                 Return
             End If
 
@@ -4757,6 +7723,8 @@ Partial Public Class ThisAddIn
 
             ' Collect any result attachments (use saved reference, not cleared field)
             Dim resultAttachments = CollectResultAttachments(tempDir, savedAttachments)
+            voicemailPreparedDeliverablesPresent =
+                resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0
 
             ' Build "Sources used:" footer
             Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
@@ -4772,6 +7740,7 @@ Partial Public Class ThisAddIn
                                                     response, resultAttachments,
                                                     sourcesHtml, voicemailNote)
                              End Sub)
+            voicemailDeliverableHandoffCompleted = True
 
             Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
             Interlocked.Increment(_apSessionReplyCount)
@@ -4779,10 +7748,22 @@ Partial Public Class ThisAddIn
             ApDashboardLog($"✓ SENT voicemail reply to: {recipientEmail} (caller: {rawCallerId})", "info")
 
         Finally
-            Try
-                If IO.Directory.Exists(tempDir) Then IO.Directory.Delete(tempDir, recursive:=True)
-            Catch
-            End Try
+            Dim preserveVoicemailTempForRecovery As Boolean =
+                Not voicemailDeliverableHandoffCompleted AndAlso
+                (voicemailPreparedDeliverablesPresent OrElse
+                 AutoPilotTempContainsRecoverableDeliverables(tempDir, voicemailAttachmentsForRecovery))
+
+            If preserveVoicemailTempForRecovery Then
+                ApDashboardLog(
+                    "⚠ Voicemail deliverables preserved for recovery after incomplete delivery: " & tempDir,
+                    "warn")
+            Else
+                Try
+                    If IO.Directory.Exists(tempDir) Then IO.Directory.Delete(tempDir, recursive:=True)
+                Catch
+                End Try
+            End If
+
             _apCurrentToolCallLog = Nothing
         End Try
     End Function
@@ -4800,55 +7781,132 @@ Partial Public Class ThisAddIn
                                    sourcesHtml As String,
                                    voicemailNote As String)
         Dim newMail As MailItem = Nothing
+        Dim sendAccount As Microsoft.Office.Interop.Outlook.Account = Nothing
+        Dim accounts As Microsoft.Office.Interop.Outlook.Accounts = Nothing
+
         Try
             newMail = Application.CreateItem(OlItemType.olMailItem)
-            newMail.To = recipientEmail
+
+            Dim voicemailRecipient As Microsoft.Office.Interop.Outlook.Recipient = Nothing
+            Try
+                voicemailRecipient = newMail.Recipients.Add(recipientEmail)
+                voicemailRecipient.Type = OlMailRecipientType.olTo
+            Finally
+                If voicemailRecipient IsNot Nothing Then
+                    Try
+                        Marshal.ReleaseComObject(voicemailRecipient)
+                    Catch
+                    End Try
+                End If
+            End Try
+
+            Dim recipientsResolved As Boolean
+            Try
+                recipientsResolved = newMail.Recipients.ResolveAll()
+            Catch ex As System.Exception
+                Throw New System.InvalidOperationException(
+                    $"Voicemail recipient resolution failed for '{recipientEmail}'.",
+                    ex)
+            End Try
+
+            If Not recipientsResolved Then
+                Throw New System.InvalidOperationException(
+                    $"Voicemail recipient '{recipientEmail}' could not be resolved; reply was not sent.")
+            End If
+
             newMail.Subject = "Re: " & subject
             newMail.BodyFormat = OlBodyFormat.olFormatHTML
 
-            ' Build HTML body
-            Dim htmlBody = ConvertResponseToHtml(responseText)
+            Dim contentHtml As String = ConvertResponseToHtml(responseText)
 
-            ' Append voicemail note
-            htmlBody &= "<br/><div style='font-size:9pt;color:#888888;font-style:italic;margin-top:12px;'>" &
-                         System.Net.WebUtility.HtmlEncode(voicemailNote) & "</div>"
+            contentHtml &= "<br/><div style='font-size:9pt;color:#888888;font-style:italic;margin-top:12px;'>" &
+                           System.Net.WebUtility.HtmlEncode(voicemailNote) & "</div>"
 
-            ' Append sources
             If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
-                htmlBody &= sourcesHtml
+                contentHtml &= sourcesHtml
             End If
 
-            htmlBody &= BuildAutoPilotFooter()
-            newMail.HTMLBody = htmlBody
+            Dim footerHtml As String = BuildAutoPilotFooter()
+            Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
+                PrepareAutoPilotOutgoingDelivery(contentHtml & footerHtml, resultAttachments)
 
-            ' Add result attachments
-            If resultAttachments IsNot Nothing Then
-                For Each attachPath In resultAttachments
-                    If IO.File.Exists(attachPath) Then
-                        newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , IO.Path.GetFileName(attachPath))
-                    End If
+            contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            contentHtml &= footerHtml
+            newMail.HTMLBody = contentHtml
+
+            For Each attachPath As String In deliveryPlan.PrimaryAttachments
+                If String.IsNullOrWhiteSpace(attachPath) OrElse Not IO.File.Exists(attachPath) Then
+                    Throw New System.IO.FileNotFoundException(
+                        "An outgoing deliverable disappeared before voicemail attachment creation.",
+                        If(attachPath, ""))
+                End If
+
+                newMail.Attachments.Add(
+                    attachPath,
+                    OlAttachmentType.olByValue,
+                    ,
+                    IO.Path.GetFileName(attachPath))
+            Next
+
+            Try
+                newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
+            Catch
+            End Try
+
+            Try
+                newMail.Categories = AP_CategoryName
+            Catch
+            End Try
+
+            ' Bind the send to the monitored mailbox exactly as the standard AutoPilot
+            ' reply path does. Never silently fall back to an ambiguous Outlook account.
+            accounts = Application.Session.Accounts
+
+            If accounts Is Nothing OrElse accounts.Count = 0 Then
+                Throw New System.InvalidOperationException(
+                    "Outlook reports no configured sending accounts.")
+            End If
+
+            If _apConfig IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+
+                For i As Integer = 1 To accounts.Count
+                    Dim candidate As Microsoft.Office.Interop.Outlook.Account = Nothing
+
+                    Try
+                        candidate = accounts.Item(i)
+
+                        If candidate IsNot Nothing AndAlso
+                           Not String.IsNullOrWhiteSpace(candidate.SmtpAddress) AndAlso
+                           candidate.SmtpAddress.Equals(
+                               _apConfig.MonitoredMailbox,
+                               StringComparison.OrdinalIgnoreCase) Then
+
+                            sendAccount = candidate
+                            candidate = Nothing
+                            Exit For
+                        End If
+                    Finally
+                        If candidate IsNot Nothing Then
+                            Try
+                                Marshal.ReleaseComObject(candidate)
+                            Catch
+                            End Try
+                        End If
+                    End Try
                 Next
             End If
 
-            ' Tag as AutoPilot reply
-            Try
-                newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
-            Catch : End Try
-            Try : newMail.Categories = AP_CategoryName : Catch : End Try
-
-            ' Use the same sending account as the monitored mailbox
-            If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
-                Try
-                    Dim ns = Application.GetNamespace("MAPI")
-                    For i As Integer = 1 To ns.Accounts.Count
-                        If ns.Accounts(i).SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then
-                            newMail.SendUsingAccount = ns.Accounts(i)
-                            Exit For
-                        End If
-                    Next
-                Catch
-                End Try
+            If sendAccount Is Nothing AndAlso accounts.Count = 1 Then
+                sendAccount = accounts.Item(1)
             End If
+
+            If sendAccount Is Nothing Then
+                Throw New System.InvalidOperationException(
+                    "Could not determine the Outlook account for the AutoPilot voicemail reply.")
+            End If
+
+            newMail.SendUsingAccount = sendAccount
 
             Dim cleanupGroupId As String = Nothing
             Dim cleanupIsEligible As Boolean = False
@@ -4874,13 +7932,56 @@ Partial Public Class ThisAddIn
                 Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on voicemail reply: {ex.Message}")
             End Try
 
+            Dim sentPrimarySubject As String = newMail.Subject
+            Dim sentPrimaryTo As String = newMail.To
             newMail.Send()
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
+
+            Try
+                MoveLastSentToInkyReplies(
+                    cleanupGroupId,
+                    cleanupIsEligible,
+                    cleanupAnsweredUtc,
+                    cleanupDeleteAfterUtc,
+                    sentPrimarySubject,
+                    sentPrimaryTo)
+            Catch
+            End Try
+
+            SendAutoPilotAttachmentFollowUps(
+                New String() {recipientEmail},
+                sentPrimarySubject,
+                deliveryPlan,
+                sendAccount,
+                cleanupGroupId,
+                cleanupIsEligible,
+                cleanupAnsweredUtc,
+                cleanupDeleteAfterUtc)
 
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending voicemail reply: {ex.Message}", "error")
+            Throw
+
         Finally
-            If newMail IsNot Nothing Then Try : Marshal.ReleaseComObject(newMail) : Catch : End Try
+            If accounts IsNot Nothing Then
+                Try
+                    Marshal.ReleaseComObject(accounts)
+                Catch
+                End Try
+            End If
+
+            If sendAccount IsNot Nothing Then
+                Try
+                    Marshal.ReleaseComObject(sendAccount)
+                Catch
+                End Try
+            End If
+
+            If newMail IsNot Nothing Then
+                Try
+                    Marshal.ReleaseComObject(newMail)
+                Catch
+                End Try
+            End If
         End Try
     End Sub
 
@@ -4895,6 +7996,9 @@ Partial Public Class ThisAddIn
         Public Property SenderName As String
         Public Property SenderEmail As String
         Public Property Body As String
+        ' Safe, formatting-aware Markdown body for LLM consumption only. The canonical plain Body
+        ' remains available internally for filters, routing, commands and fail-safe fallback.
+        Public Property FormattingAwareBody As String
         Public Property ReceivedTime As DateTime
         Public Property SentOn As DateTime
         Public Property HasAutoReplyHeader As Boolean
@@ -4904,6 +8008,7 @@ Partial Public Class ThisAddIn
         Public Property FolderPath As String
         Public Property MessageClass As String
         Public Property InternetHeaders As String
+        Public Property ConversationID As String
     End Class
 
     ''' <summary>Describes an attachment and its per-mail processing data.</summary>
@@ -4919,8 +8024,13 @@ Partial Public Class ThisAddIn
         Public Property LastModifiedTime As DateTime?
         Public Property OutputFiles As New List(Of String)()
         Property CachedText As String
+        Property CachedMarkdownText As String
         Property CachedDocxHint As String
         Public Property IsToolOutput As Boolean = False
+
+        ''' <summary>True when this file was injected from the conversation retention store
+        ''' (as opposed to being a genuinely-inbound attachment of the current mail).</summary>
+        Public Property IsRetentionLoaded As Boolean = False
 
         ''' <summary>Number of pages (PDF only, 0 if unknown).</summary>
         Public Property PageCount As Integer = 0

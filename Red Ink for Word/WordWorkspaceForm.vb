@@ -2,8 +2,17 @@
 
 ' =============================================================================
 ' File: WordWorkspaceForm.vb
-' PURPOSE
-'   Manage the Word agent workspace folder and permissions. The agent writes files there.
+' Purpose:
+'   Modal Word UI for selecting the connected agent workspace and configuring the
+'   workspace permissions exposed to shared workspace/file tools.
+'
+' Architecture / Function:
+'   - Reads/writes WorkspaceState for host key "word" rather than performing file-tool
+'     operations itself.
+'   - Lets the user persist a root and independently grant read, write, move/copy/rename,
+'     delete, hidden-file and active-document-write capabilities.
+'   - Uses PathPolicy/WorkspaceState as the enforcement source; the dialog is only the
+'     configuration surface and never grants access outside the resolved workspace root.
 ' =============================================================================
 
 Option Strict On
@@ -13,12 +22,21 @@ Imports System.Drawing
 Imports System.IO
 Imports System.Windows.Forms
 Imports SharedLibrary.Agents
+Imports SharedLibrary.SharedLibrary
 
 ''' <summary>
 ''' Modal dialog for designating and managing the Word agent workspace.
 ''' </summary>
 Public Class WordWorkspaceForm
     Inherits Form
+
+    Protected Overrides Sub OnShown(e As System.EventArgs)
+        MyBase.OnShown(e)
+        Me.TopMost = True
+        SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+        SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+    End Sub
+
 
     Private Const HostKey As String = "word"
     Private Const EM_SETCUEBANNER As Integer = &H1501
@@ -154,7 +172,7 @@ Public Class WordWorkspaceForm
         chkDelete = New CheckBox() With {
             .Text = "Allow the agent to delete (to Recycle Bin)",
             .AutoSize = True,
-            .Checked = False,
+            .Checked = SharedMethods.WorkspaceDeleteByDefaultOn,
             .Margin = New Padding(0, 0, 0, 2)
         }
 

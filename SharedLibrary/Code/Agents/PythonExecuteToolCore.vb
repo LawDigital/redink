@@ -1,0 +1,1392 @@
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: PythonExecuteToolCore.vb
+' Purpose: Implements the host-agnostic core of the `python_execute` tool:
+'          schema/instructions, request validation, option handling, and broker
+'          execution orchestration.
+'
+' Architecture / How it works:
+'  - `PythonExecuteToolCoreOptions` defines execution policy, size/time limits,
+'    allowed host operations, logging callbacks, and output publication hooks.
+'  - `PythonExecuteToolCoreResult` is the normalized return shape used by host
+'    adapters to convert execution outcomes into host-specific tool responses.
+'  - `ToolInstructionsPrompt` and `ToolDefinitionJson` define the model-facing
+'    contract for sandboxed Python execution and input/output handling.
+'  - `ExecuteAsync()` validates arguments and configuration, delegates to the
+'    Python agent client/broker, and converts failures into bounded safe result
+'    payloads rather than leaking raw exceptions.
+' =============================================================================
+
+
+Option Explicit On
+Option Strict On
+Option Infer On
+
+Namespace Agents
+    Public NotInheritable Class PythonExecuteToolArgumentException
+        Inherits System.Exception
+
+        Public Sub New(message As System.String)
+            MyBase.New(message)
+        End Sub
+    End Class
+
+    ''' <summary>
+    ''' Result of querying the installed Python Agent executable for its semantic version and comparing it
+    ''' against the required and recommended minimums. Protocol compatibility is enforced separately through
+    ''' the request/response contract and is therefore not part of this status.
+    ''' </summary>
+    Public NotInheritable Class PythonAgentVersionStatus
+        Public Property Succeeded As System.Boolean
+        Public Property Version As System.String
+        Public Property MeetsRequired As System.Boolean
+        Public Property MeetsRecommended As System.Boolean
+        Public Property ErrorMessage As System.String
+    End Class
+
+    Public NotInheritable Class PythonExecuteToolCoreOptions
+        Public Property AgentConfiguration As RedInkPythonAgentConfiguration
+        Public Property RootDirectory As System.String = System.String.Empty
+        Public Property InputFileResolver As System.Func(Of System.String, RedInkPythonAgentInputFile)
+        Public Property HostServiceHandler As IRedInkPythonAgentHostServiceHandler
+        Public Property DefaultTimeoutSeconds As System.Int32 = 1800
+        Public Property MinimumTimeoutSeconds As System.Int32 = 5
+        Public Property MaximumTimeoutSeconds As System.Int32 = 14400
+        Public Property MaximumCodeBytes As System.Int32 = 1048576
+        Public Property MaximumStdinBytes As System.Int32 = 1048576
+        Public Property MaximumInputFiles As System.Int32 = 100
+        Public Property MaximumOutputBytes As System.Int64 = 67108864L
+        Public Property MaximumOutputFiles As System.Int32 = 10
+        Public Property MaximumWorkingBytes As System.Int64 = 2147483648L
+        Public Property MaximumWorkingFiles As System.Int32 = 10000
+        Public Property MaximumResultBytes As System.Int64 = 67108864L
+        Public Property MaximumResultJsonDepth As System.Int32 = 128
+        Public Property MaximumResultJsonNodes As System.Int32 = 1000000
+        Public Property AllowedOperations As System.Collections.Generic.IList(Of System.String) = New System.Collections.Generic.List(Of System.String)(New System.String() {"llm.complete", "web.get", "web.search"})
+        Public Property MaximumHostCalls As System.Int32 = 20
+        Public Property MaximumConcurrentHostCalls As System.Int32 = 2
+        Public Property MaximumHostRequestBytes As System.Int32 = 67108864
+        Public Property MaximumHostResponseBytes As System.Int32 = 134217728
+        Public Property DefaultHostCallTimeoutSeconds As System.Int32 = 300
+        Public Property MaximumHostCallTimeoutSeconds As System.Int32 = 3600
+        Public Property StartupWallTimeSeconds As System.Int32 = 300
+        Public Property ExecutionInactivitySeconds As System.Int32 = 1800
+        Public Property ValidatorWallTimeSeconds As System.Int32 = 300
+        Public Property OverallCleanupMarginSeconds As System.Int32 = 60
+        Public Property ProcessWaitShutdownMarginSeconds As System.Int32 = 30
+        Public Property MemoryMiB As System.Int32 = 1536
+        Public Property HeartbeatTimeout As System.TimeSpan = System.TimeSpan.FromSeconds(15)
+        Public Property PollInterval As System.TimeSpan = System.TimeSpan.FromMilliseconds(100)
+        Public Property CancellationGracePeriod As System.TimeSpan = System.TimeSpan.FromSeconds(3)
+        Public Property HardKillWait As System.TimeSpan = System.TimeSpan.FromSeconds(5)
+        Public Property LogAgentToolCall As System.Action(Of System.Object, System.Object)
+        Public Property LogRawResponse As System.Action(Of System.String, System.String)
+        Public Property PublishOutputFile As System.Action(Of RedInkPythonAgentOutput)
+
+        ''' <summary>
+        ''' Creates a shallow copy so a single execution can apply per-call capability overrides
+        ''' (allowed operations and host-service handler) without mutating the shared configured
+        ''' options, which would otherwise race across concurrent tooling loops / sub-agents.
+        ''' </summary>
+        Public Function Clone() As PythonExecuteToolCoreOptions
+            Dim copy As New PythonExecuteToolCoreOptions() With {
+                .AgentConfiguration = Me.AgentConfiguration,
+                .RootDirectory = Me.RootDirectory,
+                .InputFileResolver = Me.InputFileResolver,
+                .HostServiceHandler = Me.HostServiceHandler,
+                .DefaultTimeoutSeconds = Me.DefaultTimeoutSeconds,
+                .MinimumTimeoutSeconds = Me.MinimumTimeoutSeconds,
+                .MaximumTimeoutSeconds = Me.MaximumTimeoutSeconds,
+                .MaximumCodeBytes = Me.MaximumCodeBytes,
+                .MaximumStdinBytes = Me.MaximumStdinBytes,
+                .MaximumInputFiles = Me.MaximumInputFiles,
+                .MaximumOutputBytes = Me.MaximumOutputBytes,
+                .MaximumOutputFiles = Me.MaximumOutputFiles,
+                .MaximumWorkingBytes = Me.MaximumWorkingBytes,
+                .MaximumWorkingFiles = Me.MaximumWorkingFiles,
+                .MaximumResultBytes = Me.MaximumResultBytes,
+                .MaximumResultJsonDepth = Me.MaximumResultJsonDepth,
+                .MaximumResultJsonNodes = Me.MaximumResultJsonNodes,
+                .MaximumHostCalls = Me.MaximumHostCalls,
+                .MaximumConcurrentHostCalls = Me.MaximumConcurrentHostCalls,
+                .MaximumHostRequestBytes = Me.MaximumHostRequestBytes,
+                .MaximumHostResponseBytes = Me.MaximumHostResponseBytes,
+                .DefaultHostCallTimeoutSeconds = Me.DefaultHostCallTimeoutSeconds,
+                .MaximumHostCallTimeoutSeconds = Me.MaximumHostCallTimeoutSeconds,
+                .StartupWallTimeSeconds = Me.StartupWallTimeSeconds,
+                .ExecutionInactivitySeconds = Me.ExecutionInactivitySeconds,
+                .ValidatorWallTimeSeconds = Me.ValidatorWallTimeSeconds,
+                .OverallCleanupMarginSeconds = Me.OverallCleanupMarginSeconds,
+                .ProcessWaitShutdownMarginSeconds = Me.ProcessWaitShutdownMarginSeconds,
+                .MemoryMiB = Me.MemoryMiB,
+                .HeartbeatTimeout = Me.HeartbeatTimeout,
+                .PollInterval = Me.PollInterval,
+                .CancellationGracePeriod = Me.CancellationGracePeriod,
+                .HardKillWait = Me.HardKillWait,
+                .LogAgentToolCall = Me.LogAgentToolCall,
+                .LogRawResponse = Me.LogRawResponse,
+                .PublishOutputFile = Me.PublishOutputFile
+            }
+            copy.AllowedOperations = New System.Collections.Generic.List(Of System.String)(Me.AllowedOperations)
+            Return copy
+        End Function
+    End Class
+
+    Public NotInheritable Class PythonExecuteToolCoreResult
+        Public Property Payload As System.String = System.String.Empty
+        Public Property Success As System.Boolean
+        Public Property Status As System.String = System.String.Empty
+        Public Property ErrorCode As System.String = System.String.Empty
+        Public Property ErrorMessage As System.String = System.String.Empty
+        Public Property ExitCode As System.Int32
+        Public Property DurationMilliseconds As System.Int64
+        Public Property DiagnosticId As System.Guid
+        Public Property HumanLogAvailable As System.Boolean
+        Public Property RunResult As RedInkPythonAgentRunResult
+    End Class
+
+    Public NotInheritable Class PythonExecuteToolCore
+        Public Const ToolName As System.String = "python_execute"
+        Private Const ReservedStdinRelativePath As System.String = "__redink_tool/stdin.txt"
+
+        Public Shared ReadOnly Property ToolInstructionsPrompt As System.String
+            Get
+                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. For Word document modifications (.docx), prefer the native Word tools (for example word_write, word_markup, word_comment_add) over python_execute; select python_execute only when those native tools are unsuitable, have already failed, or cannot perform the required operation. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. When you do use python_execute, put the COMPLETE task into one self-contained program that inspects the document as needed, identifies the target, performs the modification, saves the final output, validates the result, and publishes the result/output, all in the same execution. Do not split a simple task into separate python_execute calls for discovery, editing, re-reading, verification, or publication; only make a second call when information from the first execution is genuinely required before the next program can be constructed, or to repair a genuinely failed execution. After the requested output has been produced and validated in a successful run, do not issue further python_execute calls to re-read or re-verify the result; finalize instead. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Never shorten, rename, or invent aliases for input_files to work around host path lengths; input_files must remain real attachment/workspace references and the host handles any required physical staging aliases transparently. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Do not use python_execute to inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; the sandbox can access only staged `input_files` and files created through `agent_api.output_path(...)`. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model. Each call executes a complete, standalone Python program from scratch; nothing persists between calls. Do not stall the process: do not sleep, poll, retry in a loop, or wait for a file, resource, or state to appear; if an expected input or condition is missing, publish that fact and return immediately instead of waiting. Host-mediated capabilities (such as language-model assistance or web retrieval/search) are comparatively slow and optional; only call them when the task requires them, and never rely on them completing quickly. A deterministic Python error (for example SyntaxError, NameError, AttributeError, TypeError, ValueError, ImportError, or ModuleNotFoundError) will fail identically if resubmitted unchanged, so fix the code instead of retrying the same script. After an AttributeError or an API mismatch, do not guess a similarly named attribute or method; first inspect the real object with type(value), type(value).__module__, type(value).__qualname__, and hasattr(value, 'name') (a filtered dir() is acceptable), then call the API that actually exists. Do not reuse an approach that already failed. agent_api.output_path(name) requires a non-empty relative path inside the output directory; an empty string, '.', absolute paths, and paths escaping the output directory are rejected. Never mask a failure with a broad try/except or by writing placeholder/dummy output; a repair must preserve the required behavior and produce the real result. Published results must be JSON-compatible: allowed values are dictionaries with string keys, lists, strings, integers, finite floating-point values, booleans, and null; convert tuples and sets to lists, convert pathlib.Path values with str(path), convert datetime values to ISO 8601 strings, and reduce library objects or custom classes to dictionaries or primitive values before calling agent_api.publish_result(...). agent_api.output_path(name) returns a pathlib.Path; most modern APIs accept path-like objects, but if a third-party library rejects pathlib.Path or WindowsPath (for example reportlab.platypus.SimpleDocTemplate), convert it with str(path) only at that API boundary. python-docx header objects do not provide a universal .text property: read header text from section.header.paragraphs (joining each paragraph.text) and, when required, from section.header.tables. Do not pass a returned internal results path (for example results/<session-id>/file.docx) to input_files: published-result paths are informational only and are not reusable as inputs. Only use attachment references, workspace-relative paths, or explicitly reusable published-file handles as input_files."
+            End Get
+        End Property
+
+        Public Shared ReadOnly Property ToolDefinitionJson As System.String
+            Get
+                Dim definition As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("name", ToolName),
+                New Newtonsoft.Json.Linq.JProperty("description", "Executes a self-contained Python script in a sandboxed, network-isolated process. It may return an explicit bounded JSON/text result, create validated output documents, and, depending on host configuration for the task, may additionally have access to optional host-mediated capabilities such as language-model assistance and web retrieval/search. Use for calculations, parsing, transformations, document editing, and file generation. When js_run is available and sufficient for a deterministic task, prefer js_run because it is usually faster. For Word document edits (.docx), prefer the native Word tools (word_write, word_markup, etc.) and use python_execute only when those tools are unsuitable or have failed. Consolidate an entire task into a SINGLE call: put all steps and all input files into one self-contained script that inspects, modifies, saves, validates, and publishes in one execution; do not issue multiple python_execute calls for one logical task, and do not make additional verification calls after a successful run has produced and validated the requested output. The worker has no direct network access and sees only files explicitly passed in. It cannot inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; use python_execute only on explicitly staged inputs and declared outputs. Values passed to agent_api.publish_result(...) must be JSON-compatible: convert tuples/sets to lists, pathlib.Path to str(path), and datetime to ISO 8601 strings. agent_api.output_path(...) returns a pathlib.Path; convert it with str(path) only when a library requires a string filename."),
+                New Newtonsoft.Json.Linq.JProperty("parameters", New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("type", "object"),
+                    New Newtonsoft.Json.Linq.JProperty("properties", New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("code", New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                            New Newtonsoft.Json.Linq.JProperty("description", "The complete Python source to execute. Must be self-contained."))),
+                        New Newtonsoft.Json.Linq.JProperty("stdin", New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                            New Newtonsoft.Json.Linq.JProperty("description", "Optional text exposed to the script through sys.stdin."))),
+                        New Newtonsoft.Json.Linq.JProperty("input_files", New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty("type", "array"),
+                            New Newtonsoft.Json.Linq.JProperty("items", New Newtonsoft.Json.Linq.JObject(
+                                New Newtonsoft.Json.Linq.JProperty("type", "string"))),
+                            New Newtonsoft.Json.Linq.JProperty("description", "Optional relative names made available read-only inside the sandbox. Inside the script, open each one via redink_pythonagent.agent_api.input_path(name) using the same name listed here; do not open it by a bare filename or absolute path, because staged inputs are not in the working directory. Do not pass a returned internal results path (for example results/<session-id>/file.docx); published-result paths are not reusable as inputs. Use only attachment references, workspace-relative paths, or explicitly reusable published-file handles."))),
+                        New Newtonsoft.Json.Linq.JProperty("timeout_seconds", New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty("type", "integer"),
+                            New Newtonsoft.Json.Linq.JProperty("description", "Optional absolute wall-clock limit in seconds, clamped to host policy; default 30. Keep the default unless the task genuinely needs long computation; do not raise it to accommodate waiting, polling, or slow optional host calls."))))),
+                    New Newtonsoft.Json.Linq.JProperty("required", New Newtonsoft.Json.Linq.JArray("code")))))
+                Return definition.ToString(Newtonsoft.Json.Formatting.None)
+            End Get
+        End Property
+
+        Private Sub New()
+        End Sub
+
+        Public Shared Function ResolveAndValidateAvailability(options As PythonExecuteToolCoreOptions) As System.String
+            ValidateOptions(options)
+            Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
+            Dim executable As System.String = ValidateExecutableConfigurationCached(configuration)
+
+            ' Gate exposure on the minimum required version. Below the required minimum the integration is
+            ' deactivated for the whole session (the tool is never advertised). A version at or above the
+            ' required minimum but below the recommended minimum is treated as a soft state: still available,
+            ' with an update advisory surfaced elsewhere. The result is cached per executable
+            ' (path + last-write-time + length), so the tooling loop pays no per-call process-launch cost.
+            Dim status As PythonAgentVersionStatus = QueryVersionStatus(executable)
+            If status.Succeeded AndAlso Not status.MeetsRequired Then
+                Throw New RedInkPythonAgentConfigurationException(
+                    "The installed Python Agent version " & status.Version &
+                    " is below the minimum required version " & SharedLibrary.SharedMethods.PythonAgentMinRequiredVersion &
+                    ". The Python integration is deactivated until it is updated.")
+            End If
+
+            Return executable
+        End Function
+
+        Private Shared ReadOnly TrustCacheLock As New System.Object()
+        Private Shared ReadOnly TrustCache As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+        ''' <summary>
+        ''' Caches a successful executable trust validation (SHA-256 + Authenticode) keyed by full path,
+        ''' last-write-time, length and the configured trust criteria, so the tooling-loop tool-registration
+        ''' path does not repeat the hash/WinVerifyTrust cost on every run. A changed or updated executable
+        ''' (or changed criteria) produces a new key and is therefore re-verified automatically.
+        ''' </summary>
+        Private Shared Function ValidateExecutableConfigurationCached(configuration As RedInkPythonAgentConfiguration) As System.String
+            Dim cacheKey As System.String = Nothing
+            Try
+                Dim resolvedPath As System.String = System.IO.Path.GetFullPath(
+                    System.Environment.ExpandEnvironmentVariables(configuration.ExecutablePath))
+                Dim information As New System.IO.FileInfo(resolvedPath)
+                cacheKey = resolvedPath & "|" &
+                           information.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                           information.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                           If(configuration.ExpectedSignerOrganization, System.String.Empty) & "|" &
+                           If(configuration.ExpectedSha256, System.String.Empty)
+            Catch ex As System.Exception
+                cacheKey = Nothing
+            End Try
+
+            If cacheKey IsNot Nothing Then
+                SyncLock TrustCacheLock
+                    Dim cachedExecutable As System.String = Nothing
+                    If TrustCache.TryGetValue(cacheKey, cachedExecutable) Then
+                        Return cachedExecutable
+                    End If
+                End SyncLock
+            End If
+
+            Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+
+            If cacheKey IsNot Nothing Then
+                SyncLock TrustCacheLock
+                    TrustCache(cacheKey) = executable
+                End SyncLock
+            End If
+
+            Return executable
+        End Function
+
+        ''' <summary>
+        ''' Warms the trust and version caches for the configured Python Agent executable off the hot path
+        ''' (e.g. during add-in startup), so the first tooling run does not pay the SHA-256 + Authenticode
+        ''' verification and version-probe cost. Never throws; on failure the on-demand path re-verifies.
+        ''' </summary>
+        Public Shared Sub PrimeAvailabilityCache(configuration As RedInkPythonAgentConfiguration)
+            If configuration Is Nothing Then Return
+            Try
+                Dim resolved As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(configuration)
+                ValidateExecutableConfigurationCached(resolved)
+                QueryVersionStatus(resolved.ExecutablePath)
+            Catch ex As System.Exception
+                ' Non-fatal: on-demand tool registration re-verifies.
+            End Try
+        End Sub
+
+        Private Shared ReadOnly VersionCacheLock As New System.Object()
+        Private Shared ReadOnly VersionCache As New System.Collections.Generic.Dictionary(Of System.String, PythonAgentVersionStatus)(System.StringComparer.OrdinalIgnoreCase)
+
+        Private Shared ReadOnly PythonAgentVersionRegex As New System.Text.RegularExpressions.Regex(
+            "^redink-pythonagent(?:\.exe)?\s+(?<version>\d+\.\d+\.\d+)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        ''' <summary>
+        ''' Queries the Python Agent executable for its semantic version via "--version" and compares it against
+        ''' the required and recommended minimums. The result is cached per executable, keyed by full path,
+        ''' last-write-time and file length, so a changed or updated executable is automatically re-probed.
+        ''' </summary>
+        Public Shared Function QueryVersionStatus(executablePath As System.String) As PythonAgentVersionStatus
+            If System.String.IsNullOrWhiteSpace(executablePath) OrElse Not System.IO.File.Exists(executablePath) Then
+                Return New PythonAgentVersionStatus() With {
+                    .Succeeded = False,
+                    .ErrorMessage = "The Python Agent executable could not be found."
+                }
+            End If
+
+            Dim cacheKey As System.String
+            Try
+                Dim information As New System.IO.FileInfo(executablePath)
+                cacheKey = System.IO.Path.GetFullPath(executablePath) & "|" &
+                           information.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                           information.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            Catch ex As System.Exception
+                cacheKey = System.IO.Path.GetFullPath(executablePath)
+            End Try
+
+            SyncLock VersionCacheLock
+                Dim cached As PythonAgentVersionStatus = Nothing
+                If VersionCache.TryGetValue(cacheKey, cached) Then
+                    Return cached
+                End If
+            End SyncLock
+
+            Dim status As PythonAgentVersionStatus = ProbeVersionStatus(executablePath)
+
+            SyncLock VersionCacheLock
+                VersionCache(cacheKey) = status
+            End SyncLock
+
+            Return status
+        End Function
+
+        Private Shared Function ProbeVersionStatus(executablePath As System.String) As PythonAgentVersionStatus
+            Dim status As New PythonAgentVersionStatus()
+
+            Dim rawVersion As System.String
+            Try
+                rawVersion = QueryPythonAgentVersion(executablePath)
+            Catch ex As System.Exception
+                status.Succeeded = False
+                status.ErrorMessage = ex.Message
+                Return status
+            End Try
+
+            Dim match As System.Text.RegularExpressions.Match = PythonAgentVersionRegex.Match(rawVersion.Trim())
+            If Not match.Success Then
+                status.Succeeded = False
+                status.ErrorMessage = "The Python Agent returned an unrecognized version string: " & rawVersion
+                Return status
+            End If
+
+            Dim versionText As System.String = match.Groups("version").Value
+            Dim installedVersion As System.Version = Nothing
+            Dim requiredVersion As System.Version = Nothing
+            Dim recommendedVersion As System.Version = Nothing
+            If Not System.Version.TryParse(versionText, installedVersion) OrElse
+               Not System.Version.TryParse(SharedLibrary.SharedMethods.PythonAgentMinRequiredVersion, requiredVersion) OrElse
+               Not System.Version.TryParse(SharedLibrary.SharedMethods.PythonAgentMinRecommendedVersion, recommendedVersion) Then
+                status.Succeeded = False
+                status.Version = versionText
+                status.ErrorMessage = "The Python Agent version could not be compared against the configured minimums."
+                Return status
+            End If
+
+            status.Succeeded = True
+            status.Version = versionText
+            status.MeetsRequired = installedVersion >= requiredVersion
+            status.MeetsRecommended = installedVersion >= recommendedVersion
+            Return status
+        End Function
+
+        Private Shared Function QueryPythonAgentVersion(executablePath As System.String) As System.String
+            Dim startInfo As New System.Diagnostics.ProcessStartInfo() With {
+                .FileName = executablePath,
+                .Arguments = "--version",
+                .UseShellExecute = False,
+                .CreateNoWindow = True,
+                .RedirectStandardOutput = True,
+                .RedirectStandardError = True
+            }
+
+            Using process As New System.Diagnostics.Process()
+                process.StartInfo = startInfo
+
+                If Not process.Start() Then
+                    Throw New System.InvalidOperationException("The Python Agent version process could not be started.")
+                End If
+
+                Dim outputTask As System.Threading.Tasks.Task(Of System.String) = process.StandardOutput.ReadToEndAsync()
+                Dim errorTask As System.Threading.Tasks.Task(Of System.String) = process.StandardError.ReadToEndAsync()
+
+                If Not process.WaitForExit(10000) Then
+                    Try
+                        process.Kill()
+                    Catch ex As System.Exception
+                        ' Preserve the original timeout outcome.
+                    End Try
+
+                    Throw New System.TimeoutException("The Python Agent version query timed out.")
+                End If
+
+                System.Threading.Tasks.Task.WaitAll(outputTask, errorTask)
+
+                Dim standardOutput As System.String = outputTask.Result.Trim()
+                Dim standardError As System.String = errorTask.Result.Trim()
+
+                If process.ExitCode <> 0 Then
+                    Throw New System.InvalidOperationException(
+                        "The Python Agent version query failed with exit code " &
+                        process.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        ". " & standardError)
+                End If
+
+                If System.String.IsNullOrWhiteSpace(standardOutput) Then
+                    Throw New System.InvalidOperationException("The Python Agent returned an empty version string.")
+                End If
+
+                Return standardOutput
+            End Using
+        End Function
+
+        Public Shared Async Function ExecuteAsync(
+        options As PythonExecuteToolCoreOptions,
+        arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+        cancellationToken As System.Threading.CancellationToken,
+        Optional logStep As System.Action(Of System.String) = Nothing,
+        Optional logInfo As System.Action(Of System.String) = Nothing,
+        Optional logWarn As System.Action(Of System.String) = Nothing,
+        Optional logDiag As System.Action(Of System.String) = Nothing
+    ) As System.Threading.Tasks.Task(Of PythonExecuteToolCoreResult)
+            Dim result As PythonExecuteToolCoreResult = Nothing
+            Dim argumentFailure As PythonExecuteToolArgumentException = Nothing
+            Dim configurationFailure As RedInkPythonAgentConfigurationException = Nothing
+            Dim unexpectedFailure As System.Exception = Nothing
+            Try
+                result = Await ExecuteValidatedAsync(options, arguments, cancellationToken, logStep, logInfo, logWarn, logDiag).ConfigureAwait(False)
+            Catch ex As PythonExecuteToolArgumentException
+                argumentFailure = ex
+            Catch ex As RedInkPythonAgentConfigurationException
+                configurationFailure = ex
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.Exception
+                unexpectedFailure = ex
+            End Try
+            If argumentFailure IsNot Nothing Then
+                SafeLog(logDiag, argumentFailure.ToString())
+                Return CreateLocalFailure("REQUEST_INVALID", "failed", "The Python execution request is invalid.")
+            End If
+            If configurationFailure IsNot Nothing Then
+                SafeLog(logDiag, configurationFailure.ToString())
+                Return CreateLocalFailure("CONFIGURATION_INVALID", "failed", FriendlyMessage("CONFIGURATION_INVALID", "failed"))
+            End If
+            If unexpectedFailure IsNot Nothing Then
+                SafeLog(logDiag, unexpectedFailure.ToString())
+                Return CreateLocalFailure("INTERNAL_BROKER_ERROR", "failed", FriendlyMessage("INTERNAL_BROKER_ERROR", "failed"))
+            End If
+            Return result
+        End Function
+
+        Private Shared Async Function ExecuteValidatedAsync(
+        options As PythonExecuteToolCoreOptions,
+        arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+        cancellationToken As System.Threading.CancellationToken,
+        logStep As System.Action(Of System.String),
+        logInfo As System.Action(Of System.String),
+        logWarn As System.Action(Of System.String),
+        logDiag As System.Action(Of System.String)
+    ) As System.Threading.Tasks.Task(Of PythonExecuteToolCoreResult)
+
+            ValidateOptions(options)
+            If arguments Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(arguments))
+            End If
+            cancellationToken.ThrowIfCancellationRequested()
+
+            Dim code As System.String = GetRequiredString(arguments, "code")
+            Dim codeBytes As System.Int32 = System.Text.Encoding.UTF8.GetByteCount(code)
+            If codeBytes > options.MaximumCodeBytes Then
+                Return CreateLocalFailure("REQUEST_INVALID", "failed", "Python source exceeds the configured limit.")
+            End If
+
+            Dim stdinText As System.String = GetOptionalString(arguments, "stdin")
+            If System.Text.Encoding.UTF8.GetByteCount(stdinText) > options.MaximumStdinBytes Then
+                Return CreateLocalFailure("REQUEST_INVALID", "failed", "Standard input exceeds the configured limit.")
+            End If
+
+            Dim requestedTimeout As System.Int32 = GetTimeoutSeconds(arguments, options.DefaultTimeoutSeconds)
+            Dim effectiveTimeout As System.Int32 = Clamp(requestedTimeout, options.MinimumTimeoutSeconds, options.MaximumTimeoutSeconds)
+            If effectiveTimeout <> requestedTimeout Then
+                SafeLog(logWarn, "Python timeout was clamped to host policy.")
+            End If
+
+            Dim requestedInputFiles As System.Collections.Generic.List(Of System.String) = GetInputFiles(arguments, options.MaximumInputFiles)
+            Dim resolvedInputFiles As New System.Collections.Generic.List(Of RedInkPythonAgentInputFile)()
+            Dim seenInputFiles As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each requested As System.String In requestedInputFiles
+                cancellationToken.ThrowIfCancellationRequested()
+                If IsInternalPublishedResultReference(requested) Then
+                    ' The model passed a returned internal published-result path (results/<session-id>/...) as an
+                    ' input. Published result paths are not reusable input references; report a specific,
+                    ' repairable tool-argument error instead of the generic "input not found", so the model
+                    ' corrects input_files rather than editing its Python code.
+                    Return CreateInputReferenceFailure(requested)
+                End If
+                Dim relative As System.String = ValidateWorkspaceRelativePath(requested)
+                If System.String.Equals(relative, ReservedStdinRelativePath, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return CreateLocalFailure("REQUEST_INVALID", "failed", "The requested input path is reserved.")
+                End If
+                If Not seenInputFiles.Add(relative) Then
+                    Return CreateLocalFailure("REQUEST_INVALID", "failed", "Duplicate input file path.")
+                End If
+                If options.InputFileResolver Is Nothing Then
+                    Return CreateLocalFailure("CONFIGURATION_INVALID", "failed", "Input-file resolution is not configured.")
+                End If
+                Dim resolved As RedInkPythonAgentInputFile = Nothing
+                Try
+                    resolved = options.InputFileResolver(relative)
+                Catch ex As System.Exception
+                    SafeLog(logDiag, ex.ToString())
+                    Return CreateLocalFailure("REQUEST_INVALID", "failed", "Workspace input file could not be resolved.")
+                End Try
+                If resolved Is Nothing OrElse System.String.IsNullOrWhiteSpace(resolved.SourcePath) OrElse Not System.IO.File.Exists(System.IO.Path.GetFullPath(resolved.SourcePath)) Then
+                    Return CreateLocalFailure("REQUEST_INVALID", "failed", "Workspace input file was not found.")
+                End If
+                resolvedInputFiles.Add(New RedInkPythonAgentInputFile(System.IO.Path.GetFullPath(resolved.SourcePath), relative))
+            Next
+
+            Dim temporaryInputDirectory As System.String = Nothing
+            If stdinText.Length <> 0 Then
+                temporaryInputDirectory = CreateTemporaryInputDirectory()
+                Dim stdinSource As System.String = System.IO.Path.Combine(temporaryInputDirectory, "stdin.txt")
+                System.IO.File.WriteAllText(stdinSource, stdinText, New System.Text.UTF8Encoding(False, True))
+                resolvedInputFiles.Add(New RedInkPythonAgentInputFile(stdinSource, ReservedStdinRelativePath))
+                code = WrapCodeForStandardInput(code)
+            End If
+
+            Dim callRoot As System.String = CreateCallRoot(options.RootDirectory)
+
+            ' Decouple logical input names from physical staging paths only when the projected
+            ' Windows path would approach the legacy path limit. The PythonAgent protocol and
+            ' agent_api contract remain unchanged: user code still addresses the original logical
+            ' name, while the host transparently maps it to a compact staged relative path.
+            Dim stagedInputFiles As System.Collections.Generic.List(Of RedInkPythonAgentInputFile) = resolvedInputFiles
+            Dim inputAliases As System.Collections.Generic.Dictionary(Of System.String, System.String) = Nothing
+            PrepareCompactInputStaging(callRoot, resolvedInputFiles, stagedInputFiles, inputAliases)
+            If inputAliases IsNot Nothing AndAlso inputAliases.Count > 0 Then
+                code = WrapCodeForInputAliases(code, inputAliases)
+                SafeLog(logDiag, "Python input staging uses " & inputAliases.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " compact physical alias(es); logical input names remain unchanged.")
+            End If
+
+            Dim retainDiagnostics As System.Boolean = False
+            Try
+                Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
+                Dim limits As RedInkPythonAgentLimits = CreateLimits(options, effectiveTimeout)
+                Dim executionOptions As New RedInkPythonAgentExecutionOptions() With {
+                .OverallTimeout = System.TimeSpan.FromSeconds(limits.OverallWallTimeSeconds) + System.TimeSpan.FromSeconds(options.ProcessWaitShutdownMarginSeconds),
+                .HeartbeatTimeout = options.HeartbeatTimeout,
+                .PollInterval = options.PollInterval,
+                .CancellationGracePeriod = options.CancellationGracePeriod,
+                .HardKillWait = options.HardKillWait,
+                .HumanDiagnosticLog = logDiag
+            }
+                Dim client As New RedInkPythonAgentClient(executionOptions)
+                Dim progress As System.IProgress(Of RedInkPythonAgentEvent) = New PythonExecuteProgressAdapter(logStep, logInfo, logWarn, logDiag)
+                Dim execution As RedInkPythonAgentExecution = Nothing
+                Dim runResult As RedInkPythonAgentRunResult = Nothing
+                Dim started As System.DateTimeOffset = System.DateTimeOffset.UtcNow
+                Dim cancelled As System.Boolean = False
+                Dim unexpected As System.Exception = Nothing
+
+                SafeLog(logStep, "Running secure Python script...")
+                Try
+                    SafeLog(logDiag, "Validating secure Python executable...")
+                    Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+                    SafeLog(logDiag, "Secure Python executable verified.")
+                    SafeLog(logDiag, "Verified PythonAgent executable: " & executable)
+                    SafeLog(logDiag, "Python request source bytes: " & codeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    execution = client.CreateExecution(configuration, callRoot, code, stagedInputFiles, limits, options.HostServiceHandler, progress)
+                    Using registration As System.Threading.CancellationTokenRegistration = cancellationToken.Register(
+                    Sub()
+                        If execution IsNot Nothing Then
+                            execution.CancelAsync().GetAwaiter().GetResult()
+                        End If
+                    End Sub)
+                        runResult = Await execution.Completion.ConfigureAwait(False)
+                    End Using
+                Catch ex As System.OperationCanceledException
+                    cancelled = True
+                Catch ex As System.Exception
+                    unexpected = ex
+                Finally
+                    DeleteDirectoryBestEffort(temporaryInputDirectory, logDiag)
+                End Try
+
+                If cancelled OrElse cancellationToken.IsCancellationRequested Then
+                    SafeLog(logWarn, "Python execution was cancelled.")
+                    Return CreateLocalFailure("SESSION_CANCELLED", "cancelled", "Operation was cancelled.")
+                End If
+                If unexpected IsNot Nothing Then
+                    retainDiagnostics = True
+                    SafeLog(logDiag, unexpected.ToString())
+                    Dim trustException As RedInkPythonAgentExecutableTrustException = TryCast(unexpected, RedInkPythonAgentExecutableTrustException)
+                    If trustException IsNot Nothing Then
+                        Return CreateLocalFailure(trustException.Code, "failed", FriendlyMessage(trustException.Code, "failed"))
+                    End If
+                    If TypeOf unexpected Is RedInkPythonAgentConfigurationException Then
+                        Return CreateLocalFailure("CONFIGURATION_INVALID", "failed", FriendlyMessage("CONFIGURATION_INVALID", "failed"))
+                    End If
+                    If TypeOf unexpected Is System.IO.PathTooLongException Then
+                        Return CreateLocalFailure("INPUT_STAGING_PATH_TOO_LONG", "failed", FriendlyMessage("INPUT_STAGING_PATH_TOO_LONG", "failed"))
+                    End If
+                    Return CreateLocalFailure("INTERNAL_BROKER_ERROR", "failed", FriendlyMessage("INTERNAL_BROKER_ERROR", "failed"))
+                End If
+                If runResult Is Nothing Then
+                    retainDiagnostics = True
+                    Return CreateLocalFailure("BROKER_EXITED_WITHOUT_RESPONSE", "failed", FriendlyMessage("BROKER_EXITED_WITHOUT_RESPONSE", "failed"))
+                End If
+
+                Dim duration As System.Int64 = System.Convert.ToInt64((System.DateTimeOffset.UtcNow - started).TotalMilliseconds)
+                Dim result As PythonExecuteToolCoreResult = CreateResultFromRun(runResult, duration)
+                If options.PublishOutputFile IsNot Nothing Then
+                    Dim expectedResultsRoot As System.String = System.IO.Path.GetFullPath(System.IO.Path.Combine(callRoot, "results", runResult.SessionId.ToString("D")))
+                    For Each output As RedInkPythonAgentOutput In runResult.Outputs
+                        Try
+                            If Not ValidatePublishedOutput(output, expectedResultsRoot, logDiag) Then
+                                Continue For
+                            End If
+                            options.PublishOutputFile.Invoke(output)
+                        Catch ex As System.Exception
+                            SafeLog(logDiag, ex.ToString())
+                        End Try
+                    Next
+                End If
+                If Not result.Success Then
+                    retainDiagnostics = True
+                End If
+                If result.Success Then
+                    SafeLog(logStep, "Python script finished (exit " & result.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture) & ", " & duration.ToString(System.Globalization.CultureInfo.InvariantCulture) & " ms).")
+                Else
+                    SafeLog(logWarn, "Python script finished with status " & result.Status & ".")
+                End If
+                SafeLog(logDiag, "PythonAgent model-safe response bytes: " & System.Text.Encoding.UTF8.GetByteCount(result.Payload).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                Return result
+            Finally
+                If retainDiagnostics Then
+                    RetainDiagnosticsBestEffort(callRoot, options.RootDirectory, logDiag)
+                End If
+                DeleteDirectoryBestEffort(callRoot, logDiag)
+            End Try
+        End Function
+
+        Private Shared Function ValidatePublishedOutput(output As RedInkPythonAgentOutput, expectedResultsRoot As System.String, logDiag As System.Action(Of System.String)) As System.Boolean
+            If output Is Nothing Then Return False
+            Dim relative As System.String = If(output.RelativePath, System.String.Empty)
+            If relative.Length = 0 Then
+                SafeLog(logDiag, "Rejected python_execute output with an empty relative path.")
+                Return False
+            End If
+            If System.IO.Path.IsPathRooted(relative) Then
+                SafeLog(logDiag, "Rejected rooted python_execute output path: " & relative)
+                Return False
+            End If
+            For Each part As System.String In relative.Replace("\"c, "/"c).Split("/"c)
+                If part = "." OrElse part = ".." Then
+                    SafeLog(logDiag, "Rejected python_execute output path with relative navigation: " & relative)
+                    Return False
+                End If
+            Next
+            Dim fullPath As System.String
+            Try
+                fullPath = System.IO.Path.GetFullPath(output.FullPath)
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+                Return False
+            End Try
+            Dim containmentPrefix As System.String = expectedResultsRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
+            If Not fullPath.StartsWith(containmentPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                SafeLog(logDiag, "Rejected python_execute output outside the results directory: " & fullPath)
+                Return False
+            End If
+            Dim information As System.IO.FileInfo
+            Try
+                information = New System.IO.FileInfo(fullPath)
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+                Return False
+            End Try
+            If Not information.Exists Then
+                SafeLog(logDiag, "python_execute output file is missing: " & fullPath)
+                Return False
+            End If
+            If (information.Attributes And System.IO.FileAttributes.Directory) = System.IO.FileAttributes.Directory OrElse
+               (information.Attributes And System.IO.FileAttributes.ReparsePoint) = System.IO.FileAttributes.ReparsePoint Then
+                SafeLog(logDiag, "python_execute output is not a regular file: " & fullPath)
+                Return False
+            End If
+            If information.Length <> output.Size Then
+                SafeLog(logDiag, "python_execute output size mismatch: " & fullPath)
+                Return False
+            End If
+            If Not VerifyFileSha256(fullPath, output.Sha256, logDiag) Then
+                SafeLog(logDiag, "python_execute output SHA-256 mismatch: " & fullPath)
+                Return False
+            End If
+            output.PublishedSubPath = fullPath.Substring(containmentPrefix.Length).Replace(System.IO.Path.DirectorySeparatorChar, "/"c)
+            Return True
+        End Function
+
+        Private Shared Function VerifyFileSha256(fullPath As System.String, expectedHex As System.String, logDiag As System.Action(Of System.String)) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(expectedHex) Then Return False
+            Try
+                Using stream As New System.IO.FileStream(fullPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                    Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                        Dim hashBytes As System.Byte() = sha.ComputeHash(stream)
+                        Dim builder As New System.Text.StringBuilder(hashBytes.Length * 2)
+                        For Each value As System.Byte In hashBytes
+                            builder.Append(value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+                        Next
+                        Return System.String.Equals(builder.ToString(), expectedHex.Trim(), System.StringComparison.OrdinalIgnoreCase)
+                    End Using
+                End Using
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+                Return False
+            End Try
+        End Function
+
+        Private Shared Sub RetainDiagnosticsBestEffort(callRoot As System.String, baseRoot As System.String, logDiag As System.Action(Of System.String))
+            Try
+                If System.String.IsNullOrWhiteSpace(callRoot) OrElse Not System.IO.Directory.Exists(callRoot) Then Return
+                Dim diagnosticsRoot As System.String = System.IO.Path.Combine(System.IO.Path.GetFullPath(System.Environment.ExpandEnvironmentVariables(baseRoot)), "diagnostics")
+                System.IO.Directory.CreateDirectory(diagnosticsRoot)
+                PruneDiagnostics(diagnosticsRoot, 20, logDiag)
+                Dim target As System.String = System.IO.Path.Combine(diagnosticsRoot, System.DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'", System.Globalization.CultureInfo.InvariantCulture) & "_" & System.Guid.NewGuid().ToString("N"))
+                System.IO.Directory.CreateDirectory(target)
+                Dim responsePath As System.String = System.IO.Path.Combine(callRoot, "response.json")
+                If System.IO.File.Exists(responsePath) Then
+                    CopyFileSharedRead(responsePath, System.IO.Path.Combine(target, "response.json"), logDiag)
+                End If
+                For Each logPath As System.String In System.IO.Directory.EnumerateFiles(callRoot, "*.log", System.IO.SearchOption.AllDirectories)
+                    CopyFileSharedRead(logPath, System.IO.Path.Combine(target, System.IO.Path.GetFileName(logPath)), logDiag)
+                Next
+                SafeLog(logDiag, "python_execute diagnostics retained under: " & target)
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+            End Try
+        End Sub
+
+        Private Shared Sub CopyFileSharedRead(sourcePath As System.String, destinationPath As System.String, logDiag As System.Action(Of System.String))
+            Try
+                Using source As New System.IO.FileStream(sourcePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
+                    Using destination As New System.IO.FileStream(destinationPath, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None)
+                        source.CopyTo(destination)
+                    End Using
+                End Using
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+            End Try
+        End Sub
+
+        Private Shared Sub PruneDiagnostics(diagnosticsRoot As System.String, maximumEntries As System.Int32, logDiag As System.Action(Of System.String))
+            Try
+                Dim directories As New System.Collections.Generic.List(Of System.String)(System.IO.Directory.EnumerateDirectories(diagnosticsRoot))
+                If directories.Count < maximumEntries Then Return
+                directories.Sort(Function(a, b) System.IO.Directory.GetCreationTimeUtc(a).CompareTo(System.IO.Directory.GetCreationTimeUtc(b)))
+                Dim removeCount As System.Int32 = directories.Count - maximumEntries + 1
+                For index As System.Int32 = 0 To removeCount - 1
+                    DeleteDirectoryBestEffort(directories(index), logDiag)
+                Next
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+            End Try
+        End Sub
+
+        Private Shared Function CreateLimits(options As PythonExecuteToolCoreOptions, executeSeconds As System.Int32) As RedInkPythonAgentLimits
+            Dim startupSeconds As System.Int32 = System.Math.Max(1, options.StartupWallTimeSeconds)
+            Dim inactivitySeconds As System.Int32 = System.Math.Max(1, options.ExecutionInactivitySeconds)
+            Dim validatorSeconds As System.Int32 = System.Math.Max(1, options.ValidatorWallTimeSeconds)
+            Dim cleanupMarginSeconds As System.Int32 = System.Math.Max(0, options.OverallCleanupMarginSeconds)
+            Dim overallSeconds As System.Int32 = startupSeconds + executeSeconds + validatorSeconds + cleanupMarginSeconds
+            Dim operations As New System.Collections.Generic.List(Of System.String)()
+            If options.HostServiceHandler IsNot Nothing Then
+                For Each operation As System.String In options.AllowedOperations
+                    operations.Add(operation)
+                Next
+            End If
+            Return New RedInkPythonAgentLimits() With {
+            .OverallWallTimeSeconds = overallSeconds,
+            .StartupWallTimeSeconds = startupSeconds,
+            .ExecuteWallTimeSeconds = executeSeconds,
+            .ExecutionInactivitySeconds = inactivitySeconds,
+            .ValidatorWallTimeSeconds = validatorSeconds,
+            .MemoryMiB = options.MemoryMiB,
+            .MaxOutputBytes = options.MaximumOutputBytes,
+            .MaxOutputFiles = options.MaximumOutputFiles,
+            .MaxWorkingBytes = options.MaximumWorkingBytes,
+            .MaxWorkingFiles = options.MaximumWorkingFiles,
+            .MaxResultBytes = options.MaximumResultBytes,
+            .MaxResultJsonDepth = options.MaximumResultJsonDepth,
+            .MaxResultJsonNodes = options.MaximumResultJsonNodes,
+            .AllowedOperations = operations,
+            .MaximumCalls = If(operations.Count = 0, 0, options.MaximumHostCalls),
+            .MaximumConcurrentCalls = If(operations.Count = 0, 0, options.MaximumConcurrentHostCalls),
+            .MaximumRequestBytes = options.MaximumHostRequestBytes,
+            .MaximumResponseBytes = options.MaximumHostResponseBytes,
+            .DefaultCallTimeoutSeconds = options.DefaultHostCallTimeoutSeconds,
+            .MaximumCallTimeoutSeconds = options.MaximumHostCallTimeoutSeconds
+        }
+        End Function
+
+        Private Shared Function CreateResultFromRun(runResult As RedInkPythonAgentRunResult, durationMilliseconds As System.Int64) As PythonExecuteToolCoreResult
+            Dim success As System.Boolean = System.String.Equals(runResult.Status, "success", System.StringComparison.Ordinal)
+            Dim code As System.String = If(runResult.Error Is Nothing, System.String.Empty, runResult.Error.Code)
+            Dim payload As New Newtonsoft.Json.Linq.JObject(
+            New Newtonsoft.Json.Linq.JProperty("status", runResult.Status),
+            New Newtonsoft.Json.Linq.JProperty("exit_code", runResult.ExitCode),
+            New Newtonsoft.Json.Linq.JProperty("duration_ms", durationMilliseconds),
+            New Newtonsoft.Json.Linq.JProperty("diagnostic_id", runResult.DiagnosticId.ToString("D")),
+            New Newtonsoft.Json.Linq.JProperty("human_log_available", runResult.HumanLogAvailable))
+            If runResult.Result IsNot Nothing Then
+                payload.Add("result", New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("kind", runResult.Result.Kind),
+                New Newtonsoft.Json.Linq.JProperty("value", runResult.Result.Value.DeepClone())))
+            Else
+                payload.Add("result", Newtonsoft.Json.Linq.JValue.CreateNull())
+            End If
+            Dim outputs As New Newtonsoft.Json.Linq.JArray()
+            For Each output As RedInkPythonAgentOutput In runResult.Outputs
+                outputs.Add(New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("name", output.RelativePath),
+                New Newtonsoft.Json.Linq.JProperty("media_type", output.MediaType),
+                New Newtonsoft.Json.Linq.JProperty("bytes", output.Size),
+                New Newtonsoft.Json.Linq.JProperty("sha256", output.Sha256)))
+            Next
+            payload.Add("output_files", outputs)
+            If runResult.Error IsNot Nothing Then
+                payload.Add("error", CreateSafeErrorJson(runResult.Error))
+            Else
+                payload.Add("error", Newtonsoft.Json.Linq.JValue.CreateNull())
+            End If
+            Return New PythonExecuteToolCoreResult() With {
+            .Payload = payload.ToString(Newtonsoft.Json.Formatting.None),
+            .Success = success,
+            .Status = runResult.Status,
+            .ErrorCode = code,
+            .ErrorMessage = If(success, System.String.Empty, FriendlyMessage(code, runResult.Status)),
+            .ExitCode = runResult.ExitCode,
+            .DurationMilliseconds = durationMilliseconds,
+            .DiagnosticId = runResult.DiagnosticId,
+            .HumanLogAvailable = runResult.HumanLogAvailable,
+            .RunResult = runResult
+        }
+        End Function
+
+        Private Shared Function CreateSafeErrorJson(errorValue As RedInkPythonAgentSafeError) As Newtonsoft.Json.Linq.JObject
+            Dim sourceToken As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JValue.CreateNull()
+            If errorValue.Source IsNot Nothing Then
+                sourceToken = New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("file", errorValue.Source.File),
+                New Newtonsoft.Json.Linq.JProperty("line", errorValue.Source.Line),
+                New Newtonsoft.Json.Linq.JProperty("column", If(errorValue.Source.Column.HasValue, New Newtonsoft.Json.Linq.JValue(errorValue.Source.Column.Value), Newtonsoft.Json.Linq.JValue.CreateNull())),
+                New Newtonsoft.Json.Linq.JProperty("function", If(errorValue.Source.Function Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.Source.Function))),
+                New Newtonsoft.Json.Linq.JProperty("symbol", If(errorValue.Source.Symbol Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.Source.Symbol))))
+            End If
+            Dim stack As New Newtonsoft.Json.Linq.JArray()
+            For Each frame As RedInkPythonAgentSafeStackFrame In errorValue.Stack
+                stack.Add(New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("file", frame.File),
+                New Newtonsoft.Json.Linq.JProperty("line", frame.Line),
+                New Newtonsoft.Json.Linq.JProperty("function", If(frame.Function Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(frame.Function)))))
+            Next
+            Return New Newtonsoft.Json.Linq.JObject(
+            New Newtonsoft.Json.Linq.JProperty("code", errorValue.Code),
+            New Newtonsoft.Json.Linq.JProperty("phase", errorValue.Phase),
+            New Newtonsoft.Json.Linq.JProperty("retryable", errorValue.Retryable),
+            New Newtonsoft.Json.Linq.JProperty("source", sourceToken),
+            New Newtonsoft.Json.Linq.JProperty("host_operation", If(errorValue.HostOperation Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.HostOperation))),
+            New Newtonsoft.Json.Linq.JProperty("limit", If(errorValue.Limit.HasValue, New Newtonsoft.Json.Linq.JValue(errorValue.Limit.Value), Newtonsoft.Json.Linq.JValue.CreateNull())),
+            New Newtonsoft.Json.Linq.JProperty("observed", If(errorValue.Observed.HasValue, New Newtonsoft.Json.Linq.JValue(errorValue.Observed.Value), Newtonsoft.Json.Linq.JValue.CreateNull())),
+            New Newtonsoft.Json.Linq.JProperty("stack", stack))
+        End Function
+
+        Private Shared Function CreateLocalFailure(code As System.String, status As System.String, message As System.String) As PythonExecuteToolCoreResult
+            Dim diagnosticId As System.Guid = System.Guid.NewGuid()
+            Dim payload As New Newtonsoft.Json.Linq.JObject(
+            New Newtonsoft.Json.Linq.JProperty("status", status),
+            New Newtonsoft.Json.Linq.JProperty("exit_code", 1),
+            New Newtonsoft.Json.Linq.JProperty("duration_ms", 0),
+            New Newtonsoft.Json.Linq.JProperty("diagnostic_id", diagnosticId.ToString("D")),
+            New Newtonsoft.Json.Linq.JProperty("human_log_available", False),
+            New Newtonsoft.Json.Linq.JProperty("result", Newtonsoft.Json.Linq.JValue.CreateNull()),
+            New Newtonsoft.Json.Linq.JProperty("output_files", New Newtonsoft.Json.Linq.JArray()),
+            New Newtonsoft.Json.Linq.JProperty("error", New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("code", code),
+                New Newtonsoft.Json.Linq.JProperty("phase", "initializing"),
+                New Newtonsoft.Json.Linq.JProperty("retryable", False),
+                New Newtonsoft.Json.Linq.JProperty("source", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                New Newtonsoft.Json.Linq.JProperty("host_operation", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                New Newtonsoft.Json.Linq.JProperty("limit", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                New Newtonsoft.Json.Linq.JProperty("observed", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                New Newtonsoft.Json.Linq.JProperty("stack", New Newtonsoft.Json.Linq.JArray()))))
+            Return New PythonExecuteToolCoreResult() With {
+            .Payload = payload.ToString(Newtonsoft.Json.Formatting.None),
+            .Success = False,
+            .Status = status,
+            .ErrorCode = code,
+            .ErrorMessage = message,
+            .ExitCode = 1,
+            .DurationMilliseconds = 0,
+            .DiagnosticId = diagnosticId,
+            .HumanLogAvailable = False
+        }
+        End Function
+
+        Public Shared Function FriendlyMessage(code As System.String, status As System.String) As System.String
+            Select Case code
+                Case "SESSION_CANCELLED"
+                    Return "Operation was cancelled."
+                Case "SESSION_TIMEOUT", "WORKER_TIMEOUT", "HOST_CALL_TIMEOUT"
+                    Return "Python execution timed out."
+                Case "EXECUTABLE_NOT_FOUND"
+                    Return "The secure Python executor is unavailable."
+                Case "EXECUTABLE_HASH_MISMATCH", "EXECUTABLE_SIGNATURE_INVALID", "EXECUTABLE_SIGNER_MISMATCH"
+                    Return "The secure Python executor failed authenticity verification."
+                Case "CONFIGURATION_INVALID", "REQUEST_INVALID"
+                    Return "The Python execution request is invalid."
+                Case "INPUT_REFERENCE_INVALID"
+                    Return "An input reference is invalid: an internal published-result path cannot be used as an input file."
+                Case "INPUT_STAGING_PATH_TOO_LONG"
+                    Return "The internal Python staging path exceeds the Windows path limit even after host-side compaction. Python was not started. Do not rename or invent input_files aliases; keep exact input references and correct the configured staging root/path environment."
+                Case "PYTHON_RESULT_TOO_LARGE"
+                    Return "The direct Python result exceeded the configured byte limit; write large content to an output file instead."
+                Case "PYTHON_RESULT_TOO_DEEP", "PYTHON_RESULT_TOO_COMPLEX", "PYTHON_RESULT_INVALID"
+                    Return "The direct Python result was not valid within the configured JSON limits."
+                Case "OUTPUT_VALIDATION_FAILED", "OUTPUT_PUBLICATION_FAILED"
+                    Return "Python output validation failed."
+                Case "BROKER_HEARTBEAT_LOST", "BROKER_EXITED_WITHOUT_RESPONSE", "BROKER_START_FAILED"
+                    Return "The secure Python executor stopped unexpectedly."
+                Case Else
+                    If System.String.Equals(status, "cancelled", System.StringComparison.Ordinal) Then
+                        Return "Operation was cancelled."
+                    End If
+                    If System.String.Equals(status, "timeout", System.StringComparison.Ordinal) Then
+                        Return "Python execution timed out."
+                    End If
+                    Return "Python execution failed."
+            End Select
+        End Function
+
+        Private Shared Function ResolveConfigurationRelativeToAssembly(configuration As RedInkPythonAgentConfiguration) As RedInkPythonAgentConfiguration
+            If configuration Is Nothing Then
+                Throw New RedInkPythonAgentConfigurationException("PythonAgent configuration is required.")
+            End If
+            Dim executablePath As System.String = configuration.ExecutablePath
+            If System.String.IsNullOrWhiteSpace(executablePath) Then
+                Throw New RedInkPythonAgentConfigurationException("PythonAgent executable path is required.")
+            End If
+            executablePath = System.Environment.ExpandEnvironmentVariables(executablePath)
+            If Not System.IO.Path.IsPathRooted(executablePath) Then
+                Dim assemblyPath As System.String = System.Reflection.Assembly.GetExecutingAssembly().Location
+                Dim assemblyDirectory As System.String = System.IO.Path.GetDirectoryName(assemblyPath)
+                executablePath = System.IO.Path.Combine(assemblyDirectory, executablePath)
+            End If
+            Return New RedInkPythonAgentConfiguration() With {
+            .executablePath = System.IO.Path.GetFullPath(executablePath),
+            .ExpectedSignerOrganization = configuration.ExpectedSignerOrganization,
+            .ExpectedSha256 = configuration.ExpectedSha256
+        }
+        End Function
+
+        Private Shared Sub ValidateOptions(options As PythonExecuteToolCoreOptions)
+            If options Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(options))
+            End If
+            If options.AgentConfiguration Is Nothing Then
+                Throw New RedInkPythonAgentConfigurationException("PythonAgent configuration is required.")
+            End If
+            If System.String.IsNullOrWhiteSpace(options.RootDirectory) Then
+                options.RootDirectory = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "RedInk", "PythonAgent")
+            End If
+            If options.MinimumTimeoutSeconds < 1 OrElse options.MaximumTimeoutSeconds < options.MinimumTimeoutSeconds OrElse options.DefaultTimeoutSeconds < options.MinimumTimeoutSeconds OrElse options.DefaultTimeoutSeconds > options.MaximumTimeoutSeconds Then
+                Throw New RedInkPythonAgentConfigurationException("Python execute timeout policy is invalid.")
+            End If
+            If options.MaximumCodeBytes < 1 OrElse options.MaximumStdinBytes < 0 OrElse options.MaximumInputFiles < 0 OrElse options.MaximumOutputBytes < 1 OrElse options.MaximumOutputFiles < 1 Then
+                Throw New RedInkPythonAgentConfigurationException("Python execute size policy is invalid.")
+            End If
+            If options.MaximumResultBytes < 1L OrElse options.MaximumResultBytes > 134217728L OrElse options.MaximumResultJsonDepth < 1 OrElse options.MaximumResultJsonDepth > 256 OrElse options.MaximumResultJsonNodes < 1 OrElse options.MaximumResultJsonNodes > 4000000 Then
+                Throw New RedInkPythonAgentConfigurationException("Python execute result policy is invalid.")
+            End If
+            If options.AllowedOperations Is Nothing Then Throw New RedInkPythonAgentConfigurationException("Python host-service policy is invalid.")
+            Dim seenOperations As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            For Each operation As System.String In options.AllowedOperations
+                If operation <> "llm.complete" AndAlso operation <> "web.get" AndAlso operation <> "web.search" Then Throw New RedInkPythonAgentConfigurationException("Python host-service operation is invalid.")
+                If Not seenOperations.Add(operation) Then Throw New RedInkPythonAgentConfigurationException("Python host-service operations contain duplicates.")
+            Next
+            If options.MaximumHostCalls < 0 OrElse options.MaximumHostCalls > 100 OrElse options.MaximumConcurrentHostCalls < 0 OrElse options.MaximumConcurrentHostCalls > 4 OrElse options.MaximumConcurrentHostCalls > options.MaximumHostCalls Then
+                Throw New RedInkPythonAgentConfigurationException("Python host-service call limits are invalid.")
+            End If
+            If options.MaximumHostRequestBytes < 1 OrElse options.MaximumHostRequestBytes > 67108864 OrElse options.MaximumHostResponseBytes < 1 OrElse options.MaximumHostResponseBytes > 134217728 Then
+                Throw New RedInkPythonAgentConfigurationException("Python host-service size limits are invalid.")
+            End If
+            If options.DefaultHostCallTimeoutSeconds < 1 OrElse options.MaximumHostCallTimeoutSeconds < options.DefaultHostCallTimeoutSeconds OrElse options.MaximumHostCallTimeoutSeconds > 3600 Then
+                Throw New RedInkPythonAgentConfigurationException("Python host-service timeout policy is invalid.")
+            End If
+        End Sub
+
+        Private Shared Function GetRequiredString(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object), name As System.String) As System.String
+            Dim raw As System.Object = Nothing
+            If Not arguments.TryGetValue(name, raw) Then
+                Throw New PythonExecuteToolArgumentException("Missing required argument: " & name)
+            End If
+            Dim value As System.String = TryCast(raw, System.String)
+            If System.String.IsNullOrWhiteSpace(value) Then
+                Throw New PythonExecuteToolArgumentException("Missing required argument: " & name)
+            End If
+            Return value
+        End Function
+
+        Private Shared Function GetOptionalString(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object), name As System.String) As System.String
+            Dim raw As System.Object = Nothing
+            If Not arguments.TryGetValue(name, raw) OrElse raw Is Nothing Then
+                Return System.String.Empty
+            End If
+            Dim value As System.String = TryCast(raw, System.String)
+            If value Is Nothing Then
+                Throw New PythonExecuteToolArgumentException("Invalid " & name & " value.")
+            End If
+            Return value
+        End Function
+
+        Private Shared Function GetTimeoutSeconds(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object), defaultValue As System.Int32) As System.Int32
+            Dim raw As System.Object = Nothing
+            If Not arguments.TryGetValue("timeout_seconds", raw) OrElse raw Is Nothing Then
+                Return defaultValue
+            End If
+            If TypeOf raw Is System.Boolean Then
+                Throw New PythonExecuteToolArgumentException("Invalid timeout_seconds value.")
+            End If
+            Dim token As Newtonsoft.Json.Linq.JValue = TryCast(raw, Newtonsoft.Json.Linq.JValue)
+            If token IsNot Nothing Then
+                raw = token.Value
+            End If
+            Try
+                Dim converted As System.Int64 = System.Convert.ToInt64(raw, System.Globalization.CultureInfo.InvariantCulture)
+                If converted < System.Int32.MinValue OrElse converted > System.Int32.MaxValue Then
+                    Throw New System.OverflowException()
+                End If
+                Return System.Convert.ToInt32(converted)
+            Catch ex As System.Exception
+                Throw New PythonExecuteToolArgumentException("Invalid timeout_seconds value.")
+            End Try
+        End Function
+
+        Private Shared Function GetInputFiles(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object), maximumCount As System.Int32) As System.Collections.Generic.List(Of System.String)
+            Dim result As New System.Collections.Generic.List(Of System.String)()
+            Dim raw As System.Object = Nothing
+            If Not arguments.TryGetValue("input_files", raw) OrElse raw Is Nothing Then
+                Return result
+            End If
+            If TypeOf raw Is System.String Then
+                Throw New PythonExecuteToolArgumentException("Invalid input_files value.")
+            End If
+            Dim enumerable As System.Collections.IEnumerable = TryCast(raw, System.Collections.IEnumerable)
+            If enumerable Is Nothing Then
+                Throw New PythonExecuteToolArgumentException("Invalid input_files value.")
+            End If
+            For Each item As System.Object In enumerable
+                If result.Count >= maximumCount Then
+                    Throw New PythonExecuteToolArgumentException("Too many input files.")
+                End If
+                Dim token As Newtonsoft.Json.Linq.JValue = TryCast(item, Newtonsoft.Json.Linq.JValue)
+                Dim value As System.String = If(token Is Nothing, TryCast(item, System.String), TryCast(token.Value, System.String))
+                If System.String.IsNullOrWhiteSpace(value) Then
+                    Throw New PythonExecuteToolArgumentException("Invalid input_files value.")
+                End If
+                result.Add(value)
+            Next
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Detects whether a supplied input reference is actually an internal published-result path of the form
+        ''' "results/&lt;session-id&gt;/...". Such paths are returned informationally after a successful run and are
+        ''' NOT reusable as input_files; the model must use an attachment reference or a workspace-relative path
+        ''' instead. Detection is intentionally conservative: it only matches a leading "results" segment.
+        ''' </summary>
+        Private Shared Function IsInternalPublishedResultReference(value As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(value) Then Return False
+            Dim normalized As System.String = value.Replace("\"c, "/"c).Trim().TrimStart("/"c)
+            Return normalized.StartsWith("results/", System.StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        ''' <summary>
+        ''' Builds a specific, repairable failure for an internal published-result path supplied as an input.
+        ''' Backward compatible: it carries the same error shape as CreateLocalFailure (code/phase/retryable/
+        ''' source/host_operation/limit/observed/stack) and additively adds "repairable" and "guidance" so the
+        ''' model corrects its tool arguments rather than its Python program.
+        ''' </summary>
+        Private Shared Function CreateInputReferenceFailure(suppliedReference As System.String) As PythonExecuteToolCoreResult
+            Dim result As PythonExecuteToolCoreResult = CreateLocalFailure(
+                "INPUT_REFERENCE_INVALID",
+                "failed",
+                "The supplied path is an internal published-result path and cannot be used directly as input_files.")
+            Try
+                Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(result.Payload)
+                Dim errorObj As Newtonsoft.Json.Linq.JObject = TryCast(payload("error"), Newtonsoft.Json.Linq.JObject)
+                If errorObj IsNot Nothing Then
+                    errorObj("repairable") = New Newtonsoft.Json.Linq.JValue(True)
+                    errorObj("guidance") = New Newtonsoft.Json.Linq.JValue(
+                        "Use an attachment reference, a workspace-relative path, or an explicitly reusable published-file handle. Do not pass a returned internal results path to input_files.")
+                    result.Payload = payload.ToString(Newtonsoft.Json.Formatting.None)
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            End Try
+            Return result
+        End Function
+
+        Private Shared Function ValidateWorkspaceRelativePath(value As System.String) As System.String
+            Dim normalized As System.String = value.Replace("\"c, "/"c).Trim()
+            If normalized.Length = 0 OrElse System.IO.Path.IsPathRooted(normalized) OrElse normalized.IndexOf(":"c) >= 0 Then
+                Throw New PythonExecuteToolArgumentException("Invalid workspace path.")
+            End If
+            Dim parts As System.String() = normalized.Split("/"c)
+            For Each part As System.String In parts
+                If part.Length = 0 OrElse part = "." OrElse part = ".." OrElse part.EndsWith(".", System.StringComparison.Ordinal) OrElse part.EndsWith(" ", System.StringComparison.Ordinal) Then
+                    Throw New PythonExecuteToolArgumentException("Invalid workspace path.")
+                End If
+                If part.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 Then
+                    Throw New PythonExecuteToolArgumentException("Invalid workspace path.")
+                End If
+            Next
+            Return System.String.Join("/", parts)
+        End Function
+
+        Private Shared Sub PrepareCompactInputStaging(
+            callRoot As System.String,
+            logicalInputs As System.Collections.Generic.List(Of RedInkPythonAgentInputFile),
+            ByRef stagedInputs As System.Collections.Generic.List(Of RedInkPythonAgentInputFile),
+            ByRef aliases As System.Collections.Generic.Dictionary(Of System.String, System.String))
+
+            If logicalInputs Is Nothing OrElse logicalInputs.Count = 0 Then Return
+
+            ' RedInkPythonAgentClient creates requests\<36-char-session-guid>\input below callRoot.
+            ' Keep a conservative reserve below MAX_PATH so directory creation and file open do not
+            ' depend on exact boundary behavior of the running .NET/Windows configuration.
+            Const projectedSafePathLength As System.Int32 = 220
+            Const sessionDirectoryLength As System.Int32 = 36
+            Dim projectedPrefix As System.String = System.IO.Path.Combine(
+                callRoot, "requests", New System.String("0"c, sessionDirectoryLength), "input")
+
+            Dim occupied As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item As RedInkPythonAgentInputFile In logicalInputs
+                occupied.Add(item.RelativePath.Replace("\"c, "/"c))
+            Next
+
+            Dim replacements As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim physicalInputs As New System.Collections.Generic.List(Of RedInkPythonAgentInputFile)(logicalInputs.Count)
+            Dim aliasIndex As System.Int32 = 0
+
+            For Each item As RedInkPythonAgentInputFile In logicalInputs
+                Dim logicalRelative As System.String = item.RelativePath.Replace("\"c, "/"c)
+                Dim projected As System.String = System.IO.Path.Combine(projectedPrefix, logicalRelative.Replace("/"c, System.IO.Path.DirectorySeparatorChar))
+                If projected.Length < projectedSafePathLength Then
+                    physicalInputs.Add(item)
+                    Continue For
+                End If
+
+                Dim extension As System.String = System.IO.Path.GetExtension(logicalRelative)
+                Dim compactRelative As System.String = Nothing
+                Do
+                    aliasIndex += 1
+                    compactRelative = "__ri_stage/i" & aliasIndex.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & extension
+                Loop While occupied.Contains(compactRelative)
+                occupied.Add(compactRelative)
+
+                physicalInputs.Add(New RedInkPythonAgentInputFile(item.SourcePath, compactRelative))
+                replacements(logicalRelative) = compactRelative
+            Next
+
+            If replacements.Count > 0 Then
+                stagedInputs = physicalInputs
+                aliases = replacements
+            End If
+        End Sub
+
+        Private Shared Function WrapCodeForInputAliases(
+            code As System.String,
+            aliases As System.Collections.Generic.IDictionary(Of System.String, System.String)) As System.String
+
+            If aliases Is Nothing OrElse aliases.Count = 0 Then Return code
+
+            Dim normalizedAliases As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In aliases
+                normalizedAliases(pair.Key.Replace("\"c, "/"c).ToLowerInvariant()) = pair.Value.Replace("\"c, "/"c)
+            Next
+
+            Dim aliasJson As System.String = Newtonsoft.Json.JsonConvert.SerializeObject(normalizedAliases)
+            Dim encodedSource As System.String = System.Convert.ToBase64String(New System.Text.UTF8Encoding(False, True).GetBytes(code))
+            Dim builder As New System.Text.StringBuilder()
+            builder.AppendLine("import base64 as __redink_base64")
+            builder.AppendLine("import os as __redink_os")
+            builder.AppendLine("from redink_pythonagent import agent_api as __redink_agent_api")
+            builder.Append("__redink_input_aliases = ")
+            builder.AppendLine(aliasJson)
+            builder.AppendLine("__redink_original_input_path = __redink_agent_api.input_path")
+            builder.AppendLine("def __redink_mapped_input_path(name):")
+            builder.AppendLine("    try:")
+            builder.AppendLine("        __redink_key = __redink_os.fspath(name).replace('\\', '/').lower()")
+            builder.AppendLine("    except (TypeError, AttributeError):")
+            builder.AppendLine("        return __redink_original_input_path(name)")
+            builder.AppendLine("    __redink_alias = __redink_input_aliases.get(__redink_key)")
+            builder.AppendLine("    if __redink_alias is None:")
+            builder.AppendLine("        return __redink_original_input_path(name)")
+            builder.AppendLine("    return __redink_original_input_path(__redink_alias)")
+            builder.AppendLine("__redink_agent_api.input_path = __redink_mapped_input_path")
+            builder.Append("__redink_source = __redink_base64.b64decode('")
+            builder.Append(encodedSource)
+            builder.AppendLine("').decode('utf-8')")
+            builder.AppendLine("__redink_globals = {'__name__': '__main__', '__file__': 'code.py', '__package__': None, '__cached__': None}")
+            builder.AppendLine("exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            Return builder.ToString()
+        End Function
+
+        Private Shared Function WrapCodeForStandardInput(code As System.String) As System.String
+            Dim encoded As System.String = System.Convert.ToBase64String(New System.Text.UTF8Encoding(False, True).GetBytes(code))
+            Dim builder As New System.Text.StringBuilder()
+            builder.AppendLine("import base64 as __redink_base64")
+            builder.AppendLine("import io as __redink_io")
+            builder.AppendLine("import sys as __redink_sys")
+            builder.AppendLine("from redink_pythonagent import agent_api as __redink_agent_api")
+            builder.AppendLine("__redink_sys.stdin = __redink_io.StringIO(__redink_agent_api.input_path('__redink_tool/stdin.txt').read_text(encoding='utf-8'))")
+            builder.Append("__redink_source = __redink_base64.b64decode('")
+            builder.Append(encoded)
+            builder.AppendLine("').decode('utf-8')")
+            builder.AppendLine("__redink_globals = {'__name__': '__main__', '__file__': 'code.py', '__package__': None, '__cached__': None}")
+            builder.AppendLine("exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            Return builder.ToString()
+        End Function
+
+        Private Shared Function CreateCallRoot(baseRoot As System.String) As System.String
+            Dim fullBase As System.String = System.IO.Path.GetFullPath(System.Environment.ExpandEnvironmentVariables(baseRoot))
+            System.IO.Directory.CreateDirectory(fullBase)
+
+            ' Keep the configured PythonAgent root as the path authority. The worker already creates
+            ' a unique session GUID below requests/control, so the host-side call folder only needs a
+            ' compact collision-resistant name. This deliberately saves path budget for user-supplied
+            ' input filenames without changing the agent protocol, request layout, diagnostics root,
+            ' cleanup semantics, or the logical names exposed through agent_api.input_path(...).
+            Dim legacyCallParent As System.String = System.IO.Path.Combine(fullBase, "python_execute")
+            If System.IO.Directory.Exists(legacyCallParent) Then
+                PruneStaleCallRoots(legacyCallParent)
+            End If
+
+            Dim callParent As System.String = System.IO.Path.Combine(fullBase, "p")
+            System.IO.Directory.CreateDirectory(callParent)
+
+            ' Best-effort sweep of stale per-call roots left behind when a prior broker process
+            ' crashed or was force-killed with locked files (the normal Finally cleanup could not
+            ' delete them). These transient folders are never needed after their run completes.
+            PruneStaleCallRoots(callParent)
+
+            For attempt As System.Int32 = 1 To 20
+                Dim compactId As System.String = System.Guid.NewGuid().ToString("N").Substring(0, 10)
+                Dim candidate As System.String = System.IO.Path.Combine(callParent, compactId)
+                If Not System.IO.Directory.Exists(candidate) AndAlso Not System.IO.File.Exists(candidate) Then
+                    Return candidate
+                End If
+            Next
+
+            Throw New System.IO.IOException("Could not allocate a unique Python execution staging directory.")
+        End Function
+
+        Private Shared Sub PruneStaleCallRoots(callParent As System.String)
+            Try
+                Dim cutoff As System.DateTime = System.DateTime.UtcNow.AddHours(-1)
+                For Each directory As System.String In System.IO.Directory.EnumerateDirectories(callParent)
+                    Try
+                        If System.IO.Directory.GetLastWriteTimeUtc(directory) < cutoff Then
+                            System.IO.Directory.Delete(directory, True)
+                        End If
+                    Catch
+                        ' Still locked or in use; skip and retry on a later run.
+                    End Try
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            End Try
+        End Sub
+
+        Private Shared Function CreateTemporaryInputDirectory() As System.String
+            Dim directory As System.String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInkPythonExecute", System.Guid.NewGuid().ToString("D"))
+            System.IO.Directory.CreateDirectory(directory)
+            Return directory
+        End Function
+
+        Private Shared Sub DeleteDirectoryBestEffort(path As System.String, logDiag As System.Action(Of System.String))
+            If System.String.IsNullOrWhiteSpace(path) Then
+                Return
+            End If
+            Try
+                If System.IO.Directory.Exists(path) Then
+                    System.IO.Directory.Delete(path, True)
+                End If
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+            End Try
+        End Sub
+
+        Private Shared Function Clamp(value As System.Int32, minimum As System.Int32, maximum As System.Int32) As System.Int32
+            If value < minimum Then
+                Return minimum
+            End If
+            If value > maximum Then
+                Return maximum
+            End If
+            Return value
+        End Function
+
+        Private Shared Sub SafeLog(logger As System.Action(Of System.String), message As System.String)
+            If logger Is Nothing Then
+                Return
+            End If
+            Try
+                logger(message)
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            End Try
+        End Sub
+
+        Private NotInheritable Class PythonExecuteProgressAdapter
+            Implements System.IProgress(Of RedInkPythonAgentEvent)
+
+            Private ReadOnly LogStepValue As System.Action(Of System.String)
+            Private ReadOnly LogInfoValue As System.Action(Of System.String)
+            Private ReadOnly LogWarnValue As System.Action(Of System.String)
+            Private ReadOnly LogDiagValue As System.Action(Of System.String)
+
+            Public Sub New(logStep As System.Action(Of System.String), logInfo As System.Action(Of System.String), logWarn As System.Action(Of System.String), logDiag As System.Action(Of System.String))
+                Me.LogStepValue = logStep
+                Me.LogInfoValue = logInfo
+                Me.LogWarnValue = logWarn
+                Me.LogDiagValue = logDiag
+            End Sub
+
+            Public Sub Report(value As RedInkPythonAgentEvent) Implements System.IProgress(Of RedInkPythonAgentEvent).Report
+                If value Is Nothing Then
+                    Return
+                End If
+                Select Case value.EventCode
+                    Case "BROKER_STARTED"
+                        SafeLog(Me.LogDiagValue, "Preparing secure Python execution...")
+                    Case "REQUEST_VALIDATED"
+                        SafeLog(Me.LogDiagValue, "Python request validated.")
+                    Case "INPUT_STAGING_STARTED"
+                        SafeLog(Me.LogDiagValue, "Preparing sandbox input files...")
+                    Case "INPUT_STAGING_COMPLETED"
+                        SafeLog(Me.LogDiagValue, "Sandbox input files prepared.")
+                    Case "RUNTIME_VERIFICATION_STARTED"
+                        SafeLog(Me.LogDiagValue, "Verifying secure Python runtime...")
+                    Case "RUNTIME_VERIFICATION_COMPLETED"
+                        SafeLog(Me.LogDiagValue, "Secure Python runtime verified.")
+                    Case "EXECUTE_SANDBOX_STARTING", "EXECUTE_SANDBOX_RUNNING"
+                        SafeLog(Me.LogDiagValue, "Running Python script...")
+                    Case "PYTHON_PROGRESS"
+                        SafeLog(Me.LogDiagValue, FormatProgress(value))
+                    Case "VALIDATION_STARTED"
+                        SafeLog(Me.LogDiagValue, "Validating Python output files...")
+                    Case "VALIDATION_COMPLETED"
+                        SafeLog(Me.LogDiagValue, "Python output files validated.")
+                    Case "PUBLICATION_STARTED"
+                        SafeLog(Me.LogDiagValue, "Publishing Python output files...")
+                    Case "PUBLICATION_COMPLETED"
+                        SafeLog(Me.LogDiagValue, "Python output files published.")
+                    Case "CANCELLATION_REQUESTED", "SESSION_CANCELLED"
+                        SafeLog(Me.LogWarnValue, "Python execution cancellation requested.")
+                    Case "SESSION_TIMED_OUT"
+                        SafeLog(Me.LogWarnValue, "Python execution timed out.")
+                    Case "SESSION_FAILED"
+                        SafeLog(Me.LogWarnValue, "Python execution failed.")
+                    Case "LOG_TRUNCATED"
+                        SafeLog(Me.LogWarnValue, "Python diagnostic logging was truncated by policy.")
+                    Case Else
+                        SafeLog(Me.LogDiagValue, "PythonAgent event: " & value.EventCode)
+                End Select
+            End Sub
+
+            Private Shared Function FormatProgress(value As RedInkPythonAgentEvent) As System.String
+                Dim builder As New System.Text.StringBuilder("Python progress")
+                If value.Current.HasValue AndAlso value.Total.HasValue Then
+                    builder.Append(": ")
+                    builder.Append(value.Current.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    builder.Append("/")
+                    builder.Append(value.Total.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                End If
+                If Not System.String.IsNullOrWhiteSpace(value.StepId) Then
+                    builder.Append(" (")
+                    builder.Append(value.StepId)
+                    builder.Append(")")
+                End If
+                builder.Append(".")
+                Return builder.ToString()
+            End Function
+        End Class
+    End Class
+
+End Namespace

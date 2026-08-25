@@ -22,7 +22,9 @@
 '  - `ProcessSelectedText` is the main orchestration entry point for validation, undo handling,
 '    story-aware branching, and delegation to downstream processing routines.
 '  - Core processing keeps formatting and structural state stable while coordinating prompt,
-'    response, and insertion workflows across chunked selections.
+'    response, and insertion workflows across chunked selections; Markdown insertion preserves
+'    literal backslash text, keeps serialized Word-element placeholders opaque through every
+'    Markdown/LaTeX/HTML stage, and delegates bounded LaTeX normalization to the shared HTML pipeline.
 '  - Markup orchestration remains in this file, while the surgical diff/apply engine is split
 '    into `ThisAddIn.Processing.SurgicalInsert.vb`.
 '  - Chart/diagram output cleans returned draw.io XML, persists `.drawio` files, and supports
@@ -149,6 +151,89 @@ Partial Public Class ThisAddIn
     ''' Count of paragraphs in the current selection snapshot.
     ''' </summary>
     Dim paraCount As Integer
+
+    ''' <summary>
+    ''' Tracks whether the user has pressed Esc during the current table-processing batch.
+    ''' Set by the background Esc-poll thread and cleared when the user chooses to continue.
+    ''' </summary>
+    Private _tableAbortRequested As Boolean = False
+
+    ''' <summary>
+    ''' Signals the background Esc-poll thread to stop.
+    ''' </summary>
+    Private _tableEscPollStop As Boolean = False
+
+    ''' <summary>
+    ''' Reference to the background Esc-poll thread (if running).
+    ''' </summary>
+    Private _tableEscPollThread As System.Threading.Thread = Nothing
+
+    ''' <summary>
+    ''' Starts a background thread that continuously polls the Esc key for the duration of a
+    ''' table-processing batch and latches <see cref="_tableAbortRequested"/> when pressed.
+    ''' Polling in the background (rather than a one-shot check) reliably catches the same Esc
+    ''' keystroke that cancels the currently running per-cell LLM call.
+    ''' </summary>
+    Private Sub StartTableEscPoll()
+        _tableAbortRequested = False
+        _tableEscPollStop = False
+
+        _tableEscPollThread = New System.Threading.Thread(
+            Sub()
+                Dim escLatched As Boolean = False
+                While Not _tableEscPollStop
+                    System.Threading.Thread.Sleep(100)
+                    Dim state As Integer = GetAsyncKeyState(VK_ESCAPE)
+                    If (state And &H8000) <> 0 Then
+                        ' Debounce: require a key release before latching again.
+                        If Not escLatched Then
+                            escLatched = True
+                            _tableAbortRequested = True
+                        End If
+                    Else
+                        escLatched = False
+                    End If
+                End While
+            End Sub)
+        _tableEscPollThread.IsBackground = True
+        _tableEscPollThread.Start()
+    End Sub
+
+    ''' <summary>
+    ''' Stops the background Esc-poll thread started by <see cref="StartTableEscPoll"/>.
+    ''' </summary>
+    Private Sub StopTableEscPoll()
+        _tableEscPollStop = True
+        _tableEscPollThread = Nothing
+    End Sub
+
+    ''' <summary>
+    ''' When an Esc abort has been latched, asks the user whether to abort the entire batch or
+    ''' continue with the remaining cells and text sections. Returns True only when the user
+    ''' confirms aborting the whole process.
+    ''' </summary>
+    ''' <returns>True if the user chose to abort the entire process; otherwise False.</returns>
+    Private Function ConfirmAbortIfRequested() As Boolean
+        System.Windows.Forms.Application.DoEvents()
+
+        If Not _tableAbortRequested Then Return False
+
+        Dim answer As Integer = ShowCustomYesNoBox(
+            "Processing was interrupted (Esc). Do you want to abort the entire table processing, or continue with the remaining cells and text sections?",
+            "Abort everything",
+            "Continue",
+            $"{AN} Table Processing")
+
+        If answer = 2 Then
+            ' User chose to continue: clear the latched abort and resume.
+            _tableAbortRequested = False
+            Return False
+        End If
+
+        ' Any other choice (Abort or window closed) aborts the whole process.
+        _tableAbortRequested = True
+        Return True
+    End Function
 
     ''' <summary>
     ''' Entry point for processing selected text. Validates prerequisites (system prompt, selection), opens an undo scope,
@@ -303,6 +388,8 @@ Partial Public Class ThisAddIn
 
                     If userdialog = 2 Then
 
+                        _tableAbortRequested = False
+
                         SelectedAlternateModels = Nothing
 
                         MarkupMethod = 2
@@ -340,37 +427,50 @@ Partial Public Class ThisAddIn
                             Dim sel As Word.Selection = application.Selection
                             Dim selCRange As Word.Range = sel.Range
 
-                            ' Loop only the cells the user actually selected
-                            For Each cell As Word.Cell In sel.Cells
-                                ' Make a working copy of the cell's range, minus its end-of-cell marker
-                                Dim cellRange As Word.Range = cell.Range.Duplicate
-                                cellRange.End -= 1
+                            StartTableEscPoll()
 
-                                ' Compute the overlap of selRange & cellRange
-                                Dim intersection As Word.Range = selCRange.Duplicate
-                                intersection.Start = System.Math.Max(cellRange.Start, selCRange.Start)
-                                intersection.End = System.Math.Min(cellRange.End, selCRange.End)
+                            Try
+                                ' Loop only the cells the user actually selected
+                                For Each cell As Word.Cell In sel.Cells
 
-                                ' If there is any overlap, process only that text
-                                If intersection.Start < intersection.End Then
-                                    ' Keep UI responsive
-                                    System.Windows.Forms.Application.DoEvents()
+                                    ' Allow the user to abort the entire process
+                                    If ConfirmAbortIfRequested() Then Exit For
 
-                                    ' Show exactly what's being processed
-                                    intersection.Select()
+                                    ' Make a working copy of the cell's range, minus its end-of-cell marker
+                                    Dim cellRange As Word.Range = cell.Range.Duplicate
+                                    cellRange.End -= 1
 
-                                    ' Async processing call
-                                    Dim result = Await TrueProcessSelectedText(
-                                        SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline,
-                                        InPlace, DoMarkup, MarkupMethod, PutInClipboard,
-                                        PutInBubbles, SelectionMandatory, UseSecondAPI,
-                                        FormattingCap, DoTPMarkup, TPMarkupname, False,
-                                        FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                    ' Compute the overlap of selRange & cellRange
+                                    Dim intersection As Word.Range = selCRange.Duplicate
+                                    intersection.Start = System.Math.Max(cellRange.Start, selCRange.Start)
+                                    intersection.End = System.Math.Min(cellRange.End, selCRange.End)
 
-                                    ' Throttle so Word doesn't lock up
-                                    Await System.Threading.Tasks.Task.Delay(500)
-                                End If
-                            Next
+                                    ' If there is any overlap and actual text, process only that text
+                                    If intersection.Start < intersection.End AndAlso Not String.IsNullOrWhiteSpace(intersection.Text) Then
+                                        ' Keep UI responsive
+                                        System.Windows.Forms.Application.DoEvents()
+
+                                        ' Show exactly what's being processed
+                                        intersection.Select()
+
+                                        ' Async processing call
+                                        Dim result = Await TrueProcessSelectedText(
+                                            SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline,
+                                            InPlace, DoMarkup, MarkupMethod, PutInClipboard,
+                                            PutInBubbles, SelectionMandatory, UseSecondAPI,
+                                            FormattingCap, DoTPMarkup, TPMarkupname, False,
+                                            FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+
+                                        ' If the cell was cancelled with Esc, offer to abort the whole process
+                                        If ConfirmAbortIfRequested() Then Exit For
+
+                                        ' Throttle so Word doesn't lock up
+                                        Await System.Threading.Tasks.Task.Delay(50)
+                                    End If
+                                Next
+                            Finally
+                                StopTableEscPoll()
+                            End Try
 
                         Else
 
@@ -383,21 +483,14 @@ Partial Public Class ThisAddIn
 
                             Dim lastPos As Integer = selRange.Start
 
-                            Dim splash As New SLib.SplashScreen("Processing table(s)... press 'Esc' to abort")
-                            splash.Show()
-                            splash.Refresh()
+                            StartTableEscPoll()
 
                             Dim IsExit As Boolean = False
 
                             For Each tbl As Microsoft.Office.Interop.Word.Table In tableList
 
-                                System.Windows.Forms.Application.DoEvents()
-
-                                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
-                                    Exit For
-                                End If
-
-                                If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Or IsExit Then
+                                If ConfirmAbortIfRequested() Then
+                                    IsExit = True
                                     Exit For
                                 End If
 
@@ -413,10 +506,14 @@ Partial Public Class ThisAddIn
                                     ' Double-check you haven't snagged any table content
                                     If textChunk.Tables.Count = 0 Then
                                         ' Also verify it's not empty
-                                        If textChunk.Start < textChunk.End Then
+                                        If textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
-                                            Await System.Threading.Tasks.Task.Delay(500)
+                                            If ConfirmAbortIfRequested() Then
+                                                IsExit = True
+                                                Exit For
+                                            End If
+                                            Await System.Threading.Tasks.Task.Delay(50)
                                         End If
                                     Else
 
@@ -424,10 +521,14 @@ Partial Public Class ThisAddIn
                                             textChunk.Start += 1
                                         Loop While textChunk.Tables.Count <> 0 And Not textChunk.Start = textChunk.End
 
-                                        If textChunk.Tables.Count = 0 AndAlso textChunk.Start < textChunk.End Then
+                                        If textChunk.Tables.Count = 0 AndAlso textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
-                                            Await System.Threading.Tasks.Task.Delay(500)
+                                            If ConfirmAbortIfRequested() Then
+                                                IsExit = True
+                                                Exit For
+                                            End If
+                                            Await System.Threading.Tasks.Task.Delay(50)
                                         End If
 
                                     End If
@@ -435,34 +536,36 @@ Partial Public Class ThisAddIn
 
                                 ' Process the table itself (cells)
                                 For Each row As Microsoft.Office.Interop.Word.Row In tbl.Rows
-                                    System.Windows.Forms.Application.DoEvents()
 
-                                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                                    If ConfirmAbortIfRequested() Then
+                                        IsExit = True
                                         Exit For
                                     End If
 
-                                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Or IsExit Then
-                                        Exit For
-                                    End If
                                     For Each cell As Microsoft.Office.Interop.Word.Cell In row.Cells
-                                        System.Windows.Forms.Application.DoEvents()
 
-                                        If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                                        If ConfirmAbortIfRequested() Then
+                                            IsExit = True
                                             Exit For
                                         End If
 
-                                        If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Or IsExit Then
-                                            Exit For
-                                        End If
                                         Dim cellRange As Range = cell.Range
                                         cellRange.End -= 1  ' Exclude cell marker
-                                        If cellRange.Start < cellRange.End Then
+                                        If cellRange.Start < cellRange.End AndAlso Not String.IsNullOrWhiteSpace(cellRange.Text) Then
                                             cellRange.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
-                                            Await System.Threading.Tasks.Task.Delay(500)
+                                            If ConfirmAbortIfRequested() Then
+                                                IsExit = True
+                                                Exit For
+                                            End If
+                                            Await System.Threading.Tasks.Task.Delay(50)
                                         End If
                                     Next
+
+                                    If IsExit Then Exit For
                                 Next
+
+                                If IsExit Then Exit For
 
                                 ' Move lastPos to end of this table
                                 lastPos = tblEnd + 1
@@ -493,7 +596,7 @@ Partial Public Class ThisAddIn
                                 End If
                             End If
 
-                            splash.Close()
+                            StopTableEscPoll()
                         End If
 
                     ElseIf userdialog = 1 Then
@@ -519,6 +622,8 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Debug.WriteLine("Error in Undo: " & ex.Message)
         End Try
+
+        Return ""
 
     End Function
 
@@ -860,8 +965,9 @@ Partial Public Class ThisAddIn
                     ReDim paragraphFormat(paraCount - 1)
                     Array.Clear(paragraphFormat, 0, paragraphFormat.Length)
 
-                    For i = 1 To paraCount
-                        Dim para As Word.Paragraph = rng.Paragraphs(i)
+                    i = 0
+                    For Each para As Word.Paragraph In rng.Paragraphs
+                        i += 1
                         Dim paraRange As Word.Range = para.Range
 
                         ' bodyRange = text without the paragraph mark
@@ -945,6 +1051,17 @@ Partial Public Class ThisAddIn
                 Dim BubblesText As String = ""
 
                 If DoBubblesExtract Then BubblesText = BubblesExtract(rng, DoSilent Or InTable)
+
+                ' Capture automatic list/heading numbering (e.g. "I.", "a)", "1.1") as
+                ' READ-ONLY context. These numbers are generated by Word and are not part
+                ' of rng.Text, so the LLM would otherwise not know them. We never inject
+                ' them into the reinsertable TEXTTOPROCESS; we pass them separately so the
+                ' payload that is written back stays untouched.
+                Dim NumberingContext As String = ""
+                If Not NoSelectedText AndAlso rng IsNot Nothing Then
+                    NumberingContext = BuildParagraphNumberingContext(rng)
+                End If
+                Dim NumberingUser As String = If(String.IsNullOrEmpty(NumberingContext), "", " " & NumberingContext)
 
                 Debug.WriteLine($"BubblesText = '{BubblesText}'")
 
@@ -1146,30 +1263,65 @@ Partial Public Class ThisAddIn
 
                 ' If tools are selected and the model supports tooling, enter the tool execution loop
                 If SelectedTools IsNot Nothing AndAlso SelectedTools.Count > 0 AndAlso UseSecondAPI Then
-                    LLMResult = Await ExecuteToolingLoop(
-                        SysCommand,
-                        SelectedText,
-                        SelectedTools,
-                        UseSecondAPI,
-                        FileObject,
-                        DoTPMarkup,
-                        BubblesText,
-                        NoFormatting,
-                        KeepFormat,
-                        SlideDeck,
-                        DoMyStyle,
-                        MyStyleInsert,
-                        AddDocs,
-                        InsertDocs,
-                        SlideInsert,
-                        OtherPromptUnfilled, DoChart:=DoChart)
+
+                    ' Provide ongoing agentic feedback via the InfoBox popup (multi-line, wraps),
+                    ' mirroring the chatbot (Form1) live-progress channel: run the loop with its own
+                    ' splash suppressed and refresh the InfoBox for each per-step progress note.
+                    Dim infoBoxShown As Boolean = False
+                    Try
+                        SLib.InfoBox.ShowInfoBox($"{Globals.ThisAddIn.ToolFriendlyName}: Thinking...")
+                        infoBoxShown = True
+
+                        LLMResult = Await ExecuteToolingLoop(
+                            SysCommand,
+                            SelectedText,
+                            SelectedTools,
+                            UseSecondAPI,
+                            FileObject,
+                            DoTPMarkup,
+                            BubblesText,
+                            NoFormatting,
+                            KeepFormat,
+                            SlideDeck,
+                            DoMyStyle,
+                            MyStyleInsert,
+                            AddDocs,
+                            InsertDocs,
+                            SlideInsert,
+                            OtherPromptUnfilled,
+                            DoChart:=DoChart,
+                            hideSplash:=True,
+                            hideLogWindow:=Not GetEffectiveToolingLogWindowSetting(),
+                            progressSink:=Sub(status As String)
+                                              Try
+                                                  If String.IsNullOrWhiteSpace(status) Then Return
+                                                  If mainThreadControl IsNot Nothing AndAlso mainThreadControl.InvokeRequired Then
+                                                      mainThreadControl.BeginInvoke(New System.Windows.Forms.MethodInvoker(Sub() SLib.InfoBox.ShowInfoBox(status)))
+                                                  Else
+                                                      SLib.InfoBox.ShowInfoBox(status)
+                                                  End If
+                                              Catch
+                                              End Try
+                                          End Sub)
+                    Finally
+                        If infoBoxShown Then
+                            Try
+                                If mainThreadControl IsNot Nothing AndAlso mainThreadControl.InvokeRequired Then
+                                    mainThreadControl.Invoke(New System.Windows.Forms.MethodInvoker(Sub() SLib.InfoBox.ShowInfoBox("", 1)))
+                                Else
+                                    SLib.InfoBox.ShowInfoBox("", 1)
+                                End If
+                            Catch
+                            End Try
+                        End If
+                    End Try
                 Else
 
                     ' Other LLM calls w/o Tooling
 
                     If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart > 0 Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
+                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
 
                     Else
 
@@ -1177,7 +1329,7 @@ Partial Public Class ThisAddIn
                             Dim err As Boolean = False
                             ApplyModelConfig(_context, mc, err)
 
-                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
 
                         Next
 
@@ -2049,6 +2201,211 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ''' <summary>
+    ''' Builds compact, read-only context describing paragraph numbering for the range.
+    ''' Emits up to two independent blocks:
+    '''   &lt;PARAGRAPHNUMBERS&gt; — automatic paragraph numbering as exposed by Word
+    '''       (ListFormat.ListString, e.g. "I.", "a)", "1.1", "1"), each entry prefixed
+    '''       with its outline/list level (L1..L9 where available) so the model can
+    '''       distinguish levels instead of flattening them.
+    '''   &lt;MARGINNUMBERS&gt;    — the subset of paragraph numbers that Word renders in a
+    '''       left-margin position (Randziffern / marginal numbers), reported separately
+    '''       from the general paragraph numbering. Word SEQ fields remain a fallback path.
+    ''' Each entry is paired with a short snippet of the paragraph start so the LLM can
+    ''' correlate the number with its paragraph. Returns an empty string when the range
+    ''' carries neither. The numbering is passed as separate context and is never inserted
+    ''' into the reinsertable TEXTTOPROCESS.
+    ''' </summary>
+    Public Shared Function BuildParagraphNumberingContext(ByVal rng As Word.Range) As String
+        Try
+            If rng Is Nothing Then Return ""
+
+            Dim paras As Word.Paragraphs = rng.Paragraphs
+            If paras Is Nothing OrElse paras.Count = 0 Then Return ""
+
+            ' Local helper: normalize and cap a paragraph-start snippet.
+            Dim MakeSnippet As Func(Of String, String) =
+                Function(raw As String) As String
+                    Dim s As String = If(raw, "")
+                    s = s.Replace(vbCr, " ").Replace(vbLf, " ").Replace(vbTab, " ").Trim()
+                    If s.Length > 60 Then s = s.Substring(0, 60)
+                    Return s
+                End Function
+
+            Dim sbList As New System.Text.StringBuilder()
+            Dim sbMargin As New System.Text.StringBuilder()
+
+            ' Assign a stable, deterministic stream id to each distinct numbering source.
+            ' Every automatic number is generated by a specific ListTemplate (and SEQ
+            ' numbers by their sequence name). Numbers sharing a source belong to the
+            ' same continuous sequence. We expose this as "S1", "S2", ... so the model
+            ' can tell independent streams apart (e.g. a body outline vs. a continuous
+            ' Randziffer sequence) WITHOUT any name- or geometry-based guessing.
+            Dim streamIds As New Dictionary(Of String, String)(StringComparer.Ordinal)
+            Dim StreamIdFor As Func(Of String, String) =
+                Function(key As String) As String
+                    Dim id As String = Nothing
+                    If Not streamIds.TryGetValue(key, id) Then
+                        id = "S" & (streamIds.Count + 1)
+                        streamIds(key) = id
+                    End If
+                    Return id
+                End Function
+
+            For Each p As Word.Paragraph In paras
+                Dim pr As Word.Range = p.Range
+                Dim snippet As String = MakeSnippet(pr.Text)
+
+                ' ── Automatic list numbering: keep only numbered elements in PARAGRAPHNUMBERS ──
+                Dim lf As Word.ListFormat = pr.ListFormat
+                If lf.ListType <> Word.WdListType.wdListNoNumbering Then
+                    Dim ls As String = Nothing
+                    Try
+                        ls = lf.ListString
+                    Catch
+                        ls = Nothing
+                    End Try
+
+                    Dim isNumberedElement As Boolean = False
+
+                    Try
+                        If lf.ListType <> Word.WdListType.wdListBullet AndAlso
+                           lf.ListType <> Word.WdListType.wdListPictureBullet AndAlso
+                           Not String.IsNullOrEmpty(ls) Then
+
+                            Dim trimmed As String = ls.Trim()
+
+                            If trimmed <> "" Then
+                                isNumberedElement =
+                                    System.Text.RegularExpressions.Regex.IsMatch(trimmed, "^\d+(?:[.\-]\d+)*[.)]?$") OrElse
+                                    System.Text.RegularExpressions.Regex.IsMatch(trimmed, "^(?i:[ivxlcdm]+)[.)]$") OrElse
+                                    System.Text.RegularExpressions.Regex.IsMatch(trimmed, "^[A-Za-z][.)]$")
+                            End If
+                        End If
+                    Catch
+                        isNumberedElement = False
+                    End Try
+
+                    If isNumberedElement Then
+                        Dim lvl As Integer = 0
+                        Try
+                            lvl = lf.ListLevelNumber
+                        Catch
+                            lvl = 0
+                        End Try
+
+                        Dim tmplKey As String = "list:?"
+                        Try
+                            Dim lt As Word.ListTemplate = lf.ListTemplate
+                            If lt IsNot Nothing Then tmplKey = "list:" & lt.GetHashCode().ToString()
+                        Catch
+                            tmplKey = "list:?"
+                        End Try
+
+                        Dim streamId As String = StreamIdFor(tmplKey)
+
+                        sbList.Append(streamId).Append(vbTab).
+                               Append("L").Append(lvl).Append(vbTab).
+                               Append(ls).Append(vbTab).
+                               Append(snippet).Append(vbLf)
+
+                        ' Marginal numbers / Randziffern:
+                        ' identify them from Word's own list-level positioning, not from
+                        ' hard-coded indent values.
+                        Try
+                            Dim numberPosition As Single = System.Single.NaN
+                            Dim textPosition As Single = System.Single.NaN
+
+                            Try
+                                If lvl >= 1 AndAlso lvl <= 9 Then
+                                    Dim lt As Word.ListTemplate = lf.ListTemplate
+                                    If lt IsNot Nothing Then
+                                        Dim ll As Word.ListLevel = lt.ListLevels(lvl)
+                                        If ll IsNot Nothing Then
+                                            numberPosition = ll.NumberPosition
+                                            textPosition = ll.TextPosition
+                                        End If
+                                    End If
+                                End If
+                            Catch
+                                numberPosition = System.Single.NaN
+                                textPosition = System.Single.NaN
+                            End Try
+
+                            Dim isMarginNumber As Boolean =
+                                lf.ListType = Word.WdListType.wdListSimpleNumbering AndAlso
+                                Not System.Single.IsNaN(numberPosition) AndAlso
+                                Not System.Single.IsNaN(textPosition) AndAlso
+                                numberPosition <= 0.0F AndAlso
+                                textPosition > numberPosition
+
+                            If isMarginNumber Then
+                                sbMargin.Append(streamId).Append(vbTab).
+                                         Append(ls).Append(vbTab).
+                                         Append(snippet).Append(vbLf)
+                            End If
+                        Catch
+                            ' Best-effort: ignore margin-number classification failures.
+                        End Try
+                    End If
+                End If
+
+                ' ── Additional fallback for documents that realize margin numbers as SEQ fields ──
+                Try
+                    Dim flds As Word.Fields = pr.Fields
+                    If flds IsNot Nothing AndAlso flds.Count > 0 Then
+                        For Each fld As Word.Field In flds
+                            If fld.Type = Word.WdFieldType.wdFieldSequence Then
+                                Dim num As String = Nothing
+                                Try
+                                    num = fld.Result.Text
+                                Catch
+                                    num = Nothing
+                                End Try
+                                If Not String.IsNullOrWhiteSpace(num) Then
+                                    Dim seqKey As String = "seq:?"
+                                    Try
+                                        Dim code As String = fld.Code.Text
+                                        If code IsNot Nothing Then seqKey = "seq:" & code.Trim()
+                                    Catch
+                                        seqKey = "seq:?"
+                                    End Try
+                                    sbMargin.Append(StreamIdFor(seqKey)).Append(vbTab).
+                                             Append(num.Trim()).Append(vbTab).
+                                             Append(snippet).Append(vbLf)
+                                End If
+                            End If
+                        Next
+                    End If
+                Catch
+                    ' Best-effort: ignore field access failures for this paragraph.
+                End Try
+            Next
+
+            Dim result As New System.Text.StringBuilder()
+
+            If sbList.Length > 0 Then
+                result.Append("<PARAGRAPHNUMBERS>").Append(vbCrLf).
+                       Append("The following are the automatic paragraph/heading numbers (as shown to the reader) for the numbered paragraphs in TEXTTOPROCESS. They are provided for your understanding only and are NOT part of the editable text. Each line contains: a numbering-stream id (e.g. S1, S2 — numbers sharing the same stream id belong to the same continuous, independent sequence, while different stream ids are unrelated sequences that may run in parallel), a tab, the outline level (L1 is the top level, L2 a sub-level, and so on), a tab, the number as shown, a tab, and the beginning of the corresponding paragraph. Treat numbers at different levels or in different streams as distinct (e.g. ""I."", ""a)"" and ""1."" are different). Do not add, repeat, renumber, flatten, merge streams or alter these numbers in your output.").Append(vbCrLf).
+                       Append(sbList.ToString()).
+                       Append("</PARAGRAPHNUMBERS>")
+            End If
+
+            If sbMargin.Length > 0 Then
+                If result.Length > 0 Then result.Append(vbCrLf)
+                result.Append("<MARGINNUMBERS>").Append(vbCrLf).
+                       Append("The following are marginal numbers for paragraphs in TEXTTOPROCESS. They are provided separately from the general paragraph numbering and are NOT part of the editable text. Each line contains: a stream id, a tab, the number as shown, a tab, and the beginning of the corresponding paragraph. Do not add, repeat, renumber or alter these numbers in your output.").Append(vbCrLf).
+                       Append(sbMargin.ToString()).
+                       Append("</MARGINNUMBERS>")
+            End If
+
+            Return result.ToString()
+
+        Catch ex As System.Exception
+            Debug.WriteLine($"BuildParagraphNumberingContext error: {ex.Message}")
+            Return ""
+        End Try
+    End Function
 
     ''' <summary>
     ''' Returns the visible text of a range in Final view, excluding deleted revisions.
@@ -2057,7 +2414,6 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="src">Word range to extract visible text from.</param>
     ''' <returns>Text with deletions omitted and insertions preserved.</returns>
-
     Public Function GetVisibleText(ByVal src As Range) As String
         Try
             ' 1) Catch null/empty range
@@ -2443,7 +2799,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As System.Exception
-            MsgBox("Error in SearchReplace: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in SearchReplace: " & ex.Message)
         End Try
     End Sub
 
@@ -2455,48 +2811,85 @@ Partial Public Class ThisAddIn
         Dim app As Word.Application = Globals.ThisAddIn.Application
         Dim sel As Word.Selection = app.Selection
 
-        ' Snapshot basic paragraph style + format for each paragraph in selection
-        Dim srcParas As Word.Paragraphs = sel.Range.Paragraphs
-        Dim savedStyles As New List(Of Object)()
-        Dim savedFormats As New List(Of Word.ParagraphFormat)()
+        ' Capture a single representative "base" paragraph style + format from the current
+        ' selection. This is the body style we want to preserve for plain paragraphs that the
+        ' Markdown conversion leaves at the document default. It must NOT be forced back onto
+        ' paragraphs that the conversion legitimately turns into headings or list items.
+        Dim baseStyle As Object = Nothing
+        Dim baseFormat As Word.ParagraphFormat = Nothing
+        Try
+            Dim firstPara As Word.Paragraph = sel.Range.Paragraphs(1)
+            Try
+                baseStyle = firstPara.Range.Style
+            Catch
+                baseStyle = Nothing
+            End Try
+            Try
+                baseFormat = firstPara.Range.ParagraphFormat.Duplicate
+            Catch
+                baseFormat = Nothing
+            End Try
+        Catch
+        End Try
 
-        For Each p As Word.Paragraph In srcParas
-            Try
-                savedStyles.Add(p.Range.Style)
-            Catch
-                savedStyles.Add(Nothing)
-            End Try
-            Try
-                savedFormats.Add(p.Range.ParagraphFormat.Duplicate)
-            Catch
-                savedFormats.Add(Nothing)
-            End Try
-        Next
+        ' Resolve the document's default paragraph style name so we can distinguish paragraphs
+        ' the conversion left "unstyled" (document default) from those it promoted to a heading,
+        ' a list style, etc. Only default, non-list paragraphs receive the base style/format.
+        Dim defaultStyleName As String = Nothing
+        Try
+            defaultStyleName = CType(app.ActiveDocument.Styles(Word.WdBuiltinStyle.wdStyleNormal), Word.Style).NameLocal
+        Catch
+            defaultStyleName = Nothing
+        End Try
 
         ' Perform the conversion
         Dim selectedText As String = sel.Text
         Dim trailingCR As Boolean = (selectedText.EndsWith(vbCrLf) OrElse selectedText.EndsWith(vbLf) OrElse selectedText.EndsWith(vbCr))
         InsertTextWithMarkdown(sel, selectedText, trailingCR, True)
 
-        ' Re-apply captured style + paragraph format (best-effort)
+        ' Re-apply the captured base style + format ONLY to paragraphs that the conversion left
+        ' at the document default style AND without list formatting. Paragraphs that received a
+        ' heading style, a list style, or automatic list numbering keep what the conversion
+        ' produced, so titles and numbered/bulleted lists are no longer reset.
         Dim newParas As Word.Paragraphs = sel.Range.Paragraphs
-        Dim applyCount As Integer = System.Math.Min(savedFormats.Count, newParas.Count)
 
-        For i As Integer = 1 To applyCount
-            Dim p As Word.Paragraph = newParas(i)
+        For Each p As Word.Paragraph In newParas
             Try
-                If savedStyles(i - 1) IsNot Nothing Then
-                    p.Range.Style = savedStyles(i - 1)
-                End If
-            Catch
-            End Try
-            Try
-                If savedFormats(i - 1) IsNot Nothing Then
-                    p.Range.ParagraphFormat = savedFormats(i - 1)
-                End If
+                Dim hasListFormat As Boolean = False
+                Try
+                    hasListFormat = (p.Range.ListFormat.ListType <> Word.WdListType.wdListNoNumbering)
+                Catch
+                    hasListFormat = False
+                End Try
+
+                Dim isDefaultStyle As Boolean = False
+                Try
+                    Dim curStyleName As String = CType(p.Range.Style, Word.Style).NameLocal
+                    isDefaultStyle = (defaultStyleName IsNot Nothing AndAlso
+                                      String.Equals(curStyleName, defaultStyleName, StringComparison.Ordinal))
+                Catch
+                    isDefaultStyle = False
+                End Try
+
+                ' Skip conversion-produced structure (headings/lists); restore base only to plain paragraphs.
+                If hasListFormat OrElse Not isDefaultStyle Then Continue For
+
+                If baseStyle IsNot Nothing Then p.Range.Style = baseStyle
+                If baseFormat IsNot Nothing Then p.Range.ParagraphFormat = baseFormat
             Catch
             End Try
         Next
+    End Sub
+
+    Private Shared Function BuildMarkdownOpaqueToken(kind As String, index As Integer) As String
+        Return "RIMDOPAQUE" & kind & index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "TOKENEND"
+    End Function
+
+    Private Shared Sub EnsureMarkdownOpaqueTokenSurvived(html As String, token As String)
+        If String.IsNullOrEmpty(token) Then Return
+        If html Is Nothing OrElse html.IndexOf(token, StringComparison.Ordinal) < 0 Then
+            Throw New System.Exception("A protected Word placeholder was altered during Markdown/HTML conversion. The insertion was stopped to avoid corrupting fields or notes.")
+        End If
     End Sub
 
     ''' <summary>
@@ -2546,17 +2939,44 @@ Partial Public Class ThisAddIn
 
         Dim insertionStart As Integer = selection.Range.Start
 
-        Dim ResultBack As String = Result
-        Try
-            Result = System.Text.RegularExpressions.Regex.Unescape(Result)
-        Catch
-            Debug.WriteLine("Error unescaping Result with: " & Result)
-            Result = ResultBack
-        End Try
+        ' Result is already application text at this boundary. Do not apply a generic
+        ' C/regex-style unescape here: ordinary prose and filesystem paths may legitimately
+        ' contain sequences such as \r, \a, \n or \t, which must remain literal text.
+        ' LaTeX normalization is handled later by the shared explicit allow-list only.
 
-        Debug.WriteLine($"After Unescape: {Result}")
+        ' IMPORTANT PIPELINE INVARIANT: serialized Word elements and other protected literal
+        ' regions are opaque payloads. Mask them BEFORE any line-break, Markdown, LaTeX, or
+        ' HTML preprocessing so their contents cannot be rewritten by an unrelated stage.
+        Dim curlyPlaceholders As New List(Of String)()
+        Dim singleCurlyPlaceholders As New List(Of String)()
+        Dim anglePlaceholders As New List(Of String)()
 
-        Dim markdownSource As String = Result
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "\{\{.*?\}\}",
+            Function(m)
+                curlyPlaceholders.Add(m.Value)
+                Return BuildMarkdownOpaqueToken("C", curlyPlaceholders.Count - 1)
+            End Function,
+            RegexOptions.Singleline)
+
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "\{[^{}]+\}",
+            Function(m)
+                singleCurlyPlaceholders.Add(m.Value)
+                Return BuildMarkdownOpaqueToken("S", singleCurlyPlaceholders.Count - 1)
+            End Function,
+            RegexOptions.Singleline)
+
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "<(?![/]?(?:p|br|div|span|strong|b|i|em|u|a|ul|ol|li|h[1-6]|table|tr|td|th|thead|tbody|img|hr|pre|code|blockquote)[ >/])[^>]+>",
+            Function(m)
+                anglePlaceholders.Add(m.Value)
+                Return BuildMarkdownOpaqueToken("A", anglePlaceholders.Count - 1)
+            End Function,
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
 
         Result = Result.Replace(vbLf & " " & vbLf, vbLf & vbLf)
 
@@ -2577,79 +2997,17 @@ Partial Public Class ThisAddIn
                                                     End If
                                                 End Function)
 
-        ' ============= PROTECT SPECIAL PATTERNS BEFORE MARKDOWN CONVERSION =============
-        ' Protect {{...}} placeholders (merge fields, special elements) - MUST come first
-        Dim curlyPlaceholders As New List(Of String)()
-        Result = System.Text.RegularExpressions.Regex.Replace(
-            Result,
-            "\{\{.*?\}\}",
-            Function(m)
-                curlyPlaceholders.Add(m.Value)
-                Return $"[[CURLY_{curlyPlaceholders.Count - 1}]]"
-            End Function,
-            RegexOptions.Singleline)
-
-        ' Protect single curly braces {word} that Markdig interprets as generic attributes
-        Dim singleCurlyPlaceholders As New List(Of String)()
-        Result = System.Text.RegularExpressions.Regex.Replace(
-            Result,
-            "\{[^{}]+\}",
-            Function(m)
-                singleCurlyPlaceholders.Add(m.Value)
-                Return $"[[SCURLY_{singleCurlyPlaceholders.Count - 1}]]"
-            End Function,
-            RegexOptions.Singleline)
-
-        ' Protect <...> angle bracket content that is NOT valid HTML
-        Dim anglePlaceholders As New List(Of String)()
-        Result = System.Text.RegularExpressions.Regex.Replace(
-            Result,
-            "<(?![/]?(?:p|br|div|span|strong|b|i|em|u|a|ul|ol|li|h[1-6]|table|tr|td|th|thead|tbody|img|hr|pre|code|blockquote)[ >/])[^>]+>",
-            Function(m)
-                anglePlaceholders.Add(m.Value)
-                Return $"[[ANGLE_{anglePlaceholders.Count - 1}]]"
-            End Function,
-            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
-        ' ================================================================================
-
-        Dim builder As New MarkdownPipelineBuilder()
-
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
+        ' Use the shared HTML pipeline so Word insertion follows the same Markdown/LaTeX
+        ' contract as the other Red Ink HTML surfaces. In particular, Mathematics stays
+        ' disabled and only NormalizeMarkdownForHtmlDisplay's explicit allow-list handles
+        ' supported LaTeX notation.
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(
+                useSoftlineBreakAsHardlineBreak:=True)
 
         Debug.WriteLine("Result=" & Result)
 
-        Dim htmlResult As String = Markdown.ToHtml(Result, markdownPipeline).Trim
-
-        ' ============= RESTORE PROTECTED PATTERNS AFTER MARKDOWN CONVERSION =============
-        ' Restore {{...}} placeholders - DO NOT encode, these need to be processed by RestoreSpecialTextElements
-        For idx As Integer = 0 To curlyPlaceholders.Count - 1
-            htmlResult = htmlResult.Replace($"[[CURLY_{idx}]]", curlyPlaceholders(idx))
-        Next
-
-        ' Restore single curly braces {word} - keep as literal text
-        For idx As Integer = 0 To singleCurlyPlaceholders.Count - 1
-            htmlResult = htmlResult.Replace($"[[SCURLY_{idx}]]", System.Net.WebUtility.HtmlEncode(singleCurlyPlaceholders(idx)))
-        Next
-
-        ' Restore <...> placeholders (HTML-encode them so they display as text)
-        For idx As Integer = 0 To anglePlaceholders.Count - 1
-            htmlResult = htmlResult.Replace($"[[ANGLE_{idx}]]", System.Net.WebUtility.HtmlEncode(anglePlaceholders(idx)))
-        Next
-        ' ================================================================================
+        Dim htmlResult As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(Result), markdownPipeline).Trim
 
         ' Remove all real newlines so they are not converted as text
         htmlResult = htmlResult _
@@ -2663,6 +3021,31 @@ Partial Public Class ThisAddIn
         htmlDoc.LoadHtml(htmlResult)
 
         fullhtml = htmlDoc.DocumentNode.OuterHtml
+
+        ' ============= RESTORE OPAQUE REGIONS AT THE LAST HTML BOUNDARY =============
+        ' Keep protected payloads masked through line normalization, LaTeX normalization,
+        ' Markdig, newline cleanup, and HtmlAgilityPack parsing. Restore only after the HTML
+        ' structure is final, and encode the payload for HTML transport so Word receives the
+        ' exact literal placeholder text for RestoreSpecialTextElements.
+        For idx As Integer = 0 To curlyPlaceholders.Count - 1
+            Dim token As String = BuildMarkdownOpaqueToken("C", idx)
+            EnsureMarkdownOpaqueTokenSurvived(fullhtml, token)
+            fullhtml = fullhtml.Replace(token, System.Net.WebUtility.HtmlEncode(curlyPlaceholders(idx)))
+        Next
+
+        For idx As Integer = 0 To singleCurlyPlaceholders.Count - 1
+            Dim token As String = BuildMarkdownOpaqueToken("S", idx)
+            EnsureMarkdownOpaqueTokenSurvived(fullhtml, token)
+            fullhtml = fullhtml.Replace(token, System.Net.WebUtility.HtmlEncode(singleCurlyPlaceholders(idx)))
+        Next
+
+        For idx As Integer = 0 To anglePlaceholders.Count - 1
+            Dim token As String = BuildMarkdownOpaqueToken("A", idx)
+            EnsureMarkdownOpaqueTokenSurvived(fullhtml, token)
+            fullhtml = fullhtml.Replace(token, System.Net.WebUtility.HtmlEncode(anglePlaceholders(idx)))
+        Next
+        ' ================================================================================
+
         Debug.WriteLine("HTML1=" & fullhtml)
 
         SLib.InsertTextWithFormat(fullhtml, range, True, Not TrailingCR)
@@ -2740,11 +3123,11 @@ Partial Public Class ThisAddIn
         Dim revInfos As New List(Of RevInfo)(revCount)
 
         ' Collect all revision data in a single pass to minimize COM calls
-        For i As Integer = 1 To revCount
+        Dim i As Integer = 0
+        For Each rev As Revision In rng.Revisions
+            i += 1
             splash.UpdateMessage($"Collecting markups... {revCount - i} left")
             Try
-
-                Dim rev As Revision = rng.Revisions(i)
 
                 Try
                     Dim revRange As Range = rev.Range
@@ -3445,7 +3828,8 @@ Partial Public Class ThisAddIn
             Dim selectedPath As String = Nothing
 
             Using f As New DragDropForm(DragDropMode.FileOnly)
-                If f.ShowDialog() <> DialogResult.OK Then
+                Dim __safeDialogOwner3828 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner3828 IsNot Nothing, f.ShowDialog(__safeDialogOwner3828), f.ShowDialog()) <> DialogResult.OK Then
                     ' User cancelled the file picker - ask if they want to create a new empty diagram
                     Dim createNew As String = ShowCustomInputBox(
     "You did not select a file. Do you want to create a new empty diagram instead?" & vbCrLf & vbCrLf &

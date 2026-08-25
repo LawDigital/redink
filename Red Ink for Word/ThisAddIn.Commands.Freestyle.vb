@@ -116,6 +116,266 @@ Partial Public Class ThisAddIn
         }
     End Class
 
+    Private Async Function GenerateSemanticSearchIndexAsync() As System.Threading.Tasks.Task
+        Dim sourceTxtPath As String = ""
+        Dim indexedTxtPath As String = ""
+        Dim selectedProfile As SharedMethods.SemanticSearchMetadataProfile =
+            SharedMethods.SemanticSearchMetadataProfile.Generic
+        Dim targetBytes As Integer = SharedMethods.SemanticSearchDefaultTargetBytes
+        Dim minimumBytes As Integer = SharedMethods.SemanticSearchDefaultMinimumBytes
+        Dim maximumBytes As Integer = SharedMethods.SemanticSearchDefaultMaximumBytes
+        Dim overwriteOutput As Boolean = False
+
+        DragDropFormLabel = "Select the text file to process for semantic indexing."
+        DragDropFormFilter =
+            "Text files|*.txt;*.md;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.yaml;*.yml|" &
+            "All files (*.*)|*.*"
+
+        Try
+            Using form As New DragDropForm(DragDropMode.FileOnly)
+                Dim __safeDialogOwner136 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner136 IsNot Nothing, form.ShowDialog(__safeDialogOwner136), form.ShowDialog()) <> DialogResult.OK Then
+                    Return
+                End If
+
+                sourceTxtPath = form.SelectedFilePath
+            End Using
+        Finally
+            DragDropFormLabel = ""
+            DragDropFormFilter = ""
+        End Try
+
+        If String.IsNullOrWhiteSpace(sourceTxtPath) Then
+            ShowCustomMessageBox("No source file was selected.")
+            Return
+        End If
+
+        Dim sourceDirectory As String = System.IO.Path.GetDirectoryName(sourceTxtPath)
+        Dim sourceFileNameWithoutExtension As String = System.IO.Path.GetFileNameWithoutExtension(sourceTxtPath)
+        Dim detectedSourceEncoding As System.Text.Encoding = DetectSemanticSearchSourceEncoding(sourceTxtPath)
+
+        indexedTxtPath = System.IO.Path.Combine(sourceDirectory, sourceFileNameWithoutExtension & ".indexed.txt")
+
+        Dim availableProfiles As System.Collections.Generic.List(Of SharedMethods.SemanticSearchMetadataProfile) =
+            SharedMethods.GetSemanticSearchMetadataProfiles()
+        Dim profileDisplayMap As New System.Collections.Generic.Dictionary(Of String, SharedMethods.SemanticSearchMetadataProfile)(
+            StringComparer.Ordinal)
+        Dim profileDisplayOptions As New System.Collections.Generic.List(Of String)()
+
+        For Each profile As SharedMethods.SemanticSearchMetadataProfile In availableProfiles
+            Dim displayName As String = SharedMethods.GetSemanticSearchMetadataProfileDisplayName(profile)
+            If Not profileDisplayMap.ContainsKey(displayName) Then
+                profileDisplayMap.Add(displayName, profile)
+                profileDisplayOptions.Add(displayName)
+            End If
+        Next
+
+        Dim selectedProfileDisplay As String =
+            SharedMethods.GetSemanticSearchMetadataProfileDisplayName(selectedProfile)
+
+        Dim generationParameters() As SLib.InputParameter = {
+            New SLib.InputParameter("Profile", selectedProfileDisplay, profileDisplayOptions),
+            New SLib.InputParameter("Target bytes", targetBytes),
+            New SLib.InputParameter("Minimum bytes", minimumBytes),
+            New SLib.InputParameter("Maximum bytes", maximumBytes)
+        }
+
+        Dim generationPrompt As String =
+            "Please configure the semantic-search index generation settings." & vbCrLf & vbCrLf &
+            "All size values are UTF-8 byte counts, not character counts." & vbCrLf & vbCrLf &
+            "Profile: chooses what kind of metadata the indexer should emphasize for each segment." & vbCrLf &
+            "Target bytes: the preferred segment size. The generator tries to end each segment near this size." & vbCrLf &
+            "Minimum bytes: the lower bound before the generator starts looking for a natural break point." & vbCrLf &
+            "Maximum bytes: the hard segment-size ceiling. A segment will not intentionally exceed this size."
+
+        If Not ShowCustomVariableInputForm(
+            generationPrompt,
+            $"{AN} Semantic-search index",
+            generationParameters) Then
+            Return
+        End If
+
+        selectedProfileDisplay = CStr(generationParameters(0).Value)
+        targetBytes = CInt(generationParameters(1).Value)
+        minimumBytes = CInt(generationParameters(2).Value)
+        maximumBytes = CInt(generationParameters(3).Value)
+
+        If Not profileDisplayMap.TryGetValue(selectedProfileDisplay, selectedProfile) Then
+            ShowCustomMessageBox("The selected semantic-search profile could not be resolved.")
+            Return
+        End If
+
+        If targetBytes <= 0 OrElse minimumBytes <= 0 OrElse maximumBytes <= 0 Then
+            ShowCustomMessageBox("Target bytes, minimum bytes, and maximum bytes must all be greater than zero.")
+            Return
+        End If
+
+        If minimumBytes > targetBytes Then
+            ShowCustomMessageBox("Minimum bytes must be less than or equal to target bytes.")
+            Return
+        End If
+
+        If targetBytes > maximumBytes Then
+            ShowCustomMessageBox("Target bytes must be less than or equal to maximum bytes.")
+            Return
+        End If
+
+        If System.IO.File.Exists(indexedTxtPath) Then
+            Dim overwriteAnswer As Integer = ShowCustomYesNoBox(
+                "The target output file already exists:" & vbCrLf & vbCrLf &
+                indexedTxtPath & vbCrLf & vbCrLf &
+                "Do you want to overwrite it?",
+                "Yes, overwrite",
+                "No, cancel")
+
+            If overwriteAnswer <> 1 Then
+                Return
+            End If
+
+            overwriteOutput = True
+        End If
+
+        Using progressScope As New ProgressScope(
+            "Generating semantic-search index",
+            "Preparing source file ...",
+            1)
+
+            Try
+                ProgressScope.Report(
+                    0,
+                    1,
+                    "Preparing '" & System.IO.Path.GetFileName(sourceTxtPath) & "' ...")
+
+                Dim generationProgress As New System.Progress(Of SharedMethods.SemanticSearchIndexGenerationProgress)(
+                    Sub(update As SharedMethods.SemanticSearchIndexGenerationProgress)
+                        Dim segmentCount As Integer = System.Math.Max(1, update.SegmentCount)
+                        Dim segmentNumber As Integer = System.Math.Max(0, System.Math.Min(update.SegmentNumber, segmentCount))
+                        Dim statusMessage As String = If(update.Message, "").Trim()
+
+                        If String.IsNullOrWhiteSpace(statusMessage) Then
+                            statusMessage = "Generating semantic metadata"
+                        End If
+
+                        ProgressScope.Report(
+                            segmentNumber,
+                            segmentCount,
+                            statusMessage & " (" &
+                            segmentNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & "/" &
+                            segmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            If(String.IsNullOrWhiteSpace(update.SegmentId), "", ", " & update.SegmentId) & ")")
+                    End Sub)
+
+                Dim generationResult As SharedMethods.SemanticSearchIndexGenerationResult =
+                    Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
+                        sourceTxtPath,
+                        indexedTxtPath,
+                        _context,
+                        New SharedMethods.SemanticSearchIndexGeneratorOptions() With {
+                            .TargetBytes = targetBytes,
+                            .MinimumBytes = minimumBytes,
+                            .MaximumBytes = maximumBytes,
+                            .SourceEncoding = detectedSourceEncoding,
+                            .GeneratorVersion = "1.0.0",
+                            .SpecialTaskName = "Indexer",
+                            .MetadataProfile = selectedProfile,
+                            .MaximumMetadataAttempts = 2,
+                            .OverwriteOutput = overwriteOutput
+                        },
+                        generationProgress,
+                        progressScope.Token).ConfigureAwait(False)
+
+                ProgressScope.Report(
+                    System.Math.Max(1, generationResult.SegmentCount),
+                    System.Math.Max(1, generationResult.SegmentCount),
+                    "Completed successfully.")
+
+                ShowCustomMessageBox(
+                    "Semantic-search index created successfully." & vbCrLf & vbCrLf &
+                    "Output file:" & vbCrLf &
+                    generationResult.OutputPath & vbCrLf & vbCrLf &
+                    "Detected source encoding: " & detectedSourceEncoding.EncodingName & "." & vbCrLf &
+                    "Profile: " & SharedMethods.GetSemanticSearchMetadataProfileDisplayName(selectedProfile) & "." & vbCrLf &
+                    "Segment sizing (target/min/max bytes): " &
+                    targetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
+                    minimumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
+                    maximumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." & vbCrLf &
+                    "Segments generated: " &
+                    generationResult.SegmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+            Catch ex As System.OperationCanceledException
+                ProgressScope.Report(0, 1, "Cancelled.")
+                ShowCustomMessageBox("Semantic-search index generation was cancelled.")
+            Catch ex As System.Exception
+                ProgressScope.Report(0, 1, "Failed: " & ex.Message)
+                ShowCustomMessageBox(
+                    "The semantic-search index could not be created." & vbCrLf & vbCrLf &
+                    "Target output file:" & vbCrLf &
+                    indexedTxtPath & vbCrLf & vbCrLf &
+                    "Error:" & vbCrLf &
+                    ex.Message)
+            End Try
+        End Using
+    End Function
+
+    Private Shared Function DetectSemanticSearchSourceEncoding(path As String) As System.Text.Encoding
+        Dim fileBytes As Byte() = System.IO.File.ReadAllBytes(path)
+
+        If fileBytes.Length >= 4 Then
+            If fileBytes(0) = &HFF AndAlso
+               fileBytes(1) = &HFE AndAlso
+               fileBytes(2) = &H0 AndAlso
+               fileBytes(3) = &H0 Then
+                Return New System.Text.UTF32Encoding(False, True)
+            End If
+
+            If fileBytes(0) = &H0 AndAlso
+               fileBytes(1) = &H0 AndAlso
+               fileBytes(2) = &HFE AndAlso
+               fileBytes(3) = &HFF Then
+                Return New System.Text.UTF32Encoding(True, True)
+            End If
+        End If
+
+        If fileBytes.Length >= 3 Then
+            If fileBytes(0) = &HEF AndAlso
+               fileBytes(1) = &HBB AndAlso
+               fileBytes(2) = &HBF Then
+                Return New System.Text.UTF8Encoding(True, True)
+            End If
+        End If
+
+        If fileBytes.Length >= 2 Then
+            If fileBytes(0) = &HFF AndAlso
+               fileBytes(1) = &HFE Then
+                Return System.Text.Encoding.Unicode
+            End If
+
+            If fileBytes(0) = &HFE AndAlso
+               fileBytes(1) = &HFF Then
+                Return System.Text.Encoding.BigEndianUnicode
+            End If
+        End If
+
+        If fileBytes.Length = 0 Then
+            Return New System.Text.UTF8Encoding(False, True)
+        End If
+
+        If IsValidSemanticSearchUtf8(fileBytes) Then
+            Return New System.Text.UTF8Encoding(False, True)
+        End If
+
+        Return System.Text.Encoding.Default
+    End Function
+
+    Private Shared Function IsValidSemanticSearchUtf8(data As Byte()) As Boolean
+        Try
+            Dim utf8 As New System.Text.UTF8Encoding(False, True)
+            utf8.GetCharCount(data, 0, data.Length)
+            Return True
+        Catch ex As System.Text.DecoderFallbackException
+            Return False
+        End Try
+    End Function
+
     ''' <summary>
     ''' Checks if a trigger placeholder at a given index is wrapped in XML tags.
     ''' </summary>
@@ -647,7 +907,8 @@ Partial Public Class ThisAddIn
                     Dim selectedFile As String = ""
 
                     Using frm As New DragDropForm(DragDropMode.FileOnly)
-                        If frm.ShowDialog() = DialogResult.OK Then
+                        Dim __safeDialogOwner909 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner909 IsNot Nothing, frm.ShowDialog(__safeDialogOwner909), frm.ShowDialog()) = DialogResult.OK Then
                             selectedFile = frm.SelectedFilePath
                         End If
                     End Using
@@ -715,7 +976,8 @@ Partial Public Class ThisAddIn
                     Dim selectedDir As String = ""
 
                     Using frm As New DragDropForm(DragDropMode.DirectoryOnly)
-                        If frm.ShowDialog() = DialogResult.OK Then
+                        Dim __safeDialogOwner977 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner977 IsNot Nothing, frm.ShowDialog(__safeDialogOwner977), frm.ShowDialog()) = DialogResult.OK Then
                             selectedDir = frm.SelectedFilePath
                         End If
                     End Using
@@ -1292,6 +1554,9 @@ Partial Public Class ThisAddIn
                         }
 
             ' Prompt user for input if not provided via LastPrompt parameter
+
+            GoTo SkipPromptInput
+
             If LastPrompt.Trim() = "" Then
                 If Not NoText Then
                     ' Offer optional buttons for common prefix shortcuts when text is selected
@@ -1315,6 +1580,657 @@ Partial Public Class ThisAddIn
             Else
                 OtherPrompt = LastPrompt
             End If
+
+SkipPromptInput:
+
+            If LastPrompt.Trim() = "" Then
+
+                Dim freestylePromptUiState As String = ""
+
+                Try
+                    freestylePromptUiState = CStr(My.Settings.Item("FreestylePromptUiState"))
+                Catch
+                    freestylePromptUiState = ""
+                End Try
+
+                Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                    .Title = $"{AN} Freestyle",
+                    .Heading = "What would you like Red Ink to do?",
+                    .ModeCaption = "Output",
+                    .ModelText = If(UseSecondAPI, INI_Model_2, INI_Model),
+                    .ContextStatusText = If(NoText, "No text selected", "The current selection will be used as context"),
+                    .LastPrompt = My.Settings.LastPrompt,
+                    .PromptLibraryEnabled = INI_PromptLib,
+                    .ShowShortCommandsHint = True,
+                    .Context = _context,
+                    .CallerId = "word.freestyle",
+                    .PersistedState = freestylePromptUiState,
+                    .RestorePersistedState = False
+                }
+
+                ' =============================================================
+                ' OUTPUT MODES
+                ' =============================================================
+
+                Dim modeDefault As New SLib.FreestylePromptMode() With {
+                    .Id = "default",
+                    .Text = "Configured default",
+                    .Prefix = System.String.Empty,
+                    .ManualSyntax = DefaultPrefix,
+                    .IsDefault = True
+                }
+
+                promptOptions.Modes.Add(modeDefault)
+
+
+                Dim modeWindow As New SLib.FreestylePromptMode() With {
+                    .Id = "window",
+                    .Text = "Separate window / clipboard",
+                    .Prefix = ClipboardPrefix,
+                    .ManualSyntax = ClipboardPrefix & " / " & ClipboardPrefix2
+                }
+
+                modeWindow.Prefixes.Add(ClipboardPrefix)
+                modeWindow.Prefixes.Add(ClipboardPrefix2)
+                promptOptions.Modes.Add(modeWindow)
+
+
+                Dim modeNewDoc As New SLib.FreestylePromptMode() With {
+                    .Id = "newdoc",
+                    .Text = "New Word document",
+                    .Prefix = NewdocPrefix,
+                    .ManualSyntax = NewdocPrefix
+                }
+
+                modeNewDoc.Prefixes.Add(NewdocPrefix)
+                promptOptions.Modes.Add(modeNewDoc)
+
+
+                Dim modeComments As New SLib.FreestylePromptMode() With {
+                    .Id = "comments",
+                    .Text = "Insert comments",
+                    .Prefix = BubblesPrefix,
+                    .ManualSyntax = BubblesPrefix
+                }
+
+                modeComments.Prefixes.Add(BubblesPrefix)
+                promptOptions.Modes.Add(modeComments)
+
+
+                Dim modeSlides As New SLib.FreestylePromptMode() With {
+                    .Id = "slides",
+                    .Text = "Add to PowerPoint",
+                    .Prefix = SlidesPrefix,
+                    .ManualSyntax = SlidesPrefix
+                }
+
+                modeSlides.Prefixes.Add(SlidesPrefix)
+                promptOptions.Modes.Add(modeSlides)
+
+
+                Dim modeChart As New SLib.FreestylePromptMode() With {
+                    .Id = "chart",
+                    .Text = "Create chart",
+                    .Prefix = ChartPrefix,
+                    .ManualSyntax = ChartPrefix
+                }
+
+                modeChart.Prefixes.Add(ChartPrefix)
+                promptOptions.Modes.Add(modeChart)
+
+
+                Dim modeChartApp As New SLib.FreestylePromptMode() With {
+                    .Id = "chart-app",
+                    .Text = "Create chart for web app",
+                    .Prefix = ChartPrefixApp,
+                    .ManualSyntax = ChartPrefixApp
+                }
+
+                modeChartApp.Prefixes.Add(ChartPrefixApp)
+                promptOptions.Modes.Add(modeChartApp)
+
+
+                Dim modeReplace As New SLib.FreestylePromptMode() With {
+                    .Id = "replace",
+                    .Text = "Replace selection",
+                    .Prefix = InPlacePrefix,
+                    .ManualSyntax = InPlacePrefix,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "The '" & InPlacePrefix & "' prefix requires selected text."
+                }
+
+                modeReplace.Prefixes.Add(InPlacePrefix)
+                promptOptions.Modes.Add(modeReplace)
+
+
+                Dim modeAdd As New SLib.FreestylePromptMode() With {
+                    .Id = "add",
+                    .Text = "Add after selection",
+                    .Prefix = AddPrefix,
+                    .ManualSyntax = AddPrefix & " / " & AddPrefix2,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "The '" & AddPrefix & "' prefix requires selected text."
+                }
+
+                modeAdd.Prefixes.Add(AddPrefix)
+                modeAdd.Prefixes.Add(AddPrefix2)
+                promptOptions.Modes.Add(modeAdd)
+
+
+                Dim modeMarkup As New SLib.FreestylePromptMode() With {
+                    .Id = "markup",
+                    .Text = "Track changes – configured method",
+                    .Prefix = MarkupPrefix,
+                    .ManualSyntax = MarkupPrefix,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkup.Prefixes.Add(MarkupPrefix)
+                promptOptions.Modes.Add(modeMarkup)
+
+
+                Dim modeMarkupRegex As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-regex",
+                    .Text = "Track changes – regex",
+                    .Prefix = MarkupPrefixRegex,
+                    .ManualSyntax = MarkupPrefixRegex,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupRegex.Prefixes.Add(MarkupPrefixRegex)
+                promptOptions.Modes.Add(modeMarkupRegex)
+
+
+                Dim modeMarkupWord As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-word",
+                    .Text = "Track changes – Word compare",
+                    .Prefix = MarkupPrefixWord,
+                    .ManualSyntax = MarkupPrefixWord,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupWord.Prefixes.Add(MarkupPrefixWord)
+                promptOptions.Modes.Add(modeMarkupWord)
+
+
+                Dim modeMarkupDiffWindow As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-diff-window",
+                    .Text = "Track changes – diff window",
+                    .Prefix = MarkupPrefixDiffW,
+                    .ManualSyntax = MarkupPrefixDiffW,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupDiffWindow.Prefixes.Add(MarkupPrefixDiffW)
+                promptOptions.Modes.Add(modeMarkupDiffWindow)
+
+
+                Dim modeMarkupDiff As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-diff",
+                    .Text = "Track changes – inline diff",
+                    .Prefix = MarkupPrefixDiff,
+                    .ManualSyntax = MarkupPrefixDiff,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupDiff.Prefixes.Add(MarkupPrefixDiff)
+                promptOptions.Modes.Add(modeMarkupDiff)
+
+
+                Dim modePane As New SLib.FreestylePromptMode() With {
+                    .Id = "pane",
+                    .Text = "Side pane",
+                    .Prefix = PanePrefix,
+                    .ManualSyntax = PanePrefix
+                }
+
+                modePane.Prefixes.Add(PanePrefix)
+                promptOptions.Modes.Add(modePane)
+
+
+                Dim modePushback As New SLib.FreestylePromptMode() With {
+                    .Id = "pushback",
+                    .Text = "Reply to comments",
+                    .Prefix = PushbackPrefix,
+                    .ManualSyntax = PushbackPrefix & " / " & PushbackPrefix2,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Replying to comments requires selected text."
+                }
+
+                modePushback.Prefixes.Add(PushbackPrefix)
+                modePushback.Prefixes.Add(PushbackPrefix2)
+                promptOptions.Modes.Add(modePushback)
+
+
+                Dim modeFiles As New SLib.FreestylePromptMode() With {
+                    .Id = "files",
+                    .Text = "Modify file(s)",
+                    .Prefix = FilePrefix,
+                    .ManualSyntax = FilePrefix & " / " & FilePrefix2
+                }
+
+                modeFiles.Prefixes.Add(FilePrefix)
+                modeFiles.Prefixes.Add(FilePrefix2)
+                promptOptions.Modes.Add(modeFiles)
+
+
+                Dim modeAssemble As New SLib.FreestylePromptMode() With {
+                    .Id = "assemble",
+                    .Text = "Assemble document from templates",
+                    .Prefix = AssemblePrefix,
+                    .ManualSyntax = AssemblePrefix
+                }
+
+                modeAssemble.Prefixes.Add(AssemblePrefix)
+                promptOptions.Modes.Add(modeAssemble)
+
+
+                Dim modeForm As New SLib.FreestylePromptMode() With {
+                    .Id = "form",
+                    .Text = "Complete Word form / table",
+                    .Prefix = FormPrefix,
+                    .ManualSyntax = FormPrefix,
+                    .IsAvailable = NoText,
+                    .UnavailableReason = "The '" & FormPrefix & "' prefix is available only when no text is selected."
+                }
+
+                modeForm.Prefixes.Add(FormPrefix)
+                promptOptions.Modes.Add(modeForm)
+
+
+                Dim modePure As New SLib.FreestylePromptMode() With {
+                    .Id = "pure",
+                    .Text = "Direct prompt",
+                    .Prefix = PurePrefix,
+                    .ManualSyntax = PurePrefix
+                }
+
+                modePure.Prefixes.Add(PurePrefix)
+                promptOptions.Modes.Add(modePure)
+
+                If Not NoText Then
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-window",
+                            .Text = "Run (window)",
+                            .Description = "Run immediately with the separate window / clipboard prefix.",
+                            .Prefix = ClipboardPrefix
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-pane",
+                            .Text = "Run (pane)",
+                            .Description = "Run immediately with the side-pane prefix.",
+                            .Prefix = PanePrefix
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-markup",
+                            .Text = "Run (markup)",
+                            .Description = "Run immediately with the inline-diff markup prefix.",
+                            .Prefix = MarkupPrefixDiff
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-bubbles",
+                            .Text = "Run (bubbles)",
+                            .Description = "Run immediately with the comments / bubbles prefix.",
+                            .Prefix = BubblesPrefix
+                        })
+
+                Else
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-window",
+                            .Text = "Run (window)",
+                            .Description = "Run immediately with the separate window / clipboard prefix.",
+                            .Prefix = ClipboardPrefix
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-pane",
+                            .Text = "Run (pane)",
+                            .Description = "Run immediately with the side-pane prefix.",
+                            .Prefix = PanePrefix
+                        })
+
+                End If
+
+                ' =============================================================
+                ' CONTEXT
+                ' =============================================================
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "file",
+                        .Text = "Doc",
+                        .Description = "Select and include a document (" & ExtTrigger & ").",
+                        .InsertText = ExtTrigger
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "file-path",
+                        .Text = "Doc path",
+                        .Description = "Enter a specific document path and insert it directly into the prompt.",
+                        .RequiresValue = True,
+                        .ValuePrompt = "Enter the full path of the document to include:",
+                        .ValueTitle = $"{AN} Freestyle - Doc path",
+                        .ValueTemplate = ExtTriggerFixed,
+                        .ValuePlaceholder = "[path]"
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "folder",
+                        .Text = "Folder",
+                        .Description = "Include files from a directory (" & ExtDirTrigger & ").",
+                        .InsertText = ExtDirTrigger
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "url",
+                        .Text = "URL",
+                        .Description = "Include content from a URL (" & ExtUrlTrigger & ").",
+                        .InsertText = ExtUrlTrigger
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "other-word-documents",
+                        .Text = "Other open Word docs",
+                        .Description = "Include one or more other open Word documents (" & AddDocTrigger & ").",
+                        .InsertText = AddDocTrigger
+                    })
+
+                If DoFileObject Then
+
+                    promptOptions.InsertOptions.Add(
+                        New SLib.FreestylePromptInsertOption() With {
+                            .Id = "file-object",
+                            .Text = "File object",
+                            .Description = "Attach a file as an LLM object (" & ObjectTrigger & ").",
+                            .InsertText = ObjectTrigger,
+                            .MaxOccurrences = 1
+                        })
+
+                    promptOptions.InsertOptions.Add(
+                        New SLib.FreestylePromptInsertOption() With {
+                            .Id = "clipboard-object",
+                            .Text = "Clipboard object",
+                            .Description = "Use clipboard content as an LLM object (" & ObjectTrigger2 & ").",
+                            .InsertText = ObjectTrigger2
+                        })
+
+                End If
+
+                ' =============================================================
+                ' SOURCES
+                ' =============================================================
+
+                Dim sourcesSection As New SLib.FreestylePromptSection() With {
+                    .Id = "sources",
+                    .Caption = "Sources"
+                }
+
+                If INI_Lib Then
+
+                    sourcesSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "library",
+                            .Text = "Library search",
+                            .Trigger = LibTrigger,
+                            .ManualSyntax = LibTrigger,
+                            .Description = "Search the configured Red Ink library."
+                        })
+
+                End If
+
+                If INI_ISearch Then
+
+                    sourcesSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "internet",
+                            .Text = "Internet search",
+                            .Trigger = NetTrigger,
+                            .ManualSyntax = NetTrigger,
+                            .Description = "Use internet search."
+                        })
+
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(INI_KnowledgeStorePath) OrElse Not System.String.IsNullOrWhiteSpace(INI_KnowledgeStorePathLocal) Then
+
+                    sourcesSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "knowledge",
+                            .Text = "Knowledge Store",
+                            .Trigger = KnowledgeTriggerHelper.KbTrigger,
+                            .ManualSyntax = KnowledgeTriggerHelper.KbTrigger & " / " & KnowledgeTriggerHelper.KbTriggerPrefix & "…)",
+                            .Description = "Leave blank for all stores, or enter a query, store:StoreName query, or tag:TagName query.",
+                            .ArgumentPrefix = KnowledgeTriggerHelper.KbTriggerPrefix,
+                            .ArgumentSuffix = ")",
+                            .ArgumentHint = "Optional: query, store:StoreName query, or tag:TagName query",
+                            .ArgumentRequired = False
+                        })
+
+                End If
+
+                If sourcesSection.Options.Count > 0 Then
+                    promptOptions.Sections.Add(sourcesSection)
+                End If
+
+                ' =============================================================
+                ' PROCESSING
+                ' =============================================================
+
+                Dim processingSection As New SLib.FreestylePromptSection() With {
+                    .Id = "processing",
+                    .Caption = "Processing"
+                }
+
+                processingSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "all",
+                        .Text = "Use entire document",
+                        .Trigger = AllTrigger,
+                        .ManualSyntax = AllTrigger,
+                        .Description = "Use the complete active document."
+                    })
+
+                If Not NoText Then
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "chunks",
+                            .Text = "Process in chunks",
+                            .Trigger = ChunkTrigger,
+                            .ManualSyntax = ChunkTrigger,
+                            .Description = "Iterate through the selected text in paragraph chunks."
+                        })
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "existing-comments",
+                            .Text = "Include existing comments",
+                            .Trigger = BubblesExtractTrigger,
+                            .ManualSyntax = BubblesExtractTrigger,
+                            .Description = "Include existing Word comments in the LLM context."
+                        })
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "tracked-revisions",
+                            .Text = "Include tracked revisions",
+                            .Trigger = TPMarkupTrigger,
+                            .ManualSyntax = TPMarkupTrigger & " / " & TPMarkupTriggerL & "author" & TPMarkupTriggerR,
+                            .Description = "Optionally restrict revisions to a specific author.",
+                            .ArgumentPrefix = TPMarkupTriggerL,
+                            .ArgumentSuffix = TPMarkupTriggerR,
+                            .ArgumentHint = "Optional revision author",
+                            .ArgumentRequired = False
+                        })
+
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(INI_MyStylePath) Then
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "mystyle",
+                            .Text = "Apply MyStyle",
+                            .Trigger = MyStyleTrigger,
+                            .ManualSyntax = MyStyleTrigger
+                        })
+
+                End If
+
+                promptOptions.Sections.Add(processingSection)
+
+                ' =============================================================
+                ' FORMATTING
+                ' =============================================================
+
+                If Not NoText Then
+
+                    Dim formattingSection As New SLib.FreestylePromptSection() With {
+                        .Id = "formatting",
+                        .Caption = "Formatting"
+                    }
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "no-format",
+                            .Text = "Do not preserve formatting",
+                            .Trigger = NoFormatTrigger2,
+                            .ManualSyntax = NoFormatTrigger & " / " & NoFormatTrigger2
+                        })
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "keep-format",
+                            .Text = "Keep character formatting",
+                            .Trigger = KFTrigger2,
+                            .ManualSyntax = KFTrigger & " / " & KFTrigger2
+                        })
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "keep-paragraph-format",
+                            .Text = "Keep paragraph formatting",
+                            .Trigger = KPFTrigger2,
+                            .ManualSyntax = KPFTrigger & " / " & KPFTrigger2
+                        })
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "same-as-replace",
+                            .Text = "Add: format like Replace",
+                            .Trigger = SameAsReplaceTrigger,
+                            .ManualSyntax = SameAsReplaceTrigger
+                        })
+
+                    promptOptions.Sections.Add(formattingSection)
+
+                End If
+
+                ' =============================================================
+                ' MODELS / TOOLS
+                ' =============================================================
+
+                Dim modelSection As New SLib.FreestylePromptSection() With {
+                    .Id = "models",
+                    .Caption = "Models / tools"
+                }
+
+                If UseSecondAPI AndAlso Not System.String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+
+                    modelSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "multimodel",
+                            .Text = "Use multiple models",
+                            .Trigger = MultiModelTrigger,
+                            .ManualSyntax = MultiModelTrigger
+                        })
+
+                End If
+
+                modelSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "show-model",
+                        .Text = "Include model name in output",
+                        .Trigger = ShowModel,
+                        .ManualSyntax = ShowModel
+                    })
+
+                If ToolTriggerAvailable Then
+
+                    modelSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "agentic-model",
+                            .Text = "Use agentic model",
+                            .Trigger = ToolTrigger,
+                            .ManualSyntax = ToolTrigger
+                        })
+
+                End If
+
+                Dim toolSelectionAvailable As System.Boolean = (UseSecondAPI OrElse ToolTriggerAvailable) AndAlso ((Not System.String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso modelSupportsTool) OrElse ToolTriggerAvailable)
+
+                If toolSelectionAvailable Then
+
+                    modelSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "tool-selection",
+                            .Text = "Allow tool selection",
+                            .Trigger = ToolSelectionTrigger,
+                            .ManualSyntax = ToolSelectionTrigger,
+                            .Description = "Permit selection of the available " & ToolFriendlyName.ToLower() & "."
+                        })
+
+                End If
+
+                If modelSection.Options.Count > 0 Then
+                    promptOptions.Sections.Add(modelSection)
+                End If
+
+                ' =============================================================
+                ' SHOW
+                ' =============================================================
+
+                Dim promptResult As SLib.FreestylePromptResult = SLib.ShowFreestylePromptForm(promptOptions)
+
+                If promptResult Is Nothing OrElse Not promptResult.Accepted Then
+                    Return
+                End If
+
+                Try
+                    My.Settings.Item("FreestylePromptUiState") = promptResult.PersistedState
+                    My.Settings.Save()
+                Catch
+                    ' non-critical
+                End Try
+
+                OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
+
+            Else
+
+                OtherPrompt = LastPrompt
+
+            End If
+
 
             'Debug.WriteLine($"OtherPrompt: '{OtherPrompt}'")
 
@@ -1386,6 +2302,7 @@ Partial Public Class ThisAddIn
                 ' JSON / TEMPLATES (selection required)
                 AddItem("generateresponsetemplate", "Generate a JSON response template from selected JSON + description.")
                 AddItem("generateresponsekey", "Generate a JSON response key from selected JSON + description.")
+                AddItem("generateindex", "Create a semantic-search indexed text file from a selected source file and point HelpMeInky to it.")
                 AddItem("mcp", "Import tools from an MCP server and generate INI sections.")
 
                 ' CLIPBOARD / INSERTION
@@ -1402,14 +2319,17 @@ Partial Public Class ThisAddIn
                 AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
                 AddItem("kbrepair", "Run an AI repair operation on the active Wiki (fixes issues found during health check).")
                 AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
+
                 ' TOOLS / SOURCES
                 AddItem("setagents", "Select sources/tools available For agentic models (session scope).")
+                AddItem("updateagents", "Update the sample agent files (skills, agents) from redink.ai server.")
                 AddItem("loadurl", "Retrieve the text Of a particular URL given.")
                 AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
                 AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
                 AddItem("pptxconvert", "Convert a PowerPoint presentation To a different template format.")
                 AddItem("talktome", "Start a widget that allows you to control Red Ink via speech")
+                AddItem("watermark", "Detect watermark indicators in the selected text.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
@@ -1878,7 +2798,12 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "kbstore", StringComparison.OrdinalIgnoreCase) Then
                 Using frm As New KnowledgeStoreForm(_context)
-                    frm.ShowDialog()
+                    Dim __safeDialogOwner2797 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If __safeDialogOwner2797 IsNot Nothing Then
+                        frm.ShowDialog(__safeDialogOwner2797)
+                    Else
+                        frm.ShowDialog()
+                    End If
                 End Using
                 Return
             End If
@@ -1890,6 +2815,35 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "talktome", StringComparison.OrdinalIgnoreCase) Then
                 Globals.ThisAddIn.ShowTalkToMeWidget()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "watermark", StringComparison.OrdinalIgnoreCase) Then
+                Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                If app Is Nothing Then
+                    ShowCustomMessageBox("Word is not available.")
+                    Return
+                End If
+
+                Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+                If doc Is Nothing Then
+                    ShowCustomMessageBox("There is no active document to analyze.")
+                    Return
+                End If
+
+                Dim currentSelection As Microsoft.Office.Interop.Word.Selection = app.Selection
+                If currentSelection Is Nothing Then
+                    ShowCustomMessageBox("There is no active selection to analyze.")
+                    Return
+                End If
+
+                Dim selectedText As String = currentSelection.Text
+                If String.IsNullOrWhiteSpace(selectedText) Then
+                    ShowCustomMessageBox("Please select the text you want to analyze for watermark indicators.")
+                    Return
+                End If
+
+                ShowWatermarkAnalysisWindow(selectedText)
                 Return
             End If
 
@@ -2107,6 +3061,11 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            ' Update agent sample files
+            If String.Equals(OtherPrompt.Trim(), "updateagents", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "updateskills", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.CheckForAgentResourceUpdates(_context)
+                Return
+            End If
 
             ' Signature Management for Update INI Key Functionality
             If String.Equals(OtherPrompt.Trim(), "iniupdatekeys", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "signtool", StringComparison.OrdinalIgnoreCase) Then
@@ -2233,6 +3192,11 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            If String.Equals(OtherPrompt.Trim(), "generateindex", StringComparison.OrdinalIgnoreCase) Then
+                Await GenerateSemanticSearchIndexAsync()
+                Return
+            End If
+
             If String.Equals(OtherPrompt.Trim(), "splitpdf", StringComparison.OrdinalIgnoreCase) Then
                 Globals.ThisAddIn.SplitPdfByExhibits()
                 Return
@@ -2300,7 +3264,8 @@ Partial Public Class ThisAddIn
             ' Select cloud text-to-speech voices (multi-voice mode)
             If OtherPrompt.StartsWith("voices2", StringComparison.OrdinalIgnoreCase) Then
                 Using frm As New TTSSelectionForm("Select the voices you wish to use.", $"{AN} Text-to-Speech - Select Voices", True)
-                    If frm.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner3258 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner3258 IsNot Nothing, frm.ShowDialog(__safeDialogOwner3258), frm.ShowDialog()) = DialogResult.OK Then
                         Dim selectedVoices As List(Of String) = frm.SelectedVoices
                         Dim outputPath As String = frm.SelectedOutputPath
                         If selectedVoices.Count > 0 Then
@@ -2325,7 +3290,8 @@ Partial Public Class ThisAddIn
             ' Select cloud text-to-speech voices (single-voice mode)
             If String.Equals(OtherPrompt.Trim(), "voices", StringComparison.OrdinalIgnoreCase) Then
                 Using frm As New TTSSelectionForm("Select the voices you wish to use.", $"{AN} Text-to-Speech - Select Voices", False)
-                    If frm.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner3283 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner3283 IsNot Nothing, frm.ShowDialog(__safeDialogOwner3283), frm.ShowDialog()) = DialogResult.OK Then
                         Dim selectedVoices As List(Of String) = frm.SelectedVoices
                         Dim outputPath As String = frm.SelectedOutputPath
                         If selectedVoices.Count > 0 Then
@@ -2399,7 +3365,6 @@ Partial Public Class ThisAddIn
             ' Clean and rebuild context menu
             If OtherPrompt.StartsWith("cleanmenu", StringComparison.OrdinalIgnoreCase) Then
                 RemoveOldContextMenu()
-                RemoveVeryOldContextMenu()
                 MenusAdded = False
                 AddContextMenu()
                 Return

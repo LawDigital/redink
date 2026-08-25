@@ -7,7 +7,7 @@
 '          theme / fonts / colors / custom assets) of a second .pptx, without
 '          losing any content of the source deck.
 '
-' Strategy (Hybrid C, see design proposal):
+' Strategy:
 '   1. Copy the template .pptx to the output path and strip its sample slides.
 '   2. For each source slide pick the best matching template layout
 '      (heuristic, optional LLM, optional user review dialog).
@@ -565,7 +565,8 @@ Partial Public Class ThisAddIn
             dlg.Title = title
             dlg.Filter = "PowerPoint files (*.pptx)|*.pptx"
             dlg.CheckFileExists = True
-            If dlg.ShowDialog() = DialogResult.OK Then Return dlg.FileName
+            Dim __safeDialogOwner568 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner568 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner568), dlg.ShowDialog()) = DialogResult.OK Then Return dlg.FileName
         End Using
         Return Nothing
     End Function
@@ -579,7 +580,8 @@ Partial Public Class ThisAddIn
             Dim name = System.IO.Path.GetFileNameWithoutExtension(srcPath) & "_retemplated.pptx"
             dlg.InitialDirectory = dir
             dlg.FileName = name
-            If dlg.ShowDialog() = DialogResult.OK Then Return dlg.FileName
+            Dim __safeDialogOwner582 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner582 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner582), dlg.ShowDialog()) = DialogResult.OK Then Return dlg.FileName
         End Using
         Return Nothing
     End Function
@@ -1181,7 +1183,8 @@ Partial Public Class ThisAddIn
             frm.Controls.Add(headerLabel)
             frm.Controls.Add(buttonFlow)
 
-            If frm.ShowDialog() <> DialogResult.OK Then Return False
+            Dim __safeDialogOwner1184 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner1184 IsNot Nothing, frm.ShowDialog(__safeDialogOwner1184), frm.ShowDialog()) <> DialogResult.OK Then Return False
 
             For i As Integer = 0 To mappings.Count - 1
                 Dim rid = CStr(grid.Rows(i).Cells(2).Value)

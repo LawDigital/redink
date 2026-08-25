@@ -147,6 +147,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <returns>List of available tools.</returns>
     Public Function GetAvailableTools() As List(Of ModelConfig)
+        Dim __perfAvailableTools As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
         Dim tools As New List(Of ModelConfig)()
         Dim specialServicePath As String = ExpandEnvironmentVariables(INI_SpecialServicePath)
 
@@ -175,18 +176,36 @@ Partial Public Class ThisAddIn
 
         tools.AddRange(GetInternalKnowledgeTools())
 
+        ' python_execute: secure sandboxed Python execution.
+        ' Only advertised when INI_PythonAgentPath is set, the exe is available, and
+        ' (when requested via the packed path) its authenticity has been verified.
+        Dim pythonExecuteTool As ModelConfig = Nothing
+        If TryConfigureAndBuildPythonExecuteTool(pythonExecuteTool) Then
+            tools.Add(pythonExecuteTool)
+        End If
+
         tools.AddRange(SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
 
         ' Agent layer: session memory, skill loader, and discovered skills/agents (lazy registry-backed).
         Try
-            SharedLibrary.Agents.AgentResources.Refresh()
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
             tools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+            tools.AddRange(SharedLibrary.Agents.BrowserTools.BuildAll(_context))
             tools.AddRange(SharedLibrary.Agents.WordDocTools.BuildAll())
-            tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+
+            Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
+            If jsRunTool IsNot Nothing Then
+                tools.Add(jsRunTool)
+            End If
+
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
+            tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
+            tools.Add(SharedLibrary.Agents.AskUserTool.Build())
 
             Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
             SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)
@@ -194,6 +213,18 @@ Partial Public Class ThisAddIn
             tools.AddRange(__agentReg.MaterializeAll())
         Catch ex As Exception
             ToolingFileLogger.LogWarn("Agent layer registration failed.", ex:=ex)
+        End Try
+
+        __perfAvailableTools.Stop()
+        Try
+            ToolingFileLogger.LogDiag(
+                "[PERF] GetAvailableTools: " &
+                __perfAvailableTools.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; tools=" &
+                tools.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; agentGeneration=" &
+                SharedLibrary.Agents.AgentResources.RefreshGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        Catch
         End Try
 
         Return tools
@@ -297,7 +328,10 @@ Partial Public Class ThisAddIn
            SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
            SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
+           SharedLibrary.Agents.BrowserTools.IsBrowserTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
+           SharedLibrary.Agents.PythonExecuteTool.IsPythonTool(toolName) OrElse
+           SharedLibrary.Agents.ToolDescribeTool.IsDescribeTool(toolName) OrElse
            toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
             Return True
         End If
@@ -391,14 +425,14 @@ Partial Public Class ThisAddIn
                 Return result
             End If
 
-            SharedLibrary.Agents.AgentResources.Refresh()
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
 
             For Each skill As SharedLibrary.Agents.SkillDescriptor In SharedLibrary.Agents.AgentResources.Skills
                 If skill Is Nothing OrElse String.IsNullOrWhiteSpace(skill.Name) Then
                     Continue For
                 End If
 
-                Dim skillToolName As String = "skill_" & skill.Name.Trim()
+                Dim skillToolName As String = SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skill.Name)
 
                 If Not selectedSet.Contains(skillToolName) Then
                     Continue For
@@ -518,7 +552,8 @@ Partial Public Class ThisAddIn
             instruction:="Select the advanced tools that may be callable. All available tools are on by default; " &
                          "uncheck any you want to disable. Workspace tools appear here only while a workspace is connected.")
 
-            If selector.ShowDialog() = DialogResult.OK Then
+            Dim __safeDialogOwner542 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner542 IsNot Nothing, selector.ShowDialog(__safeDialogOwner542), selector.ShowDialog()) = DialogResult.OK Then
                 Return selector.SelectedModels.
                     Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
                     Select(Function(t) t.ToolName).
@@ -561,7 +596,7 @@ Partial Public Class ThisAddIn
 
             selector.AddExtraButton("Skills && Agents…",
                 Sub(s, e)
-                    Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
+                    Using f As New SharedLibrary.Agents.AgentResourcesViewerForm(_context)
                         f.ShowDialog(selector)
                     End Using
                 End Sub)
@@ -580,7 +615,21 @@ Partial Public Class ThisAddIn
                     End Using
                 End Sub)
 
-            If selector.ShowDialog() = DialogResult.OK Then
+            ' Belt-and-suspenders: pass a same-thread owner when one is available so
+            ' the modal is correctly parented (Z-order + re-activation) even though it
+            ' is spawned in response to activity in the Local Chat page hosted in Edge.
+            ' ResolveSameThreadDialogOwner returns Nothing for any cross-thread/foreign
+            ' owner, in which case we fall back to the ownerless (TopMost) dialog, so
+            ' this cannot reintroduce the cross-host modal-close deadlock.
+            Dim selectorOwner As System.Windows.Forms.IWin32Window =
+                SharedMethods.ResolveSameThreadDialogOwner()
+
+            Dim selectorResult As DialogResult =
+                If(selectorOwner IsNot Nothing,
+                   selector.ShowDialog(selectorOwner),
+                   selector.ShowDialog())
+
+            If selectorResult = DialogResult.OK Then
                 updatedAdvancedToolNames = workingAdvanced.
                     Distinct(StringComparer.OrdinalIgnoreCase).
                     ToList()

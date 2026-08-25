@@ -42,6 +42,14 @@ Namespace SharedLibrary
     Public Class KnowledgeStoreForm
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         Private ReadOnly _context As ISharedContext
         Private _stores As New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)()
         Private _dialogOwnerScope As System.IDisposable = Nothing
@@ -544,7 +552,8 @@ Namespace SharedLibrary
             Using fbd As New FolderBrowserDialog()
                 fbd.Description = "Select the root directory for this Knowledge Store"
                 fbd.ShowNewFolderButton = True
-                If fbd.ShowDialog() <> DialogResult.OK Then Return
+                Dim __safeDialogOwner547 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner547 IsNot Nothing, fbd.ShowDialog(__safeDialogOwner547), fbd.ShowDialog()) <> DialogResult.OK Then Return
 
                 Try
                     Dim resolvedPath = fbd.SelectedPath
@@ -621,7 +630,8 @@ Namespace SharedLibrary
                         fbd.SelectedPath = expanded
                     End If
                 End If
-                If fbd.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner624 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner624 IsNot Nothing, fbd.ShowDialog(__safeDialogOwner624), fbd.ShowDialog()) = DialogResult.OK Then
                     _txtSourcePath.Text = fbd.SelectedPath
                 End If
             End Using

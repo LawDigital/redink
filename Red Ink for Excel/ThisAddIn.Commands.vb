@@ -863,6 +863,7 @@ Partial Public Class ThisAddIn
         System.Windows.Forms.Application.DoEvents()
         TranslateLanguage = INI_Language1
         Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -873,6 +874,7 @@ Partial Public Class ThisAddIn
         System.Windows.Forms.Application.DoEvents()
         TranslateLanguage = INI_Language2
         Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -892,7 +894,10 @@ Partial Public Class ThisAddIn
                 selectedRange.Select()
             End If
             Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+            Return result
         End If
+
+        Return False
     End Function
 
     ''' <summary>
@@ -908,7 +913,10 @@ Partial Public Class ThisAddIn
             _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, True, False, True, False)
+            Return result
         End If
+
+        Return False
     End Function
 
     ''' <summary>
@@ -918,6 +926,7 @@ Partial Public Class ThisAddIn
     Public Async Function Correct() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim result As Boolean = Await ProcessSelectedRange(SP_Correct, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -940,6 +949,7 @@ Partial Public Class ThisAddIn
             selectedRange.Select()
         End If
         Dim result As Boolean = Await ProcessSelectedRange(SP_WriteNeatly, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -949,6 +959,7 @@ Partial Public Class ThisAddIn
     Public Async Function Anonymize() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim result As Boolean = Await ProcessSelectedRange(SP_Anonymize, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -970,7 +981,7 @@ Partial Public Class ThisAddIn
             If Not CellProtected(cell) AndAlso Not CBool(cell.HasFormula) Then
                 Dim cellText As String = CStr(cell.Value)
                 If Not String.IsNullOrEmpty(cellText) Then
-                    Dim textLength As Integer = getnumberofwords(cellText)
+                    Dim textLength As Integer = GetNumberOfWords(cellText)
                     totalLength += textLength
                     If textLength > maxLength Then
                         maxLength = textLength
@@ -999,6 +1010,7 @@ Partial Public Class ThisAddIn
             selectedRange.Select()
         End If
         Dim result As Boolean = Await ProcessSelectedRange(SP_Shorten, True, False, False, False, True, False, ShortenPercentValue, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -1032,6 +1044,7 @@ Partial Public Class ThisAddIn
             selectedRange.Select()
         End If
         Dim result As Boolean = Await ProcessSelectedRange(SP_SwitchParty, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -1065,6 +1078,7 @@ Partial Public Class ThisAddIn
     Public Async Function FreestyleNM() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim result As Boolean = Await Freestyle(False)
+        Return result
     End Function
 
     ''' <summary>
@@ -1077,7 +1091,7 @@ Partial Public Class ThisAddIn
         If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
             If Not ShowModelSelection(_context, INI_AlternateModelPath) Then
                 originalConfigLoaded = False
-                Exit Function
+                Return False
             End If
         End If
         Dim result As Boolean = Await Freestyle(True)
@@ -1085,6 +1099,7 @@ Partial Public Class ThisAddIn
             RestoreDefaults(_context, originalConfig)
             originalConfigLoaded = False
         End If
+        Return result
     End Function
 
     ''' <summary>
@@ -1117,7 +1132,7 @@ Partial Public Class ThisAddIn
         Dim CBCInstruct As String = $"with '{CellByCellPrefix}' or '{CellByCellPrefix2} if the instruction should be executed cell-by-cell"
         Dim TextInstruct As String = $"use '{TextPrefix}' or '{TextPrefix2}' if the instruction should apply cell-by-cell, but only to text cells"
         Dim BatchInstruct As String = $"use '{BatchPrefix}' if to process a directory of files"
-        Dim BubblesInstruct As String = $"use '{BubblesPrefix}' for inserting comments only"
+        Dim BubblesInstruct As String = $"use '{BubblesPrefix}' for inserting comments only; without it, you can still ask for values/formulas and comments together"
         Dim PaneInstruct As String = $"use '{PanePrefix}' for using the pane"
         Dim ExtInstruct As String = $"; insert '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{ExtWSTrigger}' to add more worksheet(s)"
         Dim AddonInstruct As String = $"; add '{ColorTrigger}' to check for colorcodes"
@@ -1138,6 +1153,8 @@ Partial Public Class ThisAddIn
         End If
 
         AddonInstruct += NoFormulasInstruct.Replace("; add", ",")
+
+        GoTo SkipPromptWin
 
         Dim PromptLibInstruct As String = ""
         If INI_PromptLib Then
@@ -1163,6 +1180,273 @@ Partial Public Class ThisAddIn
             OtherPrompt = Trim(SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute {PromptLibInstruct} (the result will be shown to you before inserting anything into your worksheet); {PaneInstruct}{BatchInstruct}{PureInstruct}{ExtInstruct}{AddonInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, _context))
             DoRange = True
         End If
+
+SkipPromptWin:
+
+        ' =============================================================
+        ' FREESTYLE PROMPT UI
+        ' =============================================================
+
+        Dim freestylePromptUiState As String = ""
+
+        Try
+            freestylePromptUiState = CStr(My.Settings.Item("FreestylePromptUiState"))
+        Catch
+            freestylePromptUiState = ""
+        End Try
+
+        Dim promptOptions As New SLib.FreestylePromptOptions() With {
+            .Title = $"{AN} Freestyle",
+            .Heading = "What would you like Red Ink to do?",
+            .ModeCaption = "Processing",
+            .ModelText = If(UseSecondAPI, INI_Model_2, INI_Model),
+            .ContextStatusText = If(NoSelectedCells, "No cells selected", "The current Excel selection will be used as context"),
+            .LastPrompt = My.Settings.LastPrompt,
+            .PromptLibraryEnabled = INI_PromptLib,
+            .Context = _context,
+            .CallerId = "excel.freestyle",
+            .PersistedState = freestylePromptUiState,
+            .RestorePersistedState = False
+        }
+
+        ' =============================================================
+        ' PROCESSING / OUTPUT PREFIXES
+        '
+        ' Covers:
+        ' CellByCellPrefix
+        ' CellByCellPrefix2
+        ' TextPrefix
+        ' TextPrefix2
+        ' BubblesPrefix
+        ' PanePrefix
+        ' BatchPrefix
+        ' PurePrefix
+        ' =============================================================
+
+        Dim modeDefault As New SLib.FreestylePromptMode() With {
+            .Id = "default",
+            .Text = "Configured default",
+            .Prefix = System.String.Empty,
+            .ManualSyntax = DefaultPrefix,
+            .IsDefault = True
+        }
+
+        promptOptions.Modes.Add(modeDefault)
+
+
+        Dim modeCellByCell As New SLib.FreestylePromptMode() With {
+            .Id = "cell-by-cell",
+            .Text = "Cell by cell",
+            .Prefix = CellByCellPrefix,
+            .ManualSyntax = CellByCellPrefix & " / " & CellByCellPrefix2,
+            .IsAvailable = Not NoSelectedCells,
+            .UnavailableReason = "Cell-by-cell processing requires a selected Excel range."
+        }
+
+        modeCellByCell.Prefixes.Add(CellByCellPrefix)
+        modeCellByCell.Prefixes.Add(CellByCellPrefix2)
+
+        promptOptions.Modes.Add(modeCellByCell)
+
+
+        Dim modeTextOnly As New SLib.FreestylePromptMode() With {
+            .Id = "text-only",
+            .Text = "Text cells only",
+            .Prefix = TextPrefix,
+            .ManualSyntax = TextPrefix & " / " & TextPrefix2,
+            .IsAvailable = Not NoSelectedCells,
+            .UnavailableReason = "Text-cell processing requires a selected Excel range."
+        }
+
+        modeTextOnly.Prefixes.Add(TextPrefix)
+        modeTextOnly.Prefixes.Add(TextPrefix2)
+
+        promptOptions.Modes.Add(modeTextOnly)
+
+
+        Dim modeComments As New SLib.FreestylePromptMode() With {
+            .Id = "comments",
+            .Text = "Comments only",
+            .Prefix = BubblesPrefix,
+            .ManualSyntax = BubblesPrefix,
+            .IsAvailable = Not NoSelectedCells,
+            .UnavailableReason = "Comment output requires a selected Excel range."
+        }
+
+        modeComments.Prefixes.Add(BubblesPrefix)
+
+        promptOptions.Modes.Add(modeComments)
+
+
+        Dim modePane As New SLib.FreestylePromptMode() With {
+            .Id = "pane",
+            .Text = "Side pane",
+            .Prefix = PanePrefix,
+            .ManualSyntax = PanePrefix
+        }
+
+        modePane.Prefixes.Add(PanePrefix)
+
+        promptOptions.Modes.Add(modePane)
+
+
+        Dim modeBatch As New SLib.FreestylePromptMode() With {
+            .Id = "batch",
+            .Text = "Batch files",
+            .Prefix = BatchPrefix,
+            .ManualSyntax = BatchPrefix
+        }
+
+        modeBatch.Prefixes.Add(BatchPrefix)
+
+        promptOptions.Modes.Add(modeBatch)
+
+
+        Dim modePure As New SLib.FreestylePromptMode() With {
+            .Id = "pure",
+            .Text = "Direct prompt",
+            .Prefix = PurePrefix,
+            .ManualSyntax = PurePrefix
+        }
+
+        modePure.Prefixes.Add(PurePrefix)
+
+        promptOptions.Modes.Add(modePure)
+
+        promptOptions.QuickButtons.Add(
+            New SLib.FreestylePromptQuickButton() With {
+                .Id = "quick-pane",
+                .Text = "Run (pane)",
+                .Description = "Run immediately with the side-pane prefix.",
+                .Prefix = PanePrefix
+            })
+
+        ' =============================================================
+        ' ADD CONTEXT
+        '
+        ' Covers:
+        ' ExtTrigger
+        ' ExtTriggerFixed
+        ' ExtDirTrigger
+        ' ExtWSTrigger
+        ' ObjectTrigger
+        ' ObjectTrigger2
+        ' =============================================================
+
+        promptOptions.InsertOptions.Add(
+            New SLib.FreestylePromptInsertOption() With {
+                .Id = "file",
+                .Text = "Doc",
+                .Description = "Select and include the text of a document (" & ExtTrigger & ").",
+                .InsertText = ExtTrigger
+            })
+
+        If Not System.String.IsNullOrWhiteSpace(ExtTriggerFixed) AndAlso ExtTriggerFixed.IndexOf("[path]", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "file-path",
+                    .Text = "Doc path",
+                    .Description = "Enter a specific document path and insert the completed path command into the prompt.",
+                    .RequiresValue = True,
+                    .ValuePrompt = "Enter the full path of the document to include:",
+                    .ValueTitle = $"{AN} Freestyle - Doc path",
+                    .ValueTemplate = ExtTriggerFixed,
+                    .ValuePlaceholder = "[path]"
+                })
+
+        End If
+
+        promptOptions.InsertOptions.Add(
+            New SLib.FreestylePromptInsertOption() With {
+                .Id = "folder",
+                .Text = "Folder",
+                .Description = "Select and include files from a directory (" & ExtDirTrigger & ").",
+                .InsertText = ExtDirTrigger
+            })
+
+        promptOptions.InsertOptions.Add(
+            New SLib.FreestylePromptInsertOption() With {
+                .Id = "worksheet",
+                .Text = "Other worksheets",
+                .Description = "Include one or more other open worksheets (" & ExtWSTrigger & ").",
+                .InsertText = ExtWSTrigger
+            })
+
+        If DoFileObject Then
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "file-object",
+                    .Text = "File object",
+                    .Description = "Attach a file as an LLM object (" & ObjectTrigger & ").",
+                    .InsertText = ObjectTrigger,
+                    .MaxOccurrences = 1
+                })
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "clipboard-object",
+                    .Text = "Clipboard object",
+                    .Description = "Use the clipboard as an LLM object (" & ObjectTrigger2 & ").",
+                    .InsertText = ObjectTrigger2
+                })
+
+        End If
+
+        ' =============================================================
+        ' MORE OPTIONS
+        '
+        ' Covers:
+        ' ColorTrigger
+        ' NoFormulasTrigger
+        ' =============================================================
+
+        Dim processingSection As New SLib.FreestylePromptSection() With {
+            .Id = "processing",
+            .Caption = "Processing"
+        }
+
+        processingSection.Options.Add(
+            New SLib.FreestylePromptToggleOption() With {
+                .Id = "colour-codes",
+                .Text = "Check cell colours",
+                .Trigger = ColorTrigger,
+                .ManualSyntax = ColorTrigger,
+                .Description = "Include cell colour information when processing the selection."
+            })
+
+        processingSection.Options.Add(
+            New SLib.FreestylePromptToggleOption() With {
+                .Id = "no-formulas",
+                .Text = "Ignore formulas",
+                .Trigger = NoFormulasTrigger,
+                .ManualSyntax = NoFormulasTrigger,
+                .Description = "Do not process formulas in cells."
+            })
+
+        promptOptions.Sections.Add(processingSection)
+
+        ' =============================================================
+        ' SHOW
+        ' =============================================================
+
+        Dim promptResult As SLib.FreestylePromptResult = SLib.ShowFreestylePromptForm(promptOptions)
+
+        If promptResult Is Nothing OrElse Not promptResult.Accepted Then
+            Return False
+        End If
+
+        Try
+            My.Settings.Item("FreestylePromptUiState") = promptResult.PersistedState
+            My.Settings.Save()
+        Catch
+            ' non-critical
+        End Try
+
+        OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
+
+
         If String.IsNullOrEmpty(OtherPrompt) And OtherPrompt <> "ESC" And INI_PromptLib Then
             Dim promptlibresult As (String, Boolean, Boolean, Boolean)
             promptlibresult = ShowPromptSelector(INI_PromptLibPath, INI_PromptLibPathLocal, Nothing, Nothing)
@@ -1423,6 +1707,7 @@ Partial Public Class ThisAddIn
             {"Timeout", "Timeout of {model}"},
             {"Temperature_2", "Temperature of {model2}"},
             {"Timeout_2", "Timeout of {model2}"},
+            {"RestrictedModelAccessCode", "Restricted model access code(s)"},
             {"DoubleS", "Convert '" & ChrW(223) & "' to 'ss'"},
             {"NoEmDash", "Convert em to en dash"},
             {"Ignore", "Activate 'Ignore' prompt (for 'prompt injection' protection)"},
@@ -1444,6 +1729,7 @@ Partial Public Class ThisAddIn
             {"Timeout", "In milliseconds"},
             {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},
             {"Timeout_2", "In milliseconds"},
+            {"RestrictedModelAccessCode", "Optional personal access code list for restricted alternate models. Use commas or semicolons to separate multiple codes. A restricted model is only shown when one stored code matches the model's 'RestrictedAccess' value."},
             {"DoubleS", "For Switzerland"},
             {"NoEmDash", "This will convert long dashes typically generated by LLMs but that are not commonly used (thus suggesting that the text has been AI generated)"},
             {"Ignore", "Allow system prompts to use {Ignore} as a placeholder for text to ignore, such as malicious prompt injections; Freestyle and some other commands use {Ignore}; the chatbots have an independent protection"},
@@ -1463,10 +1749,15 @@ Partial Public Class ThisAddIn
         Dim splash As New SplashScreen("Updating menu following your changes ...")
         splash.Show()
         splash.Refresh()
-        RemoveMenu = True
-        MenusAdded = False
-        AddContextMenu()
 
+        ' The Excel context menus (CommandBars popups) are built once at startup and are
+        ' structurally static - their menu items never change, only the behaviour of the
+        ' OnAction VBA macros, which read the current INI values at click time. Tearing
+        ' them down and rebuilding the CommandBars popups after a settings change is
+        ' unnecessary and, on the Word side, was the cause of a non-deterministic COM
+        ' fail-fast (exit code 0xC0000409). We therefore do NOT rebuild the context menus
+        ' after a settings change; we only refresh the ribbon, which is managed WinForms
+        ' UI and safe to update.
         Try
             If Globals.Ribbons.Ribbon1 IsNot Nothing Then
                 Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()

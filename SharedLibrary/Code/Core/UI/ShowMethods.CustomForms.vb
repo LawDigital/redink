@@ -11,6 +11,20 @@
 ' Architecture:
 '  - Native window integration: Uses `FindWindow` / `SendMessage` (user32) and
 '    `WindowWrapper` ownership to optionally parent dialogs to Office app windows.
+'  - Host-prompt visibility safeguard: several dialogs intentionally run as
+'    `TopMost` so they do not disappear behind Office. In Word/Office, this can
+'    create a specific deadlock-like UX when the host raises its own native prompt
+'    (for example "Save changes?" while the user closes Word): the native prompt
+'    gains focus but stays hidden behind our `TopMost` dialog, so the UI appears
+'    stuck until the custom dialog is moved away manually.
+'  - Centralized fix for that case: do not change owner behavior broadly and do
+'    not rely on a single `Deactivate` event, because foreground activation is
+'    transient and `GetForegroundWindow()` may briefly return zero or still point
+'    to our dialog. Instead, `AttachForeignForegroundWatchdog` starts a short
+'    WinForms timer for affected `TopMost` dialogs and repeatedly calls
+'    `PromoteForeignForegroundDialog`, which temporarily drops only that dialog
+'    out of the topmost band when a same-process host prompt takes foreground,
+'    then restores normal behavior when the dialog is re-activated.
 '  - Selection UI: `ShowSelectionForm` shows a fixed dialog with a ListBox and
 '    OK/Cancel behavior.
 '  - Text input UI: `ShowCustomInputBox` supports single-line and multi-line input,
@@ -339,7 +353,10 @@ Namespace SharedLibrary
 
             ' Show dialog.
             inputForm.TopMost = True
-            Dim ownerWnd As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+
+            SharedMethods.AttachForeignForegroundWatchdog(inputForm)
+
+            Dim ownerWnd As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
             If ownerWnd IsNot Nothing Then
                 inputForm.ShowDialog(ownerWnd)
             Else
@@ -381,7 +398,8 @@ Namespace SharedLibrary
                                                     Optional CtrlP As String = "",
                                                     Optional OptionalButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
                                                     Optional InsertButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
-                                                    Optional Context As ISharedContext = Nothing
+                                                    Optional Context As ISharedContext = Nothing,
+                                                    Optional InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing
                                                 ) As String
 
             ' Screen working area (accounts for taskbar, etc.).
@@ -476,10 +494,27 @@ Namespace SharedLibrary
             Dim okButton As New Button() With {.Text = "OK", .AutoSize = True, .Font = standardFont}
             Dim cancelButton As New Button() With {.Text = "Cancel", .AutoSize = True, .Font = standardFont}
 
-            AddHandler okButton.Click, Sub()
-                                           inputForm.DialogResult = DialogResult.OK
-                                           inputForm.Close()
-                                       End Sub
+            AddHandler okButton.Click,
+                Sub()
+                    Dim violatingToken As System.String = System.String.Empty
+                    Dim maximumOccurrences As System.Int32 = 0
+                    If Not SharedMethods.ValidateCustomInputInsertOccurrenceLimits(
+                        inputTextBox.Text,
+                        InsertButtonMaxOccurrences,
+                        violatingToken,
+                        maximumOccurrences) Then
+
+                        SharedMethods.ShowCustomMessageBox(
+                            "'" & violatingToken & "' can be included at most " &
+                            maximumOccurrences.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " time(s) in one request.")
+                        inputTextBox.Focus()
+                        Return
+                    End If
+
+                    inputForm.DialogResult = DialogResult.OK
+                    inputForm.Close()
+                End Sub
             AddHandler cancelButton.Click, Sub()
                                                inputForm.DialogResult = DialogResult.Cancel
                                                inputForm.Close()
@@ -542,6 +577,21 @@ Namespace SharedLibrary
                     Dim textToInsert As String = insertItem.Item3
                     AddHandler insertBtn.Click,
                         Sub()
+                            Dim maxOccurrences As System.Int32 = SharedMethods.GetCustomInputInsertMaximum(
+                                InsertButtonMaxOccurrences,
+                                textToInsert)
+
+                            If maxOccurrences > 0 AndAlso
+                               SharedMethods.CountFreestyleTokenOccurrences(inputTextBox.Text, textToInsert) >= maxOccurrences Then
+
+                                SharedMethods.ShowCustomMessageBox(
+                                    "This item can be included at most " &
+                                    maxOccurrences.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    " time(s) in one request.")
+                                inputTextBox.Focus()
+                                Return
+                            End If
+
                             Dim selPos = inputTextBox.SelectionStart
                             inputTextBox.Text = inputTextBox.Text.Insert(selPos, textToInsert)
                             inputTextBox.SelectionStart = selPos + textToInsert.Length
@@ -685,8 +735,13 @@ Namespace SharedLibrary
             inputForm.BringToFront()
             inputForm.Focus()
 
-            ' Show the dialog, must be owned by Outlook (only then the title may contains "Browser").
+            SharedMethods.AttachForeignForegroundWatchdog(inputForm)
+
             Dim Result As DialogResult
+
+
+            ' Show the dialog, must be owned by Outlook (only then the title may contains "Browser").
+
             If title.Contains("Browser") Then
                 ' Activate Outlook window via Win32 (no COM object needed since we're already in-process).
                 Dim outlookHwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
@@ -700,10 +755,14 @@ Namespace SharedLibrary
 
                 inputForm.Opacity = 1
 
+                Dim __browserOwner As System.Windows.Forms.IWin32Window = Nothing
                 If outlookHwnd <> IntPtr.Zero Then
-                    Result = inputForm.ShowDialog(New WindowWrapper(outlookHwnd))
+                    __browserOwner = SharedMethods.IfOwnerOnCurrentThread(New WindowWrapper(outlookHwnd))
+                End If
+                If __browserOwner IsNot Nothing Then
+                    Result = inputForm.ShowDialog(__browserOwner)
                 Else
-                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     If __owner IsNot Nothing Then
                         Result = inputForm.ShowDialog(__owner)
                     Else
@@ -712,7 +771,7 @@ Namespace SharedLibrary
                 End If
             Else
                 inputForm.Opacity = 1
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     Result = inputForm.ShowDialog(__owner)
                 Else
@@ -1043,10 +1102,7 @@ Namespace SharedLibrary
 
             AddHandler messageForm.Shown,
                 Sub(sender, e)
-                    messageForm.TopMost = False
-                    messageForm.TopMost = True
-                    messageForm.Activate()
-                    messageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(messageForm)
                 End Sub
 
             If nonModal Then
@@ -1062,8 +1118,10 @@ Namespace SharedLibrary
 
                 messageForm.Dispose()
             Else
-                ' Show modal (original behavior)
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                ' Show modal.
+                SharedMethods.AttachForeignForegroundWatchdog(messageForm)
+
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     messageForm.ShowDialog(__owner)
                 Else
@@ -1267,6 +1325,8 @@ Namespace SharedLibrary
             clientH = System.Math.Min(clientH, maxWindowHeight)
             messageForm.ClientSize = New System.Drawing.Size(clientW, clientH)
 
+            SharedMethods.AttachForeignForegroundWatchdog(messageForm)
+
             If autoCloseSeconds.HasValue Then
                 Dim remaining As System.Int32 = autoCloseSeconds.Value
                 countdownLabel.Text = $"(closes in {remaining} seconds{Defaulttext})"
@@ -1293,12 +1353,9 @@ Namespace SharedLibrary
 
                     AddHandler messageForm.Shown,
                             Sub(sender, e)
-                                messageForm.TopMost = False  ' Reset first.
-                                messageForm.TopMost = True   ' Then set again.
-                                messageForm.Activate()
-                                messageForm.BringToFront()
+                                SharedMethods.ForceDialogToForeground(messageForm)
                             End Sub
-                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     If __owner IsNot Nothing Then
                         messageForm.ShowDialog(__owner)
                     Else
@@ -1316,14 +1373,11 @@ Namespace SharedLibrary
 
                 AddHandler messageForm.Shown,
                         Sub(sender, e)
-                            messageForm.TopMost = False  ' Reset first.
-                            messageForm.TopMost = True   ' Then set again.
-                            messageForm.Activate()
-                            messageForm.BringToFront()
+                            SharedMethods.ForceDialogToForeground(messageForm)
                         End Sub
 
                 messageForm.Opacity = 1
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     messageForm.ShowDialog(__owner)
                 Else
@@ -1539,6 +1593,8 @@ Namespace SharedLibrary
                     End Sub
             End If
 
+            SharedMethods.AttachForeignForegroundWatchdog(RTFMessageForm)
+
             If autoCloseSeconds.HasValue AndAlso autoCloseSeconds > 0 Then
                 Dim remainingTime As Integer = autoCloseSeconds.Value
                 countdownLabel.Text = $"(closes in {remainingTime} seconds{Defaulttext})"
@@ -1568,10 +1624,7 @@ Namespace SharedLibrary
 
                 AddHandler RTFMessageForm.Shown,
                     Sub(sender, e)
-                        RTFMessageForm.TopMost = False
-                        RTFMessageForm.TopMost = True
-                        RTFMessageForm.Activate()
-                        RTFMessageForm.BringToFront()
+                        SharedMethods.ForceDialogToForeground(RTFMessageForm)
                     End Sub
 
                 RTFMessageForm.Opacity = 1
@@ -1588,14 +1641,11 @@ Namespace SharedLibrary
 
                 AddHandler RTFMessageForm.Shown,
                     Sub(sender, e)
-                        RTFMessageForm.TopMost = False
-                        RTFMessageForm.TopMost = True
-                        RTFMessageForm.Activate()
-                        RTFMessageForm.BringToFront()
+                        SharedMethods.ForceDialogToForeground(RTFMessageForm)
                     End Sub
 
                 RTFMessageForm.Opacity = 1
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     RTFMessageForm.ShowDialog(__owner)
                 Else
@@ -1798,14 +1848,11 @@ Namespace SharedLibrary
 
             AddHandler HTMLMessageForm.Shown,
                 Sub(sender, e)
-                    HTMLMessageForm.TopMost = False
-                    HTMLMessageForm.TopMost = True
-                    HTMLMessageForm.Activate()
-                    HTMLMessageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(HTMLMessageForm)
                 End Sub
 
             HTMLMessageForm.Opacity = 1
-            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
             If __owner IsNot Nothing Then
                 HTMLMessageForm.ShowDialog(__owner)
             Else
@@ -1959,13 +2006,15 @@ Namespace SharedLibrary
             HTMLMessageForm.Controls.Add(htmlBrowser)
             HTMLMessageForm.Controls.Add(bottomFlow)
 
-            ' Keep topmost on deactivate
+            ' Keep topmost on deactivate.
             AddHandler HTMLMessageForm.Deactivate, Sub(sender, e)
                                                        Try
                                                            HTMLMessageForm.TopMost = True
                                                        Catch
                                                        End Try
                                                    End Sub
+
+            SharedMethods.AttachForeignForegroundWatchdog(HTMLMessageForm)
 
             ' Signal when closed and invoke onClose
             AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
@@ -1980,10 +2029,7 @@ Namespace SharedLibrary
 
             AddHandler HTMLMessageForm.Shown,
                 Sub(sender, e)
-                    HTMLMessageForm.TopMost = False
-                    HTMLMessageForm.TopMost = True
-                    HTMLMessageForm.Activate()
-                    HTMLMessageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(HTMLMessageForm)
                 End Sub
 
             HTMLMessageForm.Opacity = 1
@@ -2141,13 +2187,15 @@ Namespace SharedLibrary
             HTMLMessageForm.Controls.Add(htmlBrowser)
             HTMLMessageForm.Controls.Add(bottomFlow)
 
-            ' Keep topmost on deactivate
+            ' Keep topmost on deactivate.
             AddHandler HTMLMessageForm.Deactivate, Sub(sender, e)
                                                        Try
                                                            HTMLMessageForm.TopMost = True
                                                        Catch
                                                        End Try
                                                    End Sub
+
+            SharedMethods.AttachForeignForegroundWatchdog(HTMLMessageForm)
 
             ' Signal when closed
             AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
@@ -2156,10 +2204,7 @@ Namespace SharedLibrary
 
             AddHandler HTMLMessageForm.Shown,
                 Sub(sender, e)
-                    HTMLMessageForm.TopMost = False
-                    HTMLMessageForm.TopMost = True
-                    HTMLMessageForm.Activate()
-                    HTMLMessageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(HTMLMessageForm)
                 End Sub
 
             HTMLMessageForm.Opacity = 1
@@ -2455,7 +2500,7 @@ Namespace SharedLibrary
                 End Sub
 
             Dim result As DialogResult
-            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
             If __owner IsNot Nothing Then
                 result = inputForm.ShowDialog(__owner)
             Else
@@ -2909,26 +2954,35 @@ Namespace SharedLibrary
         End Sub
 
             ' Show dialog.
+            SharedMethods.AttachForeignForegroundWatchdog(styledForm)
+
             styledForm.BringToFront()
             styledForm.Focus()
             styledForm.Activate()
 
             AddHandler styledForm.Shown,
                     Sub(sender, e)
-                        styledForm.TopMost = False  ' Reset first.
-                        styledForm.TopMost = True   ' Then set again.
-                        styledForm.Activate()
-                        styledForm.BringToFront()
+                        SharedMethods.ForceDialogToForeground(styledForm)
                     End Sub
 
             If parentWindowHwnd <> IntPtr.Zero Then
-                styledForm.ShowDialog(New WindowWrapper(parentWindowHwnd))
+                Dim __ownerHwnd As System.Windows.Forms.IWin32Window =
+                    SharedMethods.IfOwnerOnCurrentThread(New WindowWrapper(parentWindowHwnd))
+                If __ownerHwnd IsNot Nothing Then
+                    styledForm.ShowDialog(__ownerHwnd)
+                Else
+                    styledForm.ShowDialog()
+                End If
             ElseIf Getfocus Then
                 Dim officeHwnd As IntPtr = GetOfficeApplicationHwnd()
+                Dim __ownerOffice As System.Windows.Forms.IWin32Window = Nothing
                 If officeHwnd <> IntPtr.Zero Then
-                    styledForm.ShowDialog(New WindowWrapper(officeHwnd))
+                    __ownerOffice = SharedMethods.IfOwnerOnCurrentThread(New WindowWrapper(officeHwnd))
+                End If
+                If __ownerOffice IsNot Nothing Then
+                    styledForm.ShowDialog(__ownerOffice)
                 Else
-                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     If __owner IsNot Nothing Then
                         styledForm.ShowDialog(__owner)
                     Else
@@ -2936,7 +2990,7 @@ Namespace SharedLibrary
                     End If
                 End If
             Else
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     styledForm.ShowDialog(__owner)
                 Else
@@ -3019,6 +3073,2639 @@ Namespace SharedLibrary
             End Sub
         End Class
 
+#Region "Freestyle Prompt Form"
+
+        Public Class FreestylePromptMode
+
+            Public Property Id As System.String
+            Public Property Text As System.String
+            Public Property Description As System.String
+            Public Property Prefix As System.String
+            Public Property Prefixes As System.Collections.Generic.List(Of System.String)
+            Public Property ManualSyntax As System.String
+            Public Property IsDefault As System.Boolean
+            Public Property IsAvailable As System.Boolean
+            Public Property UnavailableReason As System.String
+
+            Public Sub New()
+                Me.Id = System.String.Empty
+                Me.Text = System.String.Empty
+                Me.Description = System.String.Empty
+                Me.Prefix = System.String.Empty
+                Me.Prefixes = New System.Collections.Generic.List(Of System.String)()
+                Me.ManualSyntax = System.String.Empty
+                Me.IsDefault = False
+                Me.IsAvailable = True
+                Me.UnavailableReason = System.String.Empty
+            End Sub
+
+            Public Overrides Function ToString() As System.String
+
+                Dim result As System.String = If(Me.Text, System.String.Empty)
+
+                If Not System.String.IsNullOrWhiteSpace(Me.ManualSyntax) Then
+                    result &= "   [" & Me.ManualSyntax & "]"
+                End If
+
+                If Not Me.IsAvailable Then
+                    result &= "   (not available now)"
+                End If
+
+                Return result
+
+            End Function
+
+        End Class
+
+
+        Public Class FreestylePromptInsertOption
+
+            Public Property Id As System.String
+            Public Property Text As System.String
+            Public Property Description As System.String
+            Public Property InsertText As System.String
+            Public Property MaxOccurrences As System.Int32
+
+            Public Property RequiresValue As System.Boolean
+            Public Property ValuePrompt As System.String
+            Public Property ValueTitle As System.String
+            Public Property ValueTemplate As System.String
+            Public Property ValuePlaceholder As System.String
+
+            Public Sub New()
+                Me.Id = System.String.Empty
+                Me.Text = System.String.Empty
+                Me.Description = System.String.Empty
+                Me.InsertText = System.String.Empty
+                Me.MaxOccurrences = 0
+                Me.RequiresValue = False
+                Me.ValuePrompt = System.String.Empty
+                Me.ValueTitle = System.String.Empty
+                Me.ValueTemplate = System.String.Empty
+                Me.ValuePlaceholder = "[value]"
+            End Sub
+
+            Public Function BuildInsertText(ByVal value As System.String) As System.String
+
+                If Not Me.RequiresValue Then
+                    Return If(Me.InsertText, System.String.Empty)
+                End If
+
+                Dim cleanValue As System.String = If(value, System.String.Empty).Trim()
+
+                If cleanValue.Length = 0 Then
+                    Return System.String.Empty
+                End If
+
+                If System.String.IsNullOrWhiteSpace(Me.ValueTemplate) Then
+                    Return cleanValue
+                End If
+
+                Dim placeholder As System.String = If(System.String.IsNullOrWhiteSpace(Me.ValuePlaceholder), "[value]", Me.ValuePlaceholder)
+
+                Return Me.ValueTemplate.Replace(placeholder, cleanValue)
+
+            End Function
+
+        End Class
+
+
+        Public Class FreestylePromptQuickButton
+
+            Public Property Id As System.String
+            Public Property Text As System.String
+            Public Property Description As System.String
+            Public Property Prefix As System.String
+
+            Public Sub New()
+                Me.Id = System.String.Empty
+                Me.Text = System.String.Empty
+                Me.Description = System.String.Empty
+                Me.Prefix = System.String.Empty
+            End Sub
+
+        End Class
+
+
+        Public Class FreestylePromptToggleOption
+
+            Public Property Id As System.String
+            Public Property Text As System.String
+            Public Property Description As System.String
+            Public Property Trigger As System.String
+            Public Property ManualSyntax As System.String
+            Public Property IsChecked As System.Boolean
+
+            Public Property ArgumentPrefix As System.String
+            Public Property ArgumentSuffix As System.String
+            Public Property ArgumentTemplate As System.String
+            Public Property ArgumentPlaceholder As System.String
+            Public Property ArgumentHint As System.String
+            Public Property ArgumentRequired As System.Boolean
+
+            Public Sub New()
+                Me.Id = System.String.Empty
+                Me.Text = System.String.Empty
+                Me.Description = System.String.Empty
+                Me.Trigger = System.String.Empty
+                Me.ManualSyntax = System.String.Empty
+                Me.IsChecked = False
+                Me.ArgumentPrefix = System.String.Empty
+                Me.ArgumentSuffix = System.String.Empty
+                Me.ArgumentTemplate = System.String.Empty
+                Me.ArgumentPlaceholder = "[value]"
+                Me.ArgumentHint = System.String.Empty
+                Me.ArgumentRequired = False
+            End Sub
+
+            Public ReadOnly Property HasArgument As System.Boolean
+                Get
+                    Return Not System.String.IsNullOrWhiteSpace(Me.ArgumentTemplate) OrElse Not System.String.IsNullOrWhiteSpace(Me.ArgumentPrefix)
+                End Get
+            End Property
+
+            Public Function BuildTrigger(ByVal argument As System.String) As System.String
+
+                Dim cleanArgument As System.String = If(argument, System.String.Empty).Trim()
+
+                If cleanArgument.Length = 0 Then
+                    Return If(Me.Trigger, System.String.Empty)
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(Me.ArgumentTemplate) Then
+
+                    Dim placeholder As System.String = If(System.String.IsNullOrWhiteSpace(Me.ArgumentPlaceholder), "[value]", Me.ArgumentPlaceholder)
+
+                    Return Me.ArgumentTemplate.Replace(placeholder, cleanArgument)
+
+                End If
+
+                Return If(Me.ArgumentPrefix, System.String.Empty) & cleanArgument & If(Me.ArgumentSuffix, System.String.Empty)
+
+            End Function
+
+        End Class
+
+
+        Public Class FreestylePromptSection
+
+            Public Property Id As System.String
+            Public Property Caption As System.String
+            Public Property Options As System.Collections.Generic.List(Of FreestylePromptToggleOption)
+
+            Public Sub New()
+                Me.Id = System.String.Empty
+                Me.Caption = System.String.Empty
+                Me.Options = New System.Collections.Generic.List(Of FreestylePromptToggleOption)()
+            End Sub
+
+        End Class
+
+
+        Public Class FreestylePromptOptions
+
+            Public Property Title As System.String
+            Public Property Heading As System.String
+            Public Property ModeCaption As System.String
+            Public Property ModelText As System.String
+            Public Property ContextStatusText As System.String
+
+            Public Property InitialPrompt As System.String
+            Public Property LastPrompt As System.String
+
+            Public Property PromptLibraryEnabled As System.Boolean
+            Public Property ShowShortCommandsHint As System.Boolean
+            Public Property Context As ISharedContext
+
+            Public Property CallerId As System.String
+            Public Property PersistedState As System.String
+            Public Property RestorePersistedState As System.Boolean
+
+            Public Property Modes As System.Collections.Generic.List(Of FreestylePromptMode)
+            Public Property QuickButtons As System.Collections.Generic.List(Of FreestylePromptQuickButton)
+            Public Property InsertOptions As System.Collections.Generic.List(Of FreestylePromptInsertOption)
+            Public Property Sections As System.Collections.Generic.List(Of FreestylePromptSection)
+
+            Public Sub New()
+                Me.Title = "Freestyle"
+                Me.Heading = "What would you like Red Ink to do?"
+                Me.ModeCaption = "Output"
+                Me.ModelText = System.String.Empty
+                Me.ContextStatusText = System.String.Empty
+                Me.InitialPrompt = System.String.Empty
+                Me.LastPrompt = System.String.Empty
+                Me.PromptLibraryEnabled = False
+                Me.ShowShortCommandsHint = False
+                Me.Context = Nothing
+                Me.CallerId = System.String.Empty
+                Me.PersistedState = System.String.Empty
+                Me.RestorePersistedState = True
+                Me.Modes = New System.Collections.Generic.List(Of FreestylePromptMode)()
+                Me.QuickButtons = New System.Collections.Generic.List(Of FreestylePromptQuickButton)()
+                Me.InsertOptions = New System.Collections.Generic.List(Of FreestylePromptInsertOption)()
+                Me.Sections = New System.Collections.Generic.List(Of FreestylePromptSection)()
+            End Sub
+
+        End Class
+
+
+        Public Class FreestylePromptResult
+
+            Public Property Accepted As System.Boolean
+            Public Property Prompt As System.String
+            Public Property SelectedModeId As System.String
+            Public Property SelectedPrefix As System.String
+            Public Property SelectedOptionIds As System.Collections.Generic.List(Of System.String)
+            Public Property SelectedTriggers As System.Collections.Generic.List(Of System.String)
+            Public Property KnownPrefixes As System.Collections.Generic.List(Of System.String)
+            Public Property PersistedState As System.String
+
+            Public Sub New()
+                Me.Accepted = False
+                Me.Prompt = System.String.Empty
+                Me.SelectedModeId = System.String.Empty
+                Me.SelectedPrefix = System.String.Empty
+                Me.SelectedOptionIds = New System.Collections.Generic.List(Of System.String)()
+                Me.SelectedTriggers = New System.Collections.Generic.List(Of System.String)()
+                Me.KnownPrefixes = New System.Collections.Generic.List(Of System.String)()
+                Me.PersistedState = System.String.Empty
+            End Sub
+
+        End Class
+
+
+        Private Shared Function FindFreestylePromptMode(ByVal text As System.String, ByVal modes As System.Collections.Generic.IEnumerable(Of FreestylePromptMode)) As System.Tuple(Of FreestylePromptMode, System.String)
+
+            Dim source As System.String = If(text, System.String.Empty).TrimStart()
+            Dim bestMode As FreestylePromptMode = Nothing
+            Dim bestPrefix As System.String = System.String.Empty
+
+            For Each mode As FreestylePromptMode In modes
+
+                If mode Is Nothing OrElse mode.Prefixes Is Nothing Then
+                    Continue For
+                End If
+
+                For Each prefix As System.String In mode.Prefixes
+
+                    If System.String.IsNullOrWhiteSpace(prefix) Then
+                        Continue For
+                    End If
+
+                    If source.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase) AndAlso prefix.Length > bestPrefix.Length Then
+                        bestMode = mode
+                        bestPrefix = prefix
+                    End If
+
+                Next
+
+            Next
+
+            If bestMode Is Nothing Then
+                Return Nothing
+            End If
+
+            Return System.Tuple.Create(bestMode, bestPrefix)
+
+        End Function
+
+
+        Private Shared Function GetFreestyleLeadingColonToken(ByVal text As System.String) As System.String
+
+            Dim source As System.String = If(text, System.String.Empty).TrimStart()
+
+            If source.Length = 0 Then
+                Return System.String.Empty
+            End If
+
+            Dim endIndex As System.Int32 = source.Length
+
+            Dim firstSpace As System.Int32 = source.IndexOf(" "c)
+            If firstSpace >= 0 Then endIndex = System.Math.Min(endIndex, firstSpace)
+
+            Dim firstTab As System.Int32 = source.IndexOf(Microsoft.VisualBasic.ControlChars.Tab)
+            If firstTab >= 0 Then endIndex = System.Math.Min(endIndex, firstTab)
+
+            Dim firstCr As System.Int32 = source.IndexOf(Microsoft.VisualBasic.ControlChars.Cr)
+            If firstCr >= 0 Then endIndex = System.Math.Min(endIndex, firstCr)
+
+            Dim firstLf As System.Int32 = source.IndexOf(Microsoft.VisualBasic.ControlChars.Lf)
+            If firstLf >= 0 Then endIndex = System.Math.Min(endIndex, firstLf)
+
+            If endIndex <= 0 Then
+                Return System.String.Empty
+            End If
+
+            Dim token As System.String = source.Substring(0, endIndex)
+
+            If token.EndsWith(":", System.StringComparison.Ordinal) Then
+                Return token
+            End If
+
+            Return System.String.Empty
+
+        End Function
+
+
+        Private Shared Function GetCustomInputInsertMaximum(
+            ByVal limits As System.Collections.Generic.IDictionary(Of System.String, System.Int32),
+            ByVal token As System.String) As System.Int32
+
+            If limits Is Nothing OrElse System.String.IsNullOrWhiteSpace(token) Then
+                Return 0
+            End If
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Int32) In limits
+                If System.String.Equals(pair.Key, token, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return System.Math.Max(0, pair.Value)
+                End If
+            Next
+
+            Return 0
+
+        End Function
+
+
+        Private Shared Function ValidateCustomInputInsertOccurrenceLimits(
+            ByVal prompt As System.String,
+            ByVal limits As System.Collections.Generic.IDictionary(Of System.String, System.Int32),
+            ByRef violatingToken As System.String,
+            ByRef maximumOccurrences As System.Int32) As System.Boolean
+
+            violatingToken = System.String.Empty
+            maximumOccurrences = 0
+
+            If limits Is Nothing Then
+                Return True
+            End If
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Int32) In limits
+                If pair.Value <= 0 OrElse System.String.IsNullOrWhiteSpace(pair.Key) Then
+                    Continue For
+                End If
+
+                If SharedMethods.CountFreestyleTokenOccurrences(If(prompt, System.String.Empty), pair.Key) > pair.Value Then
+                    violatingToken = pair.Key
+                    maximumOccurrences = pair.Value
+                    Return False
+                End If
+            Next
+
+            Return True
+
+        End Function
+
+
+        Private Shared Function CountFreestyleTokenOccurrences(ByVal source As System.String, ByVal token As System.String) As System.Int32
+
+            If System.String.IsNullOrEmpty(source) OrElse System.String.IsNullOrEmpty(token) Then
+                Return 0
+            End If
+
+            Dim count As System.Int32 = 0
+            Dim searchIndex As System.Int32 = 0
+
+            Do
+                Dim foundIndex As System.Int32 = source.IndexOf(token, searchIndex, System.StringComparison.OrdinalIgnoreCase)
+                If foundIndex < 0 Then
+                    Exit Do
+                End If
+
+                count += 1
+                searchIndex = foundIndex + token.Length
+            Loop While searchIndex < source.Length
+
+            Return count
+
+        End Function
+
+
+        Private Shared Function ValidateFreestyleInsertOccurrenceLimits(ByVal prompt As System.String, ByVal insertOptions As System.Collections.Generic.IEnumerable(Of FreestylePromptInsertOption), ByRef violatingOption As FreestylePromptInsertOption) As System.Boolean
+
+            violatingOption = Nothing
+
+            If insertOptions Is Nothing Then
+                Return True
+            End If
+
+            For Each definition As FreestylePromptInsertOption In insertOptions
+                If definition Is Nothing OrElse definition.MaxOccurrences <= 0 OrElse System.String.IsNullOrWhiteSpace(definition.InsertText) Then
+                    Continue For
+                End If
+
+                If CountFreestyleTokenOccurrences(If(prompt, System.String.Empty), definition.InsertText) > definition.MaxOccurrences Then
+                    violatingOption = definition
+                    Return False
+                End If
+            Next
+
+            Return True
+
+        End Function
+
+
+        Private Shared Sub InsertFreestyleTextAtCaret(ByVal textBox As System.Windows.Forms.TextBox, ByVal textToInsert As System.String)
+
+            If textBox Is Nothing OrElse System.String.IsNullOrEmpty(textToInsert) Then
+                Return
+            End If
+
+            Dim selectionStart As System.Int32 = textBox.SelectionStart
+
+            textBox.Text = textBox.Text.Insert(selectionStart, textToInsert)
+            textBox.SelectionStart = selectionStart + textToInsert.Length
+            textBox.Focus()
+
+        End Sub
+
+
+        Private Shared Function FindFreestylePromptModeById(ByVal modeId As System.String, ByVal modes As System.Collections.Generic.IEnumerable(Of FreestylePromptMode)) As FreestylePromptMode
+
+            If System.String.IsNullOrWhiteSpace(modeId) OrElse modes Is Nothing Then
+                Return Nothing
+            End If
+
+            For Each mode As FreestylePromptMode In modes
+
+                If mode Is Nothing Then
+                    Continue For
+                End If
+
+                If System.String.Equals(mode.Id, modeId, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return mode
+                End If
+
+            Next
+
+            Return Nothing
+
+        End Function
+
+
+        Private Shared Function FindFreestylePromptModeByPrefix(ByVal prefix As System.String, ByVal modes As System.Collections.Generic.IEnumerable(Of FreestylePromptMode)) As FreestylePromptMode
+
+            If System.String.IsNullOrWhiteSpace(prefix) OrElse modes Is Nothing Then
+                Return Nothing
+            End If
+
+            Dim targetPrefix As System.String = prefix.Trim()
+
+            For Each mode As FreestylePromptMode In modes
+
+                If mode Is Nothing Then
+                    Continue For
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(mode.Prefix) AndAlso
+                   System.String.Equals(mode.Prefix.Trim(), targetPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return mode
+                End If
+
+                If mode.Prefixes Is Nothing Then
+                    Continue For
+                End If
+
+                For Each modePrefix As System.String In mode.Prefixes
+
+                    If System.String.IsNullOrWhiteSpace(modePrefix) Then
+                        Continue For
+                    End If
+
+                    If System.String.Equals(modePrefix.Trim(), targetPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                        Return mode
+                    End If
+
+                Next
+
+            Next
+
+            Return Nothing
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptKnownPrefixes(ByVal modes As System.Collections.Generic.IEnumerable(Of FreestylePromptMode)) As System.Collections.Generic.List(Of System.String)
+
+            Dim prefixes As New System.Collections.Generic.List(Of System.String)()
+
+            If modes Is Nothing Then
+                Return prefixes
+            End If
+
+            For Each mode As FreestylePromptMode In modes
+
+                If mode Is Nothing Then
+                    Continue For
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(mode.Prefix) Then
+                    Dim singlePrefix As System.String = mode.Prefix.Trim()
+                    If Not prefixes.Exists(Function(item As System.String) System.String.Equals(item, singlePrefix, System.StringComparison.OrdinalIgnoreCase)) Then
+                        prefixes.Add(singlePrefix)
+                    End If
+                End If
+
+                If mode.Prefixes Is Nothing Then
+                    Continue For
+                End If
+
+                For Each prefix As System.String In mode.Prefixes
+
+                    If System.String.IsNullOrWhiteSpace(prefix) Then
+                        Continue For
+                    End If
+
+                    Dim cleanedPrefix As System.String = prefix.Trim()
+
+                    If Not prefixes.Exists(Function(item As System.String) System.String.Equals(item, cleanedPrefix, System.StringComparison.OrdinalIgnoreCase)) Then
+                        prefixes.Add(cleanedPrefix)
+                    End If
+
+                Next
+
+            Next
+
+            prefixes.Sort(Function(left As System.String, right As System.String) right.Length.CompareTo(left.Length))
+
+            Return prefixes
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptStateDocument(ByVal persistedState As System.String) As System.Xml.Linq.XDocument
+
+            Try
+
+                If Not System.String.IsNullOrWhiteSpace(persistedState) Then
+
+                    Dim document As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Parse(persistedState)
+
+                    If document.Root IsNot Nothing AndAlso
+                       System.String.Equals(document.Root.Name.LocalName, "freestylePromptState", System.StringComparison.OrdinalIgnoreCase) Then
+                        Return document
+                    End If
+
+                End If
+
+            Catch
+            End Try
+
+            Return New System.Xml.Linq.XDocument(
+                New System.Xml.Linq.XElement(
+                    "freestylePromptState",
+                    New System.Xml.Linq.XAttribute("version", "1")))
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptCallerStateElement(ByVal document As System.Xml.Linq.XDocument, ByVal callerId As System.String, ByVal createIfMissing As System.Boolean) As System.Xml.Linq.XElement
+
+            If document Is Nothing OrElse document.Root Is Nothing OrElse System.String.IsNullOrWhiteSpace(callerId) Then
+                Return Nothing
+            End If
+
+            For Each callerElement As System.Xml.Linq.XElement In document.Root.Elements("caller")
+
+                Dim idAttribute As System.Xml.Linq.XAttribute = callerElement.Attribute("id")
+
+                If idAttribute IsNot Nothing AndAlso
+                   System.String.Equals(idAttribute.Value, callerId, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return callerElement
+                End If
+
+            Next
+
+            If Not createIfMissing Then
+                Return Nothing
+            End If
+
+            Dim newCallerElement As New System.Xml.Linq.XElement(
+                "caller",
+                New System.Xml.Linq.XAttribute("id", callerId))
+
+            document.Root.Add(newCallerElement)
+
+            Return newCallerElement
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptStateAttribute(ByVal element As System.Xml.Linq.XElement, ByVal attributeName As System.String) As System.String
+
+            If element Is Nothing OrElse System.String.IsNullOrWhiteSpace(attributeName) Then
+                Return System.String.Empty
+            End If
+
+            Dim attribute As System.Xml.Linq.XAttribute = element.Attribute(attributeName)
+
+            If attribute Is Nothing Then
+                Return System.String.Empty
+            End If
+
+            Return If(attribute.Value, System.String.Empty)
+
+        End Function
+
+
+        Private Shared Function BuildFreestylePromptPersistedState(
+            ByVal callerId As System.String,
+            ByVal existingState As System.String,
+            ByVal selectedModeId As System.String,
+            ByVal selectedPrefix As System.String,
+            ByVal expanded As System.Boolean,
+            ByVal toggleCheckBoxes As System.Collections.Generic.IEnumerable(Of System.Windows.Forms.CheckBox),
+            ByVal argumentTextBoxes As System.Collections.Generic.IDictionary(Of System.Windows.Forms.CheckBox, System.Windows.Forms.TextBox)) As System.String
+
+            If System.String.IsNullOrWhiteSpace(callerId) Then
+                Return If(existingState, System.String.Empty)
+            End If
+
+            Dim document As System.Xml.Linq.XDocument = SharedMethods.GetFreestylePromptStateDocument(existingState)
+            Dim callerElement As System.Xml.Linq.XElement = SharedMethods.GetFreestylePromptCallerStateElement(document, callerId, True)
+
+            If callerElement Is Nothing Then
+                Return If(existingState, System.String.Empty)
+            End If
+
+            callerElement.RemoveNodes()
+            callerElement.RemoveAttributes()
+
+            callerElement.SetAttributeValue("id", callerId)
+            callerElement.SetAttributeValue("modeId", If(selectedModeId, System.String.Empty))
+            callerElement.SetAttributeValue("prefix", If(selectedPrefix, System.String.Empty))
+            callerElement.SetAttributeValue("expanded", If(expanded, "1", "0"))
+
+            If toggleCheckBoxes IsNot Nothing Then
+
+                For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
+
+                    If optionCheckBox Is Nothing Then
+                        Continue For
+                    End If
+
+                    Dim definition As FreestylePromptToggleOption = TryCast(optionCheckBox.Tag, FreestylePromptToggleOption)
+
+                    If definition Is Nothing OrElse System.String.IsNullOrWhiteSpace(definition.Id) Then
+                        Continue For
+                    End If
+
+                    Dim optionElement As New System.Xml.Linq.XElement("option")
+
+                    optionElement.SetAttributeValue("id", definition.Id)
+                    optionElement.SetAttributeValue("checked", If(optionCheckBox.Checked, "1", "0"))
+
+                    If argumentTextBoxes IsNot Nothing AndAlso argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                        Dim argumentValue As System.String = argumentTextBoxes(optionCheckBox).Text.Trim()
+                        If argumentValue.Length > 0 Then
+                            optionElement.SetAttributeValue("argument", argumentValue)
+                        End If
+                    End If
+
+                    callerElement.Add(optionElement)
+
+                Next
+
+            End If
+
+            Return document.ToString(System.Xml.Linq.SaveOptions.DisableFormatting)
+
+        End Function
+
+
+        Private Shared Function ReplaceFreestyleLeadingPrefix(ByVal text As System.String, ByVal knownPrefixes As System.Collections.Generic.IEnumerable(Of System.String), ByVal replacementPrefix As System.String) As System.String
+
+            Dim prompt As System.String = If(text, System.String.Empty).Trim()
+            Dim prefixToApply As System.String = If(replacementPrefix, System.String.Empty).Trim()
+            Dim prefixToRemove As System.String = System.String.Empty
+
+            If knownPrefixes IsNot Nothing Then
+
+                For Each knownPrefix As System.String In knownPrefixes
+
+                    If System.String.IsNullOrWhiteSpace(knownPrefix) Then
+                        Continue For
+                    End If
+
+                    Dim cleanedPrefix As System.String = knownPrefix.Trim()
+
+                    If prompt.StartsWith(cleanedPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                        prefixToRemove = cleanedPrefix
+                        Exit For
+                    End If
+
+                Next
+
+            End If
+
+            If prefixToRemove.Length = 0 Then
+                prefixToRemove = SharedMethods.GetFreestyleLeadingColonToken(prompt)
+            End If
+
+            If prefixToRemove.Length > 0 AndAlso prompt.StartsWith(prefixToRemove, System.StringComparison.OrdinalIgnoreCase) Then
+                prompt = prompt.Substring(prefixToRemove.Length).TrimStart()
+            End If
+
+            If prefixToApply.Length = 0 Then
+                Return prompt.Trim()
+            End If
+
+            Return prefixToApply & If(prompt.Length > 0, " " & prompt.Trim(), System.String.Empty)
+
+        End Function
+
+
+        Private Shared Function TryGetFreestyleToggleTriggerMatch(
+            ByVal text As System.String,
+            ByVal definition As FreestylePromptToggleOption,
+            ByRef matchedTrigger As System.String,
+            ByRef argument As System.String) As System.Boolean
+
+            matchedTrigger = System.String.Empty
+            argument = System.String.Empty
+
+            If definition Is Nothing Then
+                Return False
+            End If
+
+            Dim source As System.String = If(text, System.String.Empty)
+
+            If definition.HasArgument Then
+
+                Dim argumentPrefix As System.String = System.String.Empty
+                Dim argumentSuffix As System.String = System.String.Empty
+
+                If Not System.String.IsNullOrWhiteSpace(definition.ArgumentTemplate) Then
+
+                    Dim template As System.String = definition.ArgumentTemplate
+                    Dim placeholder As System.String = If(System.String.IsNullOrWhiteSpace(definition.ArgumentPlaceholder), "[value]", definition.ArgumentPlaceholder)
+                    Dim placeholderIndex As System.Int32 = template.IndexOf(placeholder, System.StringComparison.Ordinal)
+
+                    If placeholderIndex >= 0 Then
+                        argumentPrefix = template.Substring(0, placeholderIndex)
+                        argumentSuffix = template.Substring(placeholderIndex + placeholder.Length)
+                    Else
+                        argumentPrefix = template
+                    End If
+
+                Else
+
+                    argumentPrefix = If(definition.ArgumentPrefix, System.String.Empty)
+                    argumentSuffix = If(definition.ArgumentSuffix, System.String.Empty)
+
+                End If
+
+                If argumentPrefix.Length > 0 Then
+
+                    Dim searchIndex As System.Int32 = 0
+
+                    Do
+
+                        Dim prefixIndex As System.Int32 = source.IndexOf(argumentPrefix, searchIndex, System.StringComparison.OrdinalIgnoreCase)
+
+                        If prefixIndex < 0 Then
+                            Exit Do
+                        End If
+
+                        Dim valueStart As System.Int32 = prefixIndex + argumentPrefix.Length
+                        Dim valueEnd As System.Int32 = -1
+                        Dim triggerEnd As System.Int32 = -1
+
+                        If argumentSuffix.Length > 0 Then
+
+                            valueEnd = source.IndexOf(argumentSuffix, valueStart, System.StringComparison.OrdinalIgnoreCase)
+
+                            If valueEnd >= 0 Then
+                                triggerEnd = valueEnd + argumentSuffix.Length
+                            End If
+
+                        Else
+
+                            valueEnd = valueStart
+
+                            While valueEnd < source.Length AndAlso Not System.Char.IsWhiteSpace(source(valueEnd))
+                                valueEnd += 1
+                            End While
+
+                            triggerEnd = valueEnd
+
+                        End If
+
+                        If valueEnd >= valueStart AndAlso triggerEnd >= valueStart Then
+
+                            Dim extractedArgument As System.String = source.Substring(valueStart, valueEnd - valueStart)
+
+                            If extractedArgument.Length > 0 OrElse Not definition.ArgumentRequired Then
+                                matchedTrigger = source.Substring(prefixIndex, triggerEnd - prefixIndex)
+                                argument = extractedArgument
+                                Return True
+                            End If
+
+                        End If
+
+                        searchIndex = prefixIndex + System.Math.Max(1, argumentPrefix.Length)
+
+                    Loop While searchIndex < source.Length
+
+                End If
+
+            End If
+
+            Dim fixedTrigger As System.String = If(definition.Trigger, System.String.Empty).Trim()
+
+            If fixedTrigger.Length > 0 Then
+
+                Dim fixedIndex As System.Int32 = source.IndexOf(fixedTrigger, System.StringComparison.OrdinalIgnoreCase)
+
+                If fixedIndex >= 0 Then
+                    matchedTrigger = source.Substring(fixedIndex, fixedTrigger.Length)
+                    Return True
+                End If
+
+            End If
+
+            Return False
+
+        End Function
+
+
+        Private Shared Function RemoveFreestyleToggleTriggers(ByVal text As System.String, ByVal definition As FreestylePromptToggleOption) As System.String
+
+            Dim result As System.String = If(text, System.String.Empty)
+
+            If definition Is Nothing Then
+                Return result
+            End If
+
+            Do
+
+                Dim matchedTrigger As System.String = System.String.Empty
+                Dim argument As System.String = System.String.Empty
+
+                If Not SharedMethods.TryGetFreestyleToggleTriggerMatch(result, definition, matchedTrigger, argument) Then
+                    Exit Do
+                End If
+
+                If matchedTrigger.Length = 0 Then
+                    Exit Do
+                End If
+
+                Dim matchIndex As System.Int32 = result.IndexOf(matchedTrigger, System.StringComparison.OrdinalIgnoreCase)
+
+                If matchIndex < 0 Then
+                    Exit Do
+                End If
+
+                Dim removeStart As System.Int32 = matchIndex
+                Dim removeLength As System.Int32 = matchedTrigger.Length
+                Dim characterBefore As System.Int32 = removeStart - 1
+                Dim characterAfter As System.Int32 = removeStart + removeLength
+
+                If characterBefore >= 0 AndAlso characterAfter < result.Length AndAlso
+                   result(characterBefore) = " "c AndAlso result(characterAfter) = " "c Then
+
+                    removeLength += 1
+
+                ElseIf removeStart = 0 AndAlso characterAfter < result.Length AndAlso result(characterAfter) = " "c Then
+
+                    removeLength += 1
+
+                ElseIf characterAfter = result.Length AndAlso characterBefore >= 0 AndAlso result(characterBefore) = " "c Then
+
+                    removeStart -= 1
+                    removeLength += 1
+
+                End If
+
+                result = result.Remove(removeStart, removeLength)
+
+            Loop
+
+            Return result
+
+        End Function
+
+
+        Private Shared Function AppendFreestyleToggleTrigger(ByVal text As System.String, ByVal trigger As System.String) As System.String
+
+            Dim result As System.String = If(text, System.String.Empty)
+            Dim cleanedTrigger As System.String = If(trigger, System.String.Empty).Trim()
+
+            If cleanedTrigger.Length = 0 Then
+                Return result
+            End If
+
+            If result.Length = 0 Then
+                Return cleanedTrigger
+            End If
+
+            If System.Char.IsWhiteSpace(result(result.Length - 1)) Then
+                Return result & cleanedTrigger
+            End If
+
+            Return result & " " & cleanedTrigger
+
+        End Function
+
+
+        Public Shared Function ShowFreestylePromptForm(ByVal options As FreestylePromptOptions) As FreestylePromptResult
+
+            Dim returnValue As New FreestylePromptResult()
+
+            If options Is Nothing Then
+                Return returnValue
+            End If
+
+            Try
+
+                Dim workingArea As System.Drawing.Rectangle = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea
+
+                Using standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+
+                    Using headingFont As New System.Drawing.Font(standardFont.FontFamily, standardFont.Size + 2.0F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point)
+
+                        Using sectionFont As New System.Drawing.Font(standardFont.FontFamily, standardFont.Size, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point)
+
+                            Using freestyleForm As New System.Windows.Forms.Form()
+
+                                Dim lineHeight As System.Int32 = System.Windows.Forms.TextRenderer.MeasureText("Ag", standardFont).Height
+                                Dim scaleFactor As System.Double = System.Math.Max(0.8R, lineHeight / 15.0R)
+
+                                Dim outerPadding As System.Int32 = System.Math.Max(1, CInt(System.Math.Round(16.0R * scaleFactor)))
+                                Dim smallGap As System.Int32 = System.Math.Max(1, CInt(System.Math.Round(5.0R * scaleFactor)))
+                                Dim normalGap As System.Int32 = System.Math.Max(1, CInt(System.Math.Round(8.0R * scaleFactor)))
+                                Dim largeGap As System.Int32 = System.Math.Max(1, CInt(System.Math.Round(13.0R * scaleFactor)))
+                                Dim buttonPadX As System.Int32 = System.Math.Max(1, CInt(System.Math.Round(5.0R * scaleFactor)))
+                                Dim buttonPadY As System.Int32 = System.Math.Max(1, CInt(System.Math.Round(2.0R * scaleFactor)))
+
+                                Dim maximumClientWidth As System.Int32 = System.Math.Max(1, workingArea.Width - 60)
+                                Dim maximumClientHeight As System.Int32 = System.Math.Max(1, workingArea.Height - 60)
+
+                                Dim preferredWidth As System.Int32 = CInt(System.Math.Round(workingArea.Width * 0.312R))
+                                preferredWidth = System.Math.Max(420, preferredWidth)
+                                preferredWidth = System.Math.Min(preferredWidth, maximumClientWidth)
+
+                                Dim preferredHeight As System.Int32 = CInt(System.Math.Round(workingArea.Height * 0.56R))
+                                preferredHeight = System.Math.Max(lineHeight * 27, preferredHeight)
+                                preferredHeight = System.Math.Min(preferredHeight, maximumClientHeight)
+
+                                Dim minimumPromptHeight As System.Int32 = lineHeight * 7
+
+                                Dim layoutBusy As System.Boolean = False
+                                Dim expanded As System.Boolean = False
+                                Dim collapsedClientHeight As System.Int32 = preferredHeight
+                                Dim quickSelectedPrefix As System.String = System.String.Empty
+                                Dim quickSelectedModeId As System.String = System.String.Empty
+
+                                freestyleForm.Opacity = 0
+                                freestyleForm.Text = If(System.String.IsNullOrWhiteSpace(options.Title), "Freestyle", options.Title)
+                                freestyleForm.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
+                                freestyleForm.StartPosition = System.Windows.Forms.FormStartPosition.Manual
+                                freestyleForm.MaximizeBox = False
+                                freestyleForm.MinimizeBox = False
+                                freestyleForm.ShowInTaskbar = False
+                                freestyleForm.TopMost = True
+                                freestyleForm.KeyPreview = True
+                                freestyleForm.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
+                                freestyleForm.Font = standardFont
+                                freestyleForm.ClientSize = New System.Drawing.Size(preferredWidth, preferredHeight)
+
+                                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                                freestyleForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+
+                                ' =========================================================
+                                ' ROOT
+                                ' =========================================================
+
+                                Dim root As New System.Windows.Forms.TableLayoutPanel() With {
+                                    .Dock = System.Windows.Forms.DockStyle.Fill,
+                                    .ColumnCount = 1,
+                                    .RowCount = 4,
+                                    .Padding = New System.Windows.Forms.Padding(outerPadding),
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                root.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                                root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, lineHeight * 10))
+                                root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                                freestyleForm.Controls.Add(root)
+
+                                ' =========================================================
+                                ' HEADER
+                                ' =========================================================
+
+                                Dim header As New System.Windows.Forms.TableLayoutPanel() With {
+                                    .Dock = System.Windows.Forms.DockStyle.Fill,
+                                    .ColumnCount = 2,
+                                    .RowCount = 1,
+                                    .AutoSize = True,
+                                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                    .Margin = New System.Windows.Forms.Padding(0, 0, 0, normalGap)
+                                }
+
+                                header.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                header.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
+                                header.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                                Dim headingLabel As New System.Windows.Forms.Label() With {
+                                    .Text = If(options.Heading, System.String.Empty),
+                                    .Font = headingFont,
+                                    .AutoSize = True,
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                header.Controls.Add(headingLabel, 0, 0)
+
+                                If Not System.String.IsNullOrWhiteSpace(options.ModelText) Then
+
+                                    Dim modelLabel As New System.Windows.Forms.Label() With {
+                                        .Text = options.ModelText,
+                                        .Font = standardFont,
+                                        .AutoSize = True,
+                                        .Anchor = System.Windows.Forms.AnchorStyles.Top Or System.Windows.Forms.AnchorStyles.Right,
+                                        .TextAlign = System.Drawing.ContentAlignment.MiddleRight,
+                                        .Margin = New System.Windows.Forms.Padding(largeGap, 3, 0, 0)
+                                    }
+
+                                    header.Controls.Add(modelLabel, 1, 0)
+
+                                End If
+
+                                root.Controls.Add(header, 0, 0)
+
+                                ' =========================================================
+                                ' PROMPT
+                                ' =========================================================
+
+                                Dim promptTextBox As New System.Windows.Forms.TextBox() With {
+                                    .Text = If(options.InitialPrompt, System.String.Empty),
+                                    .Font = standardFont,
+                                    .Multiline = True,
+                                    .AcceptsReturn = True,
+                                    .AcceptsTab = True,
+                                    .WordWrap = True,
+                                    .ScrollBars = System.Windows.Forms.ScrollBars.Vertical,
+                                    .Dock = System.Windows.Forms.DockStyle.Fill,
+                                    .MinimumSize = New System.Drawing.Size(0, minimumPromptHeight),
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                root.Controls.Add(promptTextBox, 0, 1)
+
+                                ' =========================================================
+                                ' SETTINGS HOST
+                                '
+                                ' IMPORTANT:
+                                ' Margin belongs to the TableLayout cell.
+                                ' The root-row height therefore always includes
+                                ' settingsHost.Margin.Vertical.
+                                ' =========================================================
+
+                                Dim settingsHost As New System.Windows.Forms.Panel() With {
+                                    .Dock = System.Windows.Forms.DockStyle.Fill,
+                                    .AutoScroll = True,
+                                    .Margin = New System.Windows.Forms.Padding(0, normalGap, 0, normalGap)
+                                }
+
+                                Dim settingsCanvas As New System.Windows.Forms.Panel() With {
+                                    .AutoSize = False,
+                                    .Margin = New System.Windows.Forms.Padding(0),
+                                    .Padding = New System.Windows.Forms.Padding(0),
+                                    .Location = New System.Drawing.Point(0, 0)
+                                }
+
+                                settingsHost.Controls.Add(settingsCanvas)
+                                root.Controls.Add(settingsHost, 0, 2)
+
+                                ' =========================================================
+                                ' SHORTCUTS
+                                ' =========================================================
+
+                                Dim shortcutText As System.String = "Ctrl+Enter Run"
+
+                                If options.PromptLibraryEnabled Then
+                                    shortcutText &= "   •   / Prompt library   •   Empty + Run opens Prompt library"
+                                End If
+
+                                If Not System.String.IsNullOrWhiteSpace(options.LastPrompt) Then
+                                    shortcutText &= "   •   Ctrl+P Previous prompt"
+                                End If
+
+                                If options.ShowShortCommandsHint Then shortcutText &= "   •   ? Short commands"
+
+                                Dim shortcutLabel As New System.Windows.Forms.Label() With {
+                                    .Text = shortcutText,
+                                    .Font = standardFont,
+                                    .AutoSize = False,
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                settingsCanvas.Controls.Add(shortcutLabel)
+
+                                ' =========================================================
+                                ' OUTPUT
+                                ' =========================================================
+
+                                Dim modeLabel As New System.Windows.Forms.Label() With {
+                                    .Text = If(options.ModeCaption, "Output"),
+                                    .Font = sectionFont,
+                                    .AutoSize = True,
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                settingsCanvas.Controls.Add(modeLabel)
+
+                                Dim modeCombo As New System.Windows.Forms.ComboBox() With {
+                                    .DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                                    .Font = standardFont,
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                settingsCanvas.Controls.Add(modeCombo)
+
+                                Dim defaultModeIndex As System.Int32 = -1
+
+                                For modeIndex As System.Int32 = 0 To options.Modes.Count - 1
+
+                                    Dim modeItem As FreestylePromptMode = options.Modes(modeIndex)
+
+                                    If modeItem.Prefixes Is Nothing Then
+                                        modeItem.Prefixes = New System.Collections.Generic.List(Of System.String)()
+                                    End If
+
+                                    If modeItem.Prefixes.Count = 0 AndAlso Not System.String.IsNullOrWhiteSpace(modeItem.Prefix) Then
+                                        modeItem.Prefixes.Add(modeItem.Prefix)
+                                    End If
+
+                                    If System.String.IsNullOrWhiteSpace(modeItem.ManualSyntax) AndAlso modeItem.Prefixes.Count > 0 Then
+                                        modeItem.ManualSyntax = System.String.Join(" / ", modeItem.Prefixes)
+                                    End If
+
+                                    modeCombo.Items.Add(modeItem)
+
+                                    If modeItem.IsDefault Then
+                                        defaultModeIndex = modeIndex
+                                    End If
+
+                                Next
+
+                                If modeCombo.Items.Count > 0 Then
+
+                                    If defaultModeIndex < 0 Then
+                                        defaultModeIndex = 0
+                                    End If
+
+                                    modeCombo.SelectedIndex = defaultModeIndex
+
+                                End If
+
+                                ' =========================================================
+                                ' PREFIX SYNCHRONISATION
+                                ' =========================================================
+
+                                Dim synchronizingMode As System.Boolean = False
+                                Dim synchronizingToggleOptions As System.Boolean = False
+                                Dim synchronizeToggleOptionsFromPrompt As System.Action = Nothing
+                                Dim synchronizePromptFromCheckedToggleOptions As System.Action = Nothing
+                                Dim updateLayout As System.Action = Nothing
+                                Dim defaultMode As FreestylePromptMode = Nothing
+                                Dim lastAvailableMode As FreestylePromptMode = Nothing
+
+                                If defaultModeIndex >= 0 AndAlso defaultModeIndex < modeCombo.Items.Count Then
+
+                                    defaultMode = TryCast(modeCombo.Items(defaultModeIndex), FreestylePromptMode)
+
+                                    If defaultMode IsNot Nothing AndAlso defaultMode.IsAvailable Then
+                                        lastAvailableMode = defaultMode
+                                    End If
+
+                                End If
+
+                                AddHandler promptTextBox.TextChanged,
+                                    Sub(sender As System.Object, e As System.EventArgs)
+
+                                        If Not synchronizingMode Then
+
+                                            Dim match As System.Tuple(Of FreestylePromptMode, System.String) = SharedMethods.FindFreestylePromptMode(promptTextBox.Text, options.Modes)
+
+                                            synchronizingMode = True
+
+                                            Try
+
+                                                If match IsNot Nothing Then
+
+                                                    modeCombo.SelectedItem = match.Item1
+
+                                                Else
+
+                                                    Dim manualPrefix As System.String = SharedMethods.GetFreestyleLeadingColonToken(promptTextBox.Text)
+
+                                                    If manualPrefix.Length > 0 AndAlso defaultMode IsNot Nothing Then
+                                                        modeCombo.SelectedItem = defaultMode
+                                                    End If
+
+                                                End If
+
+                                            Finally
+                                                synchronizingMode = False
+                                            End Try
+
+                                        End If
+
+                                        If synchronizeToggleOptionsFromPrompt IsNot Nothing Then
+                                            synchronizeToggleOptionsFromPrompt.Invoke()
+                                        End If
+
+                                    End Sub
+
+                                AddHandler modeCombo.SelectedIndexChanged,
+                                    Sub(sender As System.Object, e As System.EventArgs)
+
+                                        If synchronizingMode Then
+                                            Return
+                                        End If
+
+                                        Dim selectedMode As FreestylePromptMode = TryCast(modeCombo.SelectedItem, FreestylePromptMode)
+
+                                        If selectedMode Is Nothing Then
+                                            Return
+                                        End If
+
+                                        If Not selectedMode.IsAvailable Then
+
+                                            synchronizingMode = True
+
+                                            Try
+
+                                                If lastAvailableMode IsNot Nothing Then
+                                                    modeCombo.SelectedItem = lastAvailableMode
+                                                ElseIf defaultMode IsNot Nothing Then
+                                                    modeCombo.SelectedItem = defaultMode
+                                                End If
+
+                                            Finally
+                                                synchronizingMode = False
+                                            End Try
+
+                                            If Not System.String.IsNullOrWhiteSpace(selectedMode.UnavailableReason) Then
+                                                SharedMethods.ShowCustomMessageBox(selectedMode.UnavailableReason, "Freestyle")
+                                            End If
+
+                                            Return
+
+                                        End If
+
+                                        lastAvailableMode = selectedMode
+
+                                        Dim source As System.String = promptTextBox.Text
+                                        Dim match As System.Tuple(Of FreestylePromptMode, System.String) = SharedMethods.FindFreestylePromptMode(source, options.Modes)
+                                        Dim existingPrefix As System.String = System.String.Empty
+
+                                        If match IsNot Nothing Then
+                                            existingPrefix = match.Item2
+                                        Else
+                                            existingPrefix = SharedMethods.GetFreestyleLeadingColonToken(source)
+                                        End If
+
+                                        If existingPrefix.Length = 0 Then
+                                            Return
+                                        End If
+
+                                        Dim leadingCount As System.Int32 = source.Length - source.TrimStart().Length
+                                        Dim leadingWhitespace As System.String = source.Substring(0, leadingCount)
+                                        Dim trimmedSource As System.String = source.Substring(leadingCount)
+                                        Dim bodyStart As System.Int32 = System.Math.Min(existingPrefix.Length, trimmedSource.Length)
+                                        Dim body As System.String = trimmedSource.Substring(bodyStart).TrimStart()
+                                        Dim replacement As System.String = If(selectedMode.Prefix, System.String.Empty).Trim()
+
+                                        synchronizingMode = True
+
+                                        Try
+
+                                            If replacement.Length = 0 Then
+                                                promptTextBox.Text = leadingWhitespace & body
+                                            Else
+                                                promptTextBox.Text = leadingWhitespace & replacement & If(body.Length > 0, " " & body, System.String.Empty)
+                                            End If
+
+                                            promptTextBox.SelectionStart = promptTextBox.TextLength
+
+                                        Finally
+                                            synchronizingMode = False
+                                        End Try
+
+                                    End Sub
+
+                                ' =========================================================
+                                ' CONTEXT
+                                ' =========================================================
+
+                                Dim contextLabel As New System.Windows.Forms.Label() With {
+                                    .Text = "Add context",
+                                    .Font = sectionFont,
+                                    .AutoSize = True,
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                settingsCanvas.Controls.Add(contextLabel)
+
+                                Dim contextFlow As New System.Windows.Forms.FlowLayoutPanel() With {
+                                    .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                                    .WrapContents = True,
+                                    .AutoSize = False,
+                                    .Margin = New System.Windows.Forms.Padding(0),
+                                    .Padding = New System.Windows.Forms.Padding(0)
+                                }
+
+                                settingsCanvas.Controls.Add(contextFlow)
+
+                                Dim promptToolTip As New System.Windows.Forms.ToolTip()
+
+                                For Each insertDefinition As FreestylePromptInsertOption In options.InsertOptions
+
+                                    Dim insertButton As New System.Windows.Forms.Button() With {
+                                        .Text = insertDefinition.Text,
+                                        .AutoSize = True,
+                                        .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                        .Font = standardFont,
+                                        .Padding = New System.Windows.Forms.Padding(buttonPadX, buttonPadY, buttonPadX, buttonPadY),
+                                        .Tag = insertDefinition,
+                                        .Margin = New System.Windows.Forms.Padding(0, 0, normalGap, smallGap)
+                                    }
+
+                                    promptToolTip.SetToolTip(insertButton, insertDefinition.Description)
+
+                                    AddHandler insertButton.Click,
+                                        Sub(sender As System.Object, e As System.EventArgs)
+
+                                            Dim clickedButton As System.Windows.Forms.Button = TryCast(sender, System.Windows.Forms.Button)
+
+                                            If clickedButton Is Nothing Then
+                                                Return
+                                            End If
+
+                                            Dim clickedDefinition As FreestylePromptInsertOption = TryCast(clickedButton.Tag, FreestylePromptInsertOption)
+
+                                            If clickedDefinition Is Nothing Then
+                                                Return
+                                            End If
+
+                                            Dim textToInsert As System.String = clickedDefinition.InsertText
+
+                                            If clickedDefinition.RequiresValue Then
+
+                                                Dim value As System.String = SharedMethods.ShowCustomInputBox(clickedDefinition.ValuePrompt, clickedDefinition.ValueTitle, True, System.String.Empty)
+
+                                                If System.String.IsNullOrWhiteSpace(value) OrElse value.Equals("ESC", System.StringComparison.OrdinalIgnoreCase) Then
+                                                    promptTextBox.Focus()
+                                                    Return
+                                                End If
+
+                                                textToInsert = clickedDefinition.BuildInsertText(value)
+
+                                            End If
+
+                                            If System.String.IsNullOrWhiteSpace(textToInsert) Then
+                                                promptTextBox.Focus()
+                                                Return
+                                            End If
+
+                                            If clickedDefinition.MaxOccurrences > 0 AndAlso
+                                               Not System.String.IsNullOrWhiteSpace(clickedDefinition.InsertText) AndAlso
+                                               SharedMethods.CountFreestyleTokenOccurrences(promptTextBox.Text, clickedDefinition.InsertText) >= clickedDefinition.MaxOccurrences Then
+
+                                                SharedMethods.ShowCustomMessageBox(
+                                                    "'" & clickedDefinition.Text & "' can be included at most " & clickedDefinition.MaxOccurrences.ToString(System.Globalization.CultureInfo.InvariantCulture) & " time(s) in one Freestyle request.",
+                                                    "Freestyle")
+                                                promptTextBox.Focus()
+                                                Return
+                                            End If
+
+                                            SharedMethods.InsertFreestyleTextAtCaret(promptTextBox, textToInsert)
+
+                                        End Sub
+
+                                    contextFlow.Controls.Add(insertButton)
+
+                                Next
+
+                                contextLabel.Visible = options.InsertOptions.Count > 0
+                                contextFlow.Visible = options.InsertOptions.Count > 0
+
+                                ' =========================================================
+                                ' MORE OPTIONS
+                                ' =========================================================
+
+                                Dim moreButton As New System.Windows.Forms.Button() With {
+                                    .Text = "More options ▸",
+                                    .AutoSize = True,
+                                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                    .Font = standardFont,
+                                    .Padding = New System.Windows.Forms.Padding(buttonPadX, buttonPadY, buttonPadX, buttonPadY),
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                settingsCanvas.Controls.Add(moreButton)
+
+                                ' =========================================================
+                                ' ADVANCED
+                                ' =========================================================
+
+                                Dim advancedGrid As New System.Windows.Forms.TableLayoutPanel() With {
+                                    .ColumnCount = 2,
+                                    .RowCount = 0,
+                                    .AutoSize = True,
+                                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                    .Visible = False,
+                                    .Padding = New System.Windows.Forms.Padding(0),
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                advancedGrid.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 50.0F))
+                                advancedGrid.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 50.0F))
+
+                                settingsCanvas.Controls.Add(advancedGrid)
+
+                                Dim toggleCheckBoxes As New System.Collections.Generic.List(Of System.Windows.Forms.CheckBox)()
+                                Dim argumentTextBoxes As New System.Collections.Generic.Dictionary(Of System.Windows.Forms.CheckBox, System.Windows.Forms.TextBox)()
+                                Dim toggleById As New System.Collections.Generic.Dictionary(Of System.String, System.Windows.Forms.CheckBox)(System.StringComparer.OrdinalIgnoreCase)
+
+                                Dim visibleSectionIndex As System.Int32 = 0
+
+                                For Each section As FreestylePromptSection In options.Sections
+
+                                    If section Is Nothing OrElse section.Options Is Nothing OrElse section.Options.Count = 0 Then
+                                        Continue For
+                                    End If
+
+                                    Dim sectionRow As System.Int32 = visibleSectionIndex \ 2
+                                    Dim sectionColumn As System.Int32 = visibleSectionIndex Mod 2
+
+                                    If advancedGrid.RowCount <= sectionRow Then
+                                        advancedGrid.RowCount = sectionRow + 1
+                                        advancedGrid.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                                    End If
+
+                                    Dim sectionPanel As New System.Windows.Forms.TableLayoutPanel() With {
+                                        .Dock = System.Windows.Forms.DockStyle.Fill,
+                                        .ColumnCount = 1,
+                                        .RowCount = 2,
+                                        .AutoSize = True,
+                                        .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                        .Padding = New System.Windows.Forms.Padding(0),
+                                        .Margin = New System.Windows.Forms.Padding(If(sectionColumn = 0, 0, normalGap), 0, If(sectionColumn = 0, normalGap, 0), normalGap)
+                                    }
+
+                                    sectionPanel.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                    sectionPanel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                                    sectionPanel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                                    Dim sectionLabel As New System.Windows.Forms.Label() With {
+                                        .Text = section.Caption,
+                                        .Font = sectionFont,
+                                        .AutoSize = True,
+                                        .Margin = New System.Windows.Forms.Padding(0, 0, 0, smallGap)
+                                    }
+
+                                    sectionPanel.Controls.Add(sectionLabel, 0, 0)
+
+                                    Dim optionsTable As New System.Windows.Forms.TableLayoutPanel() With {
+                                        .Dock = System.Windows.Forms.DockStyle.Top,
+                                        .ColumnCount = 1,
+                                        .RowCount = 0,
+                                        .AutoSize = True,
+                                        .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                        .Padding = New System.Windows.Forms.Padding(0),
+                                        .Margin = New System.Windows.Forms.Padding(0)
+                                    }
+
+                                    optionsTable.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+
+                                    Dim optionRow As System.Int32 = 0
+
+                                    For Each definition As FreestylePromptToggleOption In section.Options
+
+                                        optionsTable.RowCount = optionRow + 1
+                                        optionsTable.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                                        Dim optionHost As New System.Windows.Forms.TableLayoutPanel() With {
+                                            .Dock = System.Windows.Forms.DockStyle.Top,
+                                            .ColumnCount = 1,
+                                            .RowCount = If(definition.HasArgument, 2, 1),
+                                            .AutoSize = True,
+                                            .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                            .Padding = New System.Windows.Forms.Padding(0),
+                                            .Margin = New System.Windows.Forms.Padding(0, 1, 0, 3)
+                                        }
+
+                                        optionHost.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                        optionHost.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                                        If definition.HasArgument Then
+                                            optionHost.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                                        End If
+
+                                        Dim displayText As System.String = definition.Text
+
+                                        If Not System.String.IsNullOrWhiteSpace(definition.ManualSyntax) Then
+                                            displayText &= "   [" & definition.ManualSyntax & "]"
+                                        End If
+
+                                        Dim optionCheckBox As New System.Windows.Forms.CheckBox() With {
+                                            .Text = displayText,
+                                            .Checked = definition.IsChecked,
+                                            .AutoSize = False,
+                                            .AutoEllipsis = True,
+                                            .Font = standardFont,
+                                            .Tag = definition,
+                                            .Dock = System.Windows.Forms.DockStyle.Top,
+                                            .Height = lineHeight + smallGap + 4,
+                                            .Margin = New System.Windows.Forms.Padding(0, 1, 0, 1)
+                                        }
+
+                                        promptToolTip.SetToolTip(optionCheckBox, displayText & If(System.String.IsNullOrWhiteSpace(definition.Description), System.String.Empty, System.Environment.NewLine & definition.Description))
+
+                                        optionHost.Controls.Add(optionCheckBox, 0, 0)
+                                        toggleCheckBoxes.Add(optionCheckBox)
+
+                                        If Not System.String.IsNullOrWhiteSpace(definition.Id) AndAlso Not toggleById.ContainsKey(definition.Id) Then
+                                            toggleById.Add(definition.Id, optionCheckBox)
+                                        End If
+
+                                        If definition.HasArgument Then
+
+                                            Dim argumentTextBox As New System.Windows.Forms.TextBox() With {
+                                                .Font = standardFont,
+                                                .Dock = System.Windows.Forms.DockStyle.Top,
+                                                .Enabled = definition.IsChecked,
+                                                .Margin = New System.Windows.Forms.Padding(22, 2, 0, 2)
+                                            }
+
+                                            promptToolTip.SetToolTip(argumentTextBox, definition.ArgumentHint)
+
+                                            optionHost.Controls.Add(argumentTextBox, 0, 1)
+                                            argumentTextBoxes.Add(optionCheckBox, argumentTextBox)
+
+                                        End If
+
+                                        AddHandler optionCheckBox.CheckedChanged,
+                                            Sub(sender As System.Object, e As System.EventArgs)
+
+                                                Dim changedCheckBox As System.Windows.Forms.CheckBox = TryCast(sender, System.Windows.Forms.CheckBox)
+
+                                                If changedCheckBox Is Nothing Then
+                                                    Return
+                                                End If
+
+                                                Dim changedDefinition As FreestylePromptToggleOption = TryCast(changedCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                If changedDefinition Is Nothing Then
+                                                    Return
+                                                End If
+
+                                                Dim linkedTextBox As System.Windows.Forms.TextBox = Nothing
+
+                                                If argumentTextBoxes.ContainsKey(changedCheckBox) Then
+                                                    linkedTextBox = argumentTextBoxes(changedCheckBox)
+                                                    linkedTextBox.Enabled = changedCheckBox.Checked
+                                                End If
+
+                                                If synchronizingToggleOptions Then
+                                                    Return
+                                                End If
+
+                                                synchronizingToggleOptions = True
+
+                                                Try
+
+                                                    Dim updatedPrompt As System.String = promptTextBox.Text
+
+                                                    If changedCheckBox.Checked Then
+
+                                                        Dim matchedTrigger As System.String = System.String.Empty
+                                                        Dim matchedArgument As System.String = System.String.Empty
+
+                                                        If SharedMethods.TryGetFreestyleToggleTriggerMatch(updatedPrompt, changedDefinition, matchedTrigger, matchedArgument) Then
+
+                                                            If linkedTextBox IsNot Nothing AndAlso matchedArgument.Length > 0 Then
+                                                                linkedTextBox.Text = matchedArgument
+                                                            End If
+
+                                                        Else
+
+                                                            Dim argumentValue As System.String = System.String.Empty
+
+                                                            If linkedTextBox IsNot Nothing Then
+                                                                argumentValue = linkedTextBox.Text.Trim()
+                                                            End If
+
+                                                            Dim triggerToInsert As System.String = changedDefinition.BuildTrigger(argumentValue)
+
+                                                            If Not System.String.IsNullOrWhiteSpace(triggerToInsert) Then
+                                                                updatedPrompt = SharedMethods.AppendFreestyleToggleTrigger(updatedPrompt, triggerToInsert)
+                                                            End If
+
+                                                        End If
+
+                                                    Else
+
+                                                        updatedPrompt = SharedMethods.RemoveFreestyleToggleTriggers(updatedPrompt, changedDefinition)
+
+                                                    End If
+
+                                                    If Not System.String.Equals(updatedPrompt, promptTextBox.Text, System.StringComparison.Ordinal) Then
+                                                        Dim oldSelectionStart As System.Int32 = promptTextBox.SelectionStart
+                                                        promptTextBox.Text = updatedPrompt
+                                                        promptTextBox.SelectionStart = System.Math.Min(oldSelectionStart, promptTextBox.TextLength)
+                                                    End If
+
+                                                Finally
+
+                                                    synchronizingToggleOptions = False
+
+                                                End Try
+
+                                                If changedCheckBox.Checked AndAlso linkedTextBox IsNot Nothing Then
+                                                    linkedTextBox.Focus()
+                                                End If
+
+                                            End Sub
+
+                                        If definition.HasArgument Then
+
+                                            Dim argumentTextBoxForHandler As System.Windows.Forms.TextBox = argumentTextBoxes(optionCheckBox)
+                                            argumentTextBoxForHandler.Tag = optionCheckBox
+
+                                            AddHandler argumentTextBoxForHandler.TextChanged,
+                                                Sub(sender As System.Object, e As System.EventArgs)
+
+                                                    If synchronizingToggleOptions Then
+                                                        Return
+                                                    End If
+
+                                                    Dim changedTextBox As System.Windows.Forms.TextBox = TryCast(sender, System.Windows.Forms.TextBox)
+
+                                                    If changedTextBox Is Nothing Then
+                                                        Return
+                                                    End If
+
+                                                    Dim linkedCheckBox As System.Windows.Forms.CheckBox = TryCast(changedTextBox.Tag, System.Windows.Forms.CheckBox)
+
+                                                    If linkedCheckBox Is Nothing OrElse Not linkedCheckBox.Checked Then
+                                                        Return
+                                                    End If
+
+                                                    Dim changedDefinition As FreestylePromptToggleOption = TryCast(linkedCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                    If changedDefinition Is Nothing Then
+                                                        Return
+                                                    End If
+
+                                                    synchronizingToggleOptions = True
+
+                                                    Try
+
+                                                        Dim updatedPrompt As System.String = SharedMethods.RemoveFreestyleToggleTriggers(promptTextBox.Text, changedDefinition)
+                                                        Dim triggerToInsert As System.String = changedDefinition.BuildTrigger(changedTextBox.Text.Trim())
+
+                                                        If Not System.String.IsNullOrWhiteSpace(triggerToInsert) Then
+                                                            updatedPrompt = SharedMethods.AppendFreestyleToggleTrigger(updatedPrompt, triggerToInsert)
+                                                        End If
+
+                                                        If Not System.String.Equals(updatedPrompt, promptTextBox.Text, System.StringComparison.Ordinal) Then
+                                                            Dim oldSelectionStart As System.Int32 = promptTextBox.SelectionStart
+                                                            promptTextBox.Text = updatedPrompt
+                                                            promptTextBox.SelectionStart = System.Math.Min(oldSelectionStart, promptTextBox.TextLength)
+                                                        End If
+
+                                                    Finally
+
+                                                        synchronizingToggleOptions = False
+
+                                                    End Try
+
+                                                End Sub
+
+                                        End If
+
+                                        optionsTable.Controls.Add(optionHost, 0, optionRow)
+
+                                        optionRow += 1
+
+                                    Next
+
+                                    sectionPanel.Controls.Add(optionsTable, 0, 1)
+                                    advancedGrid.Controls.Add(sectionPanel, sectionColumn, sectionRow)
+
+                                    visibleSectionIndex += 1
+
+                                Next
+
+                                synchronizeToggleOptionsFromPrompt =
+                                    Sub()
+
+                                        If synchronizingToggleOptions Then
+                                            Return
+                                        End If
+
+                                        synchronizingToggleOptions = True
+
+                                        Try
+
+                                            Dim anyDetected As System.Boolean = False
+                                            Dim promptText As System.String = If(promptTextBox.Text, System.String.Empty)
+
+                                            For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
+
+                                                If optionCheckBox Is Nothing Then
+                                                    Continue For
+                                                End If
+
+                                                Dim definition As FreestylePromptToggleOption = TryCast(optionCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                If definition Is Nothing Then
+                                                    Continue For
+                                                End If
+
+                                                Dim canDetect As System.Boolean = definition.HasArgument OrElse Not System.String.IsNullOrWhiteSpace(definition.Trigger)
+
+                                                If Not canDetect Then
+                                                    Continue For
+                                                End If
+
+                                                Dim matchedTrigger As System.String = System.String.Empty
+                                                Dim matchedArgument As System.String = System.String.Empty
+                                                Dim detected As System.Boolean = SharedMethods.TryGetFreestyleToggleTriggerMatch(promptText, definition, matchedTrigger, matchedArgument)
+
+                                                optionCheckBox.Checked = detected
+
+                                                If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+
+                                                    Dim argumentTextBox As System.Windows.Forms.TextBox = argumentTextBoxes(optionCheckBox)
+                                                    argumentTextBox.Enabled = detected
+
+                                                    If detected Then
+                                                        argumentTextBox.Text = matchedArgument
+                                                    End If
+
+                                                End If
+
+                                                If detected Then
+                                                    anyDetected = True
+                                                End If
+
+                                            Next
+
+                                            If anyDetected AndAlso Not expanded Then
+
+                                                If freestyleForm.Visible Then
+                                                    collapsedClientHeight = freestyleForm.ClientSize.Height
+                                                End If
+
+                                                expanded = True
+                                                advancedGrid.Visible = True
+                                                moreButton.Text = "More options ▾"
+
+                                                If updateLayout IsNot Nothing Then
+                                                    updateLayout.Invoke()
+                                                End If
+
+                                            End If
+
+                                        Finally
+
+                                            synchronizingToggleOptions = False
+
+                                        End Try
+
+                                    End Sub
+
+                                synchronizePromptFromCheckedToggleOptions =
+                                    Sub()
+
+                                        If synchronizingToggleOptions Then
+                                            Return
+                                        End If
+
+                                        synchronizingToggleOptions = True
+
+                                        Try
+
+                                            Dim updatedPrompt As System.String = promptTextBox.Text
+
+                                            For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
+
+                                                If optionCheckBox Is Nothing OrElse Not optionCheckBox.Checked Then
+                                                    Continue For
+                                                End If
+
+                                                Dim definition As FreestylePromptToggleOption = TryCast(optionCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                If definition Is Nothing Then
+                                                    Continue For
+                                                End If
+
+                                                Dim matchedTrigger As System.String = System.String.Empty
+                                                Dim matchedArgument As System.String = System.String.Empty
+
+                                                If SharedMethods.TryGetFreestyleToggleTriggerMatch(updatedPrompt, definition, matchedTrigger, matchedArgument) Then
+
+                                                    If argumentTextBoxes.ContainsKey(optionCheckBox) AndAlso matchedArgument.Length > 0 Then
+                                                        argumentTextBoxes(optionCheckBox).Text = matchedArgument
+                                                    End If
+
+                                                    Continue For
+
+                                                End If
+
+                                                Dim argumentValue As System.String = System.String.Empty
+
+                                                If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                                                    argumentValue = argumentTextBoxes(optionCheckBox).Text.Trim()
+                                                End If
+
+                                                Dim triggerToInsert As System.String = definition.BuildTrigger(argumentValue)
+
+                                                If Not System.String.IsNullOrWhiteSpace(triggerToInsert) Then
+                                                    updatedPrompt = SharedMethods.AppendFreestyleToggleTrigger(updatedPrompt, triggerToInsert)
+                                                End If
+
+                                            Next
+
+                                            If Not System.String.Equals(updatedPrompt, promptTextBox.Text, System.StringComparison.Ordinal) Then
+                                                Dim oldSelectionStart As System.Int32 = promptTextBox.SelectionStart
+                                                promptTextBox.Text = updatedPrompt
+                                                promptTextBox.SelectionStart = System.Math.Min(oldSelectionStart, promptTextBox.TextLength)
+                                            End If
+
+                                        Finally
+
+                                            synchronizingToggleOptions = False
+
+                                        End Try
+
+                                    End Sub
+
+                                moreButton.Visible = visibleSectionIndex > 0
+
+                                If options.RestorePersistedState AndAlso
+                                   Not System.String.IsNullOrWhiteSpace(options.CallerId) AndAlso
+                                   Not System.String.IsNullOrWhiteSpace(options.PersistedState) Then
+
+                                    Dim persistedStateDocument As System.Xml.Linq.XDocument =
+                                        SharedMethods.GetFreestylePromptStateDocument(options.PersistedState)
+
+                                    Dim persistedCallerElement As System.Xml.Linq.XElement =
+                                        SharedMethods.GetFreestylePromptCallerStateElement(
+                                            persistedStateDocument,
+                                            options.CallerId,
+                                            False)
+
+                                    If persistedCallerElement IsNot Nothing Then
+
+                                        Dim savedPrefix As System.String =
+                                            SharedMethods.GetFreestylePromptStateAttribute(persistedCallerElement, "prefix")
+
+                                        Dim savedModeId As System.String =
+                                            SharedMethods.GetFreestylePromptStateAttribute(persistedCallerElement, "modeId")
+
+                                        Dim restoredMode As FreestylePromptMode = Nothing
+
+                                        If savedPrefix.Length > 0 Then
+                                            restoredMode = SharedMethods.FindFreestylePromptModeByPrefix(savedPrefix, options.Modes)
+                                        End If
+
+                                        If restoredMode Is Nothing AndAlso savedModeId.Length > 0 Then
+                                            restoredMode = SharedMethods.FindFreestylePromptModeById(savedModeId, options.Modes)
+                                        End If
+
+                                        If restoredMode IsNot Nothing AndAlso restoredMode.IsAvailable Then
+                                            synchronizingMode = True
+
+                                            Try
+                                                modeCombo.SelectedItem = restoredMode
+                                                lastAvailableMode = restoredMode
+                                            Finally
+                                                synchronizingMode = False
+                                            End Try
+                                        End If
+
+                                        synchronizingToggleOptions = True
+
+                                        Try
+
+                                            For Each optionElement As System.Xml.Linq.XElement In persistedCallerElement.Elements("option")
+
+                                                Dim optionId As System.String =
+                                                SharedMethods.GetFreestylePromptStateAttribute(optionElement, "id")
+
+                                                Dim optionCheckBox As System.Windows.Forms.CheckBox = Nothing
+
+                                                If optionId.Length = 0 OrElse Not toggleById.TryGetValue(optionId, optionCheckBox) Then
+                                                    Continue For
+                                                End If
+
+                                                optionCheckBox.Checked =
+                                                SharedMethods.GetFreestylePromptStateAttribute(optionElement, "checked") = "1"
+
+                                                If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                                                    argumentTextBoxes(optionCheckBox).Text =
+                                                    SharedMethods.GetFreestylePromptStateAttribute(optionElement, "argument")
+                                                End If
+
+                                            Next
+
+                                        Finally
+
+                                            synchronizingToggleOptions = False
+
+                                        End Try
+
+                                        expanded =
+                                            SharedMethods.GetFreestylePromptStateAttribute(persistedCallerElement, "expanded") = "1"
+
+                                        advancedGrid.Visible = expanded
+                                        moreButton.Text = If(expanded, "More options ▾", "More options ▸")
+
+                                    End If
+
+                                End If
+
+                                If synchronizePromptFromCheckedToggleOptions IsNot Nothing Then
+                                    synchronizePromptFromCheckedToggleOptions.Invoke()
+                                End If
+
+                                If synchronizeToggleOptionsFromPrompt IsNot Nothing Then
+                                    synchronizeToggleOptionsFromPrompt.Invoke()
+                                End If
+
+                                ' =========================================================
+                                ' FOOTER
+                                ' =========================================================
+
+                                Dim footer As New System.Windows.Forms.TableLayoutPanel() With {
+                                    .Dock = System.Windows.Forms.DockStyle.Fill,
+                                    .ColumnCount = 2,
+                                    .RowCount = 1,
+                                    .AutoSize = True,
+                                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
+                                footer.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                                Dim statusLabel As New System.Windows.Forms.Label() With {
+                                    .Text = If(options.ContextStatusText, System.String.Empty),
+                                    .Font = standardFont,
+                                    .AutoSize = True,
+                                    .Anchor = System.Windows.Forms.AnchorStyles.Left,
+                                    .Margin = New System.Windows.Forms.Padding(0, 7, largeGap, 0)
+                                }
+
+                                Dim actionFlow As New System.Windows.Forms.FlowLayoutPanel() With {
+                                    .AutoSize = True,
+                                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                    .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                                    .WrapContents = False,
+                                    .Anchor = System.Windows.Forms.AnchorStyles.Right,
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                Dim cancelButton As New System.Windows.Forms.Button() With {
+                                    .Text = "Cancel",
+                                    .DialogResult = System.Windows.Forms.DialogResult.Cancel,
+                                    .AutoSize = True,
+                                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                    .Font = standardFont,
+                                    .Padding = New System.Windows.Forms.Padding(buttonPadX + 2, buttonPadY + 2, buttonPadX + 2, buttonPadY + 2),
+                                    .Margin = New System.Windows.Forms.Padding(0, 0, normalGap, 0)
+                                }
+
+                                Dim runButton As New System.Windows.Forms.Button() With {
+                                    .Text = "Run",
+                                    .DialogResult = System.Windows.Forms.DialogResult.OK,
+                                    .AutoSize = True,
+                                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                    .Font = standardFont,
+                                    .Padding = New System.Windows.Forms.Padding(buttonPadX + 2, buttonPadY + 2, buttonPadX + 2, buttonPadY + 2),
+                                    .Margin = New System.Windows.Forms.Padding(0)
+                                }
+
+                                If options.QuickButtons IsNot Nothing Then
+
+                                    For Each quickButtonDefinition As FreestylePromptQuickButton In options.QuickButtons
+
+                                        If quickButtonDefinition Is Nothing OrElse
+                                           System.String.IsNullOrWhiteSpace(quickButtonDefinition.Text) OrElse
+                                           System.String.IsNullOrWhiteSpace(quickButtonDefinition.Prefix) Then
+                                            Continue For
+                                        End If
+
+                                        Dim quickRunButton As New System.Windows.Forms.Button() With {
+                                            .Text = quickButtonDefinition.Text,
+                                            .AutoSize = True,
+                                            .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                            .Font = standardFont,
+                                            .Padding = New System.Windows.Forms.Padding(buttonPadX + 2, buttonPadY + 2, buttonPadX + 2, buttonPadY + 2),
+                                            .Margin = New System.Windows.Forms.Padding(0, 0, normalGap, 0),
+                                            .Tag = quickButtonDefinition
+                                        }
+
+                                        promptToolTip.SetToolTip(quickRunButton, quickButtonDefinition.Description)
+
+                                        AddHandler quickRunButton.Click,
+                                            Sub(sender As System.Object, e As System.EventArgs)
+
+                                                Dim clickedButton As System.Windows.Forms.Button = TryCast(sender, System.Windows.Forms.Button)
+
+                                                If clickedButton Is Nothing Then
+                                                    Return
+                                                End If
+
+                                                Dim clickedDefinition As FreestylePromptQuickButton =
+                                                    TryCast(clickedButton.Tag, FreestylePromptQuickButton)
+
+                                                If clickedDefinition Is Nothing OrElse
+                                                   System.String.IsNullOrWhiteSpace(clickedDefinition.Prefix) Then
+                                                    Return
+                                                End If
+
+                                                Dim quickMode As FreestylePromptMode =
+                                                    SharedMethods.FindFreestylePromptModeByPrefix(clickedDefinition.Prefix, options.Modes)
+
+                                                If quickMode IsNot Nothing AndAlso Not quickMode.IsAvailable Then
+                                                    If Not System.String.IsNullOrWhiteSpace(quickMode.UnavailableReason) Then
+                                                        SharedMethods.ShowCustomMessageBox(quickMode.UnavailableReason, "Freestyle")
+                                                    End If
+                                                    Return
+                                                End If
+
+                                                quickSelectedPrefix = clickedDefinition.Prefix.Trim()
+                                                quickSelectedModeId = If(quickMode Is Nothing, System.String.Empty, quickMode.Id)
+
+                                                freestyleForm.DialogResult = System.Windows.Forms.DialogResult.OK
+                                                freestyleForm.Close()
+
+                                            End Sub
+
+                                        actionFlow.Controls.Add(quickRunButton)
+
+                                    Next
+
+                                End If
+
+                                actionFlow.Controls.Add(cancelButton)
+                                actionFlow.Controls.Add(runButton)
+
+                                footer.Controls.Add(statusLabel, 0, 0)
+                                footer.Controls.Add(actionFlow, 1, 0)
+
+                                root.Controls.Add(footer, 0, 3)
+
+                                freestyleForm.AcceptButton = runButton
+                                freestyleForm.CancelButton = cancelButton
+
+                                ' =========================================================
+                                ' SETTINGS CANVAS
+                                ' =========================================================
+
+                                Dim layoutSettingsCanvas As System.Func(Of System.Int32, System.Int32) =
+                                    Function(contentWidth As System.Int32) As System.Int32
+
+                                        contentWidth = System.Math.Max(250, contentWidth)
+
+                                        Dim y As System.Int32 = 0
+
+                                        shortcutLabel.Location = New System.Drawing.Point(0, y)
+                                        shortcutLabel.Width = contentWidth
+
+                                        Dim shortcutPreferred As System.Drawing.Size = shortcutLabel.GetPreferredSize(New System.Drawing.Size(contentWidth, 0))
+
+                                        shortcutLabel.Height = shortcutPreferred.Height
+
+                                        y = shortcutLabel.Bottom + normalGap
+
+                                        modeLabel.Location = New System.Drawing.Point(0, y)
+
+                                        y = modeLabel.Bottom + smallGap
+
+                                        modeCombo.Location = New System.Drawing.Point(0, y)
+                                        modeCombo.Width = contentWidth
+
+                                        y = modeCombo.Bottom + normalGap
+
+                                        If contextFlow.Visible Then
+
+                                            contextLabel.Location = New System.Drawing.Point(0, y)
+
+                                            y = contextLabel.Bottom + smallGap
+
+                                            contextFlow.Location = New System.Drawing.Point(0, y)
+                                            contextFlow.Width = contentWidth
+
+                                            Dim contextPreferred As System.Drawing.Size = contextFlow.GetPreferredSize(New System.Drawing.Size(contentWidth, 0))
+
+                                            contextFlow.Height = System.Math.Max(contextPreferred.Height, lineHeight + buttonPadY * 2 + 12)
+
+                                            y = contextFlow.Bottom + smallGap
+
+                                        End If
+
+                                        moreButton.Location = New System.Drawing.Point(0, y)
+
+                                        ' Explicit bottom breathing room prevents a button
+                                        ' from visually touching the clipping boundary.
+                                        y = moreButton.Bottom + smallGap
+
+                                        If advancedGrid.Visible Then
+
+                                            y += normalGap
+
+                                            advancedGrid.Location = New System.Drawing.Point(0, y)
+                                            advancedGrid.Width = contentWidth
+                                            advancedGrid.MinimumSize = New System.Drawing.Size(contentWidth, 0)
+                                            advancedGrid.MaximumSize = New System.Drawing.Size(contentWidth, 0)
+
+                                            advancedGrid.PerformLayout()
+
+                                            Dim advancedPreferred As System.Drawing.Size = advancedGrid.GetPreferredSize(New System.Drawing.Size(contentWidth, 0))
+
+                                            advancedGrid.Height = advancedPreferred.Height
+
+                                            y = advancedGrid.Bottom + smallGap
+
+                                        Else
+
+                                            advancedGrid.Location = New System.Drawing.Point(0, y)
+                                            advancedGrid.Width = contentWidth
+                                            advancedGrid.Height = 0
+
+                                        End If
+
+                                        settingsCanvas.Location = New System.Drawing.Point(0, 0)
+                                        settingsCanvas.Size = New System.Drawing.Size(contentWidth, y)
+
+                                        Return y
+
+                                    End Function
+
+                                ' =========================================================
+                                ' LAYOUT ENGINE
+                                ' =========================================================
+
+                                updateLayout =
+                                    Sub()
+
+                                        If layoutBusy OrElse freestyleForm.IsDisposed Then
+                                            Return
+                                        End If
+
+                                        layoutBusy = True
+
+                                        Try
+
+                                            header.PerformLayout()
+                                            footer.PerformLayout()
+                                            root.PerformLayout()
+
+                                            Dim scrollbarWidth As System.Int32 = System.Windows.Forms.SystemInformation.VerticalScrollBarWidth
+
+                                            ' First pass assumes no vertical scrollbar.
+                                            Dim contentWidth As System.Int32 = settingsHost.ClientSize.Width
+
+                                            contentWidth = System.Math.Max(250, contentWidth)
+
+                                            Dim requiredSettingsHeight As System.Int32 = layoutSettingsCanvas.Invoke(contentWidth)
+
+                                            Dim headerRowHeight As System.Int32 = root.GetRowHeights()(0)
+                                            Dim footerRowHeight As System.Int32 = root.GetRowHeights()(3)
+
+                                            ' This is the conceptual correction:
+                                            ' the row contains the viewport PLUS its margins.
+                                            Dim settingsMargins As System.Int32 = settingsHost.Margin.Vertical
+
+                                            Dim requiredSettingsRowHeight As System.Int32 = requiredSettingsHeight + settingsMargins
+
+                                            Dim requiredClientHeight As System.Int32 = root.Padding.Vertical + headerRowHeight + minimumPromptHeight + requiredSettingsRowHeight + footerRowHeight
+
+                                            If requiredClientHeight > freestyleForm.ClientSize.Height AndAlso freestyleForm.ClientSize.Height < maximumClientHeight Then
+
+                                                Dim targetClientHeight As System.Int32 = System.Math.Min(requiredClientHeight, maximumClientHeight)
+
+                                                freestyleForm.ClientSize = New System.Drawing.Size(freestyleForm.ClientSize.Width, targetClientHeight)
+
+                                                root.PerformLayout()
+
+                                            End If
+
+                                            Dim availableRowHeight As System.Int32 = freestyleForm.ClientSize.Height - root.Padding.Vertical - headerRowHeight - footerRowHeight - minimumPromptHeight
+
+                                            availableRowHeight = System.Math.Max(lineHeight * 6 + settingsMargins, availableRowHeight)
+
+                                            Dim actualSettingsRowHeight As System.Int32 = System.Math.Min(requiredSettingsRowHeight, availableRowHeight)
+
+                                            root.RowStyles(2).Height = actualSettingsRowHeight
+
+                                            Dim actualViewportHeight As System.Int32 = actualSettingsRowHeight - settingsMargins
+
+                                            actualViewportHeight = System.Math.Max(1, actualViewportHeight)
+
+                                            Dim needsVerticalScroll As System.Boolean = requiredSettingsHeight > actualViewportHeight
+
+                                            If needsVerticalScroll Then
+                                                contentWidth = settingsHost.ClientSize.Width - scrollbarWidth
+                                            Else
+                                                contentWidth = settingsHost.ClientSize.Width
+                                            End If
+
+                                            contentWidth = System.Math.Max(250, contentWidth)
+
+                                            requiredSettingsHeight = layoutSettingsCanvas.Invoke(contentWidth)
+
+                                            settingsHost.AutoScrollMinSize = New System.Drawing.Size(0, requiredSettingsHeight)
+
+                                            ' Prevent horizontal scrolling by keeping the
+                                            ' canvas strictly narrower than the viewport.
+                                            settingsCanvas.Width = contentWidth
+
+                                            root.PerformLayout()
+                                            settingsHost.PerformLayout()
+
+                                        Finally
+
+                                            layoutBusy = False
+
+                                        End Try
+
+                                    End Sub
+
+                                ' =========================================================
+                                ' MORE OPTIONS
+                                ' =========================================================
+
+                                AddHandler moreButton.Click,
+                                    Sub(sender As System.Object, e As System.EventArgs)
+
+                                        If layoutBusy Then
+                                            Return
+                                        End If
+
+                                        If Not expanded Then
+
+                                            collapsedClientHeight = freestyleForm.ClientSize.Height
+
+                                            expanded = True
+                                            advancedGrid.Visible = True
+                                            moreButton.Text = "More options ▾"
+
+                                        Else
+
+                                            expanded = False
+                                            advancedGrid.Visible = False
+                                            advancedGrid.Height = 0
+                                            moreButton.Text = "More options ▸"
+
+                                            Dim restoreHeight As System.Int32 = System.Math.Min(collapsedClientHeight, maximumClientHeight)
+
+                                            freestyleForm.ClientSize = New System.Drawing.Size(freestyleForm.ClientSize.Width, restoreHeight)
+
+                                        End If
+
+                                        updateLayout.Invoke()
+
+                                        Dim centredY As System.Int32 = workingArea.Y + (workingArea.Height - freestyleForm.Height) \ 2
+
+                                        centredY = System.Math.Max(workingArea.Top, centredY)
+                                        centredY = System.Math.Min(centredY, workingArea.Bottom - freestyleForm.Height)
+
+                                        freestyleForm.Location = New System.Drawing.Point(freestyleForm.Left, centredY)
+
+                                    End Sub
+
+                                AddHandler freestyleForm.Resize,
+                                    Sub(sender As System.Object, e As System.EventArgs)
+                                        updateLayout.Invoke()
+                                    End Sub
+
+                                ' =========================================================
+                                ' ARGUMENT VALIDATION
+                                ' =========================================================
+
+                                AddHandler freestyleForm.FormClosing,
+                                    Sub(sender As System.Object, e As System.Windows.Forms.FormClosingEventArgs)
+
+                                        If freestyleForm.DialogResult <> System.Windows.Forms.DialogResult.OK Then
+                                            Return
+                                        End If
+
+                                        Dim violatingInsertOption As FreestylePromptInsertOption = Nothing
+                                        If Not SharedMethods.ValidateFreestyleInsertOccurrenceLimits(promptTextBox.Text, options.InsertOptions, violatingInsertOption) Then
+                                            e.Cancel = True
+                                            Dim optionLabel As System.String = If(violatingInsertOption Is Nothing OrElse System.String.IsNullOrWhiteSpace(violatingInsertOption.Text), "This context option", violatingInsertOption.Text)
+                                            Dim maximum As System.Int32 = If(violatingInsertOption Is Nothing, 1, violatingInsertOption.MaxOccurrences)
+                                            SharedMethods.ShowCustomMessageBox(
+                                                "'" & optionLabel & "' can be included at most " & maximum.ToString(System.Globalization.CultureInfo.InvariantCulture) & " time(s) in one Freestyle request.",
+                                                "Freestyle")
+                                            promptTextBox.Focus()
+                                            Return
+                                        End If
+
+                                        For Each pair As System.Collections.Generic.KeyValuePair(Of System.Windows.Forms.CheckBox, System.Windows.Forms.TextBox) In argumentTextBoxes
+
+                                            If Not pair.Key.Checked Then
+                                                Continue For
+                                            End If
+
+                                            Dim definition As FreestylePromptToggleOption = TryCast(pair.Key.Tag, FreestylePromptToggleOption)
+
+                                            If definition Is Nothing Then
+                                                Continue For
+                                            End If
+
+                                            If definition.ArgumentRequired AndAlso System.String.IsNullOrWhiteSpace(pair.Value.Text) Then
+
+                                                e.Cancel = True
+
+                                                SharedMethods.ShowCustomMessageBox("'" & definition.Text & "' requires a value.", "Freestyle")
+
+                                                pair.Value.Focus()
+
+                                                Return
+
+                                            End If
+
+                                        Next
+
+                                    End Sub
+
+                                ' =========================================================
+                                ' KEYBOARD
+                                ' =========================================================
+
+                                AddHandler promptTextBox.KeyDown,
+                                    Sub(sender As System.Object, e As System.Windows.Forms.KeyEventArgs)
+
+                                        If e.KeyCode = System.Windows.Forms.Keys.Enter AndAlso e.Modifiers = System.Windows.Forms.Keys.Control Then
+                                            freestyleForm.DialogResult = System.Windows.Forms.DialogResult.OK
+                                            freestyleForm.Close()
+                                            e.SuppressKeyPress = True
+                                            Return
+                                        End If
+
+                                        If e.KeyCode = System.Windows.Forms.Keys.Escape Then
+                                            freestyleForm.DialogResult = System.Windows.Forms.DialogResult.Cancel
+                                            freestyleForm.Close()
+                                            e.SuppressKeyPress = True
+                                            Return
+                                        End If
+
+                                        If e.KeyCode = System.Windows.Forms.Keys.P AndAlso e.Modifiers = System.Windows.Forms.Keys.Control AndAlso Not System.String.IsNullOrEmpty(options.LastPrompt) Then
+                                            SharedMethods.InsertFreestyleTextAtCaret(promptTextBox, options.LastPrompt)
+                                            e.SuppressKeyPress = True
+                                        End If
+
+                                    End Sub
+
+                                ' =========================================================
+                                ' PROMPT LIBRARY
+                                ' =========================================================
+
+                                If options.PromptLibraryEnabled AndAlso options.Context IsNot Nothing AndAlso options.Context.INI_PromptLib Then
+
+                                    Dim promptLibraryPath As System.String = options.Context.INI_PromptLibPath
+                                    Dim promptLibraryPathLocal As System.String = options.Context.INI_PromptLibPathLocal
+                                    Dim promptLibraryContext As ISharedContext = options.Context
+
+                                    AddHandler promptTextBox.KeyPress,
+                                        Sub(sender As System.Object, e As System.Windows.Forms.KeyPressEventArgs)
+
+                                            If e.KeyChar <> "/"c Then
+                                                Return
+                                            End If
+
+                                            Dim slashAction As SharedMethods.PromptLibrarySlashAction = SharedMethods.HandlePromptLibrarySlash(promptTextBox, promptLibraryPath, promptLibraryPathLocal, promptLibraryContext, options.LastPrompt, True)
+
+                                            If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
+                                                e.Handled = True
+                                            End If
+
+                                        End Sub
+
+                                End If
+
+                                ' =========================================================
+                                ' INITIAL PREFIX
+                                ' =========================================================
+
+                                If promptTextBox.TextLength > 0 Then
+
+                                    Dim initialMatch As System.Tuple(Of FreestylePromptMode, System.String) = SharedMethods.FindFreestylePromptMode(promptTextBox.Text, options.Modes)
+
+                                    If initialMatch IsNot Nothing Then
+
+                                        synchronizingMode = True
+
+                                        Try
+                                            modeCombo.SelectedItem = initialMatch.Item1
+                                        Finally
+                                            synchronizingMode = False
+                                        End Try
+
+                                    End If
+
+                                End If
+
+                                ' =========================================================
+                                ' INITIAL SIZE
+                                ' =========================================================
+
+                                freestyleForm.PerformLayout()
+                                updateLayout.Invoke()
+
+                                collapsedClientHeight = freestyleForm.ClientSize.Height
+
+                                Dim chromeWidth As System.Int32 = freestyleForm.Width - freestyleForm.ClientSize.Width
+                                Dim chromeHeight As System.Int32 = freestyleForm.Height - freestyleForm.ClientSize.Height
+
+                                freestyleForm.MinimumSize = New System.Drawing.Size(System.Math.Min(390 + chromeWidth, workingArea.Width), System.Math.Min(lineHeight * 21 + chromeHeight, workingArea.Height))
+
+                                freestyleForm.Location = New System.Drawing.Point(workingArea.X + (workingArea.Width - freestyleForm.Width) \ 2, workingArea.Y + (workingArea.Height - freestyleForm.Height) \ 2)
+
+                                ' =========================================================
+                                ' WINDOW HANDLING
+                                ' =========================================================
+
+                                SharedMethods.AttachForeignForegroundWatchdog(freestyleForm)
+
+                                AddHandler freestyleForm.Shown,
+                                    Sub(sender As System.Object, e As System.EventArgs)
+
+                                        updateLayout.Invoke()
+                                        SharedMethods.ForceDialogToForeground(freestyleForm)
+                                        promptTextBox.Focus()
+
+                                        If promptTextBox.TextLength > 0 Then
+                                            promptTextBox.SelectionStart = promptTextBox.TextLength
+                                        End If
+
+                                    End Sub
+
+                                freestyleForm.TopMost = True
+                                freestyleForm.Opacity = 1
+                                freestyleForm.BringToFront()
+                                freestyleForm.Focus()
+                                freestyleForm.Activate()
+
+                                Dim dialogResult As System.Windows.Forms.DialogResult
+                                Dim owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
+
+                                If owner IsNot Nothing Then
+                                    dialogResult = freestyleForm.ShowDialog(owner)
+                                Else
+                                    dialogResult = freestyleForm.ShowDialog()
+                                End If
+
+                                If dialogResult <> System.Windows.Forms.DialogResult.OK Then
+                                    Return returnValue
+                                End If
+
+                                ' =========================================================
+                                ' RESULT
+                                ' =========================================================
+
+                                returnValue.Accepted = True
+                                returnValue.Prompt = promptTextBox.Text
+                                returnValue.KnownPrefixes.AddRange(SharedMethods.GetFreestylePromptKnownPrefixes(options.Modes))
+
+                                Dim finalSelectedMode As FreestylePromptMode = TryCast(modeCombo.SelectedItem, FreestylePromptMode)
+                                Dim effectiveSelectedPrefix As System.String = quickSelectedPrefix.Trim()
+
+                                If quickSelectedModeId.Length > 0 Then
+                                    finalSelectedMode = SharedMethods.FindFreestylePromptModeById(quickSelectedModeId, options.Modes)
+                                End If
+
+                                If finalSelectedMode IsNot Nothing Then
+
+                                    returnValue.SelectedModeId = finalSelectedMode.Id
+
+                                    If effectiveSelectedPrefix.Length = 0 Then
+
+                                        Dim finalMatch As System.Tuple(Of FreestylePromptMode, System.String) =
+                                            SharedMethods.FindFreestylePromptMode(promptTextBox.Text, options.Modes)
+
+                                        If finalMatch IsNot Nothing AndAlso finalMatch.Item1 Is finalSelectedMode Then
+                                            effectiveSelectedPrefix = finalMatch.Item2
+                                        Else
+                                            effectiveSelectedPrefix = finalSelectedMode.Prefix
+                                        End If
+
+                                    End If
+
+                                ElseIf quickSelectedModeId.Length > 0 Then
+
+                                    returnValue.SelectedModeId = quickSelectedModeId
+
+                                End If
+
+                                returnValue.SelectedPrefix = effectiveSelectedPrefix
+
+                                returnValue.PersistedState =
+                                    SharedMethods.BuildFreestylePromptPersistedState(
+                                        options.CallerId,
+                                        options.PersistedState,
+                                        returnValue.SelectedModeId,
+                                        returnValue.SelectedPrefix,
+                                        expanded,
+                                        toggleCheckBoxes,
+                                        argumentTextBoxes)
+
+                                For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
+
+                                    If Not optionCheckBox.Checked Then
+                                        Continue For
+                                    End If
+
+                                    Dim definition As FreestylePromptToggleOption = TryCast(optionCheckBox.Tag, FreestylePromptToggleOption)
+
+                                    If definition Is Nothing Then
+                                        Continue For
+                                    End If
+
+                                    If Not System.String.IsNullOrWhiteSpace(definition.Id) Then
+                                        returnValue.SelectedOptionIds.Add(definition.Id)
+                                    End If
+
+                                    Dim argumentValue As System.String = System.String.Empty
+
+                                    If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                                        argumentValue = argumentTextBoxes(optionCheckBox).Text.Trim()
+                                    End If
+
+                                    Dim finalTrigger As System.String = definition.BuildTrigger(argumentValue)
+
+                                    If Not System.String.IsNullOrWhiteSpace(finalTrigger) AndAlso Not returnValue.SelectedTriggers.Contains(finalTrigger) Then
+                                        returnValue.SelectedTriggers.Add(finalTrigger)
+                                    End If
+
+                                Next
+
+                                Return returnValue
+
+                            End Using
+                        End Using
+                    End Using
+                End Using
+
+            Catch ex As System.Exception
+
+                SharedMethods.ShowCustomMessageBox("The Freestyle dialog could not be displayed." & System.Environment.NewLine & System.Environment.NewLine & ex.Message, "Freestyle")
+
+                Return returnValue
+
+            End Try
+
+        End Function
+
+
+        Public Shared Function ComposeFreestylePrompt(ByVal result As FreestylePromptResult) As System.String
+
+            If result Is Nothing OrElse Not result.Accepted Then
+                Return System.String.Empty
+            End If
+
+            Dim prompt As System.String = If(result.Prompt, System.String.Empty).Trim()
+
+            If Not System.String.IsNullOrWhiteSpace(result.SelectedPrefix) Then
+                prompt = SharedMethods.ReplaceFreestyleLeadingPrefix(prompt, result.KnownPrefixes, result.SelectedPrefix)
+            End If
+
+            For Each trigger As System.String In result.SelectedTriggers
+
+                If System.String.IsNullOrWhiteSpace(trigger) Then
+                    Continue For
+                End If
+
+                If prompt.IndexOf(trigger, System.StringComparison.OrdinalIgnoreCase) < 0 Then
+
+                    If prompt.Length > 0 Then
+                        prompt &= " "
+                    End If
+
+                    prompt &= trigger.Trim()
+
+                End If
+
+            Next
+
+            Return prompt.Trim()
+
+        End Function
+
+#End Region
 
 
     End Class

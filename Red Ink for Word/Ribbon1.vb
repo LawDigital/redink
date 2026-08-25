@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: Ribbon1.vb
+' Purpose:
+'   Word Ribbon callback surface: routes user commands to ThisAddIn workflows,
+'   manages model/menu state, and applies feature/configuration visibility.
+'
+' Architecture:
+'   Thin VSTO UI adapter over the Word add-in services. Control layout is generated
+'   in Ribbon1.Designer.vb; this file owns callbacks, dynamic menus, theme-aware
+'   icons, and visibility/availability policy.
+' =============================================================================
+
 Imports System.Diagnostics
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32
@@ -20,13 +32,13 @@ Public Class Ribbon1
             Dim theme = DetectOfficeTheme()
             Select Case theme
                 Case OfficeTheme.Light
-                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Medium)
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
                 Case Else
-                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
             End Select
             Menu1.ShowImage = True
         Catch
-            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
             Menu1.ShowImage = True
         End Try
     End Sub
@@ -92,21 +104,25 @@ Public Class Ribbon1
             Dim available = PrimaryModelManager.GetAvailableModels()
             Dim current = PrimaryModelManager.GetCurrentModelNumber()
 
-            ' Hide the entire model menu if there are fewer than 2 models
-            Menu6.Visible = (available.Count > 1)
+            ' Hide the entire model menu if there are fewer than 2 models.
+            ' Use the availability helper so a subsequent ApplyRibbonVisibilityConfiguration()
+            ' does not force the menu visible again when no additional models are defined.
+            SetRibbonControlVisibleByAvailability(Menu6, available.Count > 1)
 
             For i = 1 To 10
                 Dim btn = GetModelButton(i)
                 If btn Is Nothing Then Continue For
 
                 If available.Contains(i) Then
-                    btn.Visible = True
+                    SetRibbonControlVisibleByAvailability(btn, True)
                     Dim label = PrimaryModelManager.GetModelDisplayName(i)
                     btn.Label = If(i = current, $"{label} (active)", label)
                 Else
-                    btn.Visible = False
+                    SetRibbonControlVisibleByAvailability(btn, False)
                 End If
             Next
+
+            ApplyRibbonVisibilityConfiguration()
         Catch
             ' non-critical
         End Try
@@ -253,6 +269,7 @@ Public Class Ribbon1
             New TalkToMeRibbonCommandEntry With {.Name = "stamp_pdf_exhibits", .Category = "Word Helpers", .Button = RI_Stamper, .Execute = AddressOf RunStamperCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "split_pdf_with_ai", .Category = "Word Helpers", .Button = RI_SplitPDF, .Execute = AddressOf RunSplitPdfCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "convert_markdown", .Category = "Word Helpers", .Button = RI_Markdown, .Execute = AddressOf RunMarkdownCommand},
+            New TalkToMeRibbonCommandEntry With {.Name = "reset_spacing", .Category = "Word Helpers", .Button = RI_ResetSpacing, .Execute = AddressOf RunResetSpacingCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "remove_content_controls", .Category = "Word Helpers", .Button = RI_ContentControls, .Execute = AddressOf RunContentControlsCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "remove_ri_reference", .Category = "Word Helpers", .Button = RI_Remove, .Execute = AddressOf RunRemoveCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "clipboard_to_text", .Category = "Word Helpers", .Button = RI_InsertClipboard, .Execute = AddressOf RunInsertClipboardCommand},
@@ -856,6 +873,10 @@ Public Class Ribbon1
         ExecuteLoggedCommand("Markdown_Word invoked", Sub() Globals.ThisAddIn.ConvertMarkdownToWord())
     End Sub
 
+    Private Sub RunResetSpacingCommand()
+        ExecuteLoggedCommand("ResetSpacing_Word invoked", Sub() SharedMethods.ResetSelectedTextParagraphSpacing())
+    End Sub
+
     Private Sub RunFindHiddenCommand()
         ExecuteLoggedCommand("FindHidden_Word invoked", Sub() Globals.ThisAddIn.FindHiddenPrompts())
     End Sub
@@ -1158,6 +1179,10 @@ Public Class Ribbon1
 
     Private Sub RI_Markdown_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_Markdown.Click
         RunMarkdownCommand()
+    End Sub
+
+    Private Sub RI_ResetSpacing_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_ResetSpacing.Click
+        RunResetSpacingCommand()
     End Sub
 
     Private Sub RI_FindHidden_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_FindHidden.Click

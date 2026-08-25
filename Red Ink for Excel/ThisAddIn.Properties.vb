@@ -541,6 +541,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_Crashlog As Boolean
+        Get
+            Return _context.INI_Crashlog
+        End Get
+        Set(value As Boolean)
+            _context.INI_Crashlog = value
+        End Set
+    End Property
+
     Public Shared Property INI_AutoPilotAutoStart As Boolean
         Get
             Return _context.INI_AutoPilotAutoStart
@@ -1861,6 +1870,24 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Boolean)
             _context.INI_AllowLegacyDocFiles = value
+        End Set
+    End Property
+
+    Public Shared Property INI_JsRunDisable As Boolean
+        Get
+            Return _context.INI_JsRunDisable
+        End Get
+        Set(value As Boolean)
+            _context.INI_JsRunDisable = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BrowserToolsDisable As Boolean
+        Get
+            Return _context.INI_BrowserToolsDisable
+        End Get
+        Set(value As Boolean)
+            _context.INI_BrowserToolsDisable = value
         End Set
     End Property
 

@@ -487,7 +487,14 @@ Namespace SharedLibrary
             ApplyCheckboxWrap()
             ApplyFilePathWrap()
 
-            Dim result As System.Windows.Forms.DialogResult = settingsForm.ShowDialog()
+            AddHandler settingsForm.Shown,
+                Sub()
+                    settingsForm.TopMost = True
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(settingsForm)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(settingsForm)
+                End Sub
+            Dim __safeDialogOwner490 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            Dim result As System.Windows.Forms.DialogResult = If(__safeDialogOwner490 IsNot Nothing, settingsForm.ShowDialog(__safeDialogOwner490), settingsForm.ShowDialog())
 
             If result = System.Windows.Forms.DialogResult.OK Then
                 Dim selectedIndex = titleListBox.SelectedIndex
@@ -818,7 +825,14 @@ Namespace SharedLibrary
             ApplyCheckboxWrap()
             ApplyFilePathWrap()
 
-            Dim result As System.Windows.Forms.DialogResult = settingsForm.ShowDialog()
+            AddHandler settingsForm.Shown,
+                Sub()
+                    settingsForm.TopMost = True
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(settingsForm)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(settingsForm)
+                End Sub
+            Dim __safeDialogOwner821 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            Dim result As System.Windows.Forms.DialogResult = If(__safeDialogOwner821 IsNot Nothing, settingsForm.ShowDialog(__safeDialogOwner821), settingsForm.ShowDialog())
 
             If result = System.Windows.Forms.DialogResult.OK Then
                 Dim selectedIndex = titleListBox.SelectedIndex
@@ -1392,10 +1406,9 @@ Namespace SharedLibrary
     Sub()
         titleTextBox.Focus()
         Try
-            form.BringToFront()
-            form.Activate()
-            SharedLibrary.NativeMethods.SetForegroundWindow(form.Handle)
-        Catch
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+        Catch ex As System.Exception
         End Try
     End Sub
 
@@ -1406,6 +1419,17 @@ Namespace SharedLibrary
                 owner = New WindowWrapper(ownerHandle)
             Else
                 owner = System.Windows.Forms.Form.ActiveForm
+            End If
+
+            ' Inspect and same-thread filter the resolved owner before using it as a modal
+            ' owner. A foreign owner (e.g. another Office process's main window, whether passed
+            ' in via ownerHandle or picked up as ActiveForm) would be disabled by ShowDialog and
+            ' never re-enabled, deadlocking that host. InspectDialogOwner logs cross-process
+            ' attempts; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back to
+            ' an ownerless dialog instead of deadlocking.
+            If owner IsNot Nothing Then
+                OfficeWindowWatchdog.InspectDialogOwner(owner, "ShowAddPromptLibraryEntryDialog", "ShowAddPromptLibraryEntryDialog")
+                owner = SharedMethods.IfOwnerOnCurrentThread(owner)
             End If
 
             If owner IsNot Nothing Then
@@ -1949,10 +1973,9 @@ Namespace SharedLibrary
                         searchTextBox.SelectionStart = 0
                         searchTextBox.SelectionLength = searchTextBox.TextLength
                         Try
-                            pickerForm.BringToFront()
-                            pickerForm.Activate()
-                            SharedLibrary.NativeMethods.SetForegroundWindow(pickerForm.Handle)
-                        Catch
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(pickerForm)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(pickerForm)
+                        Catch ex As System.Exception
                         End Try
                     End Sub
 
@@ -1963,6 +1986,17 @@ Namespace SharedLibrary
                 owner = New WindowWrapper(ownerHandle)
             Else
                 owner = System.Windows.Forms.Form.ActiveForm
+            End If
+
+            ' Inspect and same-thread filter the resolved owner before using it as a modal
+            ' owner. A foreign owner (e.g. another Office process's main window, whether passed
+            ' in via ownerHandle or picked up as ActiveForm) would be disabled by ShowDialog and
+            ' never re-enabled, deadlocking that host. InspectDialogOwner logs cross-process
+            ' attempts; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back to
+            ' an ownerless dialog instead of deadlocking.
+            If owner IsNot Nothing Then
+                OfficeWindowWatchdog.InspectDialogOwner(owner, "ShowPromptInsertionSelector", "ShowPromptInsertionSelector")
+                owner = SharedMethods.IfOwnerOnCurrentThread(owner)
             End If
 
             If owner IsNot Nothing Then

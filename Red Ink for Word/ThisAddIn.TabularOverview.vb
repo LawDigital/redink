@@ -222,6 +222,7 @@ Partial Public Class ThisAddIn
             Dim pMergeEnable As New SLib.InputParameter("Permit row merging (if requested)", mergeRowsViaLlm)
             Dim pMergeDateCol As New SLib.InputParameter("Column to merge/group on (1-based)", If(mergeDateColumn <= 0, "", mergeDateColumn.ToString()))
             Dim pMergeInstruction As New SLib.InputParameter("Additional merge instructions (optional, overrides)", mergeInstruction)
+            Dim pDebugDiagnostics As New SLib.InputParameter("Debug failed/no-result extractions to Desktop log", False)
 
             Dim p11 As SLib.InputParameter = Nothing
             If hasSecondary Then
@@ -235,8 +236,8 @@ Partial Public Class ThisAddIn
 
             Dim params() As SLib.InputParameter =
                 If(hasSecondary,
-                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, p11},
-                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction})
+                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pDebugDiagnostics, p11},
+                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pDebugDiagnostics})
 
             ' Optional extra button: "Edit Local Library"
             Dim extraText As String = Nothing
@@ -337,9 +338,11 @@ Partial Public Class ThisAddIn
                 mergeDateColumn = 0
             End If
             mergeInstruction = System.Convert.ToString(params(13).Value)
+            Dim debugDiagnostics As System.Boolean = False
+            Try : debugDiagnostics = System.Convert.ToBoolean(params(14).Value) : Catch : debugDiagnostics = False : End Try
 
             If hasSecondary Then
-                Try : do2ndModel = System.Convert.ToBoolean(params(14).Value) : Catch : do2ndModel = False : End Try
+                Try : do2ndModel = System.Convert.ToBoolean(params(15).Value) : Catch : do2ndModel = False : End Try
             End If
 
             Try : My.Settings.Tabular_ManualInstruction = manualInstruction : Catch : End Try
@@ -522,7 +525,8 @@ Partial Public Class ThisAddIn
             Dim selectedIsDirectory As Boolean = False
             Try
                 Using form As New DragDropForm(DragDropMode.FileOrDirectory)
-                    If form.ShowDialog() <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(form.SelectedFilePath) Then
+                    Dim __safeDialogOwner525 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner525 IsNot Nothing, form.ShowDialog(__safeDialogOwner525), form.ShowDialog()) <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(form.SelectedFilePath) Then
                         Return
                     End If
                     selectedPath = form.SelectedFilePath.Trim()
@@ -583,7 +587,8 @@ Partial Public Class ThisAddIn
                                                        cancellationRequested:=cancelFunc,
                                                        llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
                                                                             Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
-                                                                        End Function)
+                                                                        End Function,
+                                                       debugDiagnostics:=debugDiagnostics)
                 Catch ex As Exception
                     ProgressBarModule.CancelOperation = True
                     ShowCustomMessageBox("Single-file extraction failed: " & ex.Message)
@@ -593,11 +598,11 @@ Partial Public Class ThisAddIn
                 End Try
 
                 If res Is Nothing OrElse res.Rows.Count = 0 Then
-                    ShowCustomMessageBox("No data extracted.")
+                    ShowCustomMessageBox("No data extracted." & If(res IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(res.DebugLogPath), vbCrLf & "Diagnostic log: " & res.DebugLogPath, ""))
                     Return
                 End If
                 InsertResultIntoWordTable(res, selectedPath, dateOutputFormat, insertInNewDoc)
-                ShowCustomMessageBox("Tabular overview completed.")
+                ShowCustomMessageBox("Tabular overview completed." & If(res.FailedFiles > 0 AndAlso Not System.String.IsNullOrWhiteSpace(res.DebugLogPath), vbCrLf & "Diagnostic log: " & res.DebugLogPath, ""))
             Else
                 ' ── Folder (multiple files) ──
                 Dim selectedFolder = selectedPath
@@ -709,7 +714,8 @@ Partial Public Class ThisAddIn
                                                        cancellationRequested:=cancelFunc,
                                                        llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
                                                                             Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
-                                                                        End Function)
+                                                                        End Function,
+                                                       debugDiagnostics:=debugDiagnostics)
 
                 Dim wasCancelled As Boolean = ProgressBarModule.CancelOperation
                 ProgressBarModule.CancelOperation = True
@@ -722,6 +728,7 @@ Partial Public Class ThisAddIn
                 If res.Rows.Count = 0 Then
                     Dim msg = "No data extracted."
                     If res.FailedFiles > 0 Then msg &= vbCrLf & "Failed files: " & String.Join(", ", res.FailedFileNames)
+                    If Not System.String.IsNullOrWhiteSpace(res.DebugLogPath) Then msg &= vbCrLf & "Diagnostic log: " & res.DebugLogPath
                     ShowCustomMessageBox(msg)
                     Return
                 End If
@@ -737,6 +744,7 @@ Partial Public Class ThisAddIn
                     summary.AppendLine("Skipped (unsupported): " & skippedFiles.Count.ToString())
                     'summary.AppendLine(String.Join(", ", skippedFiles))
                 End If
+                If res.FailedFiles > 0 AndAlso Not System.String.IsNullOrWhiteSpace(res.DebugLogPath) Then summary.AppendLine("Diagnostic log: " & res.DebugLogPath)
                 ShowCustomMessageBox("Tabular overview completed." & vbCrLf & summary.ToString())
             End If
 

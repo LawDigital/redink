@@ -1,7 +1,20 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.vb
+' Purpose:
+'   Main Outlook VSTO add-in entry point. Owns startup/shutdown, Explorer lifecycle,
+'   configuration initialization, UI-thread marshaling, and host-level services.
 '
-' 8.7.2026
+' Architecture:
+'   Root partial ThisAddIn lifecycle module for the Outlook host. It coordinates
+'   shared configuration/resources, Outlook event hooks, COM/UI safety, and deferred
+'   warm-up while specialized mail, tooling, web, M365, and AutoPilot logic lives in
+'   the other ThisAddIn.* files.
+' =============================================================================
+'
+' 25.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -27,6 +40,7 @@
 ' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
+' Includes Microsoft.Playwright (Playwright for .NET) in unchanged form; Copyright (c) 2020 Darío Kondratiuk and other contributors, with modifications copyright (c) Microsoft Corporation where stated in the source files; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/microsoft/playwright-dotnet
 ' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 '
 ' Licenses of Red Ink and of third-party components and further legal terms/notices are available in the installation folder and via https://redink.ai.
@@ -59,8 +73,9 @@ Partial Public Class ThisAddIn
     Public Const AN5 As String = "RI"
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
+    Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.080726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.250826" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -152,6 +167,21 @@ Partial Public Class ThisAddIn
     Public StartupInitialized As Boolean = False
 
     ''' <summary>
+    ''' Arms the ask_user interactivity guard for Outlook. A live user is only present in
+    ''' Local Chat / Web Agent runs. Unattended e-mail Scheduler and AutoPilot runs
+    ''' (indicated by _apActive) must never block on ask_user. Idempotent; safe to call
+    ''' more than once.
+    ''' </summary>
+    Private Sub ArmAskUserInteractivityGuard()
+        SharedLibrary.Agents.AskUserTool.InteractivityProvider =
+            Function() As Boolean
+                ' Interactive only when a chat agent session is active and this is not an
+                ' unattended AutoPilot / e-mail Scheduler execution.
+                Return _chatAgentActive AndAlso Not _apActive
+            End Function
+    End Sub
+
+    ''' <summary>
     ''' Hidden control created to obtain a Windows Forms handle for marshaling to the Outlook UI thread.
     ''' </summary>
     Private mainThreadControl As New System.Windows.Forms.Control()
@@ -211,6 +241,20 @@ Partial Public Class ThisAddIn
     ''' Handles add-in startup. Initializes UI synchronization, UpdateHandler targets, host window handle, Explorer hooks, fallback timer, and restores last chat id.
     ''' </summary>
     Private Sub ThisAddIn_Startup() Handles Me.Startup
+
+        ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
+        ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
+        ' on the next host launch. When False, no handlers are installed (zero overhead).
+        Try
+            RiCrashLogger.Initialize(
+                "RedInk Outlook Add-in",
+                Me.GetType().Assembly,
+                My.Settings.CrashLog,
+                True,
+                RDV)
+        Catch
+        End Try
+
         Try
             RemoveHandler Microsoft.Win32.SystemEvents.PowerModeChanged, AddressOf OnPowerModeChanged
         Catch
@@ -232,19 +276,17 @@ Partial Public Class ThisAddIn
         UiSyncContext = _uiContext
         UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
 
+        ' Arm the ask_user interactivity guard so unattended e-mail Scheduler / AutoPilot
+        ' runs never block on a modal (interactive only in Local Chat / Web Agent).
+        ArmAskUserInteractivityGuard()
+
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
         UpdateHandler.MainControl = mainThreadControl
 
-        ' 4) Capture the host window’s HWND (Word / Excel / Outlook)
-        Dim hwnd As IntPtr
-        Dim progId = Me.Application.GetType().Name.ToLowerInvariant()
-        If progId.Contains("word") OrElse progId.Contains("excel") Then
-            hwnd = New IntPtr(CInt(Me.Application.Hwnd))
-        Else
-            hwnd = FindWindow("rctrl_renwnd32", Nothing)
-        End If
+        ' 4) Capture the host window’s HWND.
+        Dim hwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
         UpdateHandler.HostHandle = hwnd
 
         ' Other tasks that need to be done at startup
@@ -275,34 +317,39 @@ Partial Public Class ThisAddIn
             activeChatId = 1
         End Try
 
-        '#If DEBUG Then
-        '        RunToolCallSequencingSelfTestsAtStartup()
-        '#End If
+#If DEBUG Then
+        RunPythonExecuteRepairAdvisorSelfTestsAtStartup()
+#End If
 
     End Sub
 
 
-    '#If DEBUG Then
-    '    Private Shared _toolCallSequencingSelfTestsRan As Boolean = False
+#If DEBUG Then
+    Private Shared _pythonExecuteRepairAdvisorSelfTestsRan As Boolean = False
 
-    'Private Sub RunToolCallSequencingSelfTestsAtStartup()
-    'If _toolCallSequencingSelfTestsRan Then Return
-    '    _toolCallSequencingSelfTestsRan = True
+    ''' <summary>
+    ''' DEBUG-only: runs the PythonExecuteRepairAdvisor self-tests once per process on a background
+    ''' thread and writes the outcome to the Visual Studio Output window (Debug pane). No UI is shown;
+    ''' this never runs in Release builds.
+    ''' </summary>
+    Private Sub RunPythonExecuteRepairAdvisorSelfTestsAtStartup()
+        If _pythonExecuteRepairAdvisorSelfTestsRan Then Return
+        _pythonExecuteRepairAdvisorSelfTestsRan = True
 
-    '    Debug.WriteLine("[Startup] Queueing ToolCallSequencing self-tests...")
+        Debug.WriteLine("[Startup] Queueing PythonExecuteRepairAdvisor self-tests...")
 
-    '   System.Threading.Tasks.Task.Run(
-    'Sub()
-    'Try
-    '               Debug.WriteLine("[Startup] Running ToolCallSequencing self-tests...")
-    'Dim status = SharedLibrary.Agents.ToolCallSequencingSelfTests.RunAllAndReturnStatus()
-    '               Debug.WriteLine("[Startup] " & status)
-    'Catch ex As System.Exception
-    '               Debug.WriteLine("[Startup] ToolCallSequencing self-tests failed: " & ex.ToString())
-    'End Try
-    'End Sub)
-    'End Sub
-    '#End If
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Debug.WriteLine("[Startup] Running PythonExecuteRepairAdvisor self-tests...")
+                    Dim status = SharedLibrary.AgentsXX.PythonExecuteRepairAdvisorSelfTests.RunAllAndReturnStatus()
+                    Debug.WriteLine("[Startup] " & status)
+                Catch ex As System.Exception
+                    Debug.WriteLine("[Startup] PythonExecuteRepairAdvisor self-tests failed: " & ex.ToString())
+                End Try
+            End Sub)
+    End Sub
+#End If
 
     ''' <summary>
     ''' Handles creation of a new Explorer window. Attaches Activate, marks initialized, runs delayed startup, and cleans handlers.
@@ -400,6 +447,17 @@ Partial Public Class ThisAddIn
 
         Try
             InitializeConfig(True, True)
+            QueueModelAndAgentResourceWarmup()
+
+            ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
+            ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
+            Try
+                If My.Settings.CrashLog <> INI_Crashlog Then
+                    My.Settings.CrashLog = INI_Crashlog
+                    My.Settings.Save()
+                End If
+            Catch
+            End Try
 
             UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context)
 
@@ -428,12 +486,17 @@ Partial Public Class ThisAddIn
                 Using anchor As New System.Windows.Forms.Control()
                     Dim h = anchor.Handle
                 End Using
+                SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2Profiles()
                 SharedLibrary.Agents.WebView2JsSandbox.Initialize(
-                    System.Threading.SynchronizationContext.Current,
-                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+                    System.Threading.SynchronizationContext.Current)
             Catch
                 ' js_run will report "sandbox_uninitialized" if this failed.
             End Try
+
+            ' Warm the Python Agent version cache off the UI thread so the first tooling run
+            ' does not pay the version-probe cost. The lazy path in ResolveAndValidateAvailability
+            ' re-probes if this warm-up is skipped or the cache is cold.
+            PrimePythonAgentVersionCache()
 
         Catch ex As System.Exception
             ' Handling errors gracefully
@@ -449,14 +512,44 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Fire-and-forget warm-up of the Python Agent version cache. Runs off the UI thread and never
+    ''' throws; on failure the on-demand tool-registration path re-probes.
+    ''' </summary>
+    Private Sub PrimePythonAgentVersionCache()
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Dim configuration = SharedLibrary.Agents.PythonExecuteToolConfig.Parse(
+                        SharedMethods.ExpandEnvironmentVariables(INI_PythonAgentPath))
+                    If configuration IsNot Nothing Then
+                        SharedLibrary.Agents.PythonExecuteToolCore.PrimeAvailabilityCache(configuration)
+                    End If
+                Catch ex As System.Exception
+                    ' Non-fatal: the tool-registration path will re-probe on demand.
+                End Try
+            End Sub)
+    End Sub
+
+    ''' <summary>
     ''' Outlook add-in shutdown handler. Sequentially stops HTTP listener, watchdog, and power watch components.
     ''' </summary>
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+
+        Try
+            RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
+        Catch
+        End Try
 
         ' Shut down Knowledge Store service
         Try
             ShutdownKnowledgeStoreService()
         Catch
+        End Try
+
+        Try
+            SharedLibrary.Agents.BrowserTools.Shutdown()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("BrowserTools.Shutdown failed: " & ex.Message)
         End Try
 
         ' 1) deterministically stop the HTTP listener (await synchronously)
@@ -527,7 +620,7 @@ Partial Public Class ThisAddIn
         If _uiContext Is Nothing OrElse SynchronizationContext.Current Is _uiContext Then
             Return System.Threading.Tasks.Task.CompletedTask
         End If
-        Dim tcs As New TaskCompletionSource(Of Object)()
+        Dim tcs As New TaskCompletionSource(Of Object)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
         _uiContext.Post(
             Sub(state As Object)
                 tcs.SetResult(Nothing)
@@ -542,7 +635,7 @@ Partial Public Class ThisAddIn
     Private Function SwitchToUi(uiAction As System.Action) _
         As System.Threading.Tasks.Task
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of Object)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of Object)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
 
         mainThreadControl.BeginInvoke(New MethodInvoker(
         Sub()
@@ -563,7 +656,7 @@ Partial Public Class ThisAddIn
     Private Function SwitchToUi(Of T)(uiFunc As System.Func(Of T)) _
         As System.Threading.Tasks.Task(Of T)
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
 
         mainThreadControl.BeginInvoke(New MethodInvoker(
         Sub()
@@ -710,7 +803,7 @@ Partial Public Class ThisAddIn
         uiFunc As System.Func(Of System.Threading.Tasks.Task(Of T))) _
         As System.Threading.Tasks.Task(Of T)
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
 
         mainThreadControl.BeginInvoke(New MethodInvoker(
         Sub()
@@ -735,6 +828,42 @@ Partial Public Class ThisAddIn
         Return tcs.Task
     End Function
 
+
+    ''' <summary>
+    ''' Primes context-independent model/tool INI parsing and the skill/agent index off the
+    ''' Outlook UI thread. The on-demand paths remain authoritative and retry on failure.
+    ''' No Office COM or WinForms objects are touched by the background task.
+    ''' </summary>
+    Private Sub QueueModelAndAgentResourceWarmup()
+        Try
+            Dim alternateModelPath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AlternateModelPath, ""))
+            Dim specialServicePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_SpecialServicePath, ""))
+            Dim centralResourcePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AgentResourcesPath, ""))
+            Dim localResourcePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AgentResourcesPathLocal, ""))
+
+            SharedLibrary.Agents.AgentResources.SetPaths(centralResourcePath, localResourcePath)
+
+            System.Threading.Tasks.Task.Run(
+                Sub()
+                    Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    Try
+                        SharedMethods.WarmAlternativeModelsCache(alternateModelPath)
+                        SharedMethods.WarmAlternativeModelsCache(specialServicePath)
+                        SharedLibrary.Agents.AgentResources.EnsureFresh()
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("[PERF] Outlook startup warm-up failed: " & ex.Message)
+                    Finally
+                        stopwatch.Stop()
+                        System.Diagnostics.Debug.WriteLine(
+                            "[PERF] Outlook model/tool/resource warm-up: " &
+                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " ms")
+                    End Try
+                End Sub)
+        Catch ex As System.Exception
+            ' Non-fatal. Each on-demand path performs the same work if the cache is cold.
+        End Try
+    End Sub
 
     ' Bridge to SharedLibrary 
 
@@ -815,133 +944,50 @@ Module GetAsyncKeyStateModule
     End Function
 End Module
 
-' =====================================================================================
-' Red Ink for Outlook – Architectural Overview (Reviewer Documentation)
-' =====================================================================================
-' PURPOSE
-'   AI-assisted authoring add-in for Outlook (with sibling add-ins for Word/Excel).
-'   Provides translation, summarization, rewriting, style application, freestyle prompting,
-'   markup/diff visualization, email-chain analysis, clipboard/object insertion, and
-'   configurable prompt library usage via local and alternate LLM endpoints.
+' =================================================================================================
+' Red Ink for Outlook - Architecture Overview
 '
-' CORE COMPONENTS (PARTIAL CLASS SPLIT)
-'   ThisAddIn.vb
-'       - Outlook/VSTO lifecycle (Startup/Shutdown) with a two-phase initialization:
-'           1. Early: capture UI SynchronizationContext + TaskScheduler, host HWND, set
-'              UpdateHandler.MainControl + HostHandle.
-'           2. Delayed: configuration load, ribbon refresh, update polling, HTTP listener start.
-'       - Global constants: product naming, version, command triggers (e.g. Markup:, Clip:, Insert:, Replace:, Newdoc:, (nf)/(kf)/(kpf)).
-'       - Mutable runtime variables (TranslateLanguage, ShortenLength, SummaryLength, Username, etc.)
-'       - COM robustness:
-'           * OleMessageFilter: temporary registration to auto-retry RPC_E_CALL_REJECTED / RETRYLATER.
-'           * ComRetry(): small exponential-ish retry for transient COM busy states.
-'       - UI thread marshaling:
-'           * EnsureUIThread(), SwitchToUi(Action/Func), SwitchToUiTask(Func(Of Task(Of T)))
-'           * Allows asynchronous background LLM calls while keeping final UI mutation safe.
-'       - External bridge to SharedLibrary.SharedMethods for:
-'           * InitializeConfig(), LLM(), PostCorrection(), Settings window, Prompt selector.
-'       - Startup-added watchdogs: power mode watcher, listener watchdog, update checker.
-'       - Shutdown order: graceful HTTP listener stop, watchdog stop, power watcher teardown.
+' ROLE OF THIS FILE
+'   ThisAddIn.vb is the Outlook VSTO composition root. It owns application startup/shutdown,
+'   Explorer/Inspector lifecycle integration, shared-context/config initialization,
+'   UI-thread marshaling and host-level services. Mail features, Local Chat tooling and
+'   AutoPilot are implemented in the other partial ThisAddIn.* files.
 '
-'   ThisAddIn.Commands.vb
-'       - Entry command dispatcher: MainMenu(RI_Command) routes ribbon actions.
-'       - Email-context resolution:
-'           * Supports inline response → optional forced Inspector promotion with selection reapplication.
-'           * Multi-selection aggregation for chain summarization.
-'       - High-level operations:
-'           * Translate / PrimLang / Correct / Summarize / Improve / NoFillers / ApplyMyStyle /
-'             Friendly / Convincing / Shorten / Sumup / Answers / Freestyle / InsertClipboard.
-'       - Freestyle engine:
-'           * Prefix parsing for behavior flags: Markup*, Replace:, Clipboard:, Clip:, Newdoc:, (net), (Lib),
-'             (mystyle), (nf)/(kf)/(kpf), (clip) object inclusion, (2nd) alternate model.
-'           * Dynamic prompt augmentation (default prefix injection).
-'       - Markup strategies:
-'           * Method 1: Word built-in compare.
-'           * Method 2: Diff (DiffPlex).
-'           * Method 3: Diff rendered in window (no inline insertion).
-'           * Cap enforcement (MarkupDiffCap) with user override prompt.
-'       - Formatting retention:
-'           * Optional HTML extraction + reinsertion (KeepFormat flags, cap INI_KeepFormatCap).
-'           * Markdown conversion of inline formatting when enabled (MarkdownConvert).
-'       - Clipboard insertion:
-'           * Robust multi-attempt STA clipboard setter with fallback to manual window or temp file.
-'           * Optional RTF conversion (MarkdownToRtf).
-'       - MyStyle:
-'           * Style prompt file selection, automatic AI-based profile generation and persistence.
-'       - Chain parsing heuristics:
-'           * GetLatestMailBody(): detects quoted sections using marker & header patterns.
+' PRIMARY ARCHITECTURAL AREAS
+'   - Outlook UI/commands: Ribbon1.vb, DragDropForm.vb, ReviewChangesDialog.vb and
+'     Commands.*, Helpers, Properties and Processing partials.
+'   - Local Chat tooling: Tooling.ToolExecution, ToolExecutionContext, ToolResponse,
+'     Tools, PromptBuilding, UserRequestResolution, Sources, Memory, M365, PythonExecute
+'     and Logging; shared registry/sequencing/finality rules live in SharedLibrary.Agents.
+'   - Agent isolation: ThisAddIn.AgentHost.vb implements ISubAgentHost and runs bounded
+'     isolated tooling loops under the parent's workflow/task contracts.
+'   - AutoPilot mail workflow: Autopilot.vb plus Config, Cleanup, Scheduler,
+'     SenderToolPolicy, ThreadRetention, UserStorage*, Doc/PDF/comment processors and
+'     CompleteTables. It processes one mail/session context while retaining explicit
+'     attachment/output identities.
+'   - AutoPilot tools: AutoPilot.Tools.vb aggregates tool definitions; Tools.Office*,
+'     Tools.PDF, Tools.Other and DataCollector own domain execution. Structured/generic
+'     Word generation is OOXML-first; Office.Interop is the explicit live-Excel COM
+'     compatibility boundary. OpenXmlTemplate/OpenXmlVisuals own deterministic DOCX work.
+'   - Microsoft 365/knowledge: Tooling.M365, M365SearchForm, Processing.KnowledgeRAG and
+'     KnowledgeStoreWiring bridge shared M365 and Knowledge Store services.
+'   - Web-extension surfaces: WebExtension.vb and Agent/FileHelpers/InkyPlay/
+'     ListenerAndPower partials provide the external/local browser integration boundary.
 '
-'   ThisAddIn.Helpers.vb (naming suggests; verify implementation)
-'       - Expected to host shared helper routines used across command code:
-'           * Text diff rendering, CompareAndInsertText / CompareAndInsertTextCompareDocs
-'           * HTML/Markdown conversion (RemoveHTML, ConvertRangeToMarkdown, InsertTextWithMarkdown,
-'             GetRangeHtml).
-'           * Utility wrappers for dialogs (ShowCustomMessageBox, ShowCustomWindow, Yes/No boxes).
-'           * Configuration override logic (Override()) and selection length retrieval.
-'       - Reviewer focus: ensure no unsafe string injection into COM automation or HTML; validate
-'         any file I/O or reflection usage.
+' DESIGN/ARTIFACT BOUNDARIES
+'   Office design catalogs and active design-set selection are data/configuration, not
+'   hard-coded organization logic. Generated files are registered through explicit
+'   artifact/deliverable identities. Retry fidelity must preserve resolved designs and
+'   other user-significant choices instead of silently degrading to a neutral result.
 '
-'   ThisAddIn.Processing.vb 
-'       - Background processing concerns:
-'           * HTTP listener startup (StartupHttpListener/ShutdownHttpListener), watchdog timers,
-'             periodic update check (UpdateHandler.PeriodicCheckForUpdates).
-'           * Post/Pre-correction pipelines (cleaning, normalization).
-'       - Reviewer focus: authentication/authorization of HTTP surface, port binding, exposure risk,
-'         timeout handling, cancellation token usage.
+' EXECUTION FLOW
+'   Outlook event/user request -> Local Chat or AutoPilot orchestration -> capability
+'   routing/tool loading -> shared sequencing + host tool execution -> validated artifact
+'   or mail result -> final-response/delivery contract. UI/COM work must cross the Outlook
+'   UI-thread boundary explicitly; OOXML-only document generation must not start Office.
 '
-'   ThisAddIn.Properties.vb 
-'       - Used to share configuration with SharedLibrary.
-'       - Lightweight computed properties and wrappers mapping INI/config values to runtime flags.
-'       - Reviewer focus: thread safety for shared state; ensure no implicit cross-thread access.
-'
-'   ThisAddIn.WebExtension.vb / ThisAddIn.WebExtension.FileHelpers.vb
-'       - Bridge to a local web extension (e.g., for UI panel or external integration).
-'       - FileHelpers: safe file access (prompt libraries, MyStyle storage, temp export).
-'           * Should sanitize paths (environment variable expansion), enforce allowed directories,
-'             handle large file sizes, avoid blocking UI thread.
-'       - WebExtension core: request routing, minimal protocol, likely JSON/HTTP.
-'       - Reviewer focus: validate no arbitrary file read/write, restrict external origin access,
-'         ensure request size limits, avoid code injection via prompt content.
-'
-'   Resources
-'       - Embedded assets: icons (ribbon), templates, prompt library defaults, language strings.
-'       - Reviewer focus: check for hardcoded secrets, mutable resources used as dynamic prompts,
-'         localization fallback behavior.
-'
-'   Ribbon1.vb (and Ribbon2 if present)
-'       - UI layer: button click handlers calling MainMenu or helper methods (e.g., ShowSettings, HelpMeInky).
-'       - Dynamic enable/disable based on config (INIloaded, GPTSetupError, selection context).
-'       - Reviewer focus: ensure no long-running work on UI callbacks; all heavy LLM calls are async.
-'
-' EXTERNAL DEPENDENCIES (FOR REVIEW)
-'   DiffPlex: text diff generation (verify unmodified usage, license Apache 2.0).
-'   Markdig: Markdown → HTML conversion (pipeline configured with advanced extensions; review for XSS if HTML rendered in custom windows).
-'   Newtonsoft.Json / Google Protobuf / gRPC libs: serialization / API calls (audit for external traffic).
-'   HtmlAgilityPack: HTML parsing (ensure safe usage for user-controlled HTML).
-'   Cryptography / Pdf libraries (BouncyCastle, PdfPig, PdfiumViewer): not directly shown here—confirm constrained usage.
-'   Whisper.net / Vosk / NAudio: speech/transcription modules (check if loaded lazily; resource cleanup).
-'   SharedLibrary.SharedMethods: central abstraction for LLM calls, config reading, UI dialogs; treat as trust boundary (audit separately).
-'
-' CONCURRENCY & THREADING
-'   - UI thread affinity enforced via captured SynchronizationContext.
-'   - Asynchronous Tasks for LLM requests; ConfigureAwait(False) used to prevent deadlocks.
-'   - Interlocked guards (e.g., inMainMenu, delayedStartupOnce) prevent reentrancy.
-'   - Timer-based OLE filter revocation to bound filter lifetime.
-'
-' SECURITY / REVIEW HOTSPOTS
-'   1. Prompt Injection: Freestyle and user-supplied prompts are concatenated into system prompts—validate escaping where model calls depend on structured markup (<TEXTTOPROCESS> tags).
-'   2. HTML / Markdown Rendering: Output into windows (ShowHTMLCustomMessageBox) → ensure no script execution (Markdig produces HTML; confirm viewer control neutralizes scripts).
-'   3. File I/O: MyStyle prompt storage & prompt library reading—check path validation and absence of directory traversal.
-'   4. HTTP Listener: Confirm authentication, port binding restrictions, and rejection of unsolicited external requests.
-'   5. Clipboard: Large data insertion & RTF conversion—ensure size caps to avoid memory pressure.
-'   6. COM Automation: Robust retry logic prevents crashes but could mask persistent failures—log repeated COMException patterns.
-'   7. Alternate Models: When switching (2nd API / model selection), verify restoration of original config (RestoreDefaults) always succeeds.
-'   8. Diff Cap (MarkupDiffCap): Performance safeguard—ensure enforced consistently for both Command_InsertAfter and Freestyle flows.
-'
-' QUICK TRACE POINTS
-'   Startup path: ThisAddIn_Startup → (Explorer_Activate OR BeginInvoke DelayedStartupTasks) → InitializeConfig → UpdateHandler.PeriodicCheckForUpdates → StartupHttpListener.
-'   Command flow (example): Ribbon click → MainMenu("Correct") → Command_InsertAfter(prompt...) → LLM() → (optional PostCorrection) → insertion + markup.
-''
-' =====================================================================================
-' End of Reviewer Documentation
-' =====================================================================================
+' MAINTENANCE HOTSPOTS
+'   Outlook COM/UI responsiveness; sender/trust and AutoPilot storage isolation; tooling
+'   retries/finality; design routing; OOXML package validity; explicit Excel COM boundary;
+'   attachment/path containment; M365/web external data; and user-visible artifact delivery.
+' =================================================================================================

@@ -67,6 +67,6 @@ Mail Mover Rules (Local); ; Word, Outlook; MailMoverPathLocal; True; %APPDATA%\m
 
 Knowledge Store (Local); ; Word, Outlook; KnowledgeStorePathLocal; True; %APPDATA%\microsoft\word; redink-ks-catalog.json
 
-Agent Resources (Local); ; Word, Outlook; AgenResourcesPathLocal; False; %APPDATA%\microsoft\word\.inky; 
+Agent Resources (Local); ; Word, Outlook; AgentResourcesPathLocal; False; %APPDATA%\microsoft\word\.inky; 
 
 Dictionary (Local); ; Word, Outlook, Excel; DictionaryPathLocal; True; %APPDATA%\microsoft\word; dictionarylocal.txt

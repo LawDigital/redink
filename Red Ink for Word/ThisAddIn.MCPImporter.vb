@@ -382,7 +382,8 @@ Partial Public Class ThisAddIn
                                      dlg.FileName = Path.GetFileName(defaultFile)
                                      dlg.InitialDirectory = defaultDir
 
-                                     If dlg.ShowDialog() = DialogResult.OK Then
+                                     Dim __safeDialogOwner385 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                     If If(__safeDialogOwner385 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner385), dlg.ShowDialog()) = DialogResult.OK Then
                                          File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8)
                                          ShowCustomMessageBox(
                                              $"INI file saved to:{vbCrLf}{dlg.FileName}{vbCrLf}{vbCrLf}" &
@@ -580,7 +581,8 @@ Partial Public Class ThisAddIn
             preselectMany:=preselectAll,
             instruction:="Select the tools/services you want to generate INI sections for:")
 
-        If selector.ShowDialog() <> DialogResult.OK Then Return Nothing
+        Dim __safeDialogOwner583 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+        If If(__safeDialogOwner583 IsNot Nothing, selector.ShowDialog(__safeDialogOwner583), selector.ShowDialog()) <> DialogResult.OK Then Return Nothing
 
         Dim selected = selector.SelectedModels
         If selected Is Nothing OrElse selected.Count = 0 Then Return Nothing

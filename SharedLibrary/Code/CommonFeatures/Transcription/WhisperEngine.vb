@@ -101,7 +101,15 @@ Namespace Transcription
         Private _audioBuffer As New List(Of Single)()
         Private Const ROLLING_OVERLAP_SAMPLES As Integer = 16000 \ 2
         Private Const PROCESS_THRESHOLD_SAMPLES As Integer = 16000 * 2
+        Private Const LIVE_DEDUP_MAX_TOKENS As Integer = 12
+        Private Const LIVE_RECENT_TEXT_MAX_CHARS As Integer = 1200
+        Private Const LIVE_SILENCE_RMS_THRESHOLD As Double = 0.0025R
+        Private Const LIVE_SILENCE_PEAK_THRESHOLD As Double = 0.012R
+        Private Const LIVE_NO_SPEECH_REJECT_FLOOR As Single = 0.65F
         Private _cancelled As Boolean
+        Private _recentLiveFinalText As String = String.Empty
+        Private _liveNoSpeechRejectThreshold As Single = 0.65F
+        Private _liveBatchProcessed As Boolean
 
         Private Shared ReadOnly _runtimeInitLock As New Object()
         Private Shared _runtimeConfigured As Boolean
@@ -111,24 +119,46 @@ Namespace Transcription
             _modelFile = modelFileName
         End Sub
 
-        Private Sub Init(opts As TranscriptionOptions)
+        Private Sub RaiseStatusMessage(message As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
+            RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message, progressPercent))
+        End Sub
+
+        Private Sub Init(opts As TranscriptionOptions, isLive As Boolean)
             EnsureRuntimeConfigured()
 
             Dim modelPath As String = Path.Combine(_modelRoot, _modelFile)
             _factory = WhisperFactory.FromPath(modelPath)
+            RaiseStatusMessage("Whisper runtime: " & GetLoadedRuntimeDisplayText())
 
             Dim vad As Single = 0.6F
             If opts.VadThreshold > 0.0F AndAlso opts.VadThreshold < 1.0F Then
                 vad = opts.VadThreshold
             End If
 
-            Dim lang As String = If(String.IsNullOrWhiteSpace(opts.LanguageCode), "auto", opts.LanguageCode)
+            Dim lang As String = If(String.IsNullOrWhiteSpace(opts.LanguageCode), "auto", opts.LanguageCode).Trim()
+
+            _liveNoSpeechRejectThreshold = Math.Max(LIVE_NO_SPEECH_REJECT_FLOOR, vad)
 
             Dim builder = _factory.CreateBuilder() _
-                .WithLanguage(lang) _
                 .WithThreads(Environment.ProcessorCount) _
                 .WithNoSpeechThreshold(vad) _
-                .WithTemperature(0.3)
+                .WithTemperature(0.0)
+
+            If String.Equals(lang, "auto", StringComparison.OrdinalIgnoreCase) Then
+                builder = builder.WithLanguageDetection()
+            Else
+                builder = builder.WithLanguage(lang)
+            End If
+
+            ' Live audio is deliberately processed in short overlapping batches. Carrying
+            ' Whisper's previous decoded text into the next batch can amplify the overlap
+            ' into repetition loops. The application already reconciles the resulting live
+            ' transcript downstream, so make each live decode independent. For full-file
+            ' transcription, retain Whisper's normal previous-text conditioning because it
+            ' improves continuity across the model's internal long-form windows.
+            If isLive Then
+                builder = builder.WithNoContext()
+            End If
 
             If opts.Translate Then
                 builder = builder.WithTranslate()
@@ -169,12 +199,67 @@ Namespace Transcription
                     Environment.SetEnvironmentVariable("PATH", currentPath & Path.PathSeparator & speechPath)
                 End If
 
-                RuntimeOptions.LibraryPath = speechPath
-                'RuntimeOptions.RuntimeLibraryOrder = New List(Of RuntimeLibrary) From {RuntimeLibrary.Cuda, RuntimeLibrary.Cpu}
+                ' Do not set RuntimeOptions.LibraryPath to the model directory. LibraryPath is a
+                ' custom native-library override and would bypass Whisper.net's multi-runtime probing.
+                ' Keep the model directory on PATH for backwards-compatible discovery of optional
+                ' native dependencies that administrators may already deploy next to the models.
+                RuntimeOptions.RuntimeLibraryOrder = New List(Of RuntimeLibrary) From {
+                    RuntimeLibrary.Cuda,
+                    RuntimeLibrary.Cuda12,
+                    RuntimeLibrary.Vulkan,
+                    RuntimeLibrary.OpenVino,
+                    RuntimeLibrary.Cpu,
+                    RuntimeLibrary.CpuNoAvx
+                }
 
                 _runtimeConfigured = True
             End SyncLock
         End Sub
+
+        Public Shared Function GetLoadedRuntimeDisplayText() As String
+            Dim loaded As System.Nullable(Of RuntimeLibrary) = RuntimeOptions.LoadedLibrary
+            If Not loaded.HasValue Then
+                Return "Automatic (selected when Whisper is first initialized)"
+            End If
+
+            Select Case loaded.Value
+                Case RuntimeLibrary.Cuda
+                    Return "CUDA 13 (NVIDIA GPU)"
+                Case RuntimeLibrary.Cuda12
+                    Return "CUDA 12 (NVIDIA GPU)"
+                Case RuntimeLibrary.Vulkan
+                    Return "Vulkan (GPU)"
+                Case RuntimeLibrary.OpenVino
+                    Return "OpenVINO (accelerated runtime)"
+                Case RuntimeLibrary.Cpu
+                    Return "CPU"
+                Case RuntimeLibrary.CpuNoAvx
+                    Return "CPU (NoAVX compatibility)"
+                Case Else
+                    Return loaded.Value.ToString()
+            End Select
+        End Function
+
+        Public Shared Function GetRuntimeOptimizationHint() As String
+            Dim loaded As System.Nullable(Of RuntimeLibrary) = RuntimeOptions.LoadedLibrary
+
+            If loaded.HasValue Then
+                Select Case loaded.Value
+                    Case RuntimeLibrary.Cuda, RuntimeLibrary.Cuda12, RuntimeLibrary.Vulkan
+                        Return "GPU acceleration is active. No additional Whisper accelerator setup is required."
+                    Case RuntimeLibrary.OpenVino
+                        Return "OpenVINO acceleration is active. A compatible GPU runtime may still be faster where supported."
+                    Case RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx
+                        Return "CPU fallback is active. For GPU acceleration, install a supported accelerator: NVIDIA CUDA Toolkit 13.0.1+ or 12.4.1+, Vulkan Toolkit 1.4.321.1+, or Intel OpenVINO 2024.4+. Whisper will select the best available runtime automatically on the next application start."
+                End Select
+            End If
+
+            Return "Whisper selects the best available runtime automatically on first use. Optional GPU acceleration: NVIDIA CUDA Toolkit 13.0.1+ or 12.4.1+, Vulkan Toolkit 1.4.321.1+, or Intel OpenVINO 2024.4+."
+        End Function
+
+        Public Shared Function IsRuntimeLoaded() As Boolean
+            Return RuntimeOptions.LoadedLibrary.HasValue
+        End Function
 
         Private Shared Function PathContainsDirectory(pathValue As String, directoryPath As String) As Boolean
             If String.IsNullOrWhiteSpace(pathValue) OrElse String.IsNullOrWhiteSpace(directoryPath) Then
@@ -201,7 +286,10 @@ Namespace Transcription
         End Function
 
         Public Function StartLiveAsync(opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.StartLiveAsync
-            Init(opts)
+            Init(opts, True)
+            _audioBuffer.Clear()
+            _recentLiveFinalText = String.Empty
+            _liveBatchProcessed = False
             Return Task.CompletedTask
         End Function
 
@@ -225,25 +313,41 @@ Namespace Transcription
                 _audioBuffer.RemoveRange(0, _audioBuffer.Count - ROLLING_OVERLAP_SAMPLES)
             End If
 
-            Await ProcessSegmentsAsync(batch, ct)
+            Await ProcessSegmentsAsync(batch, ct, True)
+            _liveBatchProcessed = True
         End Function
 
         Public Async Function StopLiveAsync() As Task Implements ITranscriptionEngine.StopLiveAsync
-            _cancelled = True
+            ' After every normal live batch the buffer contains only the rolling overlap.
+            ' Process on stop only when audio arrived after that overlap; otherwise the last
+            ' batch would be decoded twice. Do this before setting _cancelled, because the
+            ' segment loop intentionally stops immediately once cancellation is active.
+            Dim hasUnprocessedAudio As Boolean = _audioBuffer.Count > 0 AndAlso
+                                                (Not _liveBatchProcessed OrElse _audioBuffer.Count > ROLLING_OVERLAP_SAMPLES)
 
-            If _audioBuffer.Count > 0 AndAlso _processor IsNot Nothing Then
-                Await ProcessSegmentsAsync(_audioBuffer.ToArray(), CancellationToken.None)
-                _audioBuffer.Clear()
+            If _processor IsNot Nothing AndAlso hasUnprocessedAudio Then
+                Await ProcessSegmentsAsync(_audioBuffer.ToArray(), CancellationToken.None, True)
             End If
+
+            _audioBuffer.Clear()
+            _cancelled = True
         End Function
 
         Public Async Function TranscribeFileAsync(filePath As String, opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.TranscribeFileAsync
-            Init(opts)
+            Init(opts, False)
+            RaiseStatusMessage("Preparing file…")
             Dim samples As Single() = LoadAudioToFloat16k(filePath)
+            RaiseStatusMessage("Transcribing file…")
             Await ProcessSegmentsAsync(samples, ct)
+
+            If ct.IsCancellationRequested OrElse _cancelled Then
+                RaiseStatusMessage("File transcription canceled.")
+            Else
+                RaiseStatusMessage("File transcription completed.", 100)
+            End If
         End Function
 
-        Private Async Function ProcessSegmentsAsync(samples As Single(), ct As CancellationToken) As Task
+        Private Async Function ProcessSegmentsAsync(samples As Single(), ct As CancellationToken, Optional liveBoundaryDeduplication As Boolean = False) As Task
             If _processor Is Nothing OrElse samples Is Nothing OrElse samples.Length = 0 Then
                 Return
             End If
@@ -255,6 +359,7 @@ Namespace Transcription
                 enumerator = segs.GetAsyncEnumerator(ct)
 
                 Dim hasNext As Boolean = True
+                Dim atLiveBatchBoundary As Boolean = liveBoundaryDeduplication AndAlso Not String.IsNullOrWhiteSpace(_recentLiveFinalText)
 
                 While hasNext
                     Try
@@ -271,11 +376,35 @@ Namespace Transcription
                     Dim seg As SegmentData = enumerator.Current
                     Dim text As String = seg.Text
 
+                    If liveBoundaryDeduplication AndAlso Not IsLiveSegmentAcousticallySupported(samples, seg) Then
+                        System.Diagnostics.Debug.WriteLine(
+                            "[Whisper.Live] Suppressed low-speech segment. NoSpeechProbability=" &
+                            seg.NoSpeechProbability.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture) &
+                            "; Text=" & If(text, String.Empty))
+                        Continue While
+                    End If
+
                     text = Regex.Replace(text, "\[.*?\]", String.Empty)
                     text = Regex.Replace(text, "\*.*?\*", String.Empty)
 
                     If Not String.IsNullOrWhiteSpace(text) Then
-                        RaiseEvent FinalResult(Me, New TranscriptionEventArgs(text.Trim(), True))
+                        text = text.Trim()
+
+                        If liveBoundaryDeduplication AndAlso atLiveBatchBoundary Then
+                            text = RemoveRepeatedLivePrefix(_recentLiveFinalText, text)
+
+                            If String.IsNullOrWhiteSpace(text) Then
+                                Continue While
+                            End If
+
+                            atLiveBatchBoundary = False
+                        End If
+
+                        If liveBoundaryDeduplication Then
+                            RememberLiveFinalText(text)
+                        End If
+
+                        RaiseEvent FinalResult(Me, New TranscriptionEventArgs(text, True))
                     End If
                 End While
             Catch ex As Exception
@@ -290,6 +419,114 @@ Namespace Transcription
                 End Try
             End If
         End Function
+
+
+        Private Function IsLiveSegmentAcousticallySupported(samples As Single(), seg As SegmentData) As Boolean
+            If samples Is Nothing OrElse samples.Length = 0 OrElse seg Is Nothing Then
+                Return False
+            End If
+
+            If seg.NoSpeechProbability >= _liveNoSpeechRejectThreshold Then
+                Return False
+            End If
+
+            Const sampleRate As Integer = 16000
+            Const marginSamples As Integer = sampleRate \ 10
+
+            Dim startSample As Integer = Math.Max(0, CInt(Math.Floor(seg.Start.TotalSeconds * sampleRate)) - marginSamples)
+            Dim endSample As Integer = Math.Min(samples.Length, CInt(Math.Ceiling(seg.End.TotalSeconds * sampleRate)) + marginSamples)
+
+            If endSample <= startSample Then
+                startSample = 0
+                endSample = samples.Length
+            End If
+
+            Dim sumSquares As Double = 0.0R
+            Dim peak As Double = 0.0R
+            Dim count As Integer = 0
+
+            For i As Integer = startSample To endSample - 1
+                Dim amplitude As Double = Math.Abs(CDbl(samples(i)))
+                If amplitude > peak Then
+                    peak = amplitude
+                End If
+
+                sumSquares += amplitude * amplitude
+                count += 1
+            Next
+
+            If count = 0 Then
+                Return False
+            End If
+
+            Dim rms As Double = Math.Sqrt(sumSquares / count)
+
+            ' Reject only when both measures indicate near-silence. Using both avoids
+            ' discarding quiet speech while suppressing Whisper's common silence tails.
+            Return rms >= LIVE_SILENCE_RMS_THRESHOLD OrElse peak >= LIVE_SILENCE_PEAK_THRESHOLD
+        End Function
+
+        Private Shared Function RemoveRepeatedLivePrefix(previousText As String, currentText As String) As String
+            If String.IsNullOrWhiteSpace(previousText) OrElse String.IsNullOrWhiteSpace(currentText) Then
+                Return currentText
+            End If
+
+            Dim previousTokens As MatchCollection = Regex.Matches(previousText, "[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*")
+            Dim currentTokens As MatchCollection = Regex.Matches(currentText, "[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*")
+
+            If previousTokens.Count < 2 OrElse currentTokens.Count < 2 Then
+                Return currentText
+            End If
+
+            Dim maximumOverlap As Integer = Math.Min(LIVE_DEDUP_MAX_TOKENS, Math.Min(previousTokens.Count, currentTokens.Count))
+            Dim overlapCount As Integer = 0
+
+            For candidateCount As Integer = maximumOverlap To 2 Step -1
+                Dim matches As Boolean = True
+                Dim previousStart As Integer = previousTokens.Count - candidateCount
+
+                For tokenIndex As Integer = 0 To candidateCount - 1
+                    If Not String.Equals(previousTokens(previousStart + tokenIndex).Value,
+                                         currentTokens(tokenIndex).Value,
+                                         StringComparison.OrdinalIgnoreCase) Then
+                        matches = False
+                        Exit For
+                    End If
+                Next
+
+                If matches Then
+                    overlapCount = candidateCount
+                    Exit For
+                End If
+            Next
+
+            If overlapCount = 0 Then
+                Return currentText
+            End If
+
+            If overlapCount >= currentTokens.Count Then
+                Return String.Empty
+            End If
+
+            Dim firstNewToken As Match = currentTokens(overlapCount)
+            Return currentText.Substring(firstNewToken.Index).Trim()
+        End Function
+
+        Private Sub RememberLiveFinalText(text As String)
+            If String.IsNullOrWhiteSpace(text) Then
+                Return
+            End If
+
+            If String.IsNullOrWhiteSpace(_recentLiveFinalText) Then
+                _recentLiveFinalText = text.Trim()
+            Else
+                _recentLiveFinalText = (_recentLiveFinalText & " " & text.Trim()).Trim()
+            End If
+
+            If _recentLiveFinalText.Length > LIVE_RECENT_TEXT_MAX_CHARS Then
+                _recentLiveFinalText = _recentLiveFinalText.Substring(_recentLiveFinalText.Length - LIVE_RECENT_TEXT_MAX_CHARS)
+            End If
+        End Sub
 
         Friend Shared Function LoadAudioToFloat16k(filePath As String) As Single()
             Using r As New MediaFoundationReader(filePath)

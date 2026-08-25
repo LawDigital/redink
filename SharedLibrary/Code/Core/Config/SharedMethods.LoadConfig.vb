@@ -89,7 +89,12 @@ Namespace SharedLibrary
                 If Not System.IO.File.Exists(IniFilePath) Then
                     If FirstTime Then
                         Using frm As New InitialConfig(context)
-                            frm.ShowDialog()
+                            Dim __safeDialogOwner92 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                            If __safeDialogOwner92 IsNot Nothing Then
+                                frm.ShowDialog(__safeDialogOwner92)
+                            Else
+                                frm.ShowDialog()
+                            End If
                         End Using
                         IniFilePath = DefaultPath
                         If context.InitialConfigFailed AndAlso Not System.IO.File.Exists(IniFilePath) Then
@@ -255,6 +260,7 @@ Namespace SharedLibrary
                 context.INI_APIKeyPrefix = If(configDict.ContainsKey("APIKeyPrefix"), configDict("APIKeyPrefix"), "")
                 context.INI_UsageRestrictions = If(configDict.ContainsKey("UsageRestrictions"), configDict("UsageRestrictions"), "")
                 context.INI_LogPath = If(configDict.ContainsKey("LogPath"), configDict("LogPath"), "")
+                context.INI_PythonAgentPath = If(configDict.ContainsKey("PythonAgentPath"), configDict("PythonAgentPath"), "")
                 context.INI_Language1 = If(configDict.ContainsKey("Language1"), configDict("Language1"), DEFAULT_LANGUAGE_1)
                 context.INI_Language2 = If(configDict.ContainsKey("Language2"), configDict("Language2"), DEFAULT_LANGUAGE_2)
                 context.INI_KeepFormatCap = If(configDict.ContainsKey("KeepFormatCap"), CInt(configDict("KeepFormatCap")), DEFAULT_KEEPFORMAT_CAP)
@@ -269,12 +275,22 @@ Namespace SharedLibrary
                 context.INI_MenuBlock = If(configDict.ContainsKey("MenuBlock"), configDict("MenuBlock"), "")
                 context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), 0)
 
+                ' Restore shared user settings from the registry backup if My.Settings was lost.
+                TryRestoreSharedUserSettingsFromRegistry()
+
                 ' Load per-user overrides from My.Settings.
                 context.INI_DefaultPrefix = My.Settings.DefaultPrefix
                 context.INI_ReplaceText2Override = My.Settings.ReplaceText2Override
                 context.INI_MarkupMethodWordOverride = My.Settings.MarkupMethodWordOverride
                 context.INI_MarkupMethodOutlookOverride = My.Settings.MarkupMethodOutlookOverride
                 context.INI_MarkupAuthor = My.Settings.MarkupAuthor
+
+                Dim restrictedModelAccessCode As String = ""
+                If TryGetMySettingString("RestrictedModelAccessCode", restrictedModelAccessCode) Then
+                    context.INI_RestrictedModelAccessCode = restrictedModelAccessCode
+                Else
+                    context.INI_RestrictedModelAccessCode = ""
+                End If
 
                 ' Boolean parameters.
                 context.INI_DoubleS = ParseBoolean(configDict, "DoubleS")
@@ -303,6 +319,7 @@ Namespace SharedLibrary
                 End If
 
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
+                context.INI_Crashlog = ParseBoolean(configDict, "Crashlog")
                 context.INI_UseHostColorOutlook = ParseBoolean(configDict, "UseHostColorOutlook")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
@@ -312,6 +329,8 @@ Namespace SharedLibrary
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
                 context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
                 context.INI_AllowLegacyDocFiles = ParseBoolean(configDict, "AllowLegacyDocFiles")
+                context.INI_JsRunDisable = ParseBoolean(configDict, "JsRunDisable")
+                context.INI_BrowserToolsDisable = ParseBoolean(configDict, "BrowserToolsDisable")
                 context.INI_EnablePrivacyForSearch = ParseBoolean(configDict, "EnablePrivacyForSearch")
 
                 context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")
@@ -321,6 +340,10 @@ Namespace SharedLibrary
                 context.INI_ToolingLogWindow = ParseBoolean(configDict, "ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW)
                 context.INI_ToolingDryRun = ParseBoolean(configDict, "ToolingDryRun")
                 context.INI_ToolingMaximumIterations = If(configDict.ContainsKey("ToolingMaximumIterations"), CInt(configDict("ToolingMaximumIterations")), DEFAULT_TOOLING_MAXIMUMITERATIONS)
+                context.INI_ToolResponsePayloadBudgetChars = If(configDict.ContainsKey("ToolResponsePayloadBudgetChars"), CInt(configDict("ToolResponsePayloadBudgetChars")), Agents.ToolingConstants.ToolResponsePayloadBudgetChars)
+                context.INI_BudgetMediumCompactionThresholdChars = If(configDict.ContainsKey("BudgetMediumCompactionThresholdChars"), CInt(configDict("BudgetMediumCompactionThresholdChars")), Agents.ToolingConstants.BudgetMediumCompactionThresholdChars)
+                context.INI_BudgetAggressiveCompactionThresholdChars = If(configDict.ContainsKey("BudgetAggressiveCompactionThresholdChars"), CInt(configDict("BudgetAggressiveCompactionThresholdChars")), Agents.ToolingConstants.BudgetAggressiveCompactionThresholdChars)
+                context.INI_BudgetCompactionPreviewChars = If(configDict.ContainsKey("BudgetCompactionPreviewChars"), CInt(configDict("BudgetCompactionPreviewChars")), Agents.ToolingConstants.BudgetCompactionPreviewChars)
 
                 ' M365 settings
 
@@ -330,6 +353,7 @@ Namespace SharedLibrary
 
                 ' Other parameters.
 
+                context.INI_MonitorLink = If(configDict.ContainsKey("MonitorLink"), configDict("MonitorLink"), "")
                 context.INI_NoHelperDownload = ParseBoolean(configDict, "NoHelperDownload")
                 context.INI_LicenseCounterPath = If(configDict.ContainsKey("LicenseCounterPath"), configDict("LicenseCounterPath"), "")
                 context.INI_LicenseCounterMethod = If(configDict.ContainsKey("LicenseCounterMethod"), configDict("LicenseCounterMethod"), DEFAULT_LICENSECOUNTERMETHOD)
@@ -343,6 +367,7 @@ Namespace SharedLibrary
 
                 context.INI_UpdateIniClients = If(configDict.ContainsKey("UpdateIniClients"), configDict("UpdateIniClients"), "")
                 context.INI_CentralConfigClients = If(configDict.ContainsKey("CentralConfigClients"), configDict("CentralConfigClients"), "")
+                context.INI_CentralConfigPW = If(configDict.ContainsKey("CentralConfigPW"), configDict("CentralConfigPW"), "")
 
                 context.INI_UpdateIniIgnoreOverride = If(configDict.ContainsKey("UpdateIniIgnoreOverride"), configDict("UpdateIniIgnoreOverride"), "")
                 context.INI_UpdateIniSilentMode = If(configDict.ContainsKey("UpdateIniSilentMode"), CInt(configDict("UpdateIniSilentMode")), DEFAULT_UPDATE_INI_SILENT_MODE)
@@ -397,6 +422,10 @@ Namespace SharedLibrary
                 context.INI_AgentResourcesPath = If(configDict.ContainsKey("AgentResourcesPath"), configDict("AgentResourcesPath"), "")
                 context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
                 Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
+
+                ' Restore persisted Skill-author mode (My.Settings) now that resource paths are known,
+                ' so the local .inky tree can be ensured. Runs for both Word and Outlook via shared config load.
+                Try : Agents.SkillAuthorMode.RestorePersistedState() : Catch : End Try
 
                 context.INI_ChunkOCR = If(configDict.ContainsKey("ChunkOCR"), CInt(configDict("ChunkOCR")), DEFAULT_CHUNK_OCR_PAGES)
 
@@ -634,6 +663,27 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        Private Shared Function TryGetMySettingString(settingName As String, ByRef result As String) As Boolean
+            result = ""
+
+            If String.IsNullOrWhiteSpace(settingName) Then
+                Return False
+            End If
+
+            Try
+                Dim rawValue As Object = My.Settings.Item(settingName)
+
+                If rawValue Is Nothing Then
+                    Return False
+                End If
+
+                result = rawValue.ToString()
+                Return True
+            Catch
+                Return False
+            End Try
+        End Function
+
 
         ''' <summary>
         ''' Checks whether mandatory INI values are missing and optionally prompts the user to provide them.
@@ -859,7 +909,12 @@ Namespace SharedLibrary
             settingsForm.ClientSize = New System.Drawing.Size(controlXOffset + defaultControlWidth + 40, cancelButton.Bottom + 20)
 
             ' Show the form and wait for user input.
-            settingsForm.ShowDialog()
+            Dim __safeDialogOwner907 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner907 IsNot Nothing Then
+                settingsForm.ShowDialog(__safeDialogOwner907)
+            Else
+                settingsForm.ShowDialog()
+            End If
 
             ' Return whether the user completed the form.
             Return userCompleted

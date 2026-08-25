@@ -14,7 +14,7 @@
 '  - worddoc_search: substring/regex search within document.
 '  - worddoc_list_comments: list all comments on document.
 '  - (write verbs when not read-only): worddoc_insert_text, worddoc_replace,
-'    worddoc_comment_add, worddoc_format.
+'    worddoc_delete, worddoc_comment_add, worddoc_format.
 ' =============================================================================
 
 Option Strict On
@@ -37,6 +37,7 @@ Namespace Agents
         Public Const ToolListComments As String = "worddoc_list_comments"
         Public Const ToolInsert As String = "worddoc_insert_text"
         Public Const ToolReplace As String = "worddoc_replace"
+        Public Const ToolDelete As String = "worddoc_delete"
         Public Const ToolCommentAdd As String = "worddoc_comment_add"
         Public Const ToolFormat As String = "worddoc_format"
 
@@ -44,7 +45,7 @@ Namespace Agents
             If String.IsNullOrWhiteSpace(name) Then Return False
             Select Case name
                 Case ToolListOpen, ToolGetActive, ToolExtract, ToolSearch, ToolListComments,
-                     ToolInsert, ToolReplace, ToolCommentAdd, ToolFormat
+                     ToolInsert, ToolReplace, ToolDelete, ToolCommentAdd, ToolFormat
                     Return True
                 Case Else
                     Return False
@@ -59,6 +60,7 @@ Namespace Agents
             If Not WordHostPolicy.ActiveDocReadOnly Then
                 list.Add(BuildInsert())
                 list.Add(BuildReplace())
+                list.Add(BuildDelete())
                 list.Add(BuildCommentAdd())
                 list.Add(BuildFormat())
             End If
@@ -97,16 +99,23 @@ Namespace Agents
                         Dim comments = host.ListComments(target)
                         Return JsonConvert.SerializeObject(New With {Key .target = If(String.IsNullOrEmpty(target), "active", target), Key .comments = comments})
 
-                    Case ToolInsert, ToolReplace, ToolCommentAdd, ToolFormat
+                    Case ToolInsert, ToolReplace, ToolDelete, ToolCommentAdd, ToolFormat
                         If WordHostPolicy.ActiveDocReadOnly Then
                             Return Err_("read_only", "Active document is read-only for the agent. Enable writes in Red Ink settings to allow this.")
                         End If
                         Select Case toolName
                             Case ToolInsert
-                                Return host.InsertTextJson(target, GetStr(arguments, "text"), If(GetStr(arguments, "location"), "end"))
+                                Return host.InsertTextJson(target, GetStr(arguments, "text"), If(GetStr(arguments, "location"), "end"),
+                                                            GetBool(arguments, "track_changes", True))
                             Case ToolReplace
                                 Return host.ReplaceJson(target, GetStr(arguments, "find"), GetStr(arguments, "text"),
-                                                         GetBool(arguments, "only_first", True))
+                                                         GetBool(arguments, "only_first", True),
+                                                         GetBool(arguments, "track_changes", True),
+                                                         GetStr(arguments, "match_scope"))
+                            Case ToolDelete
+                                Return host.DeleteJson(target, GetStr(arguments, "find"),
+                                                        GetBool(arguments, "track_changes", True),
+                                                        GetStr(arguments, "match_scope"))
                             Case ToolCommentAdd
                                 Return host.AddCommentJson(target, GetStr(arguments, "find"), GetStr(arguments, "text"),
                                                             If(GetStr(arguments, "author"), "Red Ink"),
@@ -183,7 +192,7 @@ Namespace Agents
             Return New ModelConfig() With {
                 .ToolName = ToolInsert, .Tool = True, .ToolPriority = 875, .ToolErrorHandling = "skip",
                 .ModelDescription = "Word doc (insert text)",
-                .ToolDefinition = "{""name"":""" & ToolInsert & """,""description"":""Insert text into the active or named open document. location: 'start' | 'end' | 'cursor' (default 'end')."",""parameters"":{""type"":""object"",""properties"":{""target"":{""type"":""string""},""text"":{""type"":""string""},""location"":{""type"":""string"",""enum"":[""start"",""end"",""cursor""]}},""required"":[""text""]}}",
+                .ToolDefinition = "{""name"":""" & ToolInsert & """,""description"":""Insert text into the active or named open document. location: 'start' | 'end' | 'cursor' (default 'end'). track_changes defaults to true (insertion recorded as a tracked revision)."",""parameters"":{""type"":""object"",""properties"":{""target"":{""type"":""string""},""text"":{""type"":""string""},""location"":{""type"":""string"",""enum"":[""start"",""end"",""cursor""]},""track_changes"":{""type"":""boolean""}},""required"":[""text""]}}",
                 .ToolInstructionsPrompt = ToolInsert & ": Insert text into the open Word document."
             }
         End Function
@@ -192,11 +201,19 @@ Namespace Agents
             Return New ModelConfig() With {
                 .ToolName = ToolReplace, .Tool = True, .ToolPriority = 876, .ToolErrorHandling = "skip",
                 .ModelDescription = "Word doc (replace)",
-                .ToolDefinition = "{""name"":""" & ToolReplace & """,""description"":""Replace text in the active or named open document."",""parameters"":{""type"":""object"",""properties"":{""target"":{""type"":""string""},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""}},""required"":[""find"",""text""]}}",
-                .ToolInstructionsPrompt = ToolReplace & ": Replace text in the open Word document."
+                .ToolDefinition = "{""name"":""" & ToolReplace & """,""description"":""Replace the resilient-located 'find' span in the open document. Matching tolerates stray whitespace, paragraph marks, fields, footnote/endnote anchors and control characters, and works with anchors longer than 255 characters. track_changes defaults to true (tracked, footnote/field/format-safe surgical replacement). match_scope: '' (exact span, default) | 'sentence' | 'paragraph' expands the located span to the enclosing sentence/paragraph."",""parameters"":{""type"":""object"",""properties"":{""target"":{""type"":""string""},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""},""track_changes"":{""type"":""boolean""},""match_scope"":{""type"":""string"",""enum"":["""",""sentence"",""paragraph""]}},""required"":[""find"",""text""]}}",
+                .ToolInstructionsPrompt = ToolReplace & ": Replace a resilient-located span in the open Word document (tracked by default)."
             }
         End Function
 
+        Private Shared Function BuildDelete() As ModelConfig
+            Return New ModelConfig() With {
+                .ToolName = ToolDelete, .Tool = True, .ToolPriority = 876, .ToolErrorHandling = "skip",
+                .ModelDescription = "Word doc (delete)",
+                .ToolDefinition = "{""name"":""" & ToolDelete & """,""description"":""Delete the resilient-located 'find' span in the open document. Matching tolerates stray whitespace, paragraph marks, fields, footnote/endnote anchors and control characters, and works with anchors longer than 255 characters. track_changes defaults to true (tracked, footnote/field/format-safe surgical deletion). match_scope: '' (exact span, default) | 'sentence' | 'paragraph' deletes the enclosing sentence/paragraph."",""parameters"":{""type"":""object"",""properties"":{""target"":{""type"":""string""},""find"":{""type"":""string""},""track_changes"":{""type"":""boolean""},""match_scope"":{""type"":""string"",""enum"":["""",""sentence"",""paragraph""]}},""required"":[""find""]}}",
+                .ToolInstructionsPrompt = ToolDelete & ": Delete a resilient-located word/sentence/paragraph in the open Word document (tracked by default)."
+            }
+        End Function
         Private Shared Function BuildCommentAdd() As ModelConfig
             Return New ModelConfig() With {
                 .ToolName = ToolCommentAdd, .Tool = True, .ToolPriority = 877, .ToolErrorHandling = "skip",

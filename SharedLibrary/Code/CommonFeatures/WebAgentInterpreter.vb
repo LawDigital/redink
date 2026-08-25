@@ -1668,7 +1668,7 @@ Namespace SharedLibrary
         ''' </param>
         Private Async Function CmdHttpRequestAsync(parms As Newtonsoft.Json.Linq.JObject, timeoutMs As System.Int32, cancel As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Object)
             Dim url = ResolveUrl(ExpandTemplates(parms.Value(Of System.String)("url")))
-            Dim absolute As System.Uri
+            Dim absolute As System.Uri = Nothing
             If Not System.Uri.TryCreate(url, System.UriKind.Absolute, absolute) Then
                 Throw New System.Exception("URL must be absolute (include scheme). Got: " & url)
             End If
@@ -2064,8 +2064,8 @@ Namespace SharedLibrary
                 Else
                     ' Convert Markdown -> HTML
                     Try
-                        Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                        htmlBodyCore = Markdig.Markdown.ToHtml(plainBody, pipeline)
+                        Dim pipeline As Markdig.MarkdownPipeline = Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline()
+                        htmlBodyCore = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(plainBody), pipeline)
                     Catch
                         htmlBodyCore = System.Net.WebUtility.HtmlEncode(plainBody).Replace(vbCrLf, "<br/>")
                     End Try

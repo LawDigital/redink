@@ -98,6 +98,8 @@ Partial Public Class ThisAddIn
         Public Property ReceivedTime As DateTime
         Public Property IsRead As Boolean
         Public Property StatusFlag As String  ' "Replied", "Forwarded", "RepliedAll", ""
+        Public Property OutlookCategories As String
+        Public Property OutlookFlag As String
         Public Property AttachmentNames As String
         Public Property BodyExcerpt As String
         Public Property SourceFolderPath As String
@@ -136,7 +138,7 @@ Partial Public Class ThisAddIn
 
         Try
             ' 1. Load and select rules
-            Dim selectedRules As String = SelectMailMoverRules()
+            Dim selectedRules As String = Await SelectMailMoverRulesAsync()
             If selectedRules Is Nothing Then Return
 
             ' 2. Determine mail source and the store that owns the current folder
@@ -257,59 +259,48 @@ Partial Public Class ThisAddIn
     ''' Loads rule files, parses segments, presents selection to user, returns chosen rules text.
     ''' Returns Nothing if cancelled or no rules available.
     ''' </summary>
-    Private Function SelectMailMoverRules() As String
+    Private Async Function SelectMailMoverRulesAsync() As System.Threading.Tasks.Task(Of String)
         Dim centralPath As String = ExpandEnvironmentVariables(If(INI_MailMoverPath, ""))
         Dim localPath As String = ExpandEnvironmentVariables(If(INI_MailMoverPathLocal, ""))
-
         Dim segments As New List(Of MailMoverRuleSegment)()
+        If Not String.IsNullOrWhiteSpace(centralPath) AndAlso File.Exists(centralPath) Then segments.AddRange(ParseRuleFile(centralPath, isLocal:=False))
+        If Not String.IsNullOrWhiteSpace(localPath) AndAlso File.Exists(localPath) Then segments.AddRange(ParseRuleFile(localPath, isLocal:=True))
 
-        ' Parse central file
-        If Not String.IsNullOrWhiteSpace(centralPath) AndAlso File.Exists(centralPath) Then
-            segments.AddRange(ParseRuleFile(centralPath, isLocal:=False))
-        End If
-
-        ' Parse local file
-        If Not String.IsNullOrWhiteSpace(localPath) AndAlso File.Exists(localPath) Then
-            segments.AddRange(ParseRuleFile(localPath, isLocal:=True))
-        End If
-
-        ' Build selection items
         Dim items As New List(Of SelectionItem)()
         Dim segMap As New Dictionary(Of Integer, MailMoverRuleSegment)()
         Dim idx As Integer = 1
-
         For Each seg In segments
-            Dim displayName As String = seg.Title & If(seg.IsLocal, " (local)", "")
-            items.Add(New SelectionItem(displayName, idx))
+            items.Add(New SelectionItem(seg.Title & If(seg.IsLocal, " (local)", ""), idx))
             segMap(idx) = seg
             idx += 1
         Next
 
-        ' Add "Edit local rules..." option if local path is defined
         Const EditLocalValue As Integer = -1
-        If Not String.IsNullOrWhiteSpace(localPath) Then
-            items.Add(New SelectionItem("Edit local rules...", EditLocalValue))
-        End If
-
-        ' Add "Undo last Mail Mover" option if undo is available
         Const UndoValue As Integer = -2
-        If _mailMoverUndoList IsNot Nothing AndAlso _mailMoverUndoList.Count > 0 Then
-            items.Add(New SelectionItem("Undo last Mail Mover operation", UndoValue))
-        End If
+        Const CreateLocalValue As Integer = -3
+        If Not String.IsNullOrWhiteSpace(localPath) Then items.Add(New SelectionItem("Edit local rules...", EditLocalValue))
+        If _mailMoverUndoList IsNot Nothing AndAlso _mailMoverUndoList.Count > 0 Then items.Add(New SelectionItem("Undo last Mail Mover operation", UndoValue))
 
-        If items.Count = 0 Then
+        If items.Count = 0 AndAlso String.IsNullOrWhiteSpace(localPath) Then
             ShowCustomMessageBox("No Mail Mover rules configured. Please define 'MailMoverPath' or 'MailMoverPathLocal' in the configuration.", $"{AN} - Mail Mover")
             Return Nothing
         End If
 
-        Dim result As Integer = SelectValue(items, If(segments.Count > 0, 1, EditLocalValue),
-                                             "Select the rule set to use for mail sorting:",
-                                             $"{AN} - Mail Mover - Rule Selection")
-
+        Dim defaultSelection As Integer = If(segments.Count > 0, 1, If(Not String.IsNullOrWhiteSpace(localPath), EditLocalValue, 0))
+        Dim result As Integer = SelectValue(items, defaultSelection,
+                                            "Select the rule set to use for mail sorting:",
+                                            $"{AN} - Mail Mover - Rule Selection",
+                                            Nothing,
+                                            If(Not String.IsNullOrWhiteSpace(localPath), "Create new local rules...", Nothing),
+                                            CreateLocalValue)
         If result = 0 Then Return Nothing
 
+        If result = CreateLocalValue Then
+            If Not Await CreateNewLocalMailMoverRulesAsync(localPath) Then Return Nothing
+            Return Await SelectMailMoverRulesAsync()
+        End If
+
         If result = EditLocalValue Then
-            ' Create or open local rules file
             If Not File.Exists(localPath) Then
                 Try
                     Dim dir As String = Path.GetDirectoryName(localPath)
@@ -321,20 +312,149 @@ Partial Public Class ThisAddIn
                 End Try
             End If
             ShowTextFileEditor(localPath, $"{AN} - Mail Mover - Edit Local Rules", False, _context)
-            ' After editing, re-run selection
-            Return SelectMailMoverRules()
+            Return Await SelectMailMoverRulesAsync()
         End If
 
         If result = UndoValue Then
             MailMoverUndo()
             Return Nothing
         End If
+        If segMap.ContainsKey(result) Then Return segMap(result).Rules
+        Return Nothing
+    End Function
 
-        If segMap.ContainsKey(result) Then
-            Return segMap(result).Rules
+    ''' <summary>
+    ''' Creates and appends a new local MailMover rule segment from user input.
+    ''' </summary>
+    Private Async Function CreateNewLocalMailMoverRulesAsync(localPath As String) As System.Threading.Tasks.Task(Of Boolean)
+        If String.IsNullOrWhiteSpace(localPath) Then Return False
+
+        Dim p0 As New SLib.InputParameter("Name of the rule set", "New local rules")
+        Dim p1 As New SLib.InputParameter("Folders to exclude", "") With {.Multiline = True, .MultilineHeight = 120}
+        Dim p2 As New SLib.InputParameter("Sender rules: sender -> destination folder", "") With {.Multiline = True, .MultilineHeight = 150}
+        Dim p3 As New SLib.InputParameter("Topic/keyword rules: topic or keyword -> destination folder", "") With {.Multiline = True, .MultilineHeight = 150}
+        Dim prms() As SLib.InputParameter = {p0, p1, p2, p3}
+
+        If ShowCustomVariableInputForm("Define the new local MailMover rule set:", $"{AN} - Create Local MailMover Rules", prms) = False Then Return False
+
+        Dim requestedTitle As String = CStr(If(prms(0).Value, "")).Trim()
+        Dim excludedFolders As String = CStr(If(prms(1).Value, "")).Trim()
+        Dim senderRules As String = CStr(If(prms(2).Value, "")).Trim()
+        Dim topicRules As String = CStr(If(prms(3).Value, "")).Trim()
+
+        If String.IsNullOrWhiteSpace(requestedTitle) Then
+            ShowCustomMessageBox("Please enter a name for the rule set.", $"{AN} - Mail Mover")
+            Return False
+        End If
+        If String.IsNullOrWhiteSpace(excludedFolders) AndAlso String.IsNullOrWhiteSpace(senderRules) AndAlso String.IsNullOrWhiteSpace(topicRules) Then
+            ShowCustomMessageBox("Please enter at least one exclusion, sender rule, or topic/keyword rule.", $"{AN} - Mail Mover")
+            Return False
         End If
 
-        Return Nothing
+        Dim uniqueTitle As String = GetUniqueMailMoverSegmentTitle(localPath, requestedTitle)
+        Dim systemPrompt As New StringBuilder()
+        systemPrompt.AppendLine("You create RULES for the email sorting system described in the base MailMover system prompt below.")
+        systemPrompt.AppendLine("Do not sort emails now. Ignore only the base prompt's JSON response-format requirement for this rule-authoring task.")
+        systemPrompt.AppendLine("Return only natural-language rule lines for one rule segment. Do not return a segment header, Markdown, commentary, or invent any sender, keyword, folder, or condition.")
+        systemPrompt.AppendLine("Preserve the user's meaning. State excluded folders explicitly as folders that must never be assigned.")
+        systemPrompt.AppendLine("<BASE_MAILMOVER_SYSTEM_PROMPT>")
+        systemPrompt.AppendLine(SP_MailMover)
+        systemPrompt.AppendLine("</BASE_MAILMOVER_SYSTEM_PROMPT>")
+
+        Dim userPrompt As New StringBuilder()
+        userPrompt.AppendLine($"Rule-set name: {uniqueTitle}")
+        userPrompt.AppendLine("<EXCLUDED_FOLDERS>") : userPrompt.AppendLine(excludedFolders) : userPrompt.AppendLine("</EXCLUDED_FOLDERS>")
+        userPrompt.AppendLine("<SENDER_RULES>") : userPrompt.AppendLine(senderRules) : userPrompt.AppendLine("</SENDER_RULES>")
+        userPrompt.AppendLine("<TOPIC_KEYWORD_RULES>") : userPrompt.AppendLine(topicRules) : userPrompt.AppendLine("</TOPIC_KEYWORD_RULES>")
+
+        Dim generatedRules As String = Nothing
+        Dim splash As SLib.SplashScreen = Nothing
+        Try
+            splash = New SLib.SplashScreen("Creating local MailMover rules...")
+            splash.TopMost = True
+            splash.ShowInTaskbar = False
+            splash.Show()
+            splash.Refresh()
+
+            generatedRules = Await LLM(systemPrompt.ToString(), userPrompt.ToString(), "", "", 0, False, True)
+        Catch ex As System.Exception
+            ShowCustomMessageBox($"Could not generate local MailMover rules: {ex.Message}", $"{AN} - Mail Mover")
+            Return False
+        Finally
+            If splash IsNot Nothing Then
+                Try
+                    Dim closeSplash As System.Action =
+                        Sub()
+                            If splash.IsDisposed = False Then
+                                splash.Close()
+                                splash.Dispose()
+                            End If
+                        End Sub
+
+                    If splash.InvokeRequired Then
+                        splash.Invoke(closeSplash)
+                    Else
+                        closeSplash.Invoke()
+                    End If
+                Catch
+                End Try
+            End If
+        End Try
+
+        generatedRules = CleanGeneratedMailMoverRules(generatedRules)
+        If String.IsNullOrWhiteSpace(generatedRules) Then
+            ShowCustomMessageBox("The AI did not return any usable MailMover rules. Nothing was written.", $"{AN} - Mail Mover")
+            Return False
+        End If
+
+        Try
+            Dim dir As String = Path.GetDirectoryName(localPath)
+            If Not String.IsNullOrEmpty(dir) Then Directory.CreateDirectory(dir)
+            Dim appendText As New StringBuilder()
+            If File.Exists(localPath) AndAlso New FileInfo(localPath).Length > 0 Then appendText.AppendLine() : appendText.AppendLine()
+            appendText.AppendLine($"[{uniqueTitle}]")
+            appendText.AppendLine(generatedRules.Trim())
+            File.AppendAllText(localPath, appendText.ToString(), Encoding.UTF8)
+        Catch ex As System.Exception
+            ShowCustomMessageBox($"Could not append the new rule set: {ex.Message}", $"{AN} - Mail Mover")
+            Return False
+        End Try
+
+        Dim viewChoice As Integer = ShowCustomYesNoBox($"The local MailMover rule set [{uniqueTitle}] was created and appended to:" & vbCrLf & vbCrLf & localPath & vbCrLf & vbCrLf & "Would you like to open the local rules file now?", "Edit file", "Continue", $"{AN} - Mail Mover")
+        If viewChoice = 1 Then ShowTextFileEditor(localPath, $"{AN} - Mail Mover - Edit Local Rules", False, _context)
+        Return True
+    End Function
+
+    Private Function GetUniqueMailMoverSegmentTitle(localPath As String, requestedTitle As String) As String
+        Dim baseTitle As String = requestedTitle.Trim()
+        Dim existingTitles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If File.Exists(localPath) Then
+            For Each rawLine As String In File.ReadAllLines(localPath, Encoding.UTF8)
+                Dim headerMatch As Match = Regex.Match(rawLine.Trim(), "^\[(.+)\]\s*$")
+                If headerMatch.Success Then existingTitles.Add(headerMatch.Groups(1).Value.Trim())
+            Next
+        End If
+        If Not existingTitles.Contains(baseTitle) Then Return baseTitle
+        Dim suffix As Integer = 2
+        While existingTitles.Contains($"{baseTitle} {suffix}")
+            suffix += 1
+        End While
+        Return $"{baseTitle} {suffix}"
+    End Function
+
+    Private Function CleanGeneratedMailMoverRules(generatedRules As String) As String
+        If String.IsNullOrWhiteSpace(generatedRules) Then Return ""
+        Dim cleaned As String = generatedRules.Trim()
+        If cleaned.StartsWith("```") Then
+            Dim firstLineEnd As Integer = cleaned.IndexOf(ControlChars.Lf)
+            If firstLineEnd >= 0 Then cleaned = cleaned.Substring(firstLineEnd + 1)
+            cleaned = cleaned.TrimEnd()
+            If cleaned.EndsWith("```") Then cleaned = cleaned.Substring(0, cleaned.Length - 3)
+            cleaned = cleaned.Trim()
+        End If
+        Dim lines As New List(Of String)(cleaned.Replace(vbCrLf, vbLf).Split({ControlChars.Lf}, StringSplitOptions.None))
+        If lines.Count > 0 AndAlso Regex.IsMatch(lines(0).Trim(), "^\[.+\]$") Then lines.RemoveAt(0)
+        Return String.Join(vbCrLf, lines).Trim()
     End Function
 
     ''' <summary>
@@ -555,6 +675,9 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
+        entry.OutlookCategories = GetMailMoverCategoriesWithColors(mi)
+        entry.OutlookFlag = GetMailMoverFlagDescription(mi)
+
         entry.AttachmentNames = ""
         Try
             Dim attachCount As Integer = ComRetry(Of Integer)(Function() mi.Attachments.Count)
@@ -585,6 +708,54 @@ Partial Public Class ThisAddIn
 
         Return entry
 
+    End Function
+
+    Private Function GetMailMoverCategoriesWithColors(mi As MailItem) As String
+        Dim rawCategories As String = ""
+        Try : rawCategories = ComRetry(Of String)(Function() If(mi.Categories, "")) : Catch : End Try
+        If String.IsNullOrWhiteSpace(rawCategories) Then Return ""
+        Dim separator As String = System.Globalization.CultureInfo.CurrentCulture.TextInfo.ListSeparator
+        If String.IsNullOrEmpty(separator) Then separator = ","
+        Dim descriptions As New List(Of String)()
+        Dim ns As Outlook.NameSpace = Globals.ThisAddIn.Application.GetNamespace("MAPI")
+        For Each rawName As String In rawCategories.Split(New String() {separator}, StringSplitOptions.RemoveEmptyEntries)
+            Dim categoryName As String = rawName.Trim()
+            If categoryName.Length = 0 Then Continue For
+            Dim description As String = categoryName
+            Try
+                Dim category As Outlook.Category = ns.Categories.Item(categoryName)
+                If category IsNot Nothing Then
+                    Dim categoryColor As Outlook.OlCategoryColor = category.Color
+                    description &= $" [Color={categoryColor}; Value={CInt(categoryColor)}]"
+                Else
+                    description &= " [Color=not in master category list]"
+                End If
+            Catch
+                description &= " [Color=not in master category list]"
+            End Try
+            descriptions.Add(description)
+        Next
+        Return String.Join("; ", descriptions)
+    End Function
+
+    Private Function GetMailMoverFlagDescription(mi As MailItem) As String
+        Dim parts As New List(Of String)()
+        Try
+            Dim flagRequest As String = ComRetry(Of String)(Function() If(mi.FlagRequest, ""))
+            If Not String.IsNullOrWhiteSpace(flagRequest) Then parts.Add($"Request={flagRequest}")
+        Catch
+        End Try
+        Try
+            Dim flagStatus As Outlook.OlFlagStatus = mi.FlagStatus
+            parts.Add($"Status={flagStatus}; StatusValue={CInt(flagStatus)}")
+        Catch
+        End Try
+        Try
+            Dim flagIcon As Outlook.OlFlagIcon = mi.FlagIcon
+            parts.Add($"Color/Icon={flagIcon}; Color/IconValue={CInt(flagIcon)}")
+        Catch
+        End Try
+        Return String.Join("; ", parts)
     End Function
 
 #End Region
@@ -732,6 +903,8 @@ Partial Public Class ThisAddIn
                     If Not String.IsNullOrEmpty(mail.StatusFlag) Then
                         userPrompt.AppendLine($"Status: {mail.StatusFlag}")
                     End If
+                    If Not String.IsNullOrEmpty(mail.OutlookCategories) Then userPrompt.AppendLine($"Categories/Tags: {mail.OutlookCategories}")
+                    If Not String.IsNullOrEmpty(mail.OutlookFlag) Then userPrompt.AppendLine($"Outlook flag: {mail.OutlookFlag}")
                     userPrompt.AppendLine($"Direction: {If(mail.IsSent, "Sent", "Received")}")
                     If Not String.IsNullOrEmpty(mail.AttachmentNames) Then
                         userPrompt.AppendLine($"Attachments: {mail.AttachmentNames}")
@@ -1231,7 +1404,12 @@ Partial Public Class ThisAddIn
                 End Sub
 
             updateCount.Invoke()
-            frm.ShowDialog()
+            Dim __safeDialogOwner1407 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner1407 IsNot Nothing Then
+                frm.ShowDialog(__safeDialogOwner1407)
+            Else
+                frm.ShowDialog()
+            End If
         End Using
 
         Return approved

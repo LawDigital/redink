@@ -4,83 +4,20 @@
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Tools.vb
 ' Purpose:
-'   Central hub for AutoPilot internal tool registration and execution dispatch.
-'   Orchestrates all built-in tools across modular tool files (Tools.Office.vb,
-'   Tools.PDF.vb, Tools.Other.vb) into a unified tool-calling pipeline consumed
-'   by Outlook AutoPilot Chat-Agent runs.
+'   AutoPilot tool-surface aggregator for Outlook: assembles built-in tool definitions,
+'   normalizes results, tracks produced files and delegates execution to modular Office,
+'   PDF, data-collection and miscellaneous tool implementations. Source-format carrier
+'   routing is explicit so existing native structures win over implicit creator defaults.
 '
-' Architecture Overview:
-'   - Registration Hub:
-'       * `GetAutoPilotInternalTools()` centralizes tool registration into a single
-'         `List(Of ModelConfig)` that unifies all built-in tools across modules.
-'       * Each tool is registered with `ToolDefinition` (JSON schema) and
-'         `ToolInstructionsPrompt` (LLM-facing documentation).
-'       * Tools are marked with `Tool=True`, `ToolOnly=True` to enable tool-calling
-'         mode in the LLM integration layer.
-'   - Execution Dispatch:
-'       * `TryExecuteAutoPilotTool()` is the single entry point that routes all
-'         tool calls (from the LLM or user) to the appropriate executor.
-'       * A switch statement matches `toolCall.ToolName` to call-specific executor
-'         functions (e.g., `ExecuteCreateWordDocTool`, `ExecuteCommentPdfTool`,
-'         `ExecuteGenerateImageTool`).
-'       * Each executor is scoped to its module file (Tools.Office.vb,
-'         Tools.PDF.vb, Tools.Other.vb) as a `Private Async Function` and
-'         handles argument parsing, validation, and orchestration of that tool's
-'         specific operation.
-'       * Executors return structured `ToolResponse` payloads (success flag,
-'         response message, error details, callId).
-'   - Constant Definitions:
-'       * Tool name constants (e.g., `AP_Tool_ProcessWordDoc`, `AP_Tool_CreatePowerPoint`)
-'         are defined here for centralized reference and consistency.
-'   - Session State Management:
-'       * All tool executors access shared AutoPilot session state:
-'           - `_apCurrentAttachments`: attachment registry maintained across
-'             the mail processing lifecycle.
-'           - `_apCurrentTempDir`: per-mail temp directory for input/output files.
-'           - `_apCurrentMailInfo`: metadata about the current email.
-'       * Output files from one tool are registered in attachment.OutputFiles
-'         and become discoverable to subsequent tools via `FindAttachment`.
-'
-' Tool Categories:
-'
-'   Office (ThisAddIn.AutoPilot.Tools.Office.vb):
-'   - create_word_document, comment_word_document, create_excel_spreadsheet,
-'     create_powerpoint, word_to_pdf, pdf_to_word
-'
-'   PDF (ThisAddIn.AutoPilot.Tools.PDF.vb):
-'   - extract_pdf_text, merge_pdfs, split_pdf, add_pdf_watermark,
-'     comment_pdf_document, redact_pdf, overlay_pdf
-'
-'   Other (ThisAddIn.AutoPilot.Tools.Other.vb):
-'   - read_attachment, list_attachments, search_in_attachments,
-'     generate_image, create_audio_file, web_grounding, manage_scheduled_tasks,
-'     manage_user_memory, manage_user_files, complete_word_tables, report_inability
-'
-'   Utility:
-'   - js_run (from SharedLibrary.Agents.JsRunTool for deterministic computation)
-'   - process_word_document, extract_data_from_attachments, describe_binary_attachment,
-'     compare_word_documents, read_word_document_details, create_pdf_from_text
-'
-' Session Lifecycle:
-'   - Tool Registration: called during AutoPilot initialization to populate
-'     the model config with all available built-in tools.
-'   - Tool Execution: called for each tool invocation during the LLM run,
-'     always within the context of `_apCurrentAttachments`,
-'     `_apCurrentTempDir`, and `_apCurrentMailInfo`.
-'   - Output Chaining: output files are registered and become available for
-'     subsequent tool calls in the same session.
-'   - Cleanup: the session lifecycle handles cleanup of temp files after the
-'     mail processing is complete.
-'
-' Security & Safety:
-'   - Path containment: all file I/O is scoped to `_apCurrentTempDir`.
-'   - Attachment resolution: `FindAttachment` validates attachment availability
-'     and size limits before tools operate.
-'   - COM cleanup: Office interop objects are properly released via
-'     `Marshal.FinalReleaseComObject` to prevent resource leaks.
-'   - Error isolation: each tool reports errors independently without affecting
-'     other tools or the overall LLM run.
-'
+' Architecture / Function:
+'   - Registration combines host tools with the shared registry/lazy-loading model; tool
+'     names and schemas remain stable model-facing contracts.
+'   - Execution is delegated to the owning module and returns normalized ToolResponse
+'     payloads into the same sequencing/finality pipeline used by Local Chat.
+'   - Produced artifacts are registered with explicit artifact/deliverable semantics so
+'     later tool calls and final delivery do not rely on filename heuristics.
+'   - Uses per-run AutoPilot attachment/temp/session state but does not own the Office
+'     rendering algorithms implemented in Tools.Office* or the shared agent tools.
 ' =============================================================================
 
 
@@ -226,18 +163,52 @@ Partial Public Class ThisAddIn
         Dim tools As New List(Of ModelConfig)()
 
         ' Deterministic helper for exact text/data computation inside AutoPilot.
-        tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+        Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
+        If jsRunTool IsNot Nothing Then
+            tools.Add(jsRunTool)
+        End If
+
+        ' Shared file/workspace tools available inside the current AutoPilot workspace.
+        tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.FileTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.BrowserTools.BuildAll(_context))
+        tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
+        tools.AddRange(GetAutoPilotAgentWorkspaceTools())
+
+        ' python_execute: secure sandboxed Python execution.
+        ' Only advertised when INI_PythonAgentPath is set, the exe is available, and
+        ' (when requested) its authenticity has been verified.
+        Dim pythonExecuteTool As ModelConfig = Nothing
+        If TryConfigureAndBuildPythonExecuteTool(pythonExecuteTool) Then
+            tools.Add(pythonExecuteTool)
+        End If
+
+        ' Shared helper tools used by the tooling runtime.
+        tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
+        tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+        tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
 
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
         .ModelDescription = "Process Word/PowerPoint/Excel Document (built-in)",
         .ToolInstructionsPrompt =
-            AP_Tool_ProcessWordDoc & ": Processes one or more Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments by applying a prompt/instruction. " &
-            "Use this for translation, correction, proofreading, anonymization, data updates, formula changes, or any text/data transformation. " &
+            AP_Tool_ProcessWordDoc & ": PREFERRED for transforming an EXISTING Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachment while preserving the source document's native structure, styles, layout/master, and formatting. " &
+            "Use this for translation, correction, proofreading, anonymization, replacements, data updates, formula changes, or any other transformation of an existing Office file. Converting an existing artifact into a generic/template/boilerplate version by replacing substantive content with placeholders or generic wording while keeping its format is also a transformation. " &
+            "If the user asks for a translated/corrected/revised/new-language/generic-template VERSION of an existing Office document, use this tool rather than a create_* tool when the existing file is the requested format carrier. " &
             "For Word documents, returns both a clean version and a compare document showing changes. " &
             "For PowerPoint and Excel files, returns the processed version (no compare document). " &
             "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter. " &
+            "CHUNKING / GLOBAL CONSISTENCY (IMPORTANT): The processor model does NOT receive the whole document at once. " &
+            "It processes the document sequentially in bounded chunks with only a small nearby context window, and the individual processor calls do not share hidden memory. " &
+            "Therefore YOU, the calling model, are responsible for document-wide consistency. When the task depends on information or choices that must remain stable across the whole document, " &
+            "put those facts and decisions in global_context so the same compact guidance is repeated to every chunk. Examples: defined-term translations, names, terminology, " &
+            "target-language variant, tone/register, abbreviation policy, recurring replacements, or terms that must not be translated. " &
+            "For very long documents, keep global_context bounded to reusable cross-document rules and decisions; do NOT paste the document or a long document summary into it. " &
+            "Do not assume the processor can infer information that appears only elsewhere in the document, and do not invent global facts that are not supported by the user request or known source context. " &
+            "global_context is context, not a second operation. " &
+            "For a successful Word transformation, the tool returns TWO user-relevant files: the clean processed document and the tracked-changes compare document. In the final user-facing answer, identify BOTH generated files by name; do not collapse them into a generic reference to one processed document. " &
             "CRITICAL — ONE OPERATION PER CALL: This tool applies exactly ONE instruction per call. " &
             "If the user requests multiple distinct operations (e.g., 'correct and translate', 'anonymize and summarize', 'fix grammar then make more concise'), " &
             "you MUST split them into separate sequential calls. First call: apply the first operation to the original file. " &
@@ -250,10 +221,13 @@ Partial Public Class ThisAddIn
             "Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
         .ToolDefinition =
             "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
-            """description"":""Applies exactly ONE processing instruction to Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments. " &
-            "Supports translation, correction, anonymization, data updates, formula modifications, and freestyle operations. " &
+            """description"":""Preferred for transforming an EXISTING Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachment while preserving its native structure, styles, layout/master, and formatting. Applies exactly ONE processing instruction per call. " &
+            "Use for translation, correction, proofreading, anonymization, replacements, data updates, formula modifications, generic/template/boilerplate conversion, and other transformations of an existing Office file when that file is the requested format carrier. " &
             "For Word documents, produces clean output plus a compare document with tracked changes. " &
             "For PowerPoint and Excel, produces the processed file only. " &
+            "The processor works chunk-by-chunk and does not see the full document in one model call or retain hidden memory between chunks. The calling model is responsible for document-wide consistency: " &
+            "when stable terminology, names, translation choices, tone, abbreviations, recurring replacements, or other cross-document facts matter, provide a compact reusable global_context. " &
+            "For successful Word processing, surface both returned files (clean processed document and compare document) to the user. " &
             "IMPORTANT: Apply only ONE operation per call. For multi-step requests (e.g. 'correct and translate'), " &
             "make separate sequential calls — first correct, then translate the corrected output file. " &
             "Output files are named '<original>_processed.<ext>' and can be used as input for the next call via attachment_names.""," &
@@ -261,6 +235,12 @@ Partial Public Class ThisAddIn
             """instruction"":{""type"":""string"",""description"":""A single, specific instruction to apply to the document. Must be ONE operation only — " &
             "e.g. 'Translate to German' or 'Correct spelling and grammar' or 'Anonymize all personal names'. " &
             "Do NOT combine multiple operations like 'Correct and translate'. Split those into separate calls.""}," &
+            """global_context"":{""type"":""string"",""description"":""Optional document-wide consistency context repeated to EVERY processing chunk. " &
+            "Use this when all chunks must know stable facts or decisions that may not appear in their local text window, such as defined-term translations, names, terminology, " &
+            "target-language variant, tone/register, abbreviation policy, recurring replacements, or do-not-translate terms. " &
+            "The processor never sees the complete document in one model call, so the calling model is responsible for supplying material cross-document guidance here. " &
+            "Keep this compact even for very long documents: include reusable rules/decisions, not the document itself or a long summary. Do not invent unsupported facts. " &
+            "This is context only and does not count as a second operation.""}," &
             """task_type"":{""type"":""string"",""enum"":[""translate"",""correct"",""other""]," &
             """description"":""Classifies the operation: 'translate' for language translation, 'correct' for spelling/grammar/style correction or proofreading, " &
             "'other' for everything else (anonymization, data transformation, restructuring, summarization, etc.). Default: 'other'""}," &
@@ -276,18 +256,24 @@ Partial Public Class ThisAddIn
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractPdfText,
         .ModelDescription = "Extract PDF Text (built-in)",
         .ToolInstructionsPrompt =
-            AP_Tool_ExtractPdfText & ": Extracts the text content from one or more PDF attachments.",
+            AP_Tool_ExtractPdfText & ": Extracts content from one or more PDF attachments. " &
+            "By default it returns plain text. If the user wants Markdown, pass output_format='markdown'. " &
+            "For text-based PDFs, Markdown uses the direct PDF-to-Markdown extractor without OCR. " &
+            "If OCR is needed and available, the OCR path is retained and should return Markdown when Markdown was requested.",
         .ToolDefinition =
             "{""name"":""" & AP_Tool_ExtractPdfText & """," &
-            """description"":""Extracts text from PDF file attachments""," &
+            """description"":""Extracts content from PDF file attachments. " &
+            "Optional output_format='markdown' returns Markdown instead of plain text when possible.""," &
             """parameters"":{""type"":""object"",""properties"":{" &
-            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}" &
+            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}," &
+            """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Optional output format. Default is 'text'. Use 'markdown' to request Markdown output.""}" &
             "},""required"":[]}}"
     })
 
         ' ── merge_pdfs ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_MergePdfs,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Merge PDFs (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_MergePdfs & ": Merges multiple PDF attachments into a single PDF file.",
@@ -305,22 +291,27 @@ Partial Public Class ThisAddIn
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReadAttachment,
             .ModelDescription = "Read Attachment Content (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ReadAttachment & ": Reads and returns the text content of one or more supported attachments " &
-                "(DOCX, PDF, TXT, CSV, HTML, XML, JSON, XLSX, XLS, PPTX). " &
+                AP_Tool_ReadAttachment & ": Reads and returns the content of one or more supported attachments. " &
+                "By default it returns plain text. If the user wants Markdown, pass output_format='markdown'. " &
+                "For Word documents (.docx), Markdown uses the sandboxed DOCX-to-Markdown path. " &
+                "For PDFs (.pdf), Markdown uses the direct PDF-to-Markdown extractor without OCR unless OCR is explicitly requested by another tool. " &
+                "Other supported formats continue to return plain text even when Markdown is requested. " &
                 "Embedded mail files (.msg, .eml) are automatically unpacked — their body text and nested attachments " &
                 "are extracted recursively and appear as separate attachments that you can reference by name. " &
                 "Use attachment_name for a single file or attachment_names for batch reading.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadAttachment & """," &
-                """description"":""Reads and returns the text content of one or more attachment files. " &
+                """description"":""Reads and returns the content of one or more attachment files. " &
                 "Supports Word documents (.docx), PDFs (.pdf), Excel spreadsheets (.xlsx, .xls), " &
                 "PowerPoint presentations (.pptx), and text-based files (.txt, .csv, .html, .xml, .json, .md, .log). " &
+                "Optional output_format='markdown' enables Markdown output for DOCX and PDF files; other formats remain plain text. " &
                 "Embedded mail files (.msg, .eml) are automatically unpacked at intake — their text content " &
                 "and nested attachments appear as separate files in the attachment list. " &
                 "For Word documents, also reports if comments or tracked changes are present.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of a single attachment to read""}," &
-                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of multiple attachments to read in batch. Use this instead of attachment_name when reading several files.""}" &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of multiple attachments to read in batch. Use this instead of attachment_name when reading several files.""}," &
+                """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Optional output format. Default is 'text'. Use 'markdown' to request Markdown output for DOCX and PDF attachments.""}" &
                 "},""required"":[]}}"
         })
 
@@ -394,6 +385,7 @@ Partial Public Class ThisAddIn
         ' ── compare_word_documents ── 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CompareWordDocs,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Compare two Word documents (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CompareWordDocs & ": Compares exactly two Word document (.doc/.docx) attachments using Word's " &
@@ -426,32 +418,41 @@ Partial Public Class ThisAddIn
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReadWordDocDetails,
             .ModelDescription = "Read Word Document Details (built-in)",
-            .ToolInstructionsPrompt =
-                AP_Tool_ReadWordDocDetails & ": Deep-reads a Word document (.docx) including body text with inline tracked changes, " &
-                "comment bubbles (with author, date, and anchored text), headers, footers, footnotes, and endnotes. " &
-                "This is a heavier tool — only use it when the user explicitly asks about comments, tracked changes, " &
-                "revisions, review history, headers/footers, or footnotes/endnotes. For general content questions, use read_attachment instead. " &
-                "Tracked changes are shown inline using «INS|author|date»...«/INS» and «DEL|author|date»...«/DEL» markers. " &
-                "Use tracked_changes_author and tracked_changes_since to filter changes by a specific author or date.",
+                  .ToolInstructionsPrompt =
+                AP_Tool_ReadWordDocDetails & ": Deep-reads a Word document (.docx) directly from its WordprocessingML/OpenXML parts, including body text, " &
+                "tracked revisions (insertions, deletions, moves, and revision/property-change records), comment bubbles (with author, date, and anchored text), " &
+                "headers, footers, footnotes, and endnotes. IMPORTANT TRACK-CHANGES ROUTING: when the user asks to read, list, inspect, extract, identify, transfer, " &
+                "filter, verify, or reason about tracked changes/revisions in a .docx, use this tool rather than assuming ordinary extracted/rendered text contains them. " &
+                "The user does NOT need to explicitly ask for an XML read: this tool is the built-in deterministic way to inspect tracked changes stored in Word XML. " &
+                "Set include_tracked_changes=true (default) and, when requested, filter with tracked_changes_author (legacy single-author filter), tracked_changes_authors " &
+                "(one or more authors), tracked_changes_since, and/or tracked_changes_until. If only revision records are needed, set tracked_changes_only=true to avoid returning the full document body. " &
+                "Do not use Python merely to rediscover Word tracked changes after this tool has returned them; use Python only when the remaining task genuinely requires Python processing. " &
+                "For general content questions unrelated to review markup, use " & AP_Tool_ReadAttachment & " instead. " &
+                "NOTE: The body text returned by this tool is optimized for review markup and does NOT include automatic list/heading numbering, multilevel list restarts, " &
+                "resolved fields, or bookmark/cross-reference (REF) resolution. When the user needs fully rendered content, use " & AP_Tool_ReadAttachment & " instead. " &
+                "Tracked insertions/deletions are shown inline using «INS|author|date»...«/INS» and «DEL|author|date»...«/DEL» markers, and a separate XML revision list provides explicit revision records.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadWordDocDetails & """," &
-                """description"":""Deep-reads a Word document (.docx) with comments, tracked changes, headers/footers, and footnotes/endnotes. " &
-                "Only use when the user asks about comments, revisions, changes, review history, headers, footers, footnotes, or endnotes. " &
-                "For general content, use read_attachment instead.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
+                """description"":""Deep-reads a .docx directly from WordprocessingML/OpenXML, including explicit tracked-revision records with author/date/text plus comments and optional document parts. " &
+                "Use this whenever the task depends on Word tracked changes/revisions; ordinary text extraction may not expose revision XML. Supports all revisions or filters by one/multiple authors and date range. " &
+                "For general rendered content unrelated to review markup, use " & AP_Tool_ReadAttachment & " instead. The body text here omits automatic list/heading numbering, multilevel list restarts, resolved fields, and cross-references (REF).""," & """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the .docx attachment to read""}," &
                 """include_comments"":{""type"":""boolean"",""description"":""Include comment bubbles with author, date, and anchored text (default: true)""}," &
                 """include_headers_footers"":{""type"":""boolean"",""description"":""Include headers and footers (default: false)""}," &
                 """include_footnotes_endnotes"":{""type"":""boolean"",""description"":""Include footnotes and endnotes (default: false)""}," &
-                """include_tracked_changes"":{""type"":""boolean"",""description"":""Include tracked changes as inline markers in the body text (default: true)""}," &
-                """tracked_changes_author"":{""type"":""string"",""description"":""Optional: only show tracked changes by this author""}," &
-                """tracked_changes_since"":{""type"":""string"",""description"":""Optional: only show tracked changes on or after this date (ISO 8601, e.g. '2026-01-15')""}" &
+                """include_tracked_changes"":{""type"":""boolean"",""description"":""Include tracked changes from the Word XML as inline markers plus an explicit XML revision list (default: true). Set true whenever the task depends on revisions.""}," &
+                """tracked_changes_only"":{""type"":""boolean"",""description"":""Return only explicit tracked-change/revision records from Word XML, with type, author, date, changed text, paragraph context, and OOXML part (default: false). Use for revision-focused tasks to avoid returning the full document body.""}," &
+                """tracked_changes_author"":{""type"":""string"",""description"":""Optional legacy single-author filter; case-insensitive partial author-name match""}," &
+                """tracked_changes_authors"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional list of one or more authors. A revision is included when its author matches any supplied value (case-insensitive partial match).""}," &
+                """tracked_changes_since"":{""type"":""string"",""description"":""Optional inclusive lower date/time bound for revisions (ISO 8601, e.g. '2026-08-24' or '2026-08-24T09:30:00+02:00')""}," &
+                """tracked_changes_until"":{""type"":""string"",""description"":""Optional inclusive upper date/time bound for revisions (ISO 8601). A date-only value includes that entire calendar day.""}" &
                 "},""required"":[""attachment_name""]}}"
         })
 
         ' ── create_pdf_from_text ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreatePdfFromText,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create PDF from Text (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreatePdfFromText & ": Creates a PDF document from provided text content. " &
@@ -514,21 +515,26 @@ Partial Public Class ThisAddIn
             .ToolPriority = 980,
             .ToolInstructionsPrompt =
                 AP_Tool_ExcelReadLiveRange & ": Reads the live contents of an existing Excel attachment through Excel Interop, not through XML/OpenXML parsing. " &
-                "Use this for existing workbooks whenever formulas, dropdowns, validations, comments, threaded comments, recalculated values, colors, or current workbook state matter. " &
+                "Use this for existing workbooks whenever formulas, dropdowns, validations, comments, threaded comments, recalculated values, colors, font properties, common formatting, structure, protection details, conditional formatting, data bars, icon sets, or current workbook state matter. " &
                 "For form completion or updating an existing workbook, call excel_list_live_worksheets first, then this tool to understand the live sheet content and options, and only then call excel_complete_live_workbook. " &
                 "If worksheet_name is omitted, the first worksheet is used. If range_address is omitted, the worksheet's used range is read. " &
-                "By default include_formulas is false and include_color is true.",
+                "By default include_formulas is false, include_color is true, include_font_properties is false, include_formatting is false, include_structure is false, include_protection_details is false, and include_conditional_formatting is false.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExcelReadLiveRange & """," &
                 """description"":""Reads a worksheet or range from an existing Excel attachment through live Excel Interop. " &
-                "This is the preferred reader for existing workbooks that may contain active formulas, dropdowns, validations, recalculated values, comments, or protected sheets. " &
-                "Defaults: first worksheet if worksheet_name is omitted, used range if range_address is omitted, include_formulas=false, include_color=true.""," &
+                "This is the preferred reader for existing workbooks that may contain active formulas, dropdowns, validations, recalculated values, comments, font properties, colors, common formatting, structure, protection details, conditional formatting, data bars, icon sets, or protected sheets. " &
+                "Defaults: first worksheet if worksheet_name is omitted, used range if range_address is omitted, include_formulas=false, include_color=true, include_font_properties=false, include_formatting=false, include_structure=false, include_protection_details=false, include_conditional_formatting=false.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to read""}," &
                 """worksheet_name"":{""type"":""string"",""description"":""Optional worksheet name. If omitted, the first worksheet is used.""}," &
                 """range_address"":{""type"":""string"",""description"":""Optional Excel range in A1 notation, for example 'A1:D20'. If omitted, the worksheet's used range is read.""}," &
                 """include_formulas"":{""type"":""boolean"",""description"":""Optional. Default false. Include cell formulas in the output.""}," &
-                """include_color"":{""type"":""boolean"",""description"":""Optional. Default true. Include font and background color information in the output.""}" &
+                """include_color"":{""type"":""boolean"",""description"":""Optional. Default true. Include font and background color information in the output.""}," &
+                """include_font_properties"":{""type"":""boolean"",""description"":""Optional. Default false. Include font properties such as name, size, strikethrough, bold, italic, and underline in the output.""}," &
+                """include_formatting"":{""type"":""boolean"",""description"":""Optional. Default false. Include common formatting such as number format, alignment, wrapping, shrink-to-fit, and borders in the output.""}," &
+                """include_structure"":{""type"":""boolean"",""description"":""Optional. Default false. Include structural details such as row height, column width, and merged-area information.""}," &
+                """include_protection_details"":{""type"":""boolean"",""description"":""Optional. Default false. Include cell protection flags such as locked and formula_hidden.""}," &
+                """include_conditional_formatting"":{""type"":""boolean"",""description"":""Optional. Default false. Include conditional-formatting summaries, including data bars and icon sets.""}" &
                 "},""required"":[""attachment_name""]}}"
         })
 
@@ -538,27 +544,55 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Complete Live Excel Workbook (built-in)",
             .ToolPriority = 990,
             .ToolInstructionsPrompt =
-                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
-                "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, or current workbook state matter. " &
+                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through Excel Interop. By default it edits the existing workbook in place, so repeated updates accumulate in one file rather than creating a new file per round. Supply output_filename only when a separate copy is wanted, leaving the source workbook untouched. " &
+                "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, current workbook state, or cell and structure formatting matter. " &
                 "Do not use normal XML-based Excel editing for such tasks. " &
-                "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, and available options. " &
-                "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, and/or a comment. " &
+                "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, available options, and any required formatting. " &
+                "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, a comment, font formatting, fill formatting, common formatting, borders, row height, column width, merge state, and cell protection flags. " &
+                "Always batch every cell change for a workbook into a single call by passing all updates in one 'updates' array. Do not make one call per cell; the workbook is opened, recalculated, and saved once per call, so batching many updates together is far more efficient. " &
                 "If worksheet_name is omitted, the first worksheet is used. A per-update worksheet_name may override the default worksheet. " &
                 "For formulas, prefer English Excel formulas with comma separators when possible. The tool includes locale-safe fallbacks for localized Excel installations and different list separators.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExcelCompleteLiveWorkbook & """," &
-                """description"":""Updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
-                "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, or protected sheets with LiftLock markers. " &
+                """description"":""Updates an existing Excel attachment through live Excel Interop. By default the existing workbook is edited in place so repeated updates accumulate in a single file; provide output_filename to instead save the result as a separate copy and leave the source untouched. " &
+                "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, protected sheets with LiftLock markers, or required formatting such as strikethrough, font color, fill color, number format, alignment, borders, row height, column width, merge state, and cell protection flags. " &
                 "Use JSON-based cell updates. Prefer English Excel formulas with comma separators; locale fallbacks are built in.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to complete or update""}," &
-                """worksheet_name"":{""type"":""string"",""description"":""Optional default worksheet name. If omitted, the first worksheet is used.""}," &
+                                """worksheet_name"":{""type"":""string"",""description"":""Optional default worksheet name. If omitted, the first worksheet is used.""}," &
+                """output_filename"":{""type"":""string"",""description"":""Optional. If omitted, the existing workbook is edited in place (preferred for iterative edits). If provided, the result is saved as a separate .xlsx copy under this name and the source workbook is left unchanged.""}," &
                 """updates"":{""type"":""array"",""description"":""Array of cell updates to apply. Each update targets one cell."",""items"":{""type"":""object"",""properties"":{" &
                 """worksheet_name"":{""type"":""string"",""description"":""Optional worksheet override for this update. If omitted, the tool-level worksheet_name or the first worksheet is used.""}," &
                 """cell"":{""type"":""string"",""description"":""Target cell address in A1 notation, for example 'B12'""}," &
                 """value"":{""description"":""Optional cell value. Use JSON string, number, boolean, or null.""}," &
                 """formula"":{""type"":""string"",""description"":""Optional Excel formula for the cell. Prefer English function names and comma separators, starting with '='. Locale-safe fallbacks are applied automatically.""}," &
-                """comment"":{""type"":""string"",""description"":""Optional comment text to add as a threaded comment or reply where supported.""}" &
+                """comment"":{""type"":""string"",""description"":""Optional comment text to add as a threaded comment or reply where supported.""}," &
+                """font"":{""type"":""object"",""description"":""Optional font properties to set on the target cell."",""properties"":{" &
+                """name"":{""type"":""string"",""description"":""Optional font name.""}," &
+                """size"":{""description"":""Optional font size as number.""}," &
+                """strikethrough"":{""type"":""boolean"",""description"":""Optional. Set or clear strikethrough formatting.""}," &
+                """bold"":{""type"":""boolean"",""description"":""Optional. Set or clear bold formatting.""}," &
+                """italic"":{""type"":""boolean"",""description"":""Optional. Set or clear italic formatting.""}," &
+                """color"":{""description"":""Optional font color. Use '#RRGGBB', an integer OLE color value, or 'automatic'.""}," &
+                """underline"":{""description"":""Optional. Use true/false or one of: 'none', 'single', 'double', 'single_accounting', 'double_accounting'.""}" &
+                "}}," &
+                """fill"":{""type"":""object"",""description"":""Optional fill properties to set on the target cell."",""properties"":{" &
+                """color"":{""description"":""Optional background color. Use '#RRGGBB', an integer OLE color value, or 'none' to clear the fill.""}" &
+                "}}," &
+                """number_format"":{""type"":""string"",""description"":""Optional Excel number format string.""}," &
+                """horizontal_alignment"":{""type"":""string"",""description"":""Optional horizontal alignment: general, left, center, right, fill, justify, center_across_selection, distributed.""}," &
+                """vertical_alignment"":{""type"":""string"",""description"":""Optional vertical alignment: top, center, bottom, justify, distributed.""}," &
+                """wrap_text"":{""type"":""boolean"",""description"":""Optional. Enable or disable wrap text.""}," &
+                """shrink_to_fit"":{""type"":""boolean"",""description"":""Optional. Enable or disable shrink to fit.""}," &
+                """borders"":{""type"":""object"",""description"":""Optional border settings. Supported properties: top, bottom, left, right. Each side may be 'none' or an object with optional style, weight, and color.""}," &
+                """row_height"":{""description"":""Optional row height for the target cell's row.""}," &
+                """column_width"":{""description"":""Optional column width for the target cell's column.""}," &
+                """merge_action"":{""type"":""string"",""description"":""Optional merge action: 'merge' or 'unmerge'.""}," &
+                """merge_range"":{""type"":""string"",""description"":""Optional A1 range for the merge action. If omitted, the target cell or its current merged area is used.""}," &
+                """protection"":{""type"":""object"",""description"":""Optional cell protection properties to set on the target cell or merged area."",""properties"":{" &
+                """locked"":{""type"":""boolean"",""description"":""Optional. Set or clear the locked flag.""}," &
+                """formula_hidden"":{""type"":""boolean"",""description"":""Optional. Set or clear the formula-hidden flag.""}" &
+                "}}" &
                 "},""required"":[""cell""]}}" &
                 "},""required"":[""attachment_name"",""updates""]}}"
         })
@@ -566,6 +600,7 @@ Partial Public Class ThisAddIn
         ' ── split_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_SplitPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Split PDF (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_SplitPdf & ": Extracts a range of pages from a PDF attachment into a new PDF.",
@@ -583,6 +618,7 @@ Partial Public Class ThisAddIn
         ' ── add_pdf_watermark ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_AddPdfWatermark,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Add PDF Watermark (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_AddPdfWatermark & ": Adds a diagonal text watermark to every page of a PDF attachment.",
@@ -599,6 +635,7 @@ Partial Public Class ThisAddIn
         ' ── word_to_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_WordToPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Convert Word to PDF (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_WordToPdf & ": Converts a Word document (.doc/.docx) attachment to PDF format using Word.",
@@ -642,10 +679,12 @@ Partial Public Class ThisAddIn
         ' ── pdf_to_word ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_PdfToWord,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Convert PDF to Word (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF import. " &
-                "The resulting .docx can then be used with compare_word_documents or other Word tools. " &
+                "The resulting .docx can then be used with process_word_document, compare_word_documents, or other Word tools. " &
+                "When the user asks to create a Word document/template that preserves, copies, or closely follows the PDF's formatting/layout, treat the PDF as a format carrier: use pdf_to_word FIRST, then transform the converted DOCX instead of extracting text and rebuilding with create_word_document. " &
                 "This is the PREFERRED method for PDF-to-Word conversion — use it FIRST. It works well for most PDFs " &
                 "that contain real (selectable/searchable) text and preserves layout, tables, and formatting. " &
                 "If the conversion result indicates the PDF is scanned/image-only (no extractable text), THEN " &
@@ -657,12 +696,12 @@ Partial Public Class ThisAddIn
                 "(2) Call create_word_document with the OCR-extracted text to produce a .docx. " &
                 "This OCR pipeline is useful for scanned documents, image-heavy PDFs, or when Word's built-in conversion " &
                 "produces poor results. However, it does NOT preserve the original layout/formatting — it produces a " &
-                "clean text-based document. The standard Word-based conversion (this tool) remains the default.",
+                "clean text-based document. The standard Word-based conversion (this tool) remains the default. For a request where source formatting is binding, do not silently claim exact preservation after falling back to OCR/text reconstruction.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_PdfToWord & """," &
                 """description"":""Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF reflow. " &
-                "Use this as the PRIMARY method for PDF-to-Word conversion. Works well for text-based PDFs with layout preservation. " &
-                "If the result indicates the PDF is scanned/image-only, fall back to extract_pdf_text (OCR) + create_word_document. " &
+                "Use this as the PRIMARY method for PDF-to-Word conversion and whenever a PDF is the requested formatting/layout carrier for a Word deliverable; then transform the resulting DOCX instead of rebuilding it. Works well for text-based PDFs with layout preservation. " &
+                "If the result indicates the PDF is scanned/image-only, OCR + create_word_document is only a reconstruction fallback and cannot be treated as exact source-format preservation. " &
                 "ALTERNATIVE: If the user explicitly requests OCR-based conversion, use extract_pdf_text (rasterize+OCR) followed by create_word_document instead.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to convert""}," &
@@ -673,39 +712,66 @@ Partial Public Class ThisAddIn
         ' ── create_word_document ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateWordDoc,
-            .ModelDescription = "Create Word Document from Markdown (built-in)",
-                   .ToolInstructionsPrompt =
-            AP_Tool_CreateWordDoc & ": Creates a new formatted Word document (.docx) from Markdown content. " &
-            "Use this when the user asks you to create, generate, or produce a new Word document from any content " &
-            "(e.g., from a PDF extract, from research results, from your own generated text, from a summary, etc.). " &
-            "Provide the content as Markdown and it will be converted to a properly formatted .docx file. " &
-            "The tool supports richer document presentation options including document title metadata, base font, page orientation, " &
-            "professional table styling, vertical cell alignment, and a preferred Word table style name. " &
-            "When the content contains tables, you SHOULD use professional_layout=true unless the user explicitly asks for plain output. " &
-            "If the user asks for a specific look, pass base_font_name, base_font_size, table_style_name, and page_orientation when appropriate. " &
-            "The resulting file will be attached to the reply.",
-        .ToolDefinition =
-            "{""name"":""" & AP_Tool_CreateWordDoc & """," &
-            """description"":""Creates a new formatted Word document (.docx) from Markdown content. " &
-            "Supports headings, bold, italic, lists, and improved table rendering with consistent document font, " &
-            "professional table styling, vertical cell alignment, optional page orientation, and optional document metadata. " &
-            "Use when the user asks to create, generate, or produce a Word document from any content.""," &
-            """parameters"":{""type"":""object"",""properties"":{" &
-            """markdown_content"":{""type"":""string"",""description"":""The full document content in Markdown format. " &
-            "Use headings (#, ##, ###), bold (**text**), italic (*text*), lists (- or 1.), and Markdown tables when needed.""}," &
-            """file_name"":{""type"":""string"",""description"":""The desired filename for the output Word document " &
-            "(without .docx extension). Defaults to 'Document' if not specified.""}," &
-            """document_title"":{""type"":""string"",""description"":""Optional document title metadata stored in the Word file.""}," &
-            """base_font_name"":{""type"":""string"",""description"":""Optional base font for the document and generated tables, " &
-            "for example 'Calibri', 'Arial', 'Aptos', or 'Times New Roman'.""}," &
-            """base_font_size"":{""type"":""number"",""description"":""Optional base font size in points, for example 10, 11, or 12.""}," &
-            """page_orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""],""description"":""Optional page orientation. " &
-            "Use 'landscape' for wide tables or explicitly requested layouts.""}," &
-            """professional_layout"":{""type"":""boolean"",""description"":""Optional. Default true. " &
-            "When true, applies improved table formatting such as full-width layout, header styling, row banding, padding, and vertical centering.""}," &
-            """table_style_name"":{""type"":""string"",""description"":""Optional preferred Word table style name, for example 'Table Grid'. " &
-            "If omitted, the tool applies a safe built-in fallback style when available.""}" &
-            "},""required"":[""markdown_content""]}}"
+            .CapabilityTags = "explicit_operation",
+            .ModelDescription = "Create Executive Word Document (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CreateWordDoc & ": Creates a NEW polished Word document (.docx) from Markdown. " &
+                "Do NOT use this tool merely to translate, correct, proofread, genericize, turn into a template/boilerplate, replace text in, or otherwise transform an existing Word attachment when the user wants that source's structure/formatting retained; use process_word_document for that case. If a PDF is explicitly the formatting/layout model for the requested Word output, use pdf_to_word first and then transform the converted DOCX. " &
+                "Use create_word_document when the requested deliverable is genuinely a newly authored document assembled from Markdown/content rather than a transformed/reused source-format carrier. When a user-supplied artifact is the intended format authority but a creator is nevertheless necessary, set use_repository_default_design=false unless the user explicitly requested a repository design. " &
+                "Default to style_preset='consulting' and professional_layout=true unless the user explicitly requests a plain document. " &
+                "Write lean, decision-oriented content with strong section hierarchy, short paragraphs, informative headings, concise bullets, and tables where comparison is useful. " &
+                "The renderer applies consulting-style typography, page margins, heading hierarchy, restrained accent color, professional table formatting, optional cover page, headers/footers, and page numbers. " &
+                "For native Word cross-references, put [[anchor:ID]] on its own Markdown line immediately before the target heading or paragraph. Refer to it inline with [[ref:ID:number]] for the target's native full-context Word numbering (for example I.A or Randziffer 17), [[ref:ID:text]] for the target text, or [[ref:ID:full]] for native number plus target text. IDs use letters, digits, underscore, dot, or hyphen. Never type or guess the target heading/Randziffer number manually. The host converts these markers to real Word bookmarks + REF fields. If at least one REF marker is present, the host automatically performs one isolated hidden Word field-refresh pass after the DOCX is otherwise complete, saves the resolved field caches, and removes automatic-update-on-open state; no separate refresh argument is needed. " &
+                "Use include_cover=true plus cover_title/cover_subtitle for reports, proposals, board papers, investment memos, and other substantial documents. " &
+                "Use page_orientation='landscape' for wide tables. Use the DESIGN REPOSITORY routing metadata for Word format selection: explicit requested design first, then organization/document type/language, then an applicable default. If no design_name is supplied, repository defaults are enabled, and the catalog has a global Word default, the host applies it deterministically. If that design lists Word slots, markdown_content is the substantive body and template_fields must contain the listed keys exactly. The DESIGN REPOSITORY summary includes each slot's declared purpose; use that purpose rather than guessing from a placeholder id. Visible placeholders such as [[RI:Text]] or [[RI:Body]] are labels only and may be renamed without changing their meaning. Shared style_policy_file mappings and design-local body-style mappings are authoritative: use only the declared Markdown heading and list levels, and let the host apply exact native Word styles. Structured DOCX is the recommended carrier for new Word designs; slot-bound DOCX designs and generic Word creation are OOXML-first and normally do not start Word. The sole automatic exception is one final hidden Word field-refresh pass when native [[ref:...]] cross-references are present. Only an explicitly selected legacy non-slot Word carrier may otherwise use the Word/COM compatibility renderer. Their native structure, fields, styles, headers and footers remain authoritative. Do not put front-matter fields into markdown_content when the design exposes dedicated template_fields. Explicit tool arguments override repository defaults. Use accent_color only when supplied by the user or a concrete authorized design source. Never claim a named organization's design unless such a source is available; otherwise use a neutral professional preset and state that the specific corporate design was not available. " &
+                "For true Word footnotes, use the footnotes array and put exactly one inline [[footnote:ID]] marker at the intended reference position in markdown_content for each footnote. The host replaces these markers deterministically with native Word footnote references after document creation. Place the marker AFTER sentence/clause punctuation when the footnote supports the whole preceding sentence or clause (for example: '... Aussage.[[footnote:fn1]]'). Place it immediately after a specific word or phrase, before following punctuation, only when the footnote refers specifically to that word or phrase rather than to the whole sentence or clause. Do not manually number footnotes and do not simulate them with superscript text or a notes section. " &
+                "NEVER simulate diagrams, process maps, timelines, or charts with ASCII/Unicode box characters, Mermaid source, fenced code blocks, monospace/Courier pseudo-graphics, or manual spacing. " &
+                "Whenever the user requests, names, or the document itself labels something as a chart, diagram, organigram/organization chart, graphical representation, visualization, timeline, process map, or other graphic, the native 'visuals' parameter is REQUIRED and each requested graphic must have an exact [[visual:ID]] token on its own line in markdown_content. If the requested report calls for multiple graphics, EVERY requested graphic must have its own visuals entry and placeholder. Never omit a requested visual on a retry, and never substitute one with a table, repeated block/square characters, fenced character diagram, or arrow chain. Use type='process' for flows/value chains/workflows, type='timeline' for timelines, type='org_chart' for reporting hierarchies, bar_chart/column_chart/line_chart/area_chart/pie_chart/doughnut_chart for quantitative charts, and editable diagram types list/cycle/relationship/matrix/pyramid/hierarchy where they fit. Use type='smartart' only as a generic compatibility alias when a more specific diagram type does not fit. Every visual is EDITABLE by default. The host writes native Office Open XML directly into the saved DOCX: diagram families become editable DrawingML canvases/shapes and quantitative graphics become native Office chart parts with embedded XLSX data. No Word/Excel Interop is used to create visuals. Set insertion_mode='inline' or 'floating' only when placement is specifically required; otherwise use 'auto' (inline by default). Raster output is not used for create_word_document visuals. The Word-document visual renderer never substitutes PNG/raster output. For an organizational hierarchy use structured nodes and parent_id relationships and keep node labels concise, with names/subtitles in detail. " &
+                "The renderer verifies after saving that every requested chart or DrawingML diagram was actually persisted inside the DOCX. It must fail rather than claim success if an editable visual disappeared. The resulting file is attached to the reply.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CreateWordDoc & """," &
+                """description"":""Creates a NEW polished Word document (.docx) from Markdown. Use only for genuinely new authoring, not to transform or genericize an existing Office source whose structure/formatting should be retained. For PDF-as-format-source Word requests, convert the PDF first and transform the DOCX.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """markdown_content"":{""type"":""string"",""description"":""Full document content in Markdown. Use headings, concise bullets, emphasis, and Markdown tables where useful. For native cross-references, put [[anchor:ID]] alone on the line immediately before the target heading/paragraph and use inline [[ref:ID:number]], [[ref:ID:text]], or [[ref:ID:full]] markers; do not manually type the target's native number. When the selected Word design exposes a native body-style contract, use only the heading and list levels declared by that contract; unsupported levels are rejected.""}," &
+                """file_name"":{""type"":""string"",""description"":""Desired output filename without .docx. Defaults to Document.""}," &
+                """design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. Use this when the user explicitly named a particular design. Otherwise prefer document_type plus document_language so the host can enforce document-type-first routing.""}," &
+                """use_repository_default_design"":{""type"":""boolean"",""description"":""Defaults to true. Set false when a user-supplied source artifact is the intended formatting/layout/design authority and no repository design was explicitly requested.""}," &
+                """document_type"":{""type"":""string"",""description"":""Requested Word artifact type such as memo, letter, note, or generic. When the user clearly names a document type, pass it. The host treats this as the primary routing key before language or global defaults.""}," &
+                """document_language"":{""type"":""string"",""description"":""Requested document language, preferably a short language code such as de or en. Used only after document_type to choose among same-type design variants.""}," &
+                """organization"":{""type"":""string"",""description"":""Optional organization/design-family routing hint when more than one organization is visible in the active repository. Do not invent one.""}," &
+                """template_fields"":{""type"":""object"",""description"":""Values for deterministic Word-template slots exposed by the selected design. Use only the exact keys listed for that design in the DESIGN REPOSITORY context and follow each key's declared purpose. The companion .md maps these keys to arbitrary speaking placeholders such as [[RI:To]] or [[RI:Recipient]]; the placeholder id itself is not semantic."",""additionalProperties"":{""type"":""string""}}," &
+                """document_title"":{""type"":""string"",""description"":""Document title metadata.""}," &
+                """document_author"":{""type"":""string"",""description"":""Optional author metadata.""}," &
+                """base_font_name"":{""type"":""string"",""description"":""Base font. Default Aptos.""}," &
+                """base_font_size"":{""type"":""number"",""description"":""Base body size in points. Default 10.5.""}," &
+                """page_orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""],""description"":""Page orientation.""}," &
+                """professional_layout"":{""type"":""boolean"",""description"":""Default true. Applies executive typography, spacing, margins and professional tables.""}," &
+                """style_preset"":{""type"":""string"",""enum"":[""consulting"",""executive"",""minimal"",""plain""],""description"":""Visual preset. Default consulting.""}," &
+                """accent_color"":{""type"":""string"",""description"":""Primary accent as hex RGB, e.g. #17365D.""}," &
+                """include_cover"":{""type"":""boolean"",""description"":""Add an executive cover page. Default false unless a substantive report/memo benefits from one.""}," &
+                """cover_title"":{""type"":""string"",""description"":""Cover page title. If omitted and include_cover=true, document_title is used.""}," &
+                """cover_subtitle"":{""type"":""string"",""description"":""Optional cover subtitle.""}," &
+                """cover_kicker"":{""type"":""string"",""description"":""Optional small uppercase cover label such as CONFIDENTIAL or STRATEGY REVIEW.""}," &
+                """header_text"":{""type"":""string"",""description"":""Optional running header text.""}," &
+                """footer_text"":{""type"":""string"",""description"":""Optional running footer text.""}," &
+                """show_page_numbers"":{""type"":""boolean"",""description"":""Show page numbers in the footer. Default true.""}," &
+                """footnotes"":{""type"":""array"",""description"":""Native Word footnotes. For each entry, put exactly one inline [[footnote:ID]] marker at the intended reference position in markdown_content. If the note supports the whole preceding sentence or clause, put the marker after its punctuation; put it directly after a word/phrase before punctuation only when the note specifically refers to that word/phrase. IDs are caller-defined opaque labels used only to bind the marker to its footnote; the host assigns Word footnote numbers automatically."",""items"":{""type"":""object"",""properties"":{""id"":{""type"":""string"",""description"":""Stable marker id using letters, digits, underscore, dot, or hyphen.""},""text"":{""type"":""string"",""description"":""Footnote text. Plain text with optional line breaks; do not include a manual footnote number.""}},""required"":[""id"",""text""]}}," &
+                """visuals"":{ ""type"":""array"",""description"":""Native embedded graphics. This array is REQUIRED whenever the user requests or the document labels any chart/diagram/organigram/visualization. Put exactly one [[visual:ID]] placeholder in markdown_content for each visual. Every requested graphic must be represented here on every retry; never replace or drop one in favor of a table, repeated block/square characters, fenced character diagram, bracket/arrow chain, or monospace text."",""items"":{ ""type"":""object"",""properties"":{" &
+                """id"":{ ""type"":""string"",""description"":""Stable placeholder id used by [[visual:ID]].""}," &
+                """type"":{ ""type"":""string"",""enum"":[""process"",""timeline"",""org_chart"",""hierarchy"",""list"",""cycle"",""relationship"",""matrix"",""pyramid"",""smartart"",""bar_chart"",""column_chart"",""line_chart"",""area_chart"",""pie_chart"",""doughnut_chart""],""description"":""Graphic type. Diagram families are written as native editable DrawingML canvases/shapes; quantitative graphics are native Office charts with embedded workbook data.""}," &
+                """editable"":{ ""type"":""boolean"",""description"":""Defaults to true. create_word_document visuals are always emitted as native editable OOXML objects; raster substitution is not used.""}," &
+                """insertion_mode"":{ ""type"":""string"",""enum"":[""auto"",""inline"",""floating""],""description"":""Native OOXML placement mode. Default auto writes inline; floating writes a top/bottom anchored object.""}," &
+                """smartart_layout"":{ ""type"":""string"",""description"":""Compatibility hint retained for callers. The OOXML renderer uses deterministic editable DrawingML geometry and does not depend on an installed SmartArt layout.""}," &
+                """title"":{ ""type"":""string""}," &
+                """caption"":{ ""type"":""string""}," &
+                """items"":{ ""type"":""array"",""description"":""For process/timeline/list/cycle/relationship/matrix/pyramid/smartart: strings or objects with label and optional detail."",""items"":{}}," &
+                """nodes"":{ ""type"":""array"",""description"":""For org_chart/hierarchy: hierarchy nodes. Each node has a stable id, label, optional detail, and optional parent_id. Root nodes omit parent_id. Keep labels concise; use detail for role/name."",""items"":{ ""type"":""object"",""properties"":{ ""id"":{ ""type"":""string""},""label"":{ ""type"":""string""},""detail"":{ ""type"":""string""},""parent_id"":{ ""type"":""string""}},""required"":[""id"",""label""]}}," &
+                """categories"":{ ""type"":""array"",""items"":{ ""type"":""string""}}," &
+                """series"":{ ""type"":""array"",""description"":""For charts: [{name, values:[numbers]}]."",""items"":{ ""type"":""object"",""properties"":{ ""name"":{ ""type"":""string""},""values"":{ ""type"":""array"",""items"":{ ""type"":""number""}}},""required"":[""values""]}}," &
+                """width_inches"":{ ""type"":""number"",""description"":""Optional display width. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}," &
+                """height_inches"":{ ""type"":""number"",""description"":""Optional display height. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}},""required"":[""id"",""type""]}}," &
+                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Renderer still applies professional header/banding treatment.""}" &
+                "},""required"":[""markdown_content""]}}"
         })
 
         tools.Add(New ModelConfig() With {
@@ -732,139 +798,123 @@ Partial Public Class ThisAddIn
         ' ── create_excel_spreadsheet ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateExcel,
-            .ModelDescription = "Create Excel Spreadsheet (built-in)",
+            .CapabilityTags = "explicit_operation",
+            .ModelDescription = "Create Professional Excel Workbook (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_CreateExcel & ": Creates a professionally formatted Excel spreadsheet (.xlsx/.xlsm). " &
-                "Use for any spreadsheet, table, budget, tracker, dashboard, or tabular data request. " &
-                "ALWAYS call this tool immediately — do NOT describe what you plan to create; just create it. " &
-                "MANDATORY: include column_widths for every column, freeze_pane='A2', auto_filter on headers, " &
-                "bold headers with bg_color/font_color/borders, alternating row colors, wrap_text on long text, " &
-                "number_format on numeric/date columns, and data_validations (dropdowns) for any column with finite valid values.",
+                AP_Tool_CreateExcel & ": Creates a product-quality Excel workbook (.xlsx/.xlsm). Use this for genuinely new tables, trackers, budgets, models, dashboards, analyses, schedules, and structured datasets. If an existing Excel workbook is supplied as the formatting/layout/structure model for a revised, generic, template, or boilerplate version, preserve that workbook through process_word_document or the native Excel tools instead of rebuilding it here. If a creator is still necessary while a user-supplied artifact is the format authority, set use_repository_default_design=false unless the user explicitly requested a repository design. " &
+                "Default to professional_layout=true, style_preset='consulting', smart_format=true. The renderer itself supplies clean typography, dark executive headers, subtle banding, sensible column sizing, hidden gridlines, frozen headers, filters, and semantic Status/Priority highlighting when applicable. " &
+                "Do NOT waste tokens manually styling every cell unless a special exception is needed. Focus the tool call on workbook structure, data, formulas and useful interactive features. " &
+                "For non-trivial workbooks, prefer multiple purpose-built worksheets (e.g. Executive Summary/Dashboard, Data, Assumptions, Calculations, Instructions). " &
+                "Use native tables for datasets, charts for decision-relevant trends/comparisons, data_validations for controlled inputs/dropdowns, conditional_formats for thresholds/alerts, named_ranges for model clarity, and vba_modules only when automation is requested. " &
+                "Keep dashboards lean: a few KPIs, 2-4 useful charts, clear labels, no decorative clutter. Use English formula syntax with comma separators. If the user requests a named design listed by the DESIGN REPOSITORY system context, pass its exact id as design_name; the tool applies configured design defaults and may use a clean repository workbook template as a theme carrier. Never claim a named organization's Excel design unless concrete design specifications or an authorized workbook/template source are available; otherwise use the neutral professional preset and say the specific corporate design was not available. The file is attached to the reply.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreateExcel & """," &
-                """description"":""Creates a new Excel spreadsheet (.xlsx or .xlsm) with MANDATORY professional formatting. " &
-                "EVERY spreadsheet MUST include: column_widths sized for content, freeze_pane='A2', auto_filter on headers, " &
-                "header row with bold + bg_color '#4472C4' + font_color '#FFFFFF' + border 'all-thin' + h_align 'center', " &
-                "data cells with border 'all-thin' + alternating bg_color '#D9E2F3', wrap_text on long text columns, " &
-                "number_format on all numeric/date/percentage columns, and data_validations with type 'list' on any column " &
-                "with a finite set of valid values (Status, Priority, Yes/No, categories, etc.). " &
-                "Also supports formulas, multiple sheets, conditional formatting, charts, VBA macros, and more. " &
-                "STYLING RULES (apply to EVERY spreadsheet unless user explicitly asks for plain output): " &
-                "1. HEADER ROW: bg_color '#4472C4', font_color '#FFFFFF', bold, font_size 12, h_align 'center', border 'all-thin'. " &
-                                "2. DATA ROWS: border 'all-thin' on ALL cells, alternating bg_color '#D9E2F3' on even rows, font_color '#000000' (black) — NEVER use '#FFFFFF' on data rows. " &
-                "3. COLUMN WIDTHS: MUST set for every column. Short labels 12-15, names/descriptions 25-35, numbers/dates 12-18. " &
-                "4. ROW HEIGHTS: header row 28. " &
-                "5. NUMBER FORMATS: '#,##0.00' for currency, '0%' for percent, 'dd/mm/yyyy' for dates, '#,##0' for integers. " &
-                "6. ALIGNMENT: left for text, center for short labels/status, right for numbers. " &
-                "7. WRAP TEXT: true for descriptions, notes, addresses, any long content. " &
-                "8. FREEZE PANE: ALWAYS 'A2'. " &
-                "9. AUTO FILTER: ALWAYS on header range (e.g. 'A1:F1'). " &
-                "10. DROPDOWNS: ALWAYS add data_validation type 'list' for columns with finite values (Status, Priority, Yes/No, Rating, Category). " &
-                "11. CONDITIONAL FORMATTING: red bg for negative/overdue/failed, green for completed/positive, yellow for pending. " &
-                "12. TOTALS ROW: SUM/AVERAGE formulas with bold + border 'bottom-medium'. " &
-                "13. TITLE ROW: For dashboards, merge + font_size 16 + bold + distinct bg_color. " &
-                "Use English formula syntax with comma separators.""," &
+                """description"":""Creates a genuinely new professional multi-sheet Excel workbook (.xlsx/.xlsm) with formulas, native tables, charts, dropdowns/data validation, conditional formatting, named ranges, optional VBA automation, print setup and opinionated formatting. Do not rebuild an existing workbook when its native formatting/layout is the requested carrier.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """cells"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """cell"":{""type"":""string"",""description"":""Cell address in A1 notation""}," &
-                """value"":{""description"":""Cell value (string or number)""}," &
-                """formula"":{""type"":""string"",""description"":""Excel formula starting with =""}," &
-                """bold"":{""type"":""boolean""}," &
-                """italic"":{""type"":""boolean""}," &
-                """underline"":{""type"":""boolean""}," &
-                """strikethrough"":{""type"":""boolean""}," &
-                """font_name"":{""type"":""string""}," &
-                """font_size"":{""type"":""number""}," &
-                """font_color"":{""type"":""string"",""description"":""Hex RGB e.g. #FF0000. Use #FFFFFF for headers""}," &
-                """bg_color"":{""type"":""string"",""description"":""Hex RGB. Use #4472C4 for headers, #D9E2F3 for alternating rows""}," &
-                """number_format"":{""type"":""string"",""description"":""REQUIRED for numbers/dates. #,##0.00 currency, 0% percent, dd/mm/yyyy dates, #,##0 integers""}," &
-                """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""],""description"":""REQUIRED: left=text, center=headers/labels, right=numbers""}," &
-                """v_align"":{""type"":""string"",""enum"":[""top"",""center"",""bottom""]}," &
-                """wrap_text"":{""type"":""boolean"",""description"":""REQUIRED true for long text cells""}," &
-                """border"":{""type"":""string"",""description"":""REQUIRED: 'all-thin' for all cells. Also: medium, thick, all-medium, bottom-thin, bottom-medium""}," &
-                """border_color"":{""type"":""string"",""description"":""Border color hex RGB""}" &
-                "}},""description"":""Cells for default/first sheet""}," &
-                """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}" &
-                "}},""description"":""Multiple sheets. Each: name + cells array.""}," &
-                """file_name"":{""type"":""string"",""description"":""Filename without extension""}," &
-                """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode""}," &
-                """column_widths"":{""type"":""object"",""description"":""REQUIRED: {col_letter: width} for EVERY column. 12-15 short, 25-35 descriptions, 12-18 numbers""}," &
-                """row_heights"":{""type"":""object"",""description"":""Row heights. Set header row to 28""}," &
-                """merge_ranges"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Ranges to merge""}," &
-                """freeze_pane"":{""type"":""string"",""description"":""REQUIRED: Always 'A2'""}," &
-                """auto_filter"":{""type"":""string"",""description"":""REQUIRED: Header range e.g. 'A1:F1'""}," &
+                """cell"":{""type"":""string"",""description"":""Cell/range address in A1 notation.""}," &
+                """value"":{""description"":""Cell value (string or number).""}," &
+                """formula"":{""type"":""string"",""description"":""Excel formula starting with =.""}," &
+                """bold"":{""type"":""boolean""},""italic"":{""type"":""boolean""},""underline"":{""type"":""boolean""},""strikethrough"":{""type"":""boolean""}," &
+                """font_name"":{""type"":""string""},""font_size"":{""type"":""number""},""font_color"":{""type"":""string""},""bg_color"":{""type"":""string""}," &
+                """number_format"":{""type"":""string"",""description"":""Excel number format such as #,##0.00, 0.0%, yyyy-mm-dd.""}," &
+                """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""]},""v_align"":{""type"":""string"",""enum"":[""top"",""center"",""bottom""]}," &
+                """wrap_text"":{""type"":""boolean""},""border"":{""type"":""string""},""border_color"":{""type"":""string""}," &
+                """text_rotation"":{""type"":""integer""},""indent"":{""type"":""integer""},""comment"":{""type"":""string""}," &
+                """hyperlink"":{""type"":""string""},""hyperlink_display"":{""type"":""string""}" &
+                "}},""description"":""Cells for default/first sheet. Low-level formatting is optional because professional_layout provides a strong baseline.""}," &
+                """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}}},""description"":""Multiple sheets. Each sheet may also override column_widths, row_heights, auto_fit_columns, auto_fit_rows, merge_ranges, freeze_pane, auto_filter, data_validations, conditional_formats, print_setup, tab_color, show_gridlines, zoom, right_to_left, professional_layout, style_preset, accent_color, font_name, smart_format, header_row.""}," &
+                """file_name"":{""type"":""string"",""description"":""Filename without extension.""}," &
+                """design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. Explicit creator arguments override design defaults.""}," &
+                """use_repository_default_design"":{""type"":""boolean"",""description"":""Defaults to true. Set false when a user-supplied source artifact is the intended formatting/layout/design authority and no repository design was explicitly requested.""}," &
+                """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode.""}," &
+                """professional_layout"":{""type"":""boolean"",""description"":""Default true. Enables opinionated professional workbook styling.""}," &
+                """style_preset"":{""type"":""string"",""enum"":[""consulting"",""executive"",""minimal"",""plain""],""description"":""Default consulting.""}," &
+                """accent_color"":{""type"":""string"",""description"":""Primary workbook accent as hex RGB. Default #17365D.""}," &
+                """font_name"":{""type"":""string"",""description"":""Workbook font. Default Aptos.""}," &
+                """smart_format"":{""type"":""boolean"",""description"":""Default true. Adds semantic formatting for common Status/Priority columns.""}," &
+                """header_row"":{""type"":""integer"",""description"":""Header row for automatic styling/filter/freeze behavior. Default is the first used row. Set 0 for dashboard sheets without a tabular header.""}," &
+                """column_widths"":{""type"":""object"",""description"":""Optional explicit {column_letter: width}. If omitted, professional mode auto-fits and caps widths.""}," &
+                """row_heights"":{""type"":""object"",""description"":""Optional explicit row heights.""}," &
+                """auto_fit_columns"":{""description"":""true/'all', a column letter, or an array of letters.""}," &
+                """auto_fit_rows"":{""description"":""true/'all', a row number, or an array of row numbers.""}," &
+                """tab_color"":{""type"":""string""},""show_gridlines"":{""type"":""boolean""},""zoom"":{""type"":""integer""},""right_to_left"":{""type"":""boolean""}," &
+                """merge_ranges"":{""type"":""array"",""items"":{""type"":""string""}},""freeze_pane"":{""type"":""string""},""auto_filter"":{""type"":""string""}," &
                 """data_validations"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """range"":{""type"":""string""},""type"":{""type"":""string""},""formula1"":{""type"":""string""}," &
-                """formula2"":{""type"":""string""},""operator"":{""type"":""string""}," &
-                """show_dropdown"":{""type"":""boolean""},""input_title"":{""type"":""string""}," &
-                """input_message"":{""type"":""string""},""error_title"":{""type"":""string""}," &
-                """error_message"":{""type"":""string""}" &
-                "}},""description"":""REQUIRED for finite-value columns: type 'list', formula1='Val1,Val2,Val3'""}," &
+                """range"":{""type"":""string""},""type"":{""type"":""string""},""formula1"":{""type"":""string""},""formula2"":{""type"":""string""},""operator"":{""type"":""string""}," &
+                """show_dropdown"":{""type"":""boolean""},""input_title"":{""type"":""string""},""input_message"":{""type"":""string""},""error_title"":{""type"":""string""},""error_message"":{""type"":""string""}" &
+                "}},""description"":""Data validation rules, including list dropdowns.""}," &
                 """conditional_formats"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """range"":{""type"":""string""},""type"":{""type"":""string""},""operator"":{""type"":""string""}," &
-                """formula1"":{""type"":""string""},""formula2"":{""type"":""string""}," &
-                """format_font_color"":{""type"":""string""},""format_bg_color"":{""type"":""string""}," &
-                """format_bold"":{""type"":""boolean""}" &
-                "}},""description"":""Conditional formatting rules""}," &
+                """range"":{""type"":""string""},""type"":{""type"":""string"",""description"":""cell_value, text_contains, duplicate, unique, color_scale, data_bar, icon_set, top_10""},""operator"":{""type"":""string""}," &
+                """formula1"":{""type"":""string""},""formula2"":{""type"":""string""},""format_font_color"":{""type"":""string""},""format_bg_color"":{""type"":""string""},""format_bold"":{""type"":""boolean""}" &
+                "}},""description"":""Conditional formatting rules.""}," &
+                """tables"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """sheet_name"":{""type"":""string""},""range"":{""type"":""string"",""description"":""Data range including headers, e.g. A1:H50.""},""name"":{""type"":""string""},""style"":{""type"":""string"",""description"":""Native Excel table style, default TableStyleMedium2.""}," &
+                """show_totals"":{""type"":""boolean""},""show_row_stripes"":{""type"":""boolean""},""show_first_column"":{""type"":""boolean""},""show_last_column"":{""type"":""boolean""}" &
+                "}},""description"":""Native Excel ListObjects for structured datasets. Prefer these for tables users will filter/sort/extend.""}," &
                 """charts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """type"":{""type"":""string"",""enum"":[""column"",""bar"",""line"",""pie"",""area"",""scatter"",""doughnut""]}," &
-                """data_range"":{""type"":""string"",""description"":""Worksheet range used as the chart source data""}," &
-                """title"":{""type"":""string"",""description"":""Optional chart title""}," &
-                """position"":{""type"":""string"",""description"":""Top-left anchor cell for the embedded chart, e.g. 'E2'""}," &
-                """width"":{""type"":""number"",""description"":""Chart width in Excel points. If omitted, defaults to 480. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 480 points is about 6.67 inches.""}," &
-                """height"":{""type"":""number"",""description"":""Chart height in Excel points. If omitted, defaults to 300. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 300 points is about 4.17 inches.""}," &
-                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}" &
-                "}},""description"":""Charts to create. Width and height are specified in Excel points; if omitted, the default size is 480 x 300 points.""}," &
-                """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """name"":{""type"":""string""},""range"":{""type"":""string""}" &
-                "}},""description"":""Named ranges""}," &
-                """vba_modules"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """name"":{""type"":""string""},""code"":{""type"":""string""},""type"":{""type"":""string""}" &
-                "}},""description"":""VBA modules (saves as .xlsm)""}," &
-                """print_setup"":{""type"":""object"",""properties"":{" &
-                """orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""]}," &
-                """fit_to_pages_wide"":{""type"":""integer""},""fit_to_pages_tall"":{""type"":""integer""}," &
-                """header_text"":{""type"":""string""},""footer_text"":{""type"":""string""}" &
-                "},""description"":""Print setup options""}" &
+                """type"":{""type"":""string"",""enum"":[""column"",""bar"",""line"",""pie"",""area"",""scatter"",""doughnut""]},""data_range"":{""type"":""string""},""title"":{""type"":""string""},""position"":{""type"":""string""}," &
+                """width"":{""type"":""number""},""height"":{""type"":""number""},""sheet_name"":{""type"":""string""},""color"":{""type"":""string""},""series_colors"":{""type"":""array"",""items"":{""type"":""string""}}," &
+                """show_legend"":{""type"":""boolean""},""legend_position"":{""type"":""string"",""enum"":[""top"",""bottom"",""left"",""right"",""corner""]},""show_data_labels"":{""type"":""boolean""},""x_axis_title"":{""type"":""string""},""y_axis_title"":{""type"":""string""}" &
+                "}},""description"":""Charts. The renderer applies a clean executive chart style and a restrained default palette.""}," &
+                """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""range"":{""type"":""string""}}}}," &
+                """vba_modules"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""code"":{""type"":""string""},""type"":{""type"":""string""}}},""description"":""Optional VBA modules; presence saves as .xlsm. Use when the user requests workbook automation. Requires Excel Trust Center permission for programmatic VBProject access.""}," &
+                """print_setup"":{""type"":""object"",""properties"":{""orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""]},""fit_to_pages_wide"":{""type"":""integer""},""fit_to_pages_tall"":{""type"":""integer""},""header_text"":{""type"":""string""},""footer_text"":{""type"":""string""}}}" &
                 "},""required"":[]}}"
         })
 
         ' ── create_powerpoint ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreatePowerPoint,
-            .ModelDescription = "Create PowerPoint Presentation (built-in)",
+            .CapabilityTags = "explicit_operation",
+            .ModelDescription = "Create Executive PowerPoint (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_CreatePowerPoint & ": Creates a new PowerPoint presentation (.pptx) with slides containing titles, body text, and speaker notes. " &
-                "Use this when the user asks you to create, generate, or produce a presentation, slide deck, or pitch deck. " &
-                "Provide slide data as a JSON array of slide objects. Each slide object has: " &
-                "'title' (string, the slide title), 'body' (string, the main content — use newlines for bullet points), " &
-                "and optionally 'notes' (string, speaker notes for that slide). " &
-                "The first slide is typically used as a title slide with a short subtitle in 'body'. " &
-                "TEMPLATE SUPPORT: If the user provides a .pptx attachment to use as a template (or references an existing presentation), " &
-                "pass its filename as 'template_attachment_name'. New slides will be appended to the template using its slide master/layouts. " &
-                "When using a template, the existing slides are preserved and new slides are added at the end.",
+                AP_Tool_CreatePowerPoint & ": Creates a polished executive PowerPoint deck. Use it for genuinely new slide authoring. If an existing PowerPoint deck is supplied as the formatting/layout/master model for a revised, generic, template, or boilerplate version, preserve that deck through process_word_document or native PowerPoint mutation rather than rebuilding it with an implicit repository design. If an explicit .pptx/.potx template carrier is supplied, that carrier takes precedence over implicit repository defaults. When a creator is otherwise necessary while a user-supplied artifact is the format authority, set use_repository_default_design=false unless the user explicitly requested a repository design. Keep one clear message per slide, use concise action-oriented titles, and keep narrative content short enough for presentation-sized typography. " &
+                "Supported layouts: title, section, bullets, two_column, kpi, table, chart, cards, process, structure, timeline, comparison, matrix, quote, closing. " &
+                "PRIMARY AUTHORING CONTRACT: use slide.visual for every intended rich graphic and slide.bullet_items for structured or nested bullets. The visual object is typed and editable-first; the host derives the semantic layout from visual.type and renders native PowerPoint shapes/text whenever possible. data_json and flat bullet_points remain compatibility inputs only and should not be the primary format for new calls. " &
+                "For bullet_items, never embed bullet glyphs or manual numbering such as '1.'/'2.' in text. Use level=0 for a main point and level=1 (or deeper) for supporting detail; the host creates the actual PowerPoint bullet and indentation. " &
+                "For visual, keep label/title text short and put only concise supporting wording in detail/body. Use type='process' for operational workflows/actions, type='structure' for ownership/reporting/entity relationships, type='comparison' for alternatives, type='cards' for parallel themes, type='timeline' for milestone/phase roadmaps (with dates when available, but dates are not required), type='matrix' for two-dimensional positioning, type='kpi' for headline metrics, and type='chart' only for genuine quantitative data. A roadmap whose steps represent phases/milestones should normally be a timeline rather than a process. " &
+                "Choose visuals by meaning: quantitative series/trends/comparisons -> chart; process/sequence -> process; corporate or ownership hierarchy -> structure; qualitative themes/benefits/risks -> cards; alternatives -> comparison; dated milestones -> timeline; two-dimensional strategic positioning -> matrix. " &
+                "Do NOT invent numbers merely to create a chart. When real quantitative data exists, prefer a chart over repeating the numbers as prose. VISUAL BALANCE DEFAULT: an executive deck needs both native text/data slides and selected rich visuals. For decks with 6+ slides, normally keep rich graphics to roughly 30-60% of content slides and use native bullets, two_column, table or quote layouts for explanatory, legal, tax, caveat and detail-heavy material. Do not turn every slide into cards/process boxes merely to satisfy a visual quota, and normally use no more than two rich visual slides consecutively. Treat structure, process, comparison, cards, timeline, matrix and KPI as vector-infographic/illustration layouts only when that visual form genuinely improves comprehension. Use structure diagrams for ownership/entity relationships, process graphics for true sequences, comparison columns for alternatives, cards for a small set of parallel themes, and timeline/matrix where semantically appropriate. Do not include literal bullet glyphs such as •, -, *, or + at the start of body lines; provide plain newline-separated text because the renderer supplies bullet formatting. " &
+                "Rich graphics have strict presentation-sized text budgets: keep visual labels short, keep detail/body to one concise sentence or short phrase, keep comparison items compact, and move dense legal/tax explanation to native text slides. The host refuses a native rich visual that cannot fit at readable diagram typography; it may fall back to native text rather than silently shrink content. " &
+                "Preferred visual shapes: cards={type:'cards',items:[{label,detail,badge,tone}]}; process={type:'process',items:[{label,detail}]}; structure={type:'structure',nodes:[{id,label,detail,parent_id}]}; timeline={type:'timeline',items:[{label,title,detail}]}; comparison={type:'comparison',columns:[{title,items,verdict,tone}]}; matrix={type:'matrix',quadrants:[{title,body}],x_left,x_right,y_top,y_bottom}; kpi={type:'kpi',items:[{label,value,detail}]}; chart={type:'chart',chart_type,categories,series:[{name,values}]}. " &
+                "Legacy data_json is accepted for backwards compatibility but new calls should use visual directly. " &
+                "Keep tables concise: preferably <= 6 data rows per slide; split long tables across slides rather than forcing tiny text. If the user requests a named design listed by the DESIGN REPOSITORY system context, pass its exact id as design_name; the repository template is treated as a real PowerPoint master/layout carrier and its sample slides are removed by default. " &
+                "If a requested .potx/.pptx template is listed under USER HOME FILES, load manage_user_files with action='use' before create_powerpoint and then pass the loaded filename as template_attachment_name. template_attachment_name may reference an existing .potx or .pptx. " &
+                "When a template is available, the host selects among its actual masters/custom layouts per slide. Repository carriers may have a same-basename Markdown guide; when present, that natural-language guide is used together with the actual master/layout names, placeholder geometry/types, and sample slides. Template-specific rich-visual proportions may also be declared there with generic rich.* settings; do not invent brand-specific coordinates in the tool call. Rich timelines, charts, matrices, processes, structures, cards, comparisons and KPI visuals are freeform editable graphics: they may span the safe content canvas and intentionally leave native body placeholders empty, while the host protects title/footer/logo/slide-number zones. Without guidance, the host may use one bounded LLM interpretation call over that actual template metadata. Do not assume numeric layout positions or fixed organization-specific layout-name heuristics. template_master_name/template_layout_name are optional exact overrides only when their names are known; otherwise let the host interpret the template and fall back safely if no layout fits. " &
+                "A named organization's design may be claimed only when design_name resolves, template_attachment_name resolves to an authorized template, or explicit design specifications are supplied; otherwise create a neutral professional deck and state that the specific corporate design was not available.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreatePowerPoint & """," &
-                """description"":""Creates a new PowerPoint presentation (.pptx) with slides. Each slide has a title, body text (use newlines for bullets), and optional speaker notes. " &
-                "Supports using an existing .pptx as template via template_attachment_name — existing slides are kept, new slides appended. " &
-                "Use when the user asks to create a presentation, slide deck, or pitch deck.""," &
+                """description"":""Creates a genuinely new professionally formatted PowerPoint presentation with executive typography, visual business layouts, charts, and optional template support. Do not rebuild an existing deck when its native master/layout is the requested format carrier.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """slides"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """title"":{""type"":""string"",""description"":""Slide title text""}," &
-                """body"":{""type"":""string"",""description"":""Slide body content. Use newline characters for separate bullet points.""}," &
-                """notes"":{""type"":""string"",""description"":""Optional speaker notes for this slide""}" &
-                "}},""description"":""Array of slide objects defining the presentation""}," &
-                """file_name"":{""type"":""string"",""description"":""Desired filename without extension (default: 'Presentation')""}," &
-                """title"":{""type"":""string"",""description"":""Presentation title metadata (default: derived from first slide title)""}," &
-                """template_attachment_name"":{""type"":""string"",""description"":""Filename of an existing .pptx attachment to use as template. " &
-                "Existing slides are preserved, new slides are appended using the template's slide masters and layouts.""}" &
+                """layout"":{""type"":""string"",""description"":""Optional layout: title, section, bullets, two_column, kpi, table, chart, cards, process, structure, timeline, comparison, matrix, quote, or closing.""}," &
+                """title"":{""type"":""string""},""subtitle"":{""type"":""string""},""body"":{""type"":""string"",""description"":""Main text; use plain newline-separated points for bullet slides without literal bullet glyphs and keep it concise enough for large presentation text.""}," &
+                """bullet_items"":{""type"":""array"",""description"":""Preferred structured bullets. Use level=0 for main points and level=1+ for supporting detail. Never put bullet glyphs or manual numeric prefixes such as 1. or 2. in text."",""items"":{""type"":""object"",""properties"":{""text"":{""type"":""string""},""level"":{""type"":""integer"",""description"":""Zero-based indentation level, normally 0 or 1.""}}, ""required"":[""text""]}}," &
+                """bullet_points"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Legacy flat bullet list. Prefer bullet_items for new calls, especially for hierarchy. Do not prefix entries with bullet glyphs or manual numbering.""}," &
+                """visual"":{""type"":""object"",""description"":""Preferred typed rich visual. Native editable PowerPoint shapes/text are the primary renderer. Keep labels concise; dense legal/tax explanation belongs on native text slides."",""properties"":{""type"":{""type"":""string"",""enum"":[""cards"",""process"",""structure"",""timeline"",""comparison"",""matrix"",""kpi"",""chart""]},""title"":{""type"":""string""},""caption"":{""type"":""string""},""items"":{""type"":""array"",""description"":""Flat array of item objects. Never wrap item objects in additional arrays."",""items"":{""type"":""object"",""properties"":{""label"":{""type"":""string""},""title"":{""type"":""string""},""detail"":{""type"":""string""},""body"":{""type"":""string""},""badge"":{""type"":""string""},""tone"":{""type"":""string""},""value"":{""type"":""string""}}}},""nodes"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""id"":{""type"":""string""},""label"":{""type"":""string""},""detail"":{""type"":""string""},""parent_id"":{""type"":""string""}},""required"":[""id"",""label""]}},""columns"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""title"":{""type"":""string""},""items"":{""type"":""array"",""items"":{""type"":""string""}},""verdict"":{""type"":""string""},""tone"":{""type"":""string""}}}},""quadrants"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""title"":{""type"":""string""},""body"":{""type"":""string""}}}},""x_left"":{""type"":""string""},""x_right"":{""type"":""string""},""y_top"":{""type"":""string""},""y_bottom"":{""type"":""string""},""chart_type"":{""type"":""string""},""categories"":{""type"":""array"",""items"":{""type"":""string""}},""series"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""values"":{""type"":""array"",""items"":{""type"":""number""}}}}}},""required"":[""type""]}," &
+                """notes"":{""type"":""string""},""source"":{""type"":""string""},""callout"":{""type"":""string""}," &
+                """section_number"":{""type"":""string""},""left_title"":{""type"":""string""},""left_body"":{""type"":""string""},""right_title"":{""type"":""string""},""right_body"":{""type"":""string""}," &
+                """template_master_name"":{""type"":""string"",""description"":""Optional exact PowerPoint master/design name override when known from the approved template. Do not guess.""}," &
+                """template_layout_name"":{""type"":""string"",""description"":""Optional exact custom-layout name override when known from the approved template. Do not guess; otherwise omit and let the host choose.""}," &
+                """quote"":{""type"":""string""},""attribution"":{""type"":""string""}," &
+                """data_json"":{""type"":""string"",""description"":""Legacy compatibility input for structured visual data. Prefer the typed visual object for new calls.""}" &
+                "}},""description"":""Slides defining the presentation.""}," &
+                """file_name"":{""type"":""string""},""title"":{""type"":""string""},""design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. Repository templates are used as real master/theme/layout carriers and sample slides are removed by default.""},""template_attachment_name"":{""type"":""string"",""description"":""Exact loaded/attached .potx or .pptx template filename. For a USER HOME FILE, call manage_user_files action='use' first. An explicit template carrier suppresses implicit repository defaults.""}," &
+                """use_repository_default_design"":{""type"":""boolean"",""description"":""Defaults to true. Set false when a user-supplied source artifact is the intended formatting/layout/design authority and no repository design was explicitly requested.""}," &
+                """preserve_template_slides"":{""type"":""boolean"",""description"":""Keep existing slides from a .pptx template. Defaults to false for design-repository templates; .potx templates normally contain no sample slides.""}," &
+                """allow_text_heavy"":{""type"":""boolean"",""description"":""Set true only when the user explicitly requests a mostly textual/minimal deck. Otherwise the host enforces a balanced text/visual mix for longer presentations.""}," &
+                """allow_visual_heavy"":{""type"":""boolean"",""description"":""Set true only when the user explicitly requests an infographic-heavy/mostly visual deck. Otherwise the host preserves a meaningful share of native text/data slides.""}," &
+                """style_preset"":{""type"":""string""},""accent_color"":{""type"":""string""},""secondary_color"":{""type"":""string""},""font_name"":{""type"":""string""}," &
+                """text_color"":{""type"":""string""},""muted_color"":{""type"":""string""},""light_color"":{""type"":""string""},""line_color"":{""type"":""string""}," &
+                """aspect_ratio"":{""type"":""string"",""description"":""16:9 or 4:3.""},""footer_text"":{""type"":""string""},""show_slide_numbers"":{""type"":""boolean""}" &
                 "},""required"":[""slides""]}}"
         })
 
         ' ── create_code_file ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateCodeFile,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create Code/Script File (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreateCodeFile & ": Creates a new code, script, or data file with the specified content. " &
@@ -964,6 +1014,7 @@ Partial Public Class ThisAddIn
         ' ── redact_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_RedactPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Redact PDF Document (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_RedactPdf & ": Redacts a PDF document by identifying text that matches the given instruction " &
@@ -1006,6 +1057,7 @@ Partial Public Class ThisAddIn
         ' ── overlay_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_OverlayPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Overlay text and images on PDF pages (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_OverlayPdf & ": Places text labels and/or images at precise positions on PDF pages. " &
@@ -1065,6 +1117,7 @@ Partial Public Class ThisAddIn
 
             tools.Add(New ModelConfig() With {
                 .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateAudioFile,
+                .CapabilityTags = "explicit_operation",
                 .ModelDescription = "Create Audio File — Podcast or Audiobook (built-in)",
                 .ToolInstructionsPrompt =
                 AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
@@ -1157,6 +1210,7 @@ Partial Public Class ThisAddIn
 
             tools.Add(New ModelConfig() With {
                 .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_GenerateImage,
+                .CapabilityTags = "explicit_operation",
                 .ModelDescription = "Generate Image (built-in)",
                 .ToolInstructionsPrompt =
                     AP_Tool_GenerateImage & ": Generates an image from a text description using an image generation model. " &
@@ -1313,6 +1367,9 @@ Partial Public Class ThisAddIn
         For Each tool As ModelConfig In tools
             If tool Is Nothing Then Continue For
             tool.ModelDescription = StripSelectorOwnedToolSuffixes(tool.ModelDescription)
+            If IsOptionalSingleFileAutoPilotArtifactTool(tool.ToolName) Then
+                SharedLibrary.Agents.ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
+            End If
         Next
 
         Return tools
@@ -1333,102 +1390,290 @@ Partial Public Class ThisAddIn
     ''' A <see cref="ToolResponse"/> when the tool is recognized; otherwise <c>Nothing</c>
     ''' so the caller can continue with external tool handling.
     ''' </returns>
+    Private Shared Function IsOptionalSingleFileAutoPilotArtifactTool(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then Return False
+        Select Case toolName
+            Case AP_Tool_MergePdfs,
+                 AP_Tool_CompareWordDocs,
+                 AP_Tool_CreatePdfFromText,
+                 AP_Tool_ExcelCompleteLiveWorkbook,
+                 AP_Tool_AddPdfWatermark,
+                 AP_Tool_WordToPdf,
+                 AP_Tool_PdfToWord,
+                 AP_Tool_CreateWordDoc,
+                 AP_Tool_CreateExcel,
+                 AP_Tool_CreatePowerPoint,
+                 AP_Tool_CreateCodeFile,
+                 AP_Tool_RedactPdf,
+                 AP_Tool_OverlayPdf,
+                 AP_Tool_CreateAudioFile,
+                 AP_Tool_GenerateImage,
+                 AP_Tool_ManageUserFiles
+                Return True
+        End Select
+        Return False
+    End Function
+
+    Private Shared Function HasExplicitArtifactIdentityArguments(arguments As IDictionary(Of String, Object)) As Boolean
+        If arguments Is Nothing Then Return False
+        For Each key As String In New String() {
+            "artifact_id", "logical_deliverable_id", "output_slot_id", "supersedes_artifact_id",
+            "artifact_state", "artifact_delivery_intent", "storage_kind"
+        }
+            Dim value As Object = Nothing
+            If arguments.TryGetValue(key, value) AndAlso value IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(value.ToString()) Then
+                Return True
+            End If
+        Next
+        Return False
+    End Function
+
+    Private Shared Function ComputeAutoPilotOutputFingerprint(path As String) As String
+        Try
+            If String.IsNullOrWhiteSpace(path) OrElse Not File.Exists(path) Then Return "missing"
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Using stream As FileStream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite Or FileShare.Delete)
+                    Dim hash As Byte() = sha.ComputeHash(stream)
+                    Return "sha256:" & BitConverter.ToString(hash).Replace("-", "")
+                End Using
+            End Using
+        Catch
+            Try
+                Dim info As New FileInfo(path)
+                Return "meta:" & info.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" & info.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            Catch
+                Return "unavailable"
+            End Try
+        End Try
+    End Function
+
     Friend Async Function TryExecuteAutoPilotTool(
             toolCall As ToolCall,
             context As ToolExecutionContext,
-            Optional cancellationToken As CancellationToken = Nothing) As Task(Of ToolResponse)
+            Optional cancellationToken As CancellationToken = Nothing) As System.Threading.Tasks.Task(Of ToolResponse)
 
-        Dim outputSnapshot As Dictionary(Of String, Long) = SnapshotAutoPilotOutputFiles()
+        Dim artifactMetadata As SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+        If HasExplicitArtifactIdentityArguments(toolCall.Arguments) Then
+            If toolCall.ToolName.Equals(AP_Tool_ManageUserFiles, StringComparison.OrdinalIgnoreCase) Then
+                Dim manageAction As String = If(GetArgString(toolCall.Arguments, "action"), "").Trim()
+                If Not manageAction.Equals("checkout", StringComparison.OrdinalIgnoreCase) Then
+                    Return New ToolResponse() With {
+                        .CallId = toolCall.CallId,
+                        .ToolName = toolCall.ToolName,
+                        .Success = False,
+                        .ResultKind = "error",
+                        .ErrorCode = "explicit_artifact_requires_checkout_action",
+                        .ErrorMessage = "manage_user_files may use explicit artifact metadata only with action='checkout', because other actions do not produce one user-facing output file."
+                    }
+                End If
+            End If
+
+            If Not IsOptionalSingleFileAutoPilotArtifactTool(toolCall.ToolName) Then
+                Return New ToolResponse() With {
+                    .CallId = toolCall.CallId,
+                    .ToolName = toolCall.ToolName,
+                    .Success = False,
+                    .ResultKind = "error",
+                    .ErrorCode = "explicit_artifact_not_supported_for_tool_cardinality",
+                    .ErrorMessage = "This tool can produce zero, multiple, or dynamic files and cannot safely bind one explicit artifact identity to the whole call. Use its legacy/multi-output flow or a tool with an explicit per-output slot protocol."
+                }
+            End If
+
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+            If Not SharedLibrary.Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                toolCall.Arguments,
+                SharedLibrary.Agents.ArtifactStorageKind.Unknown,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
+                Return New ToolResponse() With {
+                    .CallId = toolCall.CallId,
+                    .ToolName = toolCall.ToolName,
+                    .Success = False,
+                    .ResultKind = "error",
+                    .ErrorCode = artifactFailureCode,
+                    .ErrorMessage = artifactFailureMessage
+                }
+            End If
+        End If
+
+        Dim outputSnapshot As Dictionary(Of String, String) = SnapshotAutoPilotOutputFiles()
         Dim response As ToolResponse = Nothing
+        Dim enableLocalToolingMirror As Boolean = _chatAgentActive AndAlso Not _apActive
 
-        Select Case toolCall.ToolName
-            Case AP_Tool_ProcessWordDoc
-                response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExtractPdfText
-                response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
-            Case AP_Tool_MergePdfs
-                response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReadAttachment
-                response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ListAttachments
-                response = ExecuteListAttachmentsTool(toolCall, context)
-            Case AP_Tool_DescribeBinary
-                response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CommentWordDoc
-                response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CommentPdf
-                response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CompareWordDocs
-                response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReadWordDocDetails
-                response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreatePdfFromText
-                response = ExecuteCreatePdfFromTextTool(toolCall, context)
-            Case AP_Tool_ExtractExcelData
-                response = ExecuteExtractExcelDataTool(toolCall, context)
-            Case AP_Tool_ExcelListLiveWorksheets
-                response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExcelReadLiveRange
-                response = Await ExecuteExcelReadLiveRangeTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExcelCompleteLiveWorkbook
-                response = Await ExecuteExcelCompleteLiveWorkbookTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SplitPdf
-                response = ExecuteSplitPdfTool(toolCall, context)
-            Case AP_Tool_AddPdfWatermark
-                response = ExecuteAddPdfWatermarkTool(toolCall, context)
-            Case AP_Tool_WordToPdf
-                response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SearchInAttachments
-                response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SummarizeThread
-                response = ExecuteSummarizeThreadTool(toolCall, context)
-            Case AP_Tool_PdfToWord
-                response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateWordDoc
-                response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateExcel
-                response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreatePowerPoint
-                response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateCodeFile
-                response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExtractDataFromAttachments
-                response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_RedactPdf
-                response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_OverlayPdf
-                response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateAudioFile
-                response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
-            Case AP_Tool_GenerateImage
-                response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
-            Case AP_Tool_WebGrounding
-                response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageScheduledTasks
-                response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageUserMemory
-                response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageUserFiles
-                response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ListCollectionUseCases
-                response = Await ExecuteListCollectionUseCasesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CollectData
-                response = Await ExecuteCollectDataTool(toolCall, context, cancellationToken)
-            Case AP_Tool_PreviewCollection
-                response = Await ExecutePreviewCollectionTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CompleteWordTables
-                response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReportInability
-                response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
-            Case Else
-                Return Nothing
-        End Select
+        If enableLocalToolingMirror Then
+            System.Threading.Interlocked.Increment(_apMirrorDashboardLogToLocalToolingDepth)
+        End If
 
-        Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+        Try
+            Select Case toolCall.ToolName
+                Case AP_Tool_ProcessWordDoc
+                    response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractPdfText
+                    response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
+                Case AP_Tool_MergePdfs
+                    response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReadAttachment
+                    response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ListAttachments
+                    response = ExecuteListAttachmentsTool(toolCall, context)
+                Case AP_Tool_DescribeBinary
+                    response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CommentWordDoc
+                    response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CommentPdf
+                    response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CompareWordDocs
+                    response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReadWordDocDetails
+                    response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreatePdfFromText
+                    response = ExecuteCreatePdfFromTextTool(toolCall, context)
+                Case AP_Tool_ExtractExcelData
+                    response = ExecuteExtractExcelDataTool(toolCall, context)
+                Case AP_Tool_ExcelListLiveWorksheets
+                    response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExcelReadLiveRange
+                    response = Await ExecuteExcelReadLiveRangeTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExcelCompleteLiveWorkbook
+                    response = Await ExecuteExcelCompleteLiveWorkbookTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SplitPdf
+                    response = ExecuteSplitPdfTool(toolCall, context)
+                Case AP_Tool_AddPdfWatermark
+                    response = ExecuteAddPdfWatermarkTool(toolCall, context)
+                Case AP_Tool_WordToPdf
+                    response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SearchInAttachments
+                    response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SummarizeThread
+                    response = ExecuteSummarizeThreadTool(toolCall, context)
+                Case AP_Tool_PdfToWord
+                    response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateWordDoc
+                    response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateExcel
+                    response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreatePowerPoint
+                    response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateCodeFile
+                    response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractDataFromAttachments
+                    response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_RedactPdf
+                    response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_OverlayPdf
+                    response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateAudioFile
+                    response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
+                Case AP_Tool_GenerateImage
+                    response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
+                Case AP_Tool_WebGrounding
+                    response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageScheduledTasks
+                    response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageUserMemory
+                    response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageUserFiles
+                    response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ListCollectionUseCases
+                    response = Await ExecuteListCollectionUseCasesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CollectData
+                    response = Await ExecuteCollectDataTool(toolCall, context, cancellationToken)
+                Case AP_Tool_PreviewCollection
+                    response = Await ExecutePreviewCollectionTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CompleteWordTables
+                    response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReportInability
+                    response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
+                Case Agents.PythonExecuteTool.ToolName
+                    response = Await ExecutePythonExecuteTool(toolCall, context, cancellationToken)
+                Case Else
+                    Return Nothing
+            End Select
+
+            Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot, artifactMetadata)
+        Finally
+            If enableLocalToolingMirror Then
+                System.Threading.Interlocked.Decrement(_apMirrorDashboardLogToLocalToolingDepth)
+            End If
+        End Try
     End Function
 
-    Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, Long)
-        Dim snapshot As New Dictionary(Of String, Long)(StringComparer.OrdinalIgnoreCase)
+    ''' <summary>
+    ''' Registers one physical file created by an AutoPilot/Local-Agent tool as an explicit
+    ''' host-side output. This also works when the current mail/session has no inbound
+    ''' attachments; in that case a tool-output carrier is added so per-call fingerprinting,
+    ''' ArtifactDelivery normalization, and bounded legacy compatibility can all observe the file.
+    ''' No artifact identity is inferred from the path.
+    ''' </summary>
+    Private Sub RegisterAutoPilotGeneratedOutputFile(outputPath As String)
+        If String.IsNullOrWhiteSpace(outputPath) Then Return
+
+        Dim normalizedPath As String
+
+        Try
+            normalizedPath = System.IO.Path.GetFullPath(outputPath)
+        Catch ex As System.Exception
+            Return
+        End Try
+
+        If Not System.IO.File.Exists(normalizedPath) Then Return
+
+        If _apCurrentAttachments Is Nothing Then
+            _apCurrentAttachments = New List(Of AutoPilotAttachmentInfo)()
+        End If
+
+        Dim registrationTarget As AutoPilotAttachmentInfo = Nothing
+
+        For Each existingAttachment As AutoPilotAttachmentInfo In _apCurrentAttachments
+            If existingAttachment Is Nothing Then Continue For
+
+            If existingAttachment.OutputFiles IsNot Nothing Then
+                For Each existingOutput As String In existingAttachment.OutputFiles
+                    If String.Equals(
+                        If(existingOutput, String.Empty).Trim(),
+                        normalizedPath,
+                        StringComparison.OrdinalIgnoreCase) Then
+
+                        Return
+                    End If
+                Next
+            End If
+
+            If registrationTarget Is Nothing Then
+                registrationTarget = existingAttachment
+            End If
+        Next
+
+        If registrationTarget Is Nothing Then
+            Dim fileInfo As New System.IO.FileInfo(normalizedPath)
+
+            registrationTarget = New AutoPilotAttachmentInfo With {
+                .OriginalFileName = System.IO.Path.GetFileName(normalizedPath),
+                .TempFilePath = normalizedPath,
+                .SourcePath = normalizedPath,
+                .Extension = System.IO.Path.GetExtension(normalizedPath),
+                .SizeBytes = fileInfo.Length,
+                .IsOverSizeLimit = False,
+                .StatusMessage = "Generated tool output",
+                .CreatedTime = fileInfo.CreationTime,
+                .LastModifiedTime = fileInfo.LastWriteTime,
+                .IsToolOutput = True,
+                .OutputFiles = New List(Of String)()
+            }
+
+            _apCurrentAttachments.Add(registrationTarget)
+        ElseIf registrationTarget.OutputFiles Is Nothing Then
+            registrationTarget.OutputFiles = New List(Of String)()
+        End If
+
+        registrationTarget.OutputFiles.Add(normalizedPath)
+    End Sub
+
+    Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, String)
+        Dim snapshot As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
         If _apCurrentAttachments Is Nothing Then
             Return snapshot
@@ -1441,24 +1686,14 @@ Partial Public Class ThisAddIn
                 Dim normalized As String = If(outputPath, "").Trim()
                 If normalized = "" Then Continue For
 
-                Dim stamp As Long = Long.MinValue
-
-                Try
-                    If File.Exists(normalized) Then
-                        Dim info As New FileInfo(normalized)
-                        stamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
-                    End If
-                Catch
-                End Try
-
-                snapshot(normalized) = stamp
+                snapshot(normalized) = ComputeAutoPilotOutputFingerprint(normalized)
             Next
         Next
 
         Return snapshot
     End Function
 
-    Private Function GetProducedAutoPilotOutputFiles(previousSnapshot As IDictionary(Of String, Long)) As List(Of String)
+    Private Function GetProducedAutoPilotOutputFiles(previousSnapshot As IDictionary(Of String, String)) As List(Of String)
         Dim produced As New List(Of String)()
         Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
@@ -1474,20 +1709,13 @@ Partial Public Class ThisAddIn
                 If normalized = "" Then Continue For
                 If Not File.Exists(normalized) Then Continue For
 
-                Dim currentStamp As Long = Long.MinValue
-
-                Try
-                    Dim info As New FileInfo(normalized)
-                    currentStamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
-                Catch
-                End Try
-
-                Dim previousStamp As Long = Long.MinValue
+                Dim currentStamp As String = ComputeAutoPilotOutputFingerprint(normalized)
+                Dim previousStamp As String = Nothing
                 Dim wasKnown As Boolean =
                     previousSnapshot IsNot Nothing AndAlso
                     previousSnapshot.TryGetValue(normalized, previousStamp)
 
-                If Not wasKnown OrElse previousStamp <> currentStamp Then
+                If Not wasKnown OrElse Not String.Equals(previousStamp, currentStamp, StringComparison.Ordinal) Then
                     If seen.Add(normalized) Then
                         produced.Add(normalized)
                     End If
@@ -1579,12 +1807,36 @@ Partial Public Class ThisAddIn
 
     Private Function NormalizeAutoPilotToolResponse(toolCall As ToolCall,
                                                     toolResponse As ToolResponse,
-                                                    outputSnapshot As IDictionary(Of String, Long)) As ToolResponse
+                                                    outputSnapshot As IDictionary(Of String, String),
+                                                    Optional artifactMetadata As SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing) As ToolResponse
         If toolResponse Is Nothing OrElse Not toolResponse.Success Then
             Return toolResponse
         End If
 
         Dim parsedToken As JToken = TryParseToolResultToken(toolResponse.Response)
+        Dim producedOutputs As List(Of String) = GetProducedAutoPilotOutputFiles(outputSnapshot)
+
+        If artifactMetadata IsNot Nothing Then
+            If producedOutputs.Count = 1 Then
+                toolResponse.Response = SharedLibrary.Agents.ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(
+                    toolResponse.Response,
+                    artifactMetadata,
+                    producedOutputs(0))
+                toolResponse.ResultKind = "json_object"
+                Return toolResponse
+            End If
+
+            ' A safe single-file producer may legitimately produce no file (for example
+            ' a no-op/finalize check). In that case no artifact is fabricated; a locked
+            ' expected-artifact contract remains unsatisfied and completion is rejected.
+            If producedOutputs.Count = 0 Then Return toolResponse
+
+            toolResponse.Success = False
+            toolResponse.ResultKind = "error"
+            toolResponse.ErrorCode = "single_file_artifact_cardinality_violation"
+            toolResponse.ErrorMessage = "The tool produced more than one changed output while a single explicit artifact identity was supplied."
+            Return toolResponse
+        End If
 
         If HasNormalizedToolResultMetadata(toolResponse.Response) Then
             If String.IsNullOrWhiteSpace(toolResponse.ResultKind) Then
@@ -1594,8 +1846,6 @@ Partial Public Class ThisAddIn
 
             Return toolResponse
         End If
-
-        Dim producedOutputs As List(Of String) = GetProducedAutoPilotOutputFiles(outputSnapshot)
 
         If producedOutputs.Count > 0 Then
             toolResponse.Response =
@@ -1689,6 +1939,11 @@ Partial Public Class ThisAddIn
     Private Function FindAttachment(fileName As String) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(fileName) OrElse _apCurrentAttachments Is Nothing Then Return Nothing
 
+        ' Rescan the active session staging directory on every lookup so that files produced
+        ' by any tool (file_copy, js_run outputs, completed workbooks, etc.) become resolvable
+        ' even when the model never learned their name. Registration is deduped and cheap.
+        RefreshSessionStagingAttachments()
+
         Dim trimmedName = fileName.Trim()
 
         Dim found = _apCurrentAttachments.FirstOrDefault(
@@ -1718,7 +1973,54 @@ Partial Public Class ThisAddIn
             Next
         Next
 
+        ' Fallback: resolve the name against the granted workspace so that AutoPilot
+        ' Office tools (process_word_document, comment_word_document, compare_word_documents,
+        ' etc.) work on local workspace documents, not only on mail attachments.
+        Dim workspaceMatch As AutoPilotAttachmentInfo = TryResolveWorkspaceFile(trimmedName)
+        If workspaceMatch IsNot Nothing Then Return workspaceMatch
+
         Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Attempts to resolve <paramref name="fileName"/> against the granted workspace root.
+    ''' Returns a transient <see cref="AutoPilotAttachmentInfo"/> pointing at the workspace
+    ''' file (marked <c>IsToolOutput=True</c> so it is treated as an in-session file), or
+    ''' <c>Nothing</c> when no workspace is configured or the file is not found.
+    ''' </summary>
+    Private Function TryResolveWorkspaceFile(fileName As String) As AutoPilotAttachmentInfo
+        If String.IsNullOrWhiteSpace(fileName) Then Return Nothing
+
+        Dim state As SharedLibrary.Agents.WorkspaceState = SharedLibrary.Agents.WorkspaceStore.Load("outlook")
+        If state Is Nothing OrElse String.IsNullOrWhiteSpace(state.RootPath) OrElse
+           Not Directory.Exists(state.RootPath) Then
+            Return Nothing
+        End If
+
+        Dim candidate As String
+        Try
+            ' Accept both a bare leaf name and a workspace-relative path.
+            candidate = Path.GetFullPath(Path.Combine(state.RootPath, fileName))
+        Catch
+            Return Nothing
+        End Try
+
+        ' Confine resolution to the workspace root.
+        Dim rootFull As String = Path.GetFullPath(state.RootPath)
+        If Not candidate.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) Then Return Nothing
+        If Not File.Exists(candidate) Then Return Nothing
+
+        Return New AutoPilotAttachmentInfo() With {
+            .OriginalFileName = Path.GetFileName(candidate),
+            .Extension = Path.GetExtension(candidate).ToLowerInvariant(),
+            .TempFilePath = candidate,
+            .SourcePath = candidate,
+            .SizeBytes = New FileInfo(candidate).Length,
+            .IsOverSizeLimit = False,
+            .StatusMessage = "Workspace file",
+            .IsToolOutput = True,
+            .OutputFiles = New List(Of String)()
+        }
     End Function
 
     ''' <summary>
@@ -1747,32 +2049,34 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Reads text from a single attachment, using cache when available.
-    ''' </summary>
-    ''' 
-    ''' <summary>
-    ''' Reads text from a single attachment, using cache when available.
-    ''' Prefers sandboxed (COM-free) readers for Office formats and mail files.
-    ''' </summary>
-    ''' <summary>
-    ''' Reads text from a single attachment, using cache when available.
     ''' Prefers sandboxed (COM-free) readers for OpenXML and mail formats.
     ''' Respects <see cref="INI_AllowLegacyDocFiles"/> for .doc files.
     ''' </summary>
-    Private Async Function ReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
-        ' Return cache if available
-        If att.CachedText IsNot Nothing Then Return att.CachedText
-
+    Private Async Function ReadSingleAttachmentText(att As AutoPilotAttachmentInfo,
+                                                    context As ToolExecutionContext,
+                                                    Optional returnMarkdown As Boolean = False) As System.Threading.Tasks.Task(Of String)
+        If att Is Nothing Then Return Nothing
         If att.TempFilePath Is Nothing OrElse Not File.Exists(att.TempFilePath) Then Return Nothing
+
+        Dim ext As String = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
+        Dim markdownCapable As Boolean = (ext = ".docx" OrElse ext = ".pdf")
+        Dim useMarkdown As Boolean = returnMarkdown AndAlso markdownCapable
+
+        ' Return cache if available
+        If useMarkdown Then
+            If att.CachedMarkdownText IsNot Nothing Then Return att.CachedMarkdownText
+        ElseIf att.CachedText IsNot Nothing Then
+            Return att.CachedText
+        End If
 
         Dim text As String = Nothing
         Dim extracted As Boolean = False
 
         ' ── Sandboxed readers first (no COM interop) ──
-        Dim ext = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
         Try
             Select Case ext
                 Case ".docx"
-                    text = SharedMethods.ReadDocxSandboxed(att.TempFilePath)
+                    text = SharedMethods.ReadDocxSandboxed(att.TempFilePath, useMarkdown)
                     extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                 Case ".xlsx"
                     text = SharedMethods.ReadXlsxSandboxed(att.TempFilePath)
@@ -1797,7 +2101,7 @@ Partial Public Class ThisAddIn
         End Try
 
         ' ── Fallback: Office COM interop for .doc, .xls, .ppt, .rtf (legacy formats) ──
-        If Not extracted AndAlso ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles) Then
+        If Not extracted AndAlso (Not useMarkdown) AndAlso (ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles)) Then
             Try
                 Dim label As String = Nothing
                 extracted = TryExtractOfficeText(att.TempFilePath, text, label)
@@ -1806,7 +2110,7 @@ Partial Public Class ThisAddIn
         End If
 
         ' ── Fallback: text-like files ──
-        If Not extracted Then
+        If Not extracted AndAlso (Not useMarkdown) Then
             Try
                 Dim label As String = Nothing
                 extracted = TryExtractTextLike(att.TempFilePath, text, label)
@@ -1814,17 +2118,26 @@ Partial Public Class ThisAddIn
             End Try
         End If
 
-        ' ── Fallback: PDF ──
+        ' ── PDF extraction ──
         If Not extracted AndAlso ext = ".pdf" Then
             Try
-                text = Await SharedMethods.ReadPdfAsText(att.TempFilePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=False, AskUser:=False)
-                extracted = Not String.IsNullOrWhiteSpace(text)
+                text = Await SharedMethods.ReadPdfAsText(
+                    att.TempFilePath,
+                    ReturnErrorInsteadOfEmpty:=True,
+                    DoOCR:=False,
+                    AskUser:=False,
+                    ReturnMarkdown:=useMarkdown)
+                extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
             Catch
             End Try
         End If
 
         If extracted AndAlso Not String.IsNullOrWhiteSpace(text) Then
-            att.CachedText = text
+            If useMarkdown Then
+                att.CachedMarkdownText = text
+            Else
+                att.CachedText = text
+            End If
             Return text
         End If
 
@@ -1832,7 +2145,7 @@ Partial Public Class ThisAddIn
     End Function
 
 
-    Private Async Function oldReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
+    Private Async Function oldReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As System.Threading.Tasks.Task(Of String)
         ' Return cache if available
         If att.CachedText IsNot Nothing Then Return att.CachedText
 

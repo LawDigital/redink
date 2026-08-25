@@ -4,105 +4,24 @@
 ' =============================================================================
 ' File: DiscussInky.vb
 ' Purpose:
-'   WinForms surface that hosts the "Discuss this" multi-persona chat inside Word.
-'   Provides persona + mission selection, knowledge loading (file or directory),
-'   optional inclusion of the active Word document, transcript rendering/persistence,
-'   and LLM invocation with optional alternate-model / second-API support.
-'   Includes two automation modes:
-'     - Autorespond: simulates a second participant for multi-party dialogue
-'     - Sort It Out: structured Advocate vs Challenger discussion using the same engine
+'   Word WinForms surface for persona/mission-based discussion workflows, including
+'   optional knowledge/document context, multi-participant automation and tooling.
 '
-' Architecture / How it works:
-'  - UI Composition:
-'     * WebBrowser transcript renderer (Markdown -> HTML via Markdig, custom CSS; external links open in browser)
-'     * Multiline TextBox input with Enter-to-send (Shift+Enter for newline) and Esc-to-close
-'     * Buttons: Send, Persona, Mission, Edit Local Persona Lib, Load Knowledge, Alternate Model,
-'       Clear, Send to Doc, Close, Autorespond, Sort It Out, Tools
-'     * Checkboxes: Include active document, Persist knowledge temporarily, Enable tooling, Tooling log
+' Architecture / Function:
+'   - Maintains its own bounded discussion history and renders Markdown conversation
+'     output while persisting only user-facing session/preferences needed for reopening.
+'   - Resolves personas/missions and optional file/directory knowledge, then composes that
+'     context with the active Word document before invoking the shared LLM bridge.
+'   - Autorespond and "Sort It Out" are orchestration modes over the same conversation
+'     engine; alternate/special-task model scopes are temporary and restored after calls.
+'   - Optional tools are executed through Globals.ThisAddIn.ExecuteToolingLoop rather than
+'     reimplemented here; tool permissions/log display remain explicit session choices.
+'   - Export back to Word delegates document creation/Markdown insertion to host helpers.
+'   - File extraction, model configuration and common dialogs come from SharedLibrary.
+' Security:
+'   - External links from the embedded chat browser route through the shared
+'     SafeOpenExternalLink boundary (absolute HTTP/HTTPS/MAILTO only).
 '
-'  - Session State & Persistence (`My.Settings`):
-'     * Persists window geometry, selected persona/mission, checkbox states, knowledge path, tooling settings
-'     * Persists transcript in two forms:
-'         - HTML fragment (`DiscussLastChatHtml`) for fast UI restoration
-'         - Plain transcript (`DiscussLastChat`) to rebuild `_history` for LLM context
-'     * Maintains an in-process runtime knowledge cache (`_cachedKnowledgeContent/_cachedKnowledgeFilePath`)
-'       (survives closing/reopening the form while Word remains running)
-'     * Optional temp-file persistence of knowledge when "Persist knowledge temporarily" is enabled
-'       (`%TEMP%\redink-discussknowledge.txt`)
-'
-'  - Personas & Missions:
-'     * Personas loaded from local and/or global persona libraries (Name|Prompt, `;` comments supported)
-'       - Local personas are labeled "(local)" and display names are de-duplicated
-'     * Missions loaded from a sibling file derived from the persona library filename:
-'         [personaFileNameWithoutExtension]-missions.txt (Name|Prompt, `;` comments supported)
-'     * Mission/Persona editing is available via the shared text editor; missions reload immediately
-'
-'  - Knowledge Loading (File/Directory):
-'     * Loads a single file or all supported files from a directory (top-level only; capped to prevent overload)
-'     * Supported formats include text/code/markup, RTF, DOC/DOCX, PPTX, PDF (optional OCR when available)
-'     * When multiple files are loaded, wraps each into numbered tags:
-'         <documentN name="file.ext"> ... </documentN>
-'     * Produces a user-confirmed load summary (loaded/failed/ignored, PDF extraction warnings)
-'
-'  - LLM Pipeline & Context Unification:
-'     * Builds prompts from shared context pieces:
-'         - Persona system prompt (+ optional mission clause)
-'         - Knowledge base (if loaded)
-'         - Active Word document excerpt
-'         - Conversation history (`_history`), capped/tail-truncated using `_context.INI_ChatCap`
-'     * History roles:
-'         - `user`
-'         - `assistant` (main persona; Sort It Out stores prefixed display names like "X (Advocate): ...")
-'         - `autoresponder` (second participant; stored already prefixed with its display name)
-'       `BuildConversationForAutoResponder()` normalizes roles into a single transcript so both parties see the
-'       full conversation regardless of who spoke.
-'     * Generates a brief welcome message (persona/mission aware) and displays session info on startup when needed
-'
-'  - Automation Modes:
-'     * Autorespond:
-'         - Alternates between responder persona and main persona for up to N rounds
-'         - Supports a stop phrase (`<AUTORESPOND_STOP>`) and optional progress UI
-'         - Can optionally generate a discussion summary after completion
-'     * Sort It Out:
-'         - Runs a structured Advocate vs Challenger dialogue using the same alternation engine
-'         - Missions can be auto-generated via LLM or selected manually; settings are persisted
-'         - Can optionally generate a discussion summary after completion
-'
-'  - Model Selection / Tooling:
-'     * Alternate model support:
-'         - If an alternate model INI is configured, user can select an alternate model; the model is applied
-'           only for the duration of each call and then restored (semaphore-protected)
-'         - Legacy "second API" toggle is supported when configured
-'     * Tooling support:
-'         - Optional per-session tool selection and execution via `Globals.ThisAddIn.ExecuteToolingLoop`
-'         - Tooling UI is enabled/disabled based on the currently selected model's tooling capability
-'     * ToolTrigger "(t)" - One-Shot Tooling Model:
-'         - Users can type "(t)" anywhere in their prompt to invoke a one-shot tooling request.
-'         - The "(t)" token is stripped from the prompt before it is sent to the LLM.
-'         - On detection, the model marked ToolDefaultModel=True is loaded from the alternate models INI
-'           via GetSpecialTaskModel, without permanently altering context.
-'         - The ToolDefaultModel config is captured (snapshot), the global context is immediately
-'           restored, and the snapshot is applied temporarily only for the ExecuteToolingLoop call.
-'         - If no tools are currently selected, the tool selection dialog is shown (forceDialog).
-'         - Validation checks: INI path configured, ToolDefaultModel found, model supports tooling,
-'           tools selected. Each failure reports an error to chat and restores the original prompt.
-'         - Availability is checked at form load via IsToolDefaultModelAvailable(). When available,
-'           session info includes a "(t)" usage hint.
-'         - The one-shot model is never persisted — after the request completes, subsequent messages
-'           use whatever model was previously active.
-'
-'  - Export:
-'     * "Send to Doc" exports the conversation to a new Word document using Markdown insertion,
-'       formatting speakers explicitly for `user`, `assistant`, and `autoresponder`
-'
-' External Dependencies:
-'  - Markdig: Markdown-to-HTML conversion for transcript rendering and summary display
-'  - `SharedLibrary.SharedMethods`:
-'     * LLM calls and model configuration switching
-'     * OCR/PDF utilities and file extraction helpers
-'     * Shared dialogs (selection, variable input, message boxes, text editor)
-'  - `Globals.ThisAddIn`:
-'     * Word interop access, tooling loop, presentation extraction, drag/drop picker, progress UI helpers
 ' =============================================================================
 
 Option Strict Off
@@ -117,11 +36,11 @@ Imports System.Text.RegularExpressions
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
+Imports System.Xml.Linq
 Imports Markdig
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
-Imports System.Xml.Linq
 
 ''' <summary>
 ''' WinForms surface for persona-driven LLM discussions tied to knowledge files.
@@ -136,6 +55,13 @@ Public Class DiscussInky
     Private Const AutoPersistKnowledgeThresholdChars As Integer = 25000
     Private Const DialogueArchiveFolderName As String = "redink-discuss-dialogues"
     Private Const DialogueArchiveFileExtension As String = ".dialogue.xml"
+    ' Semantic-search index storage (durable, under %AppData%\redink; short names for Windows path limits).
+    Private Const SessionIndexFolderName As String = "discuss-this"       ' per-session persisted index copies: di\<sid>\
+    Private Const ArchiveIndexFolderSuffix As String = ".ix"    ' per-archive index copies: <archiveName>.ix\
+    Private Const IndexCopyFileExtension As String = ".txt"
+    ' Durable, My.Settings-independent pointers under %AppData%\redink\di (crash-safe).
+    Private Const SessionIndexPointerFileName As String = "cur.id"    ' stores the stable session id
+    Private Const SessionIndexStateFileName As String = "last.xml"    ' stores running-session index references
     Private Const ToolTrigger As String = "(ag)"
     Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
     Private Const DiscussLastCompactPromptSettingName As String = "DiscussLastCompactPrompt"
@@ -242,8 +168,9 @@ Public Class DiscussInky
     Private ReadOnly _btnPersona As Button = New Button() With {.Text = "Persona", .AutoSize = True}
     Private ReadOnly _btnMission As Button = New Button() With {.Text = "Mission", .AutoSize = True}
     Private ReadOnly _btnEditPersona As Button = New Button() With {.Text = "Edit Local Persona Lib", .AutoSize = True}
-    Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge (Docs)", .AutoSize = True}
+    Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge (Docs, Indexes)", .AutoSize = True}
     Private ReadOnly _btnManageDocs As Button = New Button() With {.Text = "Manage Docs", .AutoSize = True, .Enabled = False}
+    Private ReadOnly _btnManageIndexes As Button = New Button() With {.Text = "Manage Indexes", .AutoSize = True, .Enabled = False}
     Private ReadOnly _btnArchive As Button = New Button() With {.Text = "Archive", .AutoSize = True}
     Private ReadOnly _btnAlternateModel As Button = New Button() With {.Text = "Alternate Model", .AutoSize = True}
     Private ReadOnly _chkIncludeActiveDoc As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include active document", .AutoSize = True}
@@ -275,12 +202,104 @@ Public Class DiscussInky
     Private _personaSelectedThisSession As Boolean = False
     Private _isUpdatingPersistCheckbox As Boolean = False ' Prevents recursive event handling    
     Private _toolingControlsInitialized As Boolean = False
+    Private _suppressToolingLogPreferenceSync As Boolean = False
     Private _noPersonaLibraryConfigured As Boolean = False ' True when no persona path is defined
     Private _suppressTalkToMeForwarding As Boolean = False
     Private _activeDialogueArchiveName As String = ""
     Private _activeDialogueArchiveFilePath As String = ""
     Private _activeDialogueArchiveBaselineHash As String = ""
     Private _persistedKnowledgeCloseWarningAcknowledged As Boolean = False
+
+    ' Serializes all operations that touch the LLM or the knowledge/index collections (sending a
+    ' message, loading knowledge, converting/creating an index). Prevents parallel, conflicting
+    ' tasks (e.g. iterating _attachedIndexes while another task mutates it) and the resulting
+    ' "collection was modified" errors, and blocks overlapping LLM usage.
+    Private _exclusiveBusy As Boolean = False
+    Private _workingIndicatorId As String = Nothing
+
+    ''' <summary>
+    ''' Attempts to enter the single exclusive operation slot. Returns False (and notifies the user)
+    ''' when another operation is already running. On success, disables the chat input and the
+    ''' knowledge/index buttons until <see cref="EndExclusive"/> is called.
+    ''' </summary>
+    Private Function TryBeginExclusive(taskLabel As String) As Boolean
+        If _exclusiveBusy Then
+            AppendSystemMessage($"Please wait — {taskLabel} cannot start while another operation is still running.")
+            Return False
+        End If
+
+        _exclusiveBusy = True
+        Ui(Sub()
+               _txtInput.Enabled = False
+               _btnSend.Enabled = False
+               _btnKnowledge.Enabled = False
+               _btnManageDocs.Enabled = False
+               _btnManageIndexes.Enabled = False
+           End Sub)
+        Return True
+    End Function
+
+    ''' <summary>
+    ''' Releases the exclusive operation slot and re-enables the input and knowledge/index buttons.
+    ''' Button availability is recomputed from the current state via <see cref="UpdateWindowTitle"/>.
+    ''' </summary>
+    Private Sub EndExclusive()
+        _exclusiveBusy = False
+        Ui(Sub()
+               _txtInput.Enabled = True
+               _btnSend.Enabled = True
+               _btnKnowledge.Enabled = True
+               _txtInput.Focus()
+           End Sub)
+        UpdateWindowTitle()
+    End Sub
+
+    ''' <summary>
+    ''' Shows a neutral, system-styled progress line in the transcript (not attributed to the
+    ''' persona), used for file/index operations where the persona is not actually "thinking".
+    ''' </summary>
+    Private Sub ShowWorkingIndicator(text As String)
+        _workingIndicatorId = "working-" & Guid.NewGuid().ToString("N")
+        AppendHtml($"<div id=""{_workingIndicatorId}"" class='msg system'><span class='content'>{WebUtility.HtmlEncode(text)}</span></div>")
+    End Sub
+
+    ''' <summary>Updates the current working indicator text, if one is shown.</summary>
+    Private Sub UpdateWorkingIndicator(text As String)
+        If String.IsNullOrEmpty(_workingIndicatorId) Then Return
+        Ui(Sub()
+               Try
+                   If _chat.Document IsNot Nothing Then
+                       _chat.Document.InvokeScript("setThinkingText", New Object() {_workingIndicatorId, text})
+                   End If
+               Catch
+               End Try
+           End Sub)
+    End Sub
+
+    ''' <summary>Removes the current working indicator, if one is shown.</summary>
+    Private Sub RemoveWorkingIndicator()
+        If String.IsNullOrEmpty(_workingIndicatorId) Then Return
+        Ui(Sub()
+               Try
+                   If _chat.Document IsNot Nothing Then
+                       _chat.Document.InvokeScript("removeById", New Object() {_workingIndicatorId})
+                   End If
+               Catch
+               Finally
+                   _workingIndicatorId = Nothing
+               End Try
+           End Sub)
+    End Sub
+
+    ' Attached semantic-search indexes for the current session (queried alongside plain knowledge).
+    Private ReadOnly _attachedIndexes As New List(Of DiscussIndexRef)()
+    ' Short, stable per-session id used only for the persisted index folder name (di\<sid>\).
+    Private _sessionIndexId As String = Nothing
+    ' Ensures the "persist this index?" prompt is raised at most once per knowledge set, so loading
+    ' several files/indexes in one operation does not ask repeatedly. Reset on delete/replace.
+    Private _indexPersistenceOffered As Boolean = False
+    ' Per-index semantic conversation state (previously used segment ids), keyed by index id.
+    Private ReadOnly _indexConversationState As New Dictionary(Of String, List(Of String))(StringComparer.OrdinalIgnoreCase)
 
     ' Autorespond state
     Private _autoRespondInProgress As Boolean = False
@@ -297,6 +316,19 @@ Public Class DiscussInky
     Private _alternateModelConfig As ModelConfig = Nothing
     Private _alternateModelDisplayName As String = Nothing
     Private ReadOnly _modelSemaphore As New Threading.SemaphoreSlim(1, 1)
+
+    ''' <summary>
+    ''' Reference to an attached semantic-search index for the current session.
+    ''' The index file is queried standalone via the retriever; byte offsets and the
+    ''' SHA-256 guard require that the exact bytes are never altered or re-encoded.
+    ''' </summary>
+    Private Class DiscussIndexRef
+        Public Property Id As String = ""              ' short id, e.g. "i0"
+        Public Property DisplayName As String = ""     ' original file name (for citations)
+        Public Property ActivePath As String = ""      ' path currently queried (in place or a durable copy)
+        Public Property OriginalPath As String = ""    ' external source file this index was attached from (empty for indexes created in-session)
+        Public Property ContentSha256 As String = ""   ' from the index's own JSON header
+    End Class
 
     ''' <summary>
     ''' Holds a persona definition loaded from a file, including its prompt and display metadata.
@@ -324,6 +356,7 @@ Public Class DiscussInky
         CompactSelected = 1
         DeleteSelected = 2
         EditSelected = 3
+        IndexSelected = 4
     End Enum
 
     Private Structure KnowledgeDocumentEntry
@@ -450,6 +483,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnEditPersona)
         pnlButtons.Controls.Add(_btnKnowledge)
         pnlButtons.Controls.Add(_btnManageDocs)
+        pnlButtons.Controls.Add(_btnManageIndexes)
         pnlButtons.Controls.Add(_btnArchive)
 
         ' Show alternate model button if either second API is configured or an alternate INI exists
@@ -509,6 +543,7 @@ Public Class DiscussInky
         AddHandler _btnEditPersona.Click, AddressOf OnEditLocalPersona
         AddHandler _btnKnowledge.Click, AddressOf OnLoadKnowledge
         AddHandler _btnManageDocs.Click, AddressOf OnManageKnowledgeDocumentsClick
+        AddHandler _btnManageIndexes.Click, AddressOf OnManageIndexesClick
         AddHandler _btnArchive.Click, AddressOf OnArchiveClick
         AddHandler _btnAlternateModel.Click, AddressOf OnAlternateModelClick
         AddHandler _txtInput.KeyDown, AddressOf OnInputKeyDown
@@ -518,6 +553,7 @@ Public Class DiscussInky
         AddHandler _chat.NewWindow, AddressOf Chat_NewWindow
         AddHandler _chkIncludeActiveDoc.CheckedChanged, AddressOf OnIncludeActiveDocChanged
         AddHandler _chkPersistKnowledge.CheckedChanged, AddressOf OnPersistKnowledgeChanged
+        AddHandler _chkPersistKnowledge.MouseEnter, AddressOf OnPersistKnowledgeTooltipRefresh
         AddHandler _btnAutoRespond.Click, AddressOf OnAutoRespondClick
         AddHandler _btnSortOut.Click, AddressOf OnSortOutClick
         AddHandler _btnTools.Click, AddressOf OnToolsClick
@@ -662,6 +698,7 @@ Public Class DiscussInky
             Sub()
                 Me.Text = title
                 _btnManageDocs.Enabled = Not String.IsNullOrWhiteSpace(_knowledgeContent)
+                _btnManageIndexes.Enabled = _attachedIndexes.Count > 0
             End Sub)
     End Sub
 
@@ -682,6 +719,7 @@ Public Class DiscussInky
         _toolTip.SetToolTip(_btnEditPersona, "Open the local persona library for editing.")
         _toolTip.SetToolTip(_btnKnowledge, "Load a knowledge file or a folder of knowledge files.")
         _toolTip.SetToolTip(_btnManageDocs, "Compact, delete, or edit knowledge documents already loaded into the current discussion.")
+        _toolTip.SetToolTip(_btnManageIndexes, "Remove attached searchable indexes, or convert a file into a new searchable index.")
         _toolTip.SetToolTip(_btnArchive, "Store, restore, update, or delete archived discussions.")
         _toolTip.SetToolTip(_btnAlternateModel, "Switch between the primary model and an alternate or secondary model.")
         _toolTip.SetToolTip(_btnClear, "Clear the current discussion and start a new one.")
@@ -749,11 +787,24 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Gets the full path to the persisted knowledge file in the temp folder.
+    ''' Gets the full path to the persisted knowledge file under %AppData%\redink.
+    ''' For backward compatibility, a legacy file in the temp folder is moved into the
+    ''' durable location on first access if no durable copy exists yet.
     ''' </summary>
     ''' <returns>Full path to the persisted knowledge file.</returns>
     Private Function GetPersistedKnowledgeFilePath() As String
-        Return Path.Combine(Path.GetTempPath(), PersistedKnowledgeFileName)
+        Dim durablePath As String = Path.Combine(GetRedInkStorageDirectoryPath(), PersistedKnowledgeFileName)
+
+        Try
+            Dim legacyPath As String = Path.Combine(Path.GetTempPath(), PersistedKnowledgeFileName)
+            If Not File.Exists(durablePath) AndAlso File.Exists(legacyPath) Then
+                File.Move(legacyPath, durablePath)
+            End If
+        Catch
+            ' Migration is best-effort; the durable path is still returned.
+        End Try
+
+        Return durablePath
     End Function
 
     Private Function HasPersistedKnowledgeForCloseWarning() As Boolean
@@ -772,49 +823,168 @@ Public Class DiscussInky
         End Try
     End Function
 
+    Private Function IsCurrentKnowledgeBackedByLinkedArchive() As Boolean
+        If Not HasTrackedDialogueArchive() Then
+            Return False
+        End If
+
+        If String.IsNullOrWhiteSpace(_activeDialogueArchiveFilePath) OrElse
+           Not File.Exists(_activeDialogueArchiveFilePath) Then
+            Return False
+        End If
+
+        Try
+            Dim archiveDoc As XDocument = XDocument.Load(_activeDialogueArchiveFilePath)
+            Dim root As XElement = archiveDoc.Root
+
+            If root Is Nothing Then
+                Return False
+            End If
+
+            Dim archiveNameElement As XElement = root.Element("ArchiveName")
+            Dim archiveName As String =
+                If(
+                    archiveNameElement IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(archiveNameElement.Value),
+                    archiveNameElement.Value.Trim(),
+                    GetArchiveNameFromFilePath(_activeDialogueArchiveFilePath))
+
+            Dim archiveIndexDirectory As String = GetArchiveIndexDirectoryPath(archiveName)
+            Dim archiveKnowledgeElement As XElement = root.Element("Knowledge")
+            Dim archiveHasKnowledge As Boolean =
+                archiveKnowledgeElement IsNot Nothing AndAlso
+                Not String.IsNullOrWhiteSpace(archiveKnowledgeElement.Value)
+
+            Dim currentHasKnowledge As Boolean =
+                Not String.IsNullOrWhiteSpace(_knowledgeContent) OrElse
+                Not String.IsNullOrWhiteSpace(_cachedKnowledgeContent)
+
+            ' If plain knowledge is currently loaded, the linked archive must also contain plain knowledge.
+            If currentHasKnowledge AndAlso Not archiveHasKnowledge Then
+                Return False
+            End If
+
+            Dim archiveIndexHashes As New HashSet(Of String)(StringComparer.Ordinal)
+            Dim archiveIndexesElement As XElement = root.Element("Indexes")
+
+            If archiveIndexesElement IsNot Nothing Then
+                For Each indexElement As XElement In archiveIndexesElement.Elements("Index")
+                    Dim fileValue As String = GetXmlAttributeValue(indexElement, "file", "")
+                    Dim hashValue As String = GetXmlAttributeValue(indexElement, "sha", "")
+                    Dim archived As Boolean = GetXmlAttributeBoolean(indexElement, "archived", False)
+
+                    If String.IsNullOrWhiteSpace(hashValue) Then
+                        Dim resolvedPath As String = fileValue
+
+                        If archived Then
+                            resolvedPath = Path.Combine(archiveIndexDirectory, fileValue)
+                        End If
+
+                        hashValue = ComputeFileSha256(resolvedPath)
+                    End If
+
+                    If Not String.IsNullOrWhiteSpace(hashValue) Then
+                        archiveIndexHashes.Add(hashValue.Trim())
+                    End If
+                Next
+            End If
+
+            For Each indexRef As DiscussIndexRef In _attachedIndexes
+                If indexRef Is Nothing Then
+                    Return False
+                End If
+
+                Dim activePath As String = If(indexRef.ActivePath, "").Trim()
+
+                ' If the active path already points into the linked archive sidecar, it is safe.
+                If Not String.IsNullOrWhiteSpace(activePath) Then
+                    Dim activeDirectory As String = Path.GetDirectoryName(activePath)
+
+                    If Not String.IsNullOrWhiteSpace(activeDirectory) AndAlso
+                       String.Equals(activeDirectory, archiveIndexDirectory, StringComparison.OrdinalIgnoreCase) Then
+                        Continue For
+                    End If
+                End If
+
+                Dim currentHash As String = If(indexRef.ContentSha256, "").Trim()
+
+                If String.IsNullOrWhiteSpace(currentHash) AndAlso
+                   Not String.IsNullOrWhiteSpace(activePath) AndAlso
+                   File.Exists(activePath) Then
+
+                    currentHash = ComputeFileSha256(activePath).Trim()
+                End If
+
+                If String.IsNullOrWhiteSpace(currentHash) Then
+                    Return False
+                End If
+
+                If Not archiveIndexHashes.Contains(currentHash) Then
+                    Return False
+                End If
+            Next
+
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
     Private Function ConfirmCloseWhenKnowledgePersisted() As Boolean
         If _persistedKnowledgeCloseWarningAcknowledged Then
             Return True
         End If
 
-        ' Check if there's knowledge loaded
-        If String.IsNullOrWhiteSpace(_knowledgeContent) AndAlso String.IsNullOrWhiteSpace(_cachedKnowledgeContent) Then
+        ' Nothing to warn about when neither plain knowledge nor any attached index is present.
+        If String.IsNullOrWhiteSpace(_knowledgeContent) AndAlso
+           String.IsNullOrWhiteSpace(_cachedKnowledgeContent) AndAlso
+           _attachedIndexes.Count = 0 Then
             Return True
         End If
 
-        ' Determine if knowledge is persisted
-        Dim persistPath As String = GetPersistedKnowledgeFilePath()
-        Dim isPersistedToFile As Boolean = _chkPersistKnowledge.Checked AndAlso File.Exists(persistPath)
+        ' If the currently loaded knowledge and attached indexes are already backed by the linked
+        ' DiscussThis archive, no knowledge-loss warning is needed on close.
+        If IsCurrentKnowledgeBackedByLinkedArchive() Then
+            Return True
+        End If
 
-        Dim message As String
-        Dim closeButtonText As String = "Close"
-        Dim keepOpenButtonText As String = "Keep open"
+        ' Determine if every currently loaded knowledge source is persisted durably.
+        Dim persistPath As String = GetPersistedKnowledgeFilePath()
+
+        Dim currentHasKnowledge As Boolean =
+            Not String.IsNullOrWhiteSpace(_knowledgeContent) OrElse
+            Not String.IsNullOrWhiteSpace(_cachedKnowledgeContent)
+
+        Dim currentHasIndexes As Boolean = _attachedIndexes.Count > 0
+
+        Dim knowledgePersisted As Boolean =
+            Not currentHasKnowledge OrElse
+            (_chkPersistKnowledge.Checked AndAlso File.Exists(persistPath))
+
+        Dim indexesPersisted As Boolean =
+            Not currentHasIndexes OrElse
+            (_chkPersistKnowledge.Checked AndAlso Directory.Exists(GetSessionIndexDirectoryPath()))
+
+        Dim isPersistedToFile As Boolean = knowledgePersisted AndAlso indexesPersisted
 
         If isPersistedToFile Then
-            ' Knowledge IS persisted - safe to close
-            message = "DiscussInky is about to close." &
-                      vbCrLf &
-                      vbCrLf &
-                      "✓ Knowledge has been persisted." &
-                      vbCrLf &
-                      "✓ The current chat will be stored." &
-                      vbCrLf &
-                      vbCrLf &
-                      "You can safely close now. Both will be available when you return. However, for longer term storage of your chat, use 'Archive'. "
-        Else
-            ' Knowledge is NOT persisted - warn user
-            message = "DiscussInky is about to close." &
-                      vbCrLf &
-                      vbCrLf &
-                      "⚠ The loaded knowledge is NOT persisted and will not be available when you return, " &
-                      "unless the original source documents still exist in their original location." &
-                      vbCrLf &
-                      vbCrLf &
-                      "The current chat will be stored." &
-                      vbCrLf &
-                      vbCrLf &
-                      "You can activate persistence with the applicable checkbox or use 'Archive' to store the chat. Do you want to close now? "
+            Return True
         End If
+
+        Dim message As String =
+            "DiscussInky is about to close." &
+            vbCrLf &
+            vbCrLf &
+            "⚠ The loaded knowledge is NOT persisted and will not be available when you return, " &
+            "unless the original source documents still exist in their original location or the current knowledge/indexes are already stored in the archive." &
+            vbCrLf &
+            vbCrLf &
+            "The current chat will be stored." &
+            vbCrLf &
+            vbCrLf &
+            "You can activate persistence with the applicable checkbox or use 'Archive' to store the chat. Do you want to close now? "
+
+        Dim closeButtonText As String = "Close"
+        Dim keepOpenButtonText As String = "Keep open"
 
         Dim answer As Integer = ShowCustomYesNoBox(message, closeButtonText, keepOpenButtonText)
 
@@ -926,7 +1096,7 @@ Public Class DiscussInky
                 If Not String.IsNullOrWhiteSpace(_cachedKnowledgeContent) Then
                     Try
                         File.WriteAllText(persistPath, _cachedKnowledgeContent, Encoding.UTF8)
-                        AppendSystemMessage($"Knowledge persisted to temporary storage ({_cachedKnowledgeContent.Length:N0} characters).")
+                        AppendSystemMessage($"Knowledge persisted to durable storage ({_cachedKnowledgeContent.Length:N0} characters).")
                     Catch ex As Exception
                         AppendSystemMessage($"Failed to persist knowledge: {ex.Message}")
                         ' Revert checkbox state
@@ -935,23 +1105,114 @@ Public Class DiscussInky
                         _isUpdatingPersistCheckbox = False
                         Return
                     End Try
+                    PersistAttachedIndexes()
+                ElseIf _attachedIndexes.Count > 0 Then
+                    PersistAttachedIndexes()
+                    AppendSystemMessage($"{_attachedIndexes.Count:N0} attached index/indexes persisted to durable storage.")
                 Else
                     AppendSystemMessage("No knowledge loaded to persist. Load knowledge first, then check this box.")
                 End If
             Else
-                ' User unchecked the box - ask before deleting
-                If File.Exists(persistPath) Then
+                ' User unchecked the box. Persistence keeps durable copies of the loaded knowledge and
+                ' attached indexes; turning it off removes those copies. The current session keeps its
+                ' in-memory knowledge, and indexes revert to their original source files where possible.
+                Dim sessionIndexDir As String = GetSessionIndexDirectoryPath()
+                Dim hasPersistedKnowledgeFile As Boolean = File.Exists(persistPath)
+                Dim hasPersistedIndexes As Boolean = _attachedIndexes.Count > 0 AndAlso Directory.Exists(sessionIndexDir)
+
+                If hasPersistedKnowledgeFile OrElse hasPersistedIndexes Then
+                    ' The plain knowledge can be reloaded from disk only if its original source still exists;
+                    ' otherwise it simply stays in memory for the rest of this session.
+                    Dim originalKnowledgePath As String = NormalizeKnowledgePathForSettings(_knowledgeFilePath)
+                    Dim knowledgeRecoverable As Boolean =
+                        String.IsNullOrWhiteSpace(_knowledgeContent) OrElse
+                        (Not String.IsNullOrWhiteSpace(originalKnowledgePath) AndAlso
+                         (File.Exists(originalKnowledgePath) OrElse Directory.Exists(originalKnowledgePath)))
+
+                    ' Indexes that still have a reachable original file can revert; the rest exist only
+                    ' as durable copies and would be removed.
+                    Dim indexesRevertable As Integer =
+                        _attachedIndexes.Where(Function(x) Not String.IsNullOrWhiteSpace(x.OriginalPath) AndAlso File.Exists(x.OriginalPath)).Count()
+                    Dim indexesLost As Integer = _attachedIndexes.Count - indexesRevertable
+
+                    Dim warning As New StringBuilder()
+                    warning.AppendLine("Turning off persistence deletes the durable copies of your knowledge and any attached indexes.")
+                    warning.AppendLine()
+
+                    If indexesRevertable > 0 Then
+                        warning.AppendLine($"{indexesRevertable:N0} attached index(es) will revert to their original files.")
+                    End If
+                    If indexesLost > 0 Then
+                        warning.AppendLine(
+                            $"{indexesLost:N0} attached index(es) exist only as durable copies and will be removed. " &
+                            "Archive the dialogue first if you want to keep them.")
+                    End If
+                    If indexesRevertable > 0 OrElse indexesLost > 0 Then
+                        warning.AppendLine()
+                    End If
+
+                    If knowledgeRecoverable Then
+                        warning.AppendLine("The loaded knowledge will be reloaded from its original source file when needed.")
+                    ElseIf Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                        warning.AppendLine(
+                            "The loaded knowledge has no original source file, but it stays available in this session. " &
+                            "It will be lost when Word restarts unless you archive the dialogue.")
+                    End If
+
+                    warning.AppendLine()
+                    warning.Append("Do you want to proceed?")
+
                     Dim answer = ShowCustomYesNoBox(
-                        "Do you want to delete the persisted knowledge file? This cannot be undone if you quit Word.",
-                        "Yes, delete", "No, keep it")
+                        warning.ToString(),
+                        "Yes, delete persisted files",
+                        "No, keep persistence on",
+                        $"{AN} - Turn Off Persistence")
 
                     If answer = 1 Then
                         Try
-                            File.Delete(persistPath)
-                            AppendSystemMessage("Persisted knowledge file deleted.")
+                            If hasPersistedKnowledgeFile Then
+                                File.Delete(persistPath)
+                            End If
                         Catch ex As Exception
                             AppendSystemMessage($"Failed to delete persisted knowledge: {ex.Message}")
                         End Try
+
+                        DeletePersistedSessionIndexes()
+
+                        ' Durable index copies are now gone. Repoint each attached index back to its
+                        ' original external file where that still exists; otherwise detach it. Plain
+                        ' knowledge is deliberately left in memory so the chat continues this session.
+                        Dim removedIndexes As Integer = 0
+                        Dim revertedIndexes As Integer = 0
+                        For Each indexRef In _attachedIndexes.ToList()
+                            Dim durableCopyGone As Boolean =
+                                String.IsNullOrWhiteSpace(indexRef.ActivePath) OrElse Not File.Exists(indexRef.ActivePath)
+
+                            If durableCopyGone Then
+                                If Not String.IsNullOrWhiteSpace(indexRef.OriginalPath) AndAlso File.Exists(indexRef.OriginalPath) Then
+                                    indexRef.ActivePath = indexRef.OriginalPath
+                                    revertedIndexes += 1
+                                Else
+                                    _attachedIndexes.Remove(indexRef)
+                                    _indexConversationState.Remove(indexRef.Id)
+                                    removedIndexes += 1
+                                End If
+                            End If
+                        Next
+
+                        ' Keep the in-memory knowledge alive for this session; do not clear _knowledgeContent.
+                        _indexPersistenceOffered = False
+                        UpdateWindowTitle()
+
+                        Dim summary As New StringBuilder()
+                        summary.Append("Persistence turned off. Durable copies removed.")
+                        If revertedIndexes > 0 Then
+                            summary.Append($" {revertedIndexes:N0} index(es) reverted to their original files.")
+                        End If
+                        If removedIndexes > 0 Then
+                            summary.Append($" {removedIndexes:N0} index(es) detached.")
+                        End If
+                        AppendSystemMessage(summary.ToString())
                     Else
                         ' User chose not to delete - revert checkbox
                         _isUpdatingPersistCheckbox = True
@@ -975,15 +1236,59 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
-    ''' Updates the tooltip for the persist knowledge checkbox based on its state.
+    ''' Refreshes the persist-knowledge tooltip on demand (e.g., when the pointer enters the
+    ''' checkbox), so it always reflects the current durable-store contents rather than a stale
+    ''' snapshot. This is cheaper and simpler than eagerly refreshing on every state change.
+    ''' </summary>
+    Private Sub OnPersistKnowledgeTooltipRefresh(sender As Object, e As EventArgs)
+        UpdatePersistKnowledgeTooltip()
+    End Sub
+
+    ''' <summary>
+    ''' Updates the tooltip for the persist knowledge checkbox to point at the durable storage
+    ''' directory and summarize what is currently persisted there (knowledge file and indexes).
     ''' </summary>
     Private Sub UpdatePersistKnowledgeTooltip()
-        If _chkPersistKnowledge.Checked Then
-            Dim persistPath = GetPersistedKnowledgeFilePath()
-            _toolTip.SetToolTip(_chkPersistKnowledge, $"Currently stored in: {persistPath}")
-        Else
+        If Not _chkPersistKnowledge.Checked Then
             _toolTip.SetToolTip(_chkPersistKnowledge, "")
+            Return
         End If
+
+        Dim storageDir As String = GetRedInkStorageDirectoryPath()
+        Dim sb As New StringBuilder()
+        sb.Append("Persisted knowledge is stored in: ")
+        sb.Append(storageDir)
+
+        Dim items As New List(Of String)()
+
+        Try
+            Dim knowledgePath As String = GetPersistedKnowledgeFilePath()
+            If File.Exists(knowledgePath) Then
+                items.Add($"knowledge file ({New FileInfo(knowledgePath).Length:N0} bytes)")
+            End If
+        Catch
+        End Try
+
+        Try
+            Dim sessionDir As String = GetSessionIndexDirectoryPath()
+            If Directory.Exists(sessionDir) Then
+                Dim indexCount As Integer = Directory.GetFiles(sessionDir, "*" & IndexCopyFileExtension).Length
+                If indexCount > 0 Then
+                    items.Add($"{indexCount:N0} index file(s)")
+                End If
+            End If
+        Catch
+        End Try
+
+        If items.Count > 0 Then
+            sb.Append(". Currently persisted: ")
+            sb.Append(String.Join(", ", items))
+            sb.Append(".")
+        Else
+            sb.Append(". Nothing is persisted yet.")
+        End If
+
+        _toolTip.SetToolTip(_chkPersistKnowledge, sb.ToString())
     End Sub
 
     ''' <summary>
@@ -1009,6 +1314,8 @@ Public Class DiscussInky
 
             My.Settings.DiscussPersistKnowledge = True
             My.Settings.Save()
+
+            PersistAttachedIndexes()
 
             UpdatePersistKnowledgeTooltip()
 
@@ -1096,8 +1403,8 @@ Public Class DiscussInky
         Try : _chkEnableTooling.Checked = My.Settings.DiscussEnableTooling : Catch : _chkEnableTooling.Checked = False : End Try
         _chkAdvancedTools.Checked = Globals.ThisAddIn.GetDiscussInkyAdvancedToolsEnabled()
 
-        ' Tooling log checkbox always reflects the INI setting (not persisted separately)
-        _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+        ' Tooling log checkbox reflects the effective local override when present, otherwise the INI default.
+        SyncToolingLogPreferenceFromSettings()
 
         ' Load personas
         LoadPersonas()
@@ -1186,6 +1493,19 @@ Public Class DiscussInky
 
         Await RestoreKnowledgeAsync()
 
+        ' Restore attached semantic indexes for a non-archived running session (durable, crash-safe),
+        ' then remove orphaned index folders left by sessions that are no longer referenced.
+        RestoreSessionIndexStateFromDurableFile()
+        SweepOrphanSessionIndexes()
+
+        ' Make persistence visible on re-entry: when persistence is on, confirm that the loaded
+        ' knowledge and any attached indexes are being retained in durable storage.
+        If _chkPersistKnowledge.Checked AndAlso
+           (Not String.IsNullOrWhiteSpace(_knowledgeContent) OrElse _attachedIndexes.Count > 0) Then
+            AppendSystemMessage(
+                $"Knowledge persistence is on. {If(_attachedIndexes.Count > 0, $"{_attachedIndexes.Count:N0} attached index(es) and ", "")}loaded knowledge are retained in durable storage.")
+        End If
+
         ' Only force persona selection if there are custom personas beyond the default
         ' (i.e., a persona library is configured and has entries)
         If Not personaRestoredFromSettings AndAlso _personas.Count > 1 AndAlso Not _personaSelectedThisSession Then
@@ -1201,6 +1521,79 @@ Public Class DiscussInky
         If Not hasChat Then
             Await SafeGenerateWelcomeAsync()
         End If
+    End Sub
+
+    ''' <summary>
+    ''' Deletes orphaned per-session index folders under %AppData%\redink\di. A folder is kept
+    ''' when it is the current session id or when any currently attached index still points into
+    ''' it; everything else is removed to avoid accumulating copies of potentially sensitive data.
+    ''' </summary>
+    Private Sub SweepOrphanSessionIndexes()
+        Dim rootPath As String = GetSessionIndexRootPath()
+        If Not Directory.Exists(rootPath) Then
+            Return
+        End If
+
+        Dim currentId As String = GetOrCreateSessionIndexId()
+
+        Dim referencedDirs As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        For Each idx In _attachedIndexes
+            Dim indexRef As DiscussIndexRef = idx
+            If Not String.IsNullOrWhiteSpace(indexRef.ActivePath) Then
+                Dim dir As String = Path.GetDirectoryName(indexRef.ActivePath)
+                If Not String.IsNullOrWhiteSpace(dir) Then
+                    referencedDirs.Add(dir)
+                End If
+            End If
+        Next
+
+        Try
+            For Each subDir In Directory.GetDirectories(rootPath)
+                Dim folderName As String = Path.GetFileName(subDir)
+
+                If String.Equals(folderName, currentId, StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+                If referencedDirs.Contains(subDir) Then
+                    Continue For
+                End If
+
+                DeleteIndexDirectorySafe(subDir)
+            Next
+        Catch ex As Exception
+            System.Diagnostics.Debug.WriteLine(ex.Message)
+        End Try
+
+        SweepOrphanArchiveIndexes()
+    End Sub
+
+    ''' <summary>
+    ''' Deletes archive index sidecar folders (&lt;name&gt;.ix) whose matching dialogue archive
+    ''' (&lt;name&gt;.dialogue.xml) no longer exists, e.g. after an archive was deleted outside the app.
+    ''' </summary>
+    Private Sub SweepOrphanArchiveIndexes()
+        Dim archiveDir As String = GetDialogueArchiveDirectoryPath()
+        If Not Directory.Exists(archiveDir) Then
+            Return
+        End If
+
+        Try
+            For Each sidecarDir In Directory.GetDirectories(archiveDir, "*" & ArchiveIndexFolderSuffix, SearchOption.TopDirectoryOnly)
+                Dim folderName As String = Path.GetFileName(sidecarDir)
+                If Not folderName.EndsWith(ArchiveIndexFolderSuffix, StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+
+                Dim baseName As String = folderName.Substring(0, folderName.Length - ArchiveIndexFolderSuffix.Length)
+                Dim archiveFilePath As String = Path.Combine(archiveDir, baseName & DialogueArchiveFileExtension)
+
+                If Not File.Exists(archiveFilePath) Then
+                    DeleteIndexDirectorySafe(sidecarDir)
+                End If
+            Next
+        Catch ex As Exception
+            System.Diagnostics.Debug.WriteLine(ex.Message)
+        End Try
     End Sub
 
     ''' <summary>
@@ -1309,6 +1702,8 @@ Public Class DiscussInky
                 Dim loadedCount = 0
                 For Each filePath In filesToProcess
                     Try
+                        UpdateWorkingIndicator($"Reading '{System.IO.Path.GetFileName(filePath)}' ...")
+
                         Dim askWorksheetSelection As Boolean =
                         isFile AndAlso
                         filesToProcess.Count = 1 AndAlso
@@ -1386,14 +1781,20 @@ Public Class DiscussInky
     ''' Persists the current knowledge content to the temp file.
     ''' </summary>
     Private Sub PersistKnowledgeToTempFile()
-        If String.IsNullOrWhiteSpace(_knowledgeContent) Then Return
+        If String.IsNullOrWhiteSpace(_knowledgeContent) AndAlso _attachedIndexes.Count = 0 Then Return
 
         Try
-            Dim persistPath As String = GetPersistedKnowledgeFilePath()
-            System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
+            If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                Dim persistPath As String = GetPersistedKnowledgeFilePath()
+                System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
+            End If
         Catch
             ' Silently fail - not critical
         End Try
+
+        If _chkPersistKnowledge.Checked Then
+            PersistAttachedIndexes()
+        End If
     End Sub
 
     ''' <summary>
@@ -1601,7 +2002,8 @@ Public Class DiscussInky
                     useSecondApi,
                     fullPromptOverride:=userPrompt,
                     hideSplash:=True,
-                    hideLogWindow:=hideLog).ConfigureAwait(False)
+                    hideLogWindow:=hideLog,
+                    progressSink:=Sub(status) UpdateAssistantThinking(status)).ConfigureAwait(False)
             Else
                 ' Standard LLM call
                 Return Await LLM(_context,
@@ -1631,6 +2033,26 @@ Public Class DiscussInky
     ''' <summary>
     ''' Updates enabled state of tooling controls based on current model support and "(t)" availability.
     ''' </summary>
+    Public Sub SyncToolingLogPreferenceFromSettings()
+        If Me.IsDisposed Then
+            Return
+        End If
+
+        Dim effectiveSetting As Boolean = Globals.ThisAddIn.GetEffectiveToolingLogWindowSetting()
+
+        If _chkShowToolingLog.Checked = effectiveSetting Then
+            Return
+        End If
+
+        _suppressToolingLogPreferenceSync = True
+
+        Try
+            _chkShowToolingLog.Checked = effectiveSetting
+        Finally
+            _suppressToolingLogPreferenceSync = False
+        End Try
+    End Sub
+
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
 
@@ -1657,7 +2079,7 @@ Public Class DiscussInky
         End If
 
         If Not _toolingControlsInitialized Then
-            _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+            SyncToolingLogPreferenceFromSettings()
             _toolingControlsInitialized = True
         End If
     End Sub
@@ -1670,7 +2092,12 @@ Public Class DiscussInky
     ''' <param name="e">Event arguments.</param>
 
     Private Sub OnShowToolingLogChanged(sender As Object, e As EventArgs)
-        ' No special handling needed - just uses the Checked state when calling ExecuteToolingLoop
+        If _suppressToolingLogPreferenceSync Then
+            Return
+        End If
+
+        Globals.ThisAddIn.SetToolingLogWindowOverride(_chkShowToolingLog.Checked)
+        Globals.ThisAddIn.RefreshOpenToolingLogPreferenceWindows()
     End Sub
 
     ''' <summary>
@@ -2303,7 +2730,12 @@ Public Class DiscussInky
     End Function
 
 
-    Private Sub DeleteCurrentKnowledge()
+    ''' <summary>
+    ''' Clears only the inlined plain-knowledge content, its persisted file, and the saved path.
+    ''' Attached semantic indexes are a separate channel and are left untouched. Used by internal
+    ''' mutations that empty the plain content without discarding the whole knowledge.
+    ''' </summary>
+    Private Sub ClearPlainKnowledge()
         _knowledgeContent = Nothing
         _knowledgeFilePath = Nothing
         _cachedKnowledgeContent = Nothing
@@ -2322,17 +2754,276 @@ Public Class DiscussInky
             My.Settings.Save()
         Catch
         End Try
+    End Sub
+
+    ''' <summary>
+    ''' Detaches all attached semantic indexes from the session and deletes their durable copies
+    ''' (under di\&lt;sid&gt;). Index files referenced in place from an external location are left
+    ''' on disk; only copies this session created are removed.
+    ''' </summary>
+    Private Sub DetachAllAttachedIndexes()
+        _attachedIndexes.Clear()
+        _indexConversationState.Clear()
+        DeleteIndexDirectorySafe(GetSessionIndexDirectoryPath())
+        ' A new knowledge set may be loaded next; allow the persistence prompt to be offered again.
+        _indexPersistenceOffered = False
+    End Sub
+
+    ''' <summary>
+    ''' User-facing knowledge deletion. Because attached indexes are part of "Knowledge", this
+    ''' also detaches them and removes their durable copies, then clears the plain content.
+    ''' </summary>
+    Private Sub DeleteCurrentKnowledge()
+        DetachAllAttachedIndexes()
+        ClearPlainKnowledge()
 
         UpdateWindowTitle()
         PersistCurrentSessionSettings()
-        AppendSystemMessage("Knowledge deleted.")
+        AppendSystemMessage("Knowledge deleted (including any attached indexes).")
     End Sub
+
+    ''' <summary>
+    ''' Attaches an already-indexed text file as a standalone searchable source. The file is
+    ''' referenced in place (no copy) until the session is persisted or archived; its exact
+    ''' bytes must never be altered so content-relative offsets and the SHA-256 guard stay valid.
+    ''' </summary>
+    Private Function AttachIndexFromFile(indexPath As String) As Boolean
+        If String.IsNullOrWhiteSpace(indexPath) OrElse Not File.Exists(indexPath) Then
+            AppendSystemMessage("The selected index file does not exist.")
+            Return False
+        End If
+
+        ' Refuse loading the same index twice: compare exact-content SHA-256 against every
+        ' currently attached index. Identical content means the same knowledge source.
+        Dim newHash As String = ComputeFileSha256(indexPath)
+        If Not String.IsNullOrEmpty(newHash) Then
+            For Each existing In _attachedIndexes
+                Dim existingRef As DiscussIndexRef = existing
+                Dim existingHash As String = ""
+                If Not String.IsNullOrWhiteSpace(existingRef.ActivePath) AndAlso File.Exists(existingRef.ActivePath) Then
+                    existingHash = ComputeFileSha256(existingRef.ActivePath)
+                End If
+
+                If String.Equals(existingHash, newHash, StringComparison.OrdinalIgnoreCase) Then
+                    AppendSystemMessage(
+                        $"The index '{System.IO.Path.GetFileName(indexPath)}' is already attached (identical content). It was not added again.")
+                    Return False
+                End If
+            Next
+        End If
+
+        Dim indexRef As New DiscussIndexRef() With {
+            .Id = "i" & Guid.NewGuid().ToString("N").Substring(0, 4),
+            .DisplayName = System.IO.Path.GetFileName(indexPath),
+            .ActivePath = indexPath,
+            .OriginalPath = indexPath,
+            .ContentSha256 = newHash
+        }
+
+        _attachedIndexes.Add(indexRef)
+
+        ' An index is just another knowledge source: if persistence is already on, copy the newly
+        ' attached index into durable storage immediately so it is retained alongside other knowledge.
+        ' If persistence is off, offer to turn it on so the index survives temp cleanup and restarts.
+        If _chkPersistKnowledge.Checked Then
+            PersistAttachedIndexes()
+        Else
+            OfferPersistenceForAttachedIndex(indexRef.DisplayName)
+        End If
+
+        AppendSystemMessage(
+            $"Attached semantic index '{indexRef.DisplayName}'. It will be searched for each message alongside any loaded knowledge.")
+        UpdateWindowTitle()
+        PersistCurrentSessionSettings()
+        Return True
+    End Function
+
+    ''' <summary>
+    ''' Prompts the user to enable durable persistence after an index is attached while persistence
+    ''' is off. When accepted, turns the persist checkbox on (which copies the current knowledge and
+    ''' all attached indexes to durable storage). No-op when the user declines.
+    ''' </summary>
+    Private Sub OfferPersistenceForAttachedIndex(indexDisplayName As String)
+        ' Ask at most once per knowledge set; loading multiple files/indexes must not re-prompt.
+        If _indexPersistenceOffered Then
+            Return
+        End If
+        _indexPersistenceOffered = True
+
+        Dim answer = ShowCustomYesNoBox(
+            $"The searchable index '{indexDisplayName}' is currently referenced from its original location only. " &
+            "Do you want to persist it (and any loaded knowledge) to durable storage so it is retained across restarts?",
+            "Yes, persist",
+            "No, keep temporary",
+            $"{AN} - Persist Index")
+
+        If answer <> 1 Then
+            Return
+        End If
+
+        ' Setting Checked fires OnPersistKnowledgeChanged, which persists knowledge and indexes.
+        _chkPersistKnowledge.Checked = True
+    End Sub
+
+    ''' <summary>
+    ''' Informs the user that a newly created index lives only inside DiscussInky's durable storage
+    ''' and offers to save a reusable copy (ending in '.index.txt') to the Desktop for later use.
+    ''' </summary>
+    Private Sub OfferDesktopIndexCopy(sourceIndexPath As String, baseName As String)
+        Try
+            If String.IsNullOrWhiteSpace(sourceIndexPath) OrElse Not File.Exists(sourceIndexPath) Then
+                Return
+            End If
+
+            Dim answer = ShowCustomYesNoBox(
+                "The searchable index has been created, but it lives only inside DiscussInky's durable storage " &
+                "(it is retained with this session and its archives, not as a normal file you can reuse elsewhere)." &
+                vbCrLf & vbCrLf &
+                "Do you also want to save a reusable copy (ending in '.index.txt') to your Desktop for later use?",
+                "Yes, save a copy",
+                "No, thanks",
+                $"{AN} - Save Index Copy")
+
+            If answer <> 1 Then
+                Return
+            End If
+
+            Dim safeBase As String = Path.GetFileNameWithoutExtension(If(baseName, "index"))
+            For Each ch In Path.GetInvalidFileNameChars()
+                safeBase = safeBase.Replace(ch, "_"c)
+            Next
+            If String.IsNullOrWhiteSpace(safeBase) Then
+                safeBase = "index"
+            End If
+
+            Dim desktop As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+            Dim destination As String = Path.Combine(desktop, safeBase & ".index.txt")
+
+            Dim counter As Integer = 1
+            While File.Exists(destination)
+                destination = Path.Combine(desktop, $"{safeBase} ({counter}).index.txt")
+                counter += 1
+            End While
+
+            ' Exact-byte copy so content offsets and the SHA-256 guard stay valid in the copy.
+            File.Copy(sourceIndexPath, destination, overwrite:=False)
+            AppendSystemMessage($"A reusable copy of the index was saved to: {destination}")
+        Catch ex As Exception
+            AppendSystemMessage($"Could not save a Desktop copy of the index: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Returns the most recent user message as the retrieval query, falling back to the last
+    ''' message when no user turn is available (used by automated response modes).
+    ''' </summary>
+    Private Function GetRetrievalQueryFromHistory() As String
+        For i As Integer = _history.Count - 1 To 0 Step -1
+            If String.Equals(_history(i).Role, "user", StringComparison.OrdinalIgnoreCase) Then
+                Return _history(i).Content
+            End If
+        Next
+        If _history.Count > 0 Then
+            Return _history(_history.Count - 1).Content
+        End If
+        Return ""
+    End Function
+
+    ''' <summary>
+    ''' Queries each attached semantic index for the given message and returns the merged,
+    ''' most-relevant original excerpts (wrapped per source for citation). Updates per-index
+    ''' conversation state so follow-up turns can reuse previously selected segments.
+    ''' </summary>
+    Private Async Function BuildIndexExcerptsAsync(queryText As String,
+                                                   conversation As String,
+                                                   Optional reportStatus As System.Action(Of String) = Nothing) As Task(Of String)
+        If _attachedIndexes.Count = 0 OrElse String.IsNullOrWhiteSpace(queryText) Then
+            Return ""
+        End If
+
+        Dim sb As New StringBuilder()
+
+        ' Snapshot the collection so a concurrent change cannot break enumeration, and to give
+        ' stable index positions in the user-facing progress messages.
+        Dim snapshot As List(Of DiscussIndexRef) = _attachedIndexes.ToList()
+        Dim total As Integer = snapshot.Count
+        Dim position As Integer = 0
+        Dim indexesWithHits As Integer = 0
+        Dim totalSegments As Integer = 0
+
+        For Each indexRef In snapshot
+            position += 1
+
+            If String.IsNullOrWhiteSpace(indexRef.ActivePath) OrElse Not File.Exists(indexRef.ActivePath) Then
+                reportStatus?.Invoke($"Index {position} of {total}: '{indexRef.DisplayName}' is unavailable and was skipped.")
+                Continue For
+            End If
+
+            reportStatus?.Invoke($"Searching index {position} of {total}: '{indexRef.DisplayName}' ...")
+
+            Dim previousIds As List(Of String) = Nothing
+            _indexConversationState.TryGetValue(indexRef.Id, previousIds)
+
+            Try
+                Dim options As New SharedMethods.SemanticSearchRetrievalOptions() With {
+                    .SpecialTaskName = "Indexer"
+                }
+
+                Dim retrieval As SharedMethods.SemanticSearchRetrievalResult =
+                    Await SharedMethods.RetrieveSemanticSearchAsync(
+                        indexRef.ActivePath,
+                        _context,
+                        queryText,
+                        If(conversation, ""),
+                        previousIds,
+                        options).ConfigureAwait(False)
+
+                Dim matchCount As Integer =
+                    If(retrieval IsNot Nothing AndAlso retrieval.SelectedEntryIds IsNot Nothing,
+                       retrieval.SelectedEntryIds.Count, 0)
+
+                If retrieval IsNot Nothing AndAlso
+                   retrieval.IsIndexed AndAlso
+                   Not String.IsNullOrWhiteSpace(retrieval.ReducedSourceText) Then
+
+                    sb.AppendLine($"<document name=""{indexRef.DisplayName}"">")
+                    sb.AppendLine(retrieval.ReducedSourceText)
+                    sb.AppendLine("</document>")
+                    sb.AppendLine()
+
+                    indexesWithHits += 1
+                    totalSegments += matchCount
+
+                    If retrieval.SelectedEntryIds IsNot Nothing AndAlso retrieval.SelectedEntryIds.Count > 0 Then
+                        _indexConversationState(indexRef.Id) = New List(Of String)(retrieval.SelectedEntryIds)
+                    End If
+
+                    reportStatus?.Invoke($"Index {position} of {total}: '{indexRef.DisplayName}' — {matchCount:N0} relevant segment(s) found.")
+                Else
+                    reportStatus?.Invoke($"Index {position} of {total}: '{indexRef.DisplayName}' — no relevant material found.")
+                End If
+            Catch ex As Exception
+                AppendSystemMessage($"Index retrieval failed for '{indexRef.DisplayName}': {ex.Message}")
+            End Try
+        Next
+
+        reportStatus?.Invoke($"Index search complete: {totalSegments:N0} relevant segment(s) from {indexesWithHits:N0} of {total:N0} index(es).")
+
+        Return sb.ToString().TrimEnd()
+    End Function
 
     ''' <summary>
     ''' Button handler that launches the knowledge file/directory picker.
     ''' </summary>
     Private Async Sub OnLoadKnowledge(sender As Object, e As EventArgs)
-        Await PromptForKnowledgeAsync()
+        If Not TryBeginExclusive("loading knowledge") Then
+            Return
+        End If
+        Try
+            Await PromptForKnowledgeAsync()
+        Finally
+            EndExclusive()
+        End Try
         BringDiscussFormToFront()
     End Sub
 
@@ -2357,11 +3048,12 @@ Public Class DiscussInky
             Globals.ThisAddIn.DragDropFormFilter = ""
 
             If String.IsNullOrWhiteSpace(selectedPath) Then
-                ' No file selected - check if there's existing knowledge to delete
-                If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                ' No file selected - check if there's existing knowledge or attached indexes to delete
+                If HasLoadedKnowledgeOrIndexes() Then
                     Dim answer = ShowCustomYesNoBox(
-                        "No file was selected. Do you want to delete the currently loaded knowledge?",
-                        "Yes, delete knowledge", "No, keep it")
+                        "No file was selected. Do you want to delete the currently loaded knowledge and any attached indexes?",
+                        "Yes, delete knowledge",
+                        "No, keep it")
 
                     If answer = 1 Then
                         DeleteCurrentKnowledge()
@@ -2379,14 +3071,52 @@ Public Class DiscussInky
                 Return
             End If
 
+            ' If the selected file is already a semantic-search index, attach it as a standalone
+            ' searchable source instead of inlining its bytes into the plain knowledge blob.
+            If isFile AndAlso SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(selectedPath) Then
+                ' Indexes are another knowledge source, so honor the same add-vs-replace choice.
+                If HasLoadedKnowledgeOrIndexes() Then
+                    Dim indexAppendAnswer = ShowCustomYesNoBox(
+                        "There is already knowledge loaded:" &
+                        vbCrLf & vbCrLf &
+                        GetKnowledgeSummaryText() &
+                        If(_attachedIndexes.Count > 0, vbCrLf & $"Attached searchable index(es): {_attachedIndexes.Count:N0}", "") &
+                        vbCrLf & vbCrLf &
+                        "Do you want to add the selected index to the existing knowledge, or replace the existing knowledge?",
+                        "Add to existing", "Replace existing")
+
+                    If indexAppendAnswer = 0 Then
+                        ' User cancelled.
+                        Return
+                    End If
+
+                    If indexAppendAnswer = 2 Then
+                        ' Replace: discard existing plain knowledge and detach existing indexes
+                        ' (only session copies are removed; archived copies stay intact).
+                        DetachAllAttachedIndexes()
+                        ClearPlainKnowledge()
+                    End If
+                End If
+
+                AttachIndexFromFile(selectedPath)
+                Try
+                    My.Settings.DiscussKnowledgePath = selectedPath
+                    My.Settings.Save()
+                Catch
+                End Try
+                BringDiscussFormToFront()
+                Return
+            End If
+
             Dim appendToExisting As Boolean = False
             Dim existingKnowledgeSummary As String = GetKnowledgeSummaryText()
 
-            If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            If HasLoadedKnowledgeOrIndexes() Then
                 Dim appendAnswer = ShowCustomYesNoBox(
                     "There is already knowledge loaded:" &
                     vbCrLf & vbCrLf &
                     existingKnowledgeSummary &
+                    If(_attachedIndexes.Count > 0, vbCrLf & $"Attached searchable index(es): {_attachedIndexes.Count:N0}", "") &
                     vbCrLf & vbCrLf &
                     "Do you want to add the selected knowledge to the existing knowledge, or replace the existing knowledge?",
                     "Add to existing", "Replace existing")
@@ -2395,6 +3125,13 @@ Public Class DiscussInky
                     Return
                 End If
                 appendToExisting = (appendAnswer = 1)
+
+                ' Replacing knowledge also discards attached indexes, because an index is just
+                ' another knowledge source. Only session copies are removed; archived index
+                ' sidecars are left untouched.
+                If Not appendToExisting Then
+                    DetachAllAttachedIndexes()
+                End If
             End If
 
             ' Create loading context
@@ -2470,7 +3207,7 @@ Public Class DiscussInky
             End If
 
             ' Load all files
-            ShowAssistantThinking()
+            ShowWorkingIndicator("Reading knowledge document(s) ...")
 
             Dim resultBuilder As New StringBuilder()
             Dim normalizedExistingKnowledgeContent As String = _knowledgeContent
@@ -2496,7 +3233,7 @@ Public Class DiscussInky
                         askWorksheetSelection:=askWorksheetSelection)
 
                     If result.UserCancelled Then
-                        RemoveAssistantThinking()
+                        RemoveWorkingIndicator()
 
                         If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
                             Dim answer = ShowCustomYesNoBox(
@@ -2548,7 +3285,7 @@ Public Class DiscussInky
                 End Try
             Next
 
-            RemoveAssistantThinking()
+            RemoveWorkingIndicator()
 
             ' Show summary
             Dim combinedContent = resultBuilder.ToString()
@@ -2655,7 +3392,7 @@ Public Class DiscussInky
             End Try
 
         Catch ex As Exception
-            RemoveAssistantThinking()
+            RemoveWorkingIndicator()
             AppendSystemMessage($"Error loading knowledge: {ex.Message}")
             BringDiscussFormToFront()
         End Try
@@ -2708,9 +3445,325 @@ Public Class DiscussInky
         End If
 
         Await ManageKnowledgeDocumentsAsync(
-            "Select one or more knowledge documents, then choose Compact Selected, Delete Selected, or Edit Selected.")
+            "Select one or more knowledge documents, then choose Compact Selected, Delete Selected, Edit Selected, or Convert to Index.")
 
         BringDiscussFormToFront()
+    End Sub
+
+    ''' <summary>
+    ''' Opens the attached-index manager, where the user can remove attached searchable indexes
+    ''' or convert a file into a new searchable index. Indexes are treated as knowledge sources,
+    ''' so changes are persisted immediately (and copied to durable storage when persistence is on).
+    ''' </summary>
+    Private Sub OnManageIndexesClick(sender As Object, e As EventArgs)
+        ShowManageIndexesDialog()
+        BringDiscussFormToFront()
+    End Sub
+
+    ''' <summary>
+    ''' Removes an attached index from the session. If the index file lives in this session's
+    ''' durable copy folder, that copy is deleted too; externally referenced files are left alone.
+    ''' Archived index sidecars are never touched here.
+    ''' </summary>
+    Private Sub RemoveAttachedIndex(indexRef As DiscussIndexRef)
+        If indexRef Is Nothing Then
+            Return
+        End If
+
+        _attachedIndexes.Remove(indexRef)
+        _indexConversationState.Remove(indexRef.Id)
+
+        Try
+            Dim sessionDir As String = GetSessionIndexDirectoryPath()
+            If Not String.IsNullOrWhiteSpace(indexRef.ActivePath) AndAlso
+               File.Exists(indexRef.ActivePath) AndAlso
+               String.Equals(Path.GetDirectoryName(indexRef.ActivePath), sessionDir, StringComparison.OrdinalIgnoreCase) Then
+                File.Delete(indexRef.ActivePath)
+            End If
+        Catch ex As Exception
+            System.Diagnostics.Debug.WriteLine(ex.Message)
+        End Try
+
+        AppendSystemMessage($"Removed searchable index '{indexRef.DisplayName}'.")
+        UpdateWindowTitle()
+        PersistCurrentSessionSettings()
+    End Sub
+
+    ''' <summary>
+    ''' Prompts for a file and converts it into a new standalone searchable index that is attached
+    ''' to the session. Reuses the shared file importer and the semantic-index generator. If the
+    ''' picked file is already an index, it is attached in place instead.
+    ''' </summary>
+    Private Async Function ConvertFileToIndexAsync() As Task(Of Boolean)
+        Dim selectedPath As String = ""
+
+        Globals.ThisAddIn.DragDropFormLabel = "... a document to convert into a searchable index, or click Browse"
+        Globals.ThisAddIn.DragDropFormFilter = ""
+
+        Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+            If frm.ShowDialog(Me) = System.Windows.Forms.DialogResult.OK Then
+                selectedPath = frm.SelectedFilePath
+            End If
+        End Using
+
+        Globals.ThisAddIn.DragDropFormLabel = ""
+        Globals.ThisAddIn.DragDropFormFilter = ""
+
+        If String.IsNullOrWhiteSpace(selectedPath) OrElse Not File.Exists(selectedPath) Then
+            Return False
+        End If
+
+        ' Already an index: just attach it (with the standard SHA-256 dedupe guard).
+        If SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(selectedPath) Then
+            Return AttachIndexFromFile(selectedPath)
+        End If
+
+        If Not TryBeginExclusive("converting a file into a searchable index") Then
+            Return False
+        End If
+
+        Dim fileName As String = Path.GetFileName(selectedPath)
+        Dim indexDir As String = GetSessionIndexDirectoryPath()
+        Dim shortId As String = "i" & Guid.NewGuid().ToString("N").Substring(0, 4)
+        Dim outputPath As String = Path.Combine(indexDir, shortId & IndexCopyFileExtension)
+
+        Try
+            Using progressScope As New ThisAddIn.ProgressScope(
+                $"{AN} - Creating searchable index",
+                $"Reading '{fileName}' ...",
+                1)
+
+                Dim loaded = Await LoadSingleKnowledgeFileAsync(selectedPath, enableOCR:=False, silent:=False)
+
+                If loaded.UserCancelled OrElse String.IsNullOrWhiteSpace(loaded.Content) Then
+                    AppendSystemMessage($"Could not read '{fileName}' for indexing.")
+                    Return False
+                End If
+
+                ' Wrap in the canonical combine wrapper so the generator records source attribution.
+                Dim combined As String =
+                    $"<document1 name=""{fileName}"">" & vbCrLf & loaded.Content & vbCrLf & "</document1>"
+
+                Directory.CreateDirectory(indexDir)
+
+                Dim generationProgress As New System.Progress(Of SharedMethods.SemanticSearchIndexGenerationProgress)(
+                    Sub(update As SharedMethods.SemanticSearchIndexGenerationProgress)
+                        Dim segmentCount As Integer = System.Math.Max(1, update.SegmentCount)
+                        Dim segmentNumber As Integer = System.Math.Max(0, System.Math.Min(update.SegmentNumber, segmentCount))
+                        Dim statusMessage As String = If(update.Message, "").Trim()
+                        If String.IsNullOrWhiteSpace(statusMessage) Then
+                            statusMessage = "Generating semantic metadata"
+                        End If
+                        ThisAddIn.ProgressScope.Report(
+                            segmentNumber,
+                            segmentCount,
+                            $"{statusMessage} ({segmentNumber}/{segmentCount})")
+                    End Sub)
+
+                Dim generationResult As SharedMethods.SemanticSearchIndexGenerationResult =
+                    Await SharedMethods.CreateSemanticSearchIndexFromTextAsync(
+                        combined,
+                        outputPath,
+                        _context,
+                        New SharedMethods.SemanticSearchIndexGeneratorOptions() With {
+                            .SpecialTaskName = "Indexer",
+                            .OverwriteOutput = True
+                        },
+                        generationProgress,
+                        progressScope.Token).ConfigureAwait(False)
+
+                _attachedIndexes.Add(New DiscussIndexRef() With {
+                    .Id = shortId,
+                    .DisplayName = fileName,
+                    .ActivePath = outputPath,
+                    .ContentSha256 = If(generationResult IsNot Nothing, generationResult.ContentSha256, "")
+                })
+
+                ' Persistence applies to indexes: if it is already on, copy the new index to durable storage.
+                If _chkPersistKnowledge.Checked Then
+                    PersistAttachedIndexes()
+                End If
+
+                ThisAddIn.ProgressScope.Report(
+                    System.Math.Max(1, If(generationResult IsNot Nothing, generationResult.SegmentCount, 1)),
+                    System.Math.Max(1, If(generationResult IsNot Nothing, generationResult.SegmentCount, 1)),
+                    "Completed successfully.")
+
+                Dim segmentInfo As String =
+                    If(generationResult IsNot Nothing,
+                       $"{generationResult.SegmentCount:N0} segment(s)",
+                       "an index")
+
+                AppendSystemMessage($"Converted '{fileName}' into a searchable index ({segmentInfo}).")
+                OfferDesktopIndexCopy(outputPath, fileName)
+                UpdateWindowTitle()
+                PersistCurrentSessionSettings()
+                Return True
+            End Using
+
+        Catch ex As System.OperationCanceledException
+            AppendSystemMessage($"Index creation for '{fileName}' was cancelled.")
+
+            Try
+                If File.Exists(outputPath) Then
+                    File.Delete(outputPath)
+                End If
+            Catch cleanupEx As Exception
+                System.Diagnostics.Debug.WriteLine(cleanupEx.Message)
+            End Try
+
+            Return False
+
+        Catch ex As Exception
+            AppendSystemMessage($"Failed to convert '{fileName}' to an index: {ex.Message}")
+
+            Try
+                If File.Exists(outputPath) Then
+                    File.Delete(outputPath)
+                End If
+            Catch cleanupEx As Exception
+                System.Diagnostics.Debug.WriteLine(cleanupEx.Message)
+            End Try
+
+            Return False
+        Finally
+            EndExclusive()
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Modal manager for attached searchable indexes: remove selected indexes or convert a file
+    ''' into a new index. The list reflects the current attachments and refreshes after each action.
+    ''' </summary>
+    Private Sub ShowManageIndexesDialog()
+        Using frm As New Form() With {
+            .Text = $"{AN} - Manage Indexes",
+            .StartPosition = FormStartPosition.CenterParent,
+            .Size = New System.Drawing.Size(680, 420),
+            .MinimumSize = New System.Drawing.Size(520, 320),
+            .FormBorderStyle = FormBorderStyle.Sizable,
+            .Font = New System.Drawing.Font("Segoe UI", 9.0F),
+            .AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F),
+            .AutoScaleMode = AutoScaleMode.Dpi,
+            .ShowInTaskbar = False
+        }
+            Try
+                frm.Icon = Me.Icon
+            Catch
+            End Try
+
+            Dim layout As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 1,
+                .RowCount = 3,
+                .Padding = New Padding(12)
+            }
+            layout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+            layout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            layout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+            layout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            frm.Controls.Add(layout)
+
+            Dim lblInfo As New Label() With {
+                .AutoSize = True,
+                .Dock = DockStyle.Top,
+                .Margin = New Padding(0, 0, 0, 8),
+                .Text = "Attached searchable indexes are queried per message alongside any loaded knowledge. " &
+                        "Remove indexes you no longer need, or convert a file into a new index."
+            }
+
+            Dim lstIndexes As New ListBox() With {
+                .Dock = DockStyle.Fill,
+                .IntegralHeight = False,
+                .SelectionMode = SelectionMode.MultiExtended
+            }
+
+            Dim buttonBar As New FlowLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .FlowDirection = FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                .WrapContents = True,
+                .Padding = New Padding(0, 6, 0, 0),
+                .Margin = New Padding(0)
+            }
+
+            Dim btnRemove As New Button() With {.Text = "Remove Selected", .AutoSize = True}
+            Dim btnConvert As New Button() With {.Text = "Convert File to Index...", .AutoSize = True}
+            Dim btnClose As New Button() With {.Text = "Close", .AutoSize = True}
+
+            buttonBar.Controls.Add(btnRemove)
+            buttonBar.Controls.Add(btnConvert)
+            buttonBar.Controls.Add(btnClose)
+
+            layout.Controls.Add(lblInfo, 0, 0)
+            layout.Controls.Add(lstIndexes, 0, 1)
+            layout.Controls.Add(buttonBar, 0, 2)
+
+            frm.CancelButton = btnClose
+
+            Dim refreshList As System.Action =
+                Sub()
+                    lstIndexes.BeginUpdate()
+                    lstIndexes.Items.Clear()
+                    For Each idx In _attachedIndexes
+                        lstIndexes.Items.Add(idx)
+                    Next
+                    lstIndexes.EndUpdate()
+                    btnRemove.Enabled = lstIndexes.Items.Count > 0
+                End Sub
+
+            lstIndexes.DisplayMember = "DisplayName"
+
+            AddHandler btnClose.Click, Sub() frm.Close()
+
+            AddHandler btnRemove.Click,
+                Sub()
+                    Dim selected As New List(Of DiscussIndexRef)()
+                    For Each item As Object In lstIndexes.SelectedItems
+                        Dim indexRef = TryCast(item, DiscussIndexRef)
+                        If indexRef IsNot Nothing Then
+                            selected.Add(indexRef)
+                        End If
+                    Next
+
+                    If selected.Count = 0 Then
+                        ShowCustomMessageBox("Select at least one index to remove.")
+                        Return
+                    End If
+
+                    Dim confirm = ShowCustomYesNoBox(
+                        $"Remove {selected.Count:N0} attached index(es) from this discussion?",
+                        "Yes, remove",
+                        "No, keep",
+                        $"{AN} - Remove Indexes")
+
+                    If confirm <> 1 Then
+                        Return
+                    End If
+
+                    For Each indexRef In selected
+                        RemoveAttachedIndex(indexRef)
+                    Next
+
+                    refreshList.Invoke()
+                End Sub
+
+            AddHandler btnConvert.Click,
+                Async Sub()
+                    btnConvert.Enabled = False
+                    Try
+                        If Await ConvertFileToIndexAsync() Then
+                            refreshList.Invoke()
+                        End If
+                    Finally
+                        btnConvert.Enabled = True
+                    End Try
+                End Sub
+
+            refreshList.Invoke()
+            frm.ShowDialog(Me)
+        End Using
     End Sub
 
     Private Shared Function TrimSingleBoundaryLineBreak(value As String) As String
@@ -3006,7 +4059,9 @@ Public Class DiscussInky
 
     Private Sub ApplyKnowledgeContentMutation(newKnowledgeContent As String)
         If String.IsNullOrWhiteSpace(newKnowledgeContent) Then
-            DeleteCurrentKnowledge()
+            ClearPlainKnowledge()
+            UpdateWindowTitle()
+            PersistCurrentSessionSettings()
             Return
         End If
 
@@ -3166,12 +4221,14 @@ Public Class DiscussInky
             Dim btnEdit As New Button() With {.Text = "Edit Selected", .AutoSize = True}
             Dim btnDelete As New Button() With {.Text = "Delete Selected", .AutoSize = True}
             Dim btnCompact As New Button() With {.Text = "Compact Selected", .AutoSize = True}
+            Dim btnIndex As New Button() With {.Text = "Convert to Index", .AutoSize = True}
             Dim btnToggleAll As New Button() With {.Text = "Select All", .AutoSize = True}
 
             pnlButtons.Controls.Add(btnClose)
             pnlButtons.Controls.Add(btnEdit)
             pnlButtons.Controls.Add(btnDelete)
             pnlButtons.Controls.Add(btnCompact)
+            pnlButtons.Controls.Add(btnIndex)
             pnlButtons.Controls.Add(btnToggleAll)
 
             dlg.CancelButton = btnClose
@@ -3318,6 +4375,7 @@ Public Class DiscussInky
             AddHandler btnCompact.Click, Sub() acceptAction.Invoke(KnowledgeDocumentManagerAction.CompactSelected)
             AddHandler btnDelete.Click, Sub() acceptAction.Invoke(KnowledgeDocumentManagerAction.DeleteSelected)
             AddHandler btnEdit.Click, Sub() acceptAction.Invoke(KnowledgeDocumentManagerAction.EditSelected)
+            AddHandler btnIndex.Click, Sub() acceptAction.Invoke(KnowledgeDocumentManagerAction.IndexSelected)
             AddHandler btnClose.Click,
                 Sub()
                     result.Action = KnowledgeDocumentManagerAction.None
@@ -3376,6 +4434,171 @@ Public Class DiscussInky
         End If
 
         Return removedCount
+    End Function
+
+    ''' <summary>
+    ''' Converts the selected knowledge documents into a single standalone semantic index,
+    ''' attaches it as a searchable source, and removes the originals from the inlined knowledge
+    ''' to reduce prompt size. The index is stored durably under %AppData%\redink so it survives
+    ''' temp cleanup and can be persisted/archived. The user is informed of the outcome.
+    ''' </summary>
+    Private Async Function MakeKnowledgeDocumentsSearchableAsync(selectedDocumentNumbers As IEnumerable(Of Integer)) As Task(Of Integer)
+        If selectedDocumentNumbers Is Nothing Then
+            Return 0
+        End If
+
+        Dim selectedSet As New HashSet(Of Integer)(selectedDocumentNumbers)
+        If selectedSet.Count = 0 Then
+            Return 0
+        End If
+
+        Dim allEntries As List(Of KnowledgeDocumentEntry) = ParseKnowledgeDocuments()
+        Dim targetEntries As List(Of KnowledgeDocumentEntry) =
+            allEntries.
+                Where(Function(x) selectedSet.Contains(x.Number)).
+                OrderBy(Function(x) x.StartIndex).
+                ThenBy(Function(x) x.Number).
+                ToList()
+
+        If targetEntries.Count = 0 Then
+            Return 0
+        End If
+
+        Dim confirm As Integer =
+            ShowCustomYesNoBox(
+                $"Create a searchable index from {targetEntries.Count:N0} selected knowledge document(s)?" & vbCrLf & vbCrLf &
+                "The selected documents will be removed from the inlined knowledge and replaced by a compact index that is searched per message. " &
+                "This reduces the amount of text sent to the model for large or numerous documents.",
+                "Yes, make searchable",
+                "No, cancel",
+                $"{AN} - Make Knowledge Searchable")
+
+        If confirm <> 1 Then
+            Return 0
+        End If
+
+        ' Combine the selected documents using the canonical wrapper separator so the generator
+        ' can align segments to document boundaries.
+        Dim combined As String = BuildKnowledgeContentFromEntries(targetEntries)
+        If String.IsNullOrWhiteSpace(combined) Then
+            AppendSystemMessage("The selected knowledge documents produced no content to index.")
+            Return 0
+        End If
+
+        Dim indexDir As String = GetSessionIndexDirectoryPath()
+        Directory.CreateDirectory(indexDir)
+
+        Dim shortId As String = "i" & Guid.NewGuid().ToString("N").Substring(0, 4)
+        Dim outputPath As String = Path.Combine(indexDir, shortId & IndexCopyFileExtension)
+
+        If Not TryBeginExclusive("creating a searchable index") Then
+            Return 0
+        End If
+
+        Try
+            Using progressScope As New ThisAddIn.ProgressScope(
+                $"{AN} - Creating searchable index",
+                $"Preparing {targetEntries.Count:N0} document(s) ...",
+                1)
+
+                Dim generationProgress As New System.Progress(Of SharedMethods.SemanticSearchIndexGenerationProgress)(
+                    Sub(update As SharedMethods.SemanticSearchIndexGenerationProgress)
+                        Dim segmentCount As Integer = System.Math.Max(1, update.SegmentCount)
+                        Dim segmentNumber As Integer = System.Math.Max(0, System.Math.Min(update.SegmentNumber, segmentCount))
+                        Dim statusMessage As String = If(update.Message, "").Trim()
+                        If String.IsNullOrWhiteSpace(statusMessage) Then
+                            statusMessage = "Generating semantic metadata"
+                        End If
+                        ThisAddIn.ProgressScope.Report(
+                            segmentNumber,
+                            segmentCount,
+                            $"{statusMessage} ({segmentNumber}/{segmentCount})")
+                    End Sub)
+
+                Dim generationResult As SharedMethods.SemanticSearchIndexGenerationResult =
+                    Await SharedMethods.CreateSemanticSearchIndexFromTextAsync(
+                        combined,
+                        outputPath,
+                        _context,
+                        New SharedMethods.SemanticSearchIndexGeneratorOptions() With {
+                            .SpecialTaskName = "Indexer",
+                            .OverwriteOutput = True
+                        },
+                        generationProgress,
+                        progressScope.Token).ConfigureAwait(False)
+
+                Dim displayName As String =
+                    If(targetEntries.Count = 1 AndAlso Not String.IsNullOrWhiteSpace(targetEntries(0).Name),
+                       targetEntries(0).Name,
+                       $"{targetEntries.Count} documents")
+
+                _attachedIndexes.Add(New DiscussIndexRef() With {
+                    .Id = shortId,
+                    .DisplayName = displayName,
+                    .ActivePath = outputPath,
+                    .ContentSha256 = If(generationResult IsNot Nothing, generationResult.ContentSha256, "")
+                })
+
+                ' Remove the indexed originals from the inlined knowledge.
+                Dim remaining As List(Of KnowledgeDocumentEntry) =
+                    allEntries.Where(Function(x) Not selectedSet.Contains(x.Number)).ToList()
+
+                If remaining.Count = 0 Then
+                    ClearPlainKnowledge()
+                    UpdateWindowTitle()
+                    PersistCurrentSessionSettings()
+                Else
+                    ApplyKnowledgeContentMutation(BuildKnowledgeContentFromEntries(remaining))
+                End If
+
+                ThisAddIn.ProgressScope.Report(
+                    System.Math.Max(1, If(generationResult IsNot Nothing, generationResult.SegmentCount, 1)),
+                    System.Math.Max(1, If(generationResult IsNot Nothing, generationResult.SegmentCount, 1)),
+                    "Completed successfully.")
+
+                Dim segmentInfo As String =
+                    If(generationResult IsNot Nothing,
+                       $"{generationResult.SegmentCount:N0} segment(s)",
+                       "an index")
+
+                AppendSystemMessage(
+                    $"Created a searchable index '{displayName}' ({segmentInfo}). " &
+                    $"The {targetEntries.Count:N0} selected document(s) were removed from the inlined knowledge and will now be searched per message. " &
+                    "The index is stored durably and will be included when you persist or archive this session.")
+
+                OfferDesktopIndexCopy(outputPath, displayName)
+                UpdateWindowTitle()
+                Return targetEntries.Count
+            End Using
+
+        Catch ex As System.OperationCanceledException
+            AppendSystemMessage("Index creation was cancelled. The selected knowledge documents were left unchanged.")
+
+            Try
+                If File.Exists(outputPath) Then
+                    File.Delete(outputPath)
+                End If
+            Catch cleanupEx As Exception
+                System.Diagnostics.Debug.WriteLine(cleanupEx.Message)
+            End Try
+
+            Return 0
+
+        Catch ex As Exception
+            AppendSystemMessage($"Failed to make the selected knowledge searchable: {ex.Message}")
+
+            Try
+                If File.Exists(outputPath) Then
+                    File.Delete(outputPath)
+                End If
+            Catch cleanupEx As Exception
+                System.Diagnostics.Debug.WriteLine(cleanupEx.Message)
+            End Try
+
+            Return 0
+        Finally
+            EndExclusive()
+        End Try
     End Function
 
     Private Function EditKnowledgeDocuments(selectedDocumentNumbers As IEnumerable(Of Integer)) As Integer
@@ -3581,6 +4804,9 @@ Public Class DiscussInky
 
                 Case KnowledgeDocumentManagerAction.EditSelected
                     affectedCount = EditKnowledgeDocuments(selection.SelectedDocumentNumbers)
+
+                Case KnowledgeDocumentManagerAction.IndexSelected
+                    affectedCount = Await MakeKnowledgeDocumentsSearchableAsync(selection.SelectedDocumentNumbers)
             End Select
 
             totalAffectedCount += affectedCount
@@ -3660,7 +4886,7 @@ Public Class DiscussInky
     ''' <summary>
     ''' Captures the user's message, detects (t) trigger, adds it to history, and starts asynchronous LLM processing.
     ''' </summary>
-    Private Sub OnSend(sender As Object, e As EventArgs)
+    Private Async Sub OnSend(sender As Object, e As EventArgs)
         Dim userText = _txtInput.Text.Trim()
         If userText.Length = 0 Then Return
 
@@ -3676,19 +4902,28 @@ Public Class DiscussInky
             End If
         End If
 
-        Dim promptToStore As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userText}".Trim(), userText)
+        If Not TryBeginExclusive("sending a message") Then
+            Return
+        End If
 
         Try
-            My.Settings.LastPromptDiscussInky = promptToStore
-            My.Settings.Save()
-        Catch
-        End Try
+            Dim promptToStore As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userText}".Trim(), userText)
 
-        AppendUserHtml(userText)
-        _history.Add(("user", userText))
-        _txtInput.Clear()
-        ShowAssistantThinking()
-        Dim __ = SendAsync(userText, explicitToolTriggerDetected)
+            Try
+                My.Settings.LastPromptDiscussInky = promptToStore
+                My.Settings.Save()
+            Catch
+            End Try
+
+            AppendUserHtml(userText)
+            _history.Add(("user", userText))
+            _txtInput.Clear()
+            ShowAssistantThinking()
+
+            Await SendAsync(userText, explicitToolTriggerDetected)
+        Finally
+            EndExclusive()
+        End Try
     End Sub
 
     ''' <summary>
@@ -4002,8 +5237,15 @@ Public Class DiscussInky
         ' Knowledge document info
         If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
             sb.Append($" | Knowledge: {GetKnowledgeDisplayName()}")
-        Else
+        ElseIf _attachedIndexes.Count = 0 Then
             sb.Append(" | Knowledge: None loaded")
+        End If
+
+        ' Attached searchable indexes are an equivalent knowledge source, so list them here too.
+        If _attachedIndexes.Count > 0 Then
+            Dim indexNames As String =
+                String.Join(", ", _attachedIndexes.Select(Function(x) DirectCast(x, DiscussIndexRef).DisplayName))
+            sb.Append($" | Searchable index(es): {indexNames}")
         End If
 
         ' Knowledge store hint
@@ -4047,7 +5289,7 @@ Public Class DiscussInky
 
         Dim systemPrompt As String
 
-        If String.IsNullOrWhiteSpace(_knowledgeContent) Then
+        If String.IsNullOrWhiteSpace(_knowledgeContent) AndAlso _attachedIndexes.Count = 0 Then
             systemPrompt = $"{dateContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
                            "Tell the user they should load a knowledge document using the 'Load Knowledge' button (button name always in English) to start a discussion. " &
                            $"You are ready to discuss any knowledge they provide. One short sentence, not talkative. {languageInstruction} "
@@ -4064,8 +5306,17 @@ Public Class DiscussInky
                 missionContext = $" Your current mission is: '{_currentMissionPrompt}'."
             End If
 
+            Dim knowledgeStatusText As String
+            If Not String.IsNullOrWhiteSpace(_knowledgeContent) AndAlso _attachedIndexes.Count > 0 Then
+                knowledgeStatusText = "A knowledge base has been loaded (it may contain multiple documents or sections) and one or more searchable indexes are attached."
+            ElseIf _attachedIndexes.Count > 0 Then
+                knowledgeStatusText = "One or more searchable indexes are attached and will be searched for each message."
+            Else
+                knowledgeStatusText = "A knowledge base has been loaded (it may contain multiple documents or sections)."
+            End If
+
             systemPrompt = $"{dateContext} {locationContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
-                           $"A knowledge base has been loaded (it may contain multiple documents or sections).{personaContext}{missionContext} " &
+                           $"{knowledgeStatusText}{personaContext}{missionContext} " &
                            $"Generate a welcome that fits this persona and mission. One or two short sentences, stay in character. {languageInstruction}"
         End If
 
@@ -4242,6 +5493,33 @@ Public Class DiscussInky
                 sb.AppendLine()
             End If
 
+            ' Include the most relevant excerpts retrieved from attached semantic indexes, giving the
+            ' user detailed, per-index feedback while the (potentially slow) retrieval runs.
+            Dim indexExcerpts As String
+            If _attachedIndexes.Count > 0 Then
+                UpdateAssistantThinking($"Searching {_attachedIndexes.Count:N0} attached index(es) for relevant material ...")
+                indexExcerpts = Await BuildIndexExcerptsAsync(
+                    cleanedUserText,
+                    BuildConversationForAutoResponder(),
+                    Sub(status As String) UpdateAssistantThinking(status))
+
+                If Not String.IsNullOrWhiteSpace(indexExcerpts) Then
+                    UpdateAssistantThinking($"Relevant material found. {_currentPersonaName} is now thinking ...")
+                Else
+                    UpdateAssistantThinking($"No matching material found in the attached index(es). {_currentPersonaName} is now thinking ...")
+                End If
+            Else
+                indexExcerpts = Await BuildIndexExcerptsAsync(cleanedUserText, BuildConversationForAutoResponder())
+            End If
+            If Not String.IsNullOrWhiteSpace(indexExcerpts) Then
+                sb.AppendLine("<Indexed Sources>")
+                sb.AppendLine("The following are the most relevant excerpts retrieved from attached indexed documents for this message. " &
+                              "Treat them as authoritative source material, do not invent content beyond them, and cite the document names where appropriate.")
+                sb.AppendLine(indexExcerpts)
+                sb.AppendLine("</Indexed Sources>")
+                sb.AppendLine()
+            End If
+
             ' Append knowledge store results (supplemental to manually loaded knowledge)
             If Not String.IsNullOrWhiteSpace(kbContext) Then
                 sb.AppendLine("<Knowledge Store Results>")
@@ -4302,7 +5580,7 @@ Public Class DiscussInky
 
                 ' Ensure tools are selected
                 If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                    _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=True)
+                    _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=False)
 
                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
                         RemoveAssistantThinking()
@@ -4332,6 +5610,20 @@ Public Class DiscussInky
                     answer = If(answer, "").Trim()
 
                     If Await TryHandleKnowledgeCompactionOpportunityAsync(answer, userText, toolTriggerDetected) Then
+                        Return
+                    End If
+
+                    ' Guard against an empty/whitespace response so the chat does not render a
+                    ' bare persona line. Surface it as a system message and restore the prompt.
+                    If String.IsNullOrWhiteSpace(answer) Then
+                        RemoveAssistantThinking()
+                        AppendSystemMessage("The model returned an empty response. Please try again.")
+                        Ui(Sub() _txtInput.Text = restoreUserText)
+
+                        If _history.Count > 0 AndAlso _history(_history.Count - 1).Role = "user" Then
+                            _history.RemoveAt(_history.Count - 1)
+                        End If
+
                         Return
                     End If
 
@@ -4368,6 +5660,20 @@ Public Class DiscussInky
             stdAnswer = If(stdAnswer, "").Trim()
 
             If Await TryHandleKnowledgeCompactionOpportunityAsync(stdAnswer, userText, toolTriggerDetected) Then
+                Return
+            End If
+
+            ' Guard against an empty/whitespace response so the chat does not render a
+            ' bare persona line. Surface it as a system message and restore the prompt.
+            If String.IsNullOrWhiteSpace(stdAnswer) Then
+                RemoveAssistantThinking()
+                AppendSystemMessage("The model returned an empty response. Please try again.")
+                Ui(Sub() _txtInput.Text = restoreUserText)
+
+                If _history.Count > 0 AndAlso _history(_history.Count - 1).Role = "user" Then
+                    _history.RemoveAt(_history.Count - 1)
+                End If
+
                 Return
             End If
 
@@ -4438,6 +5744,12 @@ Public Class DiscussInky
                     function removeById(id) {{
                       var el=document.getElementById(id); if(!el||!el.parentNode) return;
                       el.parentNode.removeChild(el);
+                    }}
+                    function setThinkingText(id, text) {{
+                      var el=document.getElementById(id); if(!el) return;
+                      var c=el.getElementsByClassName('content');
+                      if(c && c.length>0){{ c[0].innerText = text; }}
+                      window.scrollTo(0, document.body.scrollHeight);
                     }}
                     function getWindowSelectionText() {{
                       try {{
@@ -4517,7 +5829,7 @@ Public Class DiscussInky
             Dim scheme = e.Url?.Scheme?.ToLowerInvariant()
             If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                 e.Cancel = True
-                Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(e.Url.ToString())
             End If
         Catch
         End Try
@@ -4575,6 +5887,23 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Updates the text of the current thinking placeholder, so the user gets meaningful feedback
+    ''' (e.g., that attached indexes are being searched) instead of a static 'Thinking...' label.
+    ''' No-op when no placeholder is currently shown.
+    ''' </summary>
+    Private Sub UpdateAssistantThinking(statusText As String)
+        If String.IsNullOrEmpty(_lastThinkingId) Then Return
+        Ui(Sub()
+               Try
+                   If _chat.Document IsNot Nothing Then
+                       _chat.Document.InvokeScript("setThinkingText", New Object() {_lastThinkingId, statusText})
+                   End If
+               Catch
+               End Try
+           End Sub)
+    End Sub
+
+    ''' <summary>
     ''' Removes the current thinking placeholder if present.
     ''' </summary>
     Private Sub RemoveAssistantThinking()
@@ -4606,7 +5935,7 @@ Public Class DiscussInky
                                                displayName As String,
                                                Optional forwardToTalkToMe As Boolean = True)
         md = If(md, "")
-        Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
+        Dim body = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
         Dim t = body.Trim()
         Dim isSingle = Regex.IsMatch(t, "^\s*<p>[\s\S]*?</p>\s*$", RegexOptions.IgnoreCase) AndAlso
                    Not Regex.IsMatch(t, "<(ul|ol|pre|table|h[1-6]|blockquote|hr|div)\b", RegexOptions.IgnoreCase)
@@ -5139,6 +6468,17 @@ Public Class DiscussInky
             sb.AppendLine()
         End If
 
+        ' Include the most relevant excerpts retrieved from attached semantic indexes.
+        Dim indexExcerpts As String = Await BuildIndexExcerptsAsync(GetRetrievalQueryFromHistory(), BuildConversationForAutoResponder())
+        If Not String.IsNullOrWhiteSpace(indexExcerpts) Then
+            sb.AppendLine("<Indexed Sources>")
+            sb.AppendLine("The following are the most relevant excerpts retrieved from attached indexed documents. " &
+                          "Treat them as authoritative source material and cite the document names where appropriate.")
+            sb.AppendLine(indexExcerpts)
+            sb.AppendLine("</Indexed Sources>")
+            sb.AppendLine()
+        End If
+
         ' Include active document if checkbox checked (same as main chatbot)
         If _chkIncludeActiveDoc.Checked Then
             Dim activeDocContent = GetActiveDocumentContent()
@@ -5195,6 +6535,17 @@ Public Class DiscussInky
             sb.AppendLine("<Knowledge Base>")
             sb.AppendLine(_knowledgeContent)
             sb.AppendLine("</Knowledge Base>")
+            sb.AppendLine()
+        End If
+
+        ' Include the most relevant excerpts retrieved from attached semantic indexes.
+        Dim indexExcerpts As String = Await BuildIndexExcerptsAsync(GetRetrievalQueryFromHistory(), BuildConversationForAutoResponder())
+        If Not String.IsNullOrWhiteSpace(indexExcerpts) Then
+            sb.AppendLine("<Indexed Sources>")
+            sb.AppendLine("The following are the most relevant excerpts retrieved from attached indexed documents. " &
+                          "Treat them as authoritative source material and cite the document names where appropriate.")
+            sb.AppendLine(indexExcerpts)
+            sb.AppendLine("</Indexed Sources>")
             sb.AppendLine()
         End If
 
@@ -5278,7 +6629,7 @@ Public Class DiscussInky
     Private Sub AppendAutoResponderHtml(responderName As String,
                                         text As String,
                                         Optional forwardToTalkToMe As Boolean = True)
-        Dim body = Markdig.Markdown.ToHtml(text, _mdPipeline)
+        Dim body = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(text), _mdPipeline)
         Dim t = body.Trim()
         Dim whoHtml = WebUtility.HtmlEncode(responderName)
 
@@ -6064,7 +7415,7 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub ShowDiscussionSummaryHtml(summaryMarkdown As String)
         Try
-            Dim htmlText As String = Markdig.Markdown.ToHtml(summaryMarkdown, _mdPipeline)
+            Dim htmlText As String = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(summaryMarkdown), _mdPipeline)
 
             Dim fullHtml As String =
                 "<!DOCTYPE html>" &
@@ -6292,6 +7643,135 @@ Public Class DiscussInky
         Return GetRedInkStorageDirectoryPath()
     End Function
 
+    ''' <summary>
+    ''' Root folder for all per-session index copies: %AppData%\redink\di.
+    ''' </summary>
+    Private Function GetSessionIndexRootPath() As String
+        Return Path.Combine(GetRedInkStorageDirectoryPath(), SessionIndexFolderName)
+    End Function
+
+    ''' <summary>
+    ''' Returns a short, stable per-session id used as the persisted index folder name.
+    ''' The id is stored in a durable pointer file (independent of My.Settings, which may be
+    ''' cleared) so it remains stable across restarts and crashes. Kept short to respect
+    ''' Windows path-length limits.
+    ''' </summary>
+    Private Function GetOrCreateSessionIndexId() As String
+        If Not String.IsNullOrEmpty(_sessionIndexId) Then
+            Return _sessionIndexId
+        End If
+
+        Dim rootPath As String = GetSessionIndexRootPath()
+        Dim pointerPath As String = Path.Combine(rootPath, SessionIndexPointerFileName)
+
+        Try
+            If File.Exists(pointerPath) Then
+                Dim stored As String = File.ReadAllText(pointerPath, Encoding.UTF8).Trim()
+                If stored.Length > 0 AndAlso stored.Length <= 16 Then
+                    _sessionIndexId = stored
+                    Return _sessionIndexId
+                End If
+            End If
+        Catch
+            ' Fall through to generate a fresh id.
+        End Try
+
+        _sessionIndexId = Guid.NewGuid().ToString("N").Substring(0, 8)
+
+        Try
+            Directory.CreateDirectory(rootPath)
+            File.WriteAllText(pointerPath, _sessionIndexId, New System.Text.UTF8Encoding(False))
+        Catch
+            ' Best-effort; an in-memory id is still usable for this session.
+        End Try
+
+        Return _sessionIndexId
+    End Function
+
+    ''' <summary>
+    ''' Directory holding this session's persisted index copies: %AppData%\redink\di\&lt;sid&gt;\.
+    ''' </summary>
+    Private Function GetSessionIndexDirectoryPath() As String
+        Return Path.Combine(GetSessionIndexRootPath(), GetOrCreateSessionIndexId())
+    End Function
+
+    ''' <summary>
+    ''' Directory holding a specific archive's index copies: %AppData%\redink\&lt;archiveName&gt;.ix\.
+    ''' </summary>
+    Private Function GetArchiveIndexDirectoryPath(archiveName As String) As String
+        Dim safeName As String = If(archiveName, "").Trim()
+        For Each ch In Path.GetInvalidFileNameChars()
+            safeName = safeName.Replace(ch, "_"c)
+        Next
+        If String.IsNullOrWhiteSpace(safeName) Then
+            safeName = "dialogue"
+        End If
+        Return Path.Combine(GetDialogueArchiveDirectoryPath(), safeName & ArchiveIndexFolderSuffix)
+    End Function
+
+    ''' <summary>
+    ''' Copies the given attached indexes into a target directory using short ordinal file
+    ''' names (i0.txt, i1.txt, ...) with an exact-byte copy so offsets and the SHA-256 guard
+    ''' stay valid. Returns the mapping of index id to the written relative file name.
+    ''' </summary>
+    Private Function CopyAttachedIndexesToDirectory(indexes As IEnumerable(Of DiscussIndexRef),
+                                                    targetDirectory As String,
+                                                    repointActivePath As Boolean) As Dictionary(Of String, String)
+
+        Dim writtenByIndexId As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+        If indexes Is Nothing Then Return writtenByIndexId
+
+        Directory.CreateDirectory(targetDirectory)
+
+        Dim ordinal As Integer = 0
+        For Each idx In indexes
+            Dim indexRef As DiscussIndexRef = idx
+            ' Name each copy by the index's unique id so incremental persistence cannot collide
+            ' (positional ordinals restart per call and would overwrite earlier copies). Fall back
+            ' to the ordinal only when an id is unusable as a file name.
+            Dim safeId As String = If(indexRef.Id, "")
+            For Each ch In Path.GetInvalidFileNameChars()
+                safeId = safeId.Replace(ch, "_"c)
+            Next
+            If String.IsNullOrWhiteSpace(safeId) Then
+                safeId = "i" & ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            End If
+            Dim fileName As String = safeId & IndexCopyFileExtension
+            Dim destinationPath As String = Path.Combine(targetDirectory, fileName)
+
+            Try
+                If Not String.IsNullOrWhiteSpace(indexRef.ActivePath) AndAlso File.Exists(indexRef.ActivePath) Then
+                    ' Exact-byte copy: never re-encode index content.
+                    File.Copy(indexRef.ActivePath, destinationPath, overwrite:=True)
+                    writtenByIndexId(indexRef.Id) = fileName
+                    If repointActivePath Then
+                        indexRef.ActivePath = destinationPath
+                    End If
+                End If
+            Catch ex As Exception
+                AppendSystemMessage($"Failed to copy index '{indexRef.DisplayName}': {ex.Message}")
+            End Try
+
+            ordinal += 1
+        Next
+
+        Return writtenByIndexId
+    End Function
+
+    ''' <summary>
+    ''' Deletes an index copy directory (best-effort), used when persistence is turned off
+    ''' or an archive is removed, to avoid orphaned copies of potentially sensitive data.
+    ''' </summary>
+    Private Sub DeleteIndexDirectorySafe(directoryPath As String)
+        Try
+            If Not String.IsNullOrWhiteSpace(directoryPath) AndAlso Directory.Exists(directoryPath) Then
+                Directory.Delete(directoryPath, recursive:=True)
+            End If
+        Catch ex As Exception
+            AppendSystemMessage($"Failed to delete index storage: {ex.Message}")
+        End Try
+    End Sub
+
     Private Function GetDialogueArchiveFilePath(archiveName As String) As String
         Dim safeName = If(archiveName, "").Trim()
         For Each ch In Path.GetInvalidFileNameChars()
@@ -6371,6 +7851,34 @@ Public Class DiscussInky
         Catch
             Return ""
         End Try
+    End Function
+
+    ''' <summary>
+    ''' Computes a SHA-256 hash over the exact bytes of a file, used to refuse loading the same
+    ''' semantic index twice. Returns an empty string on any failure so callers can skip the guard.
+    ''' </summary>
+    Private Shared Function ComputeFileSha256(filePath As String) As String
+        Try
+            If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
+                Return ""
+            End If
+
+            Using stream As New FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                Using sha = System.Security.Cryptography.SHA256.Create()
+                    Return System.Convert.ToBase64String(sha.ComputeHash(stream))
+                End Using
+            End Using
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' True when there is any knowledge source loaded: inlined plain knowledge or at least one
+    ''' attached semantic index (indexes are treated as an equivalent knowledge source).
+    ''' </summary>
+    Private Function HasLoadedKnowledgeOrIndexes() As Boolean
+        Return Not String.IsNullOrWhiteSpace(_knowledgeContent) OrElse _attachedIndexes.Count > 0
     End Function
 
     Private Function NormalizeSessionStateXmlForComparison(stateXml As String) As String
@@ -6513,18 +8021,117 @@ Public Class DiscussInky
                 "ToolSelection",
                 New XAttribute("main", GetSettingStringSafe("SelectedMainToolNames")),
                 New XAttribute("advanced", GetSettingStringSafe("SelectedAdvancedToolNames"))),
-            New XElement(
+                       New XElement(
                 "Ui",
                 New XAttribute("splitterDistance", _splitChat.SplitterDistance)),
             New XElement("TranscriptHtml", GetCurrentChatInnerHtml()),
+            BuildIndexesElement(archiveName),
             historyElement)
 
         Return New XDocument(root).ToString(SaveOptions.DisableFormatting)
     End Function
 
+    ''' <summary>
+    ''' Builds the &lt;Indexes&gt; element describing attached semantic indexes. When an archive
+    ''' name is supplied, the index files are copied into that archive's sidecar folder
+    ''' (&lt;archiveName&gt;.ix) so the archive is self-contained; the recorded file names are
+    ''' relative to that folder. Otherwise (session-settings persistence) the current active
+    ''' paths are recorded so the live session can be restored in place.
+    ''' </summary>
+    Private Function BuildIndexesElement(archiveName As String) As XElement
+        Dim indexesElement As New XElement("Indexes")
+        If _attachedIndexes.Count = 0 Then
+            Return indexesElement
+        End If
+
+        Dim copyToArchive As Boolean = Not String.IsNullOrWhiteSpace(archiveName)
+        Dim writtenByIndexId As Dictionary(Of String, String) = Nothing
+
+        If copyToArchive Then
+            Dim archiveIndexDir As String = GetArchiveIndexDirectoryPath(archiveName)
+            ' Rewrite the sidecar from scratch so stale copies are not left behind.
+            DeleteIndexDirectorySafe(archiveIndexDir)
+            writtenByIndexId = CopyAttachedIndexesToDirectory(_attachedIndexes, archiveIndexDir, repointActivePath:=False)
+        End If
+
+        For Each idx In _attachedIndexes
+            Dim indexRef As DiscussIndexRef = idx
+            Dim fileValue As String
+
+            If copyToArchive Then
+                Dim relativeName As String = Nothing
+                If writtenByIndexId Is Nothing OrElse Not writtenByIndexId.TryGetValue(indexRef.Id, relativeName) Then
+                    Continue For
+                End If
+                fileValue = relativeName
+            Else
+                fileValue = If(indexRef.ActivePath, "")
+            End If
+
+            indexesElement.Add(
+                New XElement("Index",
+                    New XAttribute("id", If(indexRef.Id, "")),
+                    New XAttribute("name", If(indexRef.DisplayName, "")),
+                    New XAttribute("file", fileValue),
+                    New XAttribute("originalPath", If(indexRef.OriginalPath, "")),
+                    New XAttribute("sha", If(indexRef.ContentSha256, "")),
+                    New XAttribute("archived", copyToArchive)))
+        Next
+
+        Return indexesElement
+    End Function
+
+    ''' <summary>
+    ''' Writes the running-session index references to a durable file under %AppData%\redink\di,
+    ''' independent of My.Settings (which may be cleared). Enables restoring attached indexes for
+    ''' a non-archived session after a restart or crash.
+    ''' </summary>
+    Private Sub SaveSessionIndexStateDurably()
+        Dim rootPath As String = GetSessionIndexRootPath()
+        Dim statePath As String = Path.Combine(rootPath, SessionIndexStateFileName)
+
+        Try
+            Directory.CreateDirectory(rootPath)
+
+            If _attachedIndexes.Count = 0 Then
+                If File.Exists(statePath) Then
+                    File.Delete(statePath)
+                End If
+                Return
+            End If
+
+            ' archiveName empty => records current absolute ActivePath values (archived=false).
+            Dim indexesElement As XElement = BuildIndexesElement("")
+            Dim stateDoc As New XDocument(indexesElement)
+            stateDoc.Save(statePath)
+        Catch ex As Exception
+            System.Diagnostics.Debug.WriteLine(ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Restores attached indexes for a non-archived running session from the durable state file.
+    ''' Missing files are skipped by RestoreAttachedIndexesFromXml.
+    ''' </summary>
+    Private Sub RestoreSessionIndexStateFromDurableFile()
+        Dim statePath As String = Path.Combine(GetSessionIndexRootPath(), SessionIndexStateFileName)
+
+        If Not File.Exists(statePath) Then
+            Return
+        End If
+
+        Try
+            Dim doc As XDocument = XDocument.Load(statePath)
+            RestoreAttachedIndexesFromXml(doc.Root)
+        Catch ex As Exception
+            System.Diagnostics.Debug.WriteLine(ex.Message)
+        End Try
+    End Sub
+
     Private Sub PersistCurrentSessionSettings(Optional saveImmediately As Boolean = True)
         Try
             PersistTranscriptLimited()
+            SaveSessionIndexStateDurably()
             My.Settings.DiscussLastChatHtml = GetCurrentChatInnerHtml()
             My.Settings.DiscussLastSessionStateXml = BuildSessionStateXml()
             My.Settings.DiscussIncludeActiveDoc = _chkIncludeActiveDoc.Checked
@@ -6538,6 +8145,41 @@ Public Class DiscussInky
             End If
         Catch
         End Try
+    End Sub
+
+    ''' <summary>
+    ''' Copies all attached indexes into this session's durable persist folder (di\&lt;sid&gt;)
+    ''' and repoints their active paths to the copies, so persisted sessions keep working even
+    ''' if the original source files are moved or deleted. Indexes created via "Make Searchable"
+    ''' already live in this folder, so copying is a no-op for those.
+    ''' </summary>
+    Private Sub PersistAttachedIndexes()
+        If _attachedIndexes.Count = 0 Then
+            Return
+        End If
+
+        Dim sessionDir As String = GetSessionIndexDirectoryPath()
+        Dim toCopy As List(Of DiscussIndexRef) =
+            _attachedIndexes.
+                Where(Function(x) Not String.IsNullOrWhiteSpace(x.ActivePath) AndAlso
+                                  Not String.Equals(System.IO.Path.GetDirectoryName(x.ActivePath),
+                                                    sessionDir, StringComparison.OrdinalIgnoreCase)).
+                ToList()
+
+        If toCopy.Count = 0 Then
+            Return
+        End If
+
+        CopyAttachedIndexesToDirectory(toCopy, sessionDir, repointActivePath:=True)
+    End Sub
+
+    ''' <summary>
+    ''' Removes this session's durable persist folder (di\&lt;sid&gt;). Only called when the user
+    ''' turns persistence off and confirms deletion; guards against removing indexes that are
+    ''' still attached by clearing them from the active session first.
+    ''' </summary>
+    Private Sub DeletePersistedSessionIndexes()
+        DeleteIndexDirectorySafe(GetSessionIndexDirectoryPath())
     End Sub
 
     Private Sub ApplyKnowledgePersistenceFromCurrentState()
@@ -6695,6 +8337,8 @@ Public Class DiscussInky
             _knowledgeContent = If(knowledgeElement IsNot Nothing, knowledgeElement.Value, Nothing)
             ApplyKnowledgePersistenceFromCurrentState()
 
+            RestoreAttachedIndexesFromXml(root.Element("Indexes"))
+
             Try
                 Dim splitterDistance = GetXmlAttributeInteger(uiElement, "splitterDistance", _splitChat.SplitterDistance)
                 If splitterDistance > 0 Then
@@ -6772,6 +8416,62 @@ Public Class DiscussInky
             Return False
         End Try
     End Function
+
+    ''' <summary>
+    ''' Restores the attached semantic indexes from a session/archive &lt;Indexes&gt; element.
+    ''' Archived indexes are resolved relative to the archive's sidecar folder; session indexes
+    ''' use their recorded absolute path. Missing files are reported and skipped so restore
+    ''' remains robust.
+    ''' </summary>
+    Private Sub RestoreAttachedIndexesFromXml(indexesElement As XElement)
+        _attachedIndexes.Clear()
+        _indexConversationState.Clear()
+
+        If indexesElement Is Nothing Then
+            Return
+        End If
+
+        Dim missing As New List(Of String)()
+
+        For Each indexElement In indexesElement.Elements("Index")
+            Dim id As String = GetXmlAttributeValue(indexElement, "id", "")
+            Dim displayName As String = GetXmlAttributeValue(indexElement, "name", "")
+            Dim fileValue As String = GetXmlAttributeValue(indexElement, "file", "")
+            Dim originalPath As String = GetXmlAttributeValue(indexElement, "originalPath", "")
+            Dim sha As String = GetXmlAttributeValue(indexElement, "sha", "")
+            Dim archived As Boolean = GetXmlAttributeBoolean(indexElement, "archived", False)
+
+            If String.IsNullOrWhiteSpace(fileValue) Then
+                Continue For
+            End If
+
+            Dim resolvedPath As String
+            If archived Then
+                Dim archiveName As String = If(_activeDialogueArchiveName, "")
+                resolvedPath = System.IO.Path.Combine(GetArchiveIndexDirectoryPath(archiveName), fileValue)
+            Else
+                resolvedPath = fileValue
+            End If
+
+            If String.IsNullOrWhiteSpace(resolvedPath) OrElse Not File.Exists(resolvedPath) Then
+                missing.Add(If(String.IsNullOrWhiteSpace(displayName), fileValue, displayName))
+                Continue For
+            End If
+
+            _attachedIndexes.Add(New DiscussIndexRef() With {
+                .Id = If(String.IsNullOrWhiteSpace(id), "i" & Guid.NewGuid().ToString("N").Substring(0, 4), id),
+                .DisplayName = displayName,
+                .ActivePath = resolvedPath,
+                .OriginalPath = originalPath,
+                .ContentSha256 = sha
+            })
+        Next
+
+        If missing.Count > 0 Then
+            AppendSystemMessage(
+                $"{missing.Count:N0} attached index file(s) could not be found and were skipped: {String.Join(", ", missing)}.")
+        End If
+    End Sub
 
     Private Function GetDialogueArchives() As List(Of DialogueArchiveInfo)
         Dim result As New List(Of DialogueArchiveInfo)()
@@ -6861,11 +8561,6 @@ Public Class DiscussInky
             Dim xmlToSave = BuildSessionStateXml(trimmedArchiveName)
             File.WriteAllText(filePath, xmlToSave, Encoding.UTF8)
 
-            SetCurrentActiveDialogueArchive(
-                trimmedArchiveName,
-                filePath,
-                ComputeTextHash(NormalizeSessionStateXmlForComparison(xmlToSave)))
-
             PersistCurrentSessionSettings()
             UpdateWindowTitle()
 
@@ -6874,6 +8569,15 @@ Public Class DiscussInky
             Else
                 AppendSystemMessage($"Dialogue archived as '{trimmedArchiveName}'.")
             End If
+
+            ' Capture the baseline from the LIVE session state (the same representation the dirty
+            ' check uses) AFTER all side effects, so a freshly stored dialogue is never considered
+            ' dirty. The archive-format XML written to disk uses a different index representation
+            ' (relative sidecar paths), so it must not be used as the comparison baseline.
+            SetCurrentActiveDialogueArchive(
+                trimmedArchiveName,
+                filePath,
+                GetCurrentSessionComparisonHash())
 
             Return True
 
@@ -6972,12 +8676,17 @@ Public Class DiscussInky
             Dim restored = RestoreSessionStateFromXml(stateXml, displayName, announceRestore:=True)
 
             If restored Then
+                PersistCurrentSessionSettings()
+                UpdateWindowTitle()
+
+                ' Capture the baseline from the LIVE restored session (same representation as the
+                ' dirty check) AFTER all side effects, including the restore announcement. Using the
+                ' on-disk archive XML here would mismatch (different index path representation) and
+                ' make the restored dialogue look changed immediately.
                 SetCurrentActiveDialogueArchive(
                     displayName,
                     filePath,
-                    ComputeTextHash(NormalizeSessionStateXmlForComparison(stateXml)))
-                PersistCurrentSessionSettings()
-                UpdateWindowTitle()
+                    GetCurrentSessionComparisonHash())
             End If
 
             Return restored
@@ -7165,6 +8874,7 @@ Public Class DiscussInky
 
                     Try
                         File.Delete(selected.FilePath)
+                        DeleteIndexDirectorySafe(GetArchiveIndexDirectoryPath(selected.Name))
 
                         If String.Equals(selected.FilePath, _activeDialogueArchiveFilePath, StringComparison.OrdinalIgnoreCase) Then
                             ClearCurrentActiveDialogueArchive()

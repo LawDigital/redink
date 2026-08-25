@@ -2,7 +2,7 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: M365SearchForm.vb
+' File: ThisAddIn.M365SearchForm.vb
 ' Purpose: Lightweight harness for SharedLibrary.M365Service. Lets the user
 '          enter a query, lists matching emails, and opens the selected
 '          message inside Outlook itself (or, as a last resort, in the
@@ -343,10 +343,15 @@ Public Class M365SearchTestForm
             .Location = New Point(800, 9)}
         headerPanel.Controls.Add(btnSignOut)
 
-        ' "(not signed in)" — 20 px padding above and below.
+        ' Second header row: user + AI stats. Size/position are finalized in
+        ' LayoutTopRowRight so the row remains readable at higher DPI.
         lblUser = New Label() With {
-            .Text = "(not signed in)", .AutoSize = True, .ForeColor = Color.DimGray,
-            .Location = New Point(12, 60)}
+            .Text = "(not signed in)",
+            .AutoEllipsis = True,
+            .ForeColor = Color.DimGray,
+            .TextAlign = ContentAlignment.MiddleLeft,
+            .Location = New Point(12, 60),
+            .Size = New Size(300, 24)}
         headerPanel.Controls.Add(lblUser)
 
         lblAiStats = New Label() With {
@@ -356,7 +361,7 @@ Public Class M365SearchTestForm
             .TextAlign = ContentAlignment.MiddleRight,
             .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right,
             .Location = New Point(320, 60),
-            .Size = New Size(headerPanel.ClientSize.Width - 332, 20)}
+            .Size = New Size(headerPanel.ClientSize.Width - 332, 24)}
         headerPanel.Controls.Add(lblAiStats)
 
         ' ── Footer (progress, status, Open + Close) ──────────────────────
@@ -514,10 +519,36 @@ Public Class M365SearchTestForm
         Dim newWidth As Integer = Math.Max(120, queryRight - queryLeft)
         txtQuery.SetBounds(queryLeft, txtQuery.Top, newWidth, txtQuery.Height)
 
+        Dim infoRowHeight As Integer = Math.Max(
+            MeasureSingleLineLabelHeight(lblUser),
+            MeasureSingleLineLabelHeight(lblAiStats))
+        Dim infoRowY As Integer = Math.Max(txtQuery.Bottom, btnSearch.Bottom) + 14
+
+        Dim userPreferredWidth As Integer = 220
+        If lblUser IsNot Nothing Then
+            userPreferredWidth = TextRenderer.MeasureText(
+                If(lblUser.Text, ""),
+                lblUser.Font,
+                New Size(Integer.MaxValue, Integer.MaxValue),
+                TextFormatFlags.SingleLine Or TextFormatFlags.NoPadding).Width + 16
+        End If
+
+        Dim userMaxWidth As Integer = Math.Max(220, (headerPanel.ClientSize.Width - 36) \ 2)
+        Dim userWidth As Integer = Math.Max(220, Math.Min(userPreferredWidth, userMaxWidth))
+
+        If lblUser IsNot Nothing Then
+            lblUser.SetBounds(12, infoRowY, userWidth, infoRowHeight)
+        End If
+
         If lblAiStats IsNot Nothing Then
-            Dim statsLeft As Integer = Math.Max(320, txtQuery.Left)
+            Dim statsLeft As Integer = 12 + userWidth + 12
             Dim statsWidth As Integer = Math.Max(120, headerPanel.ClientSize.Width - statsLeft - 12)
-            lblAiStats.SetBounds(statsLeft, 60, statsWidth, lblAiStats.Height)
+            lblAiStats.SetBounds(statsLeft, infoRowY, statsWidth, infoRowHeight)
+        End If
+
+        Dim neededHeaderHeight As Integer = infoRowY + infoRowHeight + 12
+        If headerPanel.Height <> neededHeaderHeight Then
+            headerPanel.Height = neededHeaderHeight
         End If
 
     End Sub
@@ -702,6 +733,7 @@ Public Class M365SearchTestForm
                        lblUser.Text = If(String.IsNullOrEmpty(user),
                                          "(not signed in)",
                                          "Signed in as: " & user)
+                       LayoutTopRowRight()
                    End Sub)
         Catch
         End Try
@@ -732,6 +764,7 @@ Public Class M365SearchTestForm
             Dim user = Await M365Service.GetSignedInUserAsync(_context).ConfigureAwait(False)
             UiPost(Sub()
                        lblUser.Text = "Signed in as: " & user
+                       LayoutTopRowRight()
                        lblStatus.Text = "Signed in."
                    End Sub)
         Catch ex As Exception When IsCancellation(ex)
@@ -941,6 +974,7 @@ Public Class M365SearchTestForm
             Await M365Service.SignOutAsync(_context).ConfigureAwait(False)
             UiPost(Sub()
                        lblUser.Text = "(not signed in)"
+                       LayoutTopRowRight()
                        lblStatus.Text = "Signed out."
                    End Sub)
         Catch ex As Exception When IsCancellation(ex)
@@ -2036,24 +2070,28 @@ Public Class M365SearchTestForm
         OpenInOutlook = 1
     End Enum
 
-    Private Function ShowHtmlPreviewDialogAsync(hit As M365SearchHit,
+    Private Async Function ShowHtmlPreviewDialogAsync(hit As M365SearchHit,
                                             message As M365Message) As Task(Of PreviewDialogChoice)
         Dim html As String = BuildPreviewDialogHtml(hit, message)
-        Dim tcs As New TaskCompletionSource(Of PreviewDialogChoice)()
+        Dim tcs As New TaskCompletionSource(Of PreviewDialogChoice)(TaskCreationOptions.RunContinuationsAsynchronously)
 
-        SharedMethods.ShowHTMLCustomMessageBox(
-        html,
-        "Microsoft 365",
-        extraButtonText:="Open in Outlook",
-        extraButtonAction:=Sub()
-                               tcs.TrySetResult(PreviewDialogChoice.OpenInOutlook)
-                           End Sub,
-        CloseAfterExtra:=True,
-        onClose:=Sub()
-                     tcs.TrySetResult(PreviewDialogChoice.ClosePreview)
-                 End Sub)
+        UiPost(Sub()
+                   Try
+                       Dim result As PreviewDialogChoice = PreviewDialogChoice.ClosePreview
+                       SharedMethods.ShowHTMLCustomMessageBox(
+                           html,
+                           "Microsoft 365",
+                           extraButtonText:="Open in Outlook",
+                           extraButtonAction:=Sub() result = PreviewDialogChoice.OpenInOutlook,
+                           CloseAfterExtra:=True,
+                           nonModal:=True)
+                       tcs.TrySetResult(result)
+                   Catch ex As Exception
+                       tcs.TrySetException(ex)
+                   End Try
+               End Sub)
 
-        Return tcs.Task
+        Return Await tcs.Task.ConfigureAwait(False)
     End Function
 
     Private Function BuildPreviewDialogHtml(hit As M365SearchHit,
@@ -3149,23 +3187,9 @@ Public Class M365SearchTestForm
     Private Function MarkdownToHtml(md As String) As String
         Try
             Dim pipeline As Markdig.MarkdownPipeline =
-                New Markdig.MarkdownPipelineBuilder().
-                    UseAdvancedExtensions().
-                    UseSoftlineBreakAsHardlineBreak().
-                    UsePipeTables().
-                    UseGridTables().
-                    UseListExtras().
-                    UseFootnotes().
-                    UseDefinitionLists().
-                    UseAbbreviations().
-                    UseAutoLinks().
-                    UseTaskLists().
-                    UseMathematics().
-                    UseFigures().
-                    UseGenericAttributes().
-                    Build()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            Return Markdig.Markdown.ToHtml(If(md, ""), pipeline)
+            Return Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(md, "")), pipeline)
         Catch
             Return System.Net.WebUtility.HtmlEncode(If(md, "")).Replace(vbCrLf, "<br>").Replace(vbLf, "<br>")
         End Try

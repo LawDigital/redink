@@ -50,7 +50,7 @@ Namespace Agents
         Public Shared Sub Initialize(syncContext As SynchronizationContext, Optional userDataDir As String = Nothing)
             _uiSync = syncContext
             _userDataDir = If(String.IsNullOrWhiteSpace(userDataDir),
-                              Path.Combine(Path.GetTempPath(), "RedInk_JsSandbox"),
+                              SharedLibrary.SharedMethods.GetWebView2UserDataFolder(),
                               userDataDir)
         End Sub
 
@@ -196,7 +196,7 @@ Namespace Agents
                 Return
             End If
 
-            Dim tcs As New TaskCompletionSource(Of Boolean)()
+            Dim tcs As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
             Dim handler As EventHandler(Of CoreWebView2NavigationCompletedEventArgs) = Nothing
 
             handler =
@@ -227,7 +227,7 @@ Namespace Agents
                                                            waitForSelector As String,
                                                            timeoutMs As Integer,
                                                            cancellationToken As CancellationToken) As Task(Of String)
-            Dim tcs As New TaskCompletionSource(Of String)()
+            Dim tcs As New TaskCompletionSource(Of String)(TaskCreationOptions.RunContinuationsAsynchronously)
             Dim handler As EventHandler(Of CoreWebView2NavigationCompletedEventArgs) = Nothing
 
             handler =
@@ -567,11 +567,31 @@ Namespace Agents
                                        s.IsZoomControlEnabled = False
                                        s.IsBuiltInErrorPageEnabled = False
                                        ConfigureNetworkPolicy(allowNetwork)
+                                       AddHandler _wv.CoreWebView2.ProcessFailed, AddressOf OnSandboxProcessFailed
                                        _wv.CoreWebView2.NavigateToString("<!doctype html><html><head><meta charset=""utf-8""><title>sandbox</title></head><body></body></html>")
                                    End If
                                    _initialized = True
                                End Function).ConfigureAwait(False)
         End Function
+
+        ''' <summary>
+        ''' Handles a WebView2 render/browser process crash. Tears down the pooled control so the
+        ''' next RunAsync call re-initializes cleanly instead of blocking forever on a dead instance.
+        ''' </summary>
+        Private Shared Sub OnSandboxProcessFailed(sender As Object, e As CoreWebView2ProcessFailedEventArgs)
+            SharedLibrary.SharedMethods.LogWebView2ProcessFailed("JsSandbox", e.ProcessFailedKind.ToString(), e.ExitCode.ToString())
+            Try
+                If _wv IsNot Nothing Then
+                    If _hostForm IsNot Nothing AndAlso _hostForm.Controls.Contains(_wv) Then
+                        _hostForm.Controls.Remove(_wv)
+                    End If
+                    _wv.Dispose()
+                End If
+            Catch
+            End Try
+            _wv = Nothing
+            _initialized = False
+        End Sub
 
         Private Shared Sub ConfigureNetworkPolicy(allow As Boolean)
             Try
@@ -602,7 +622,7 @@ Namespace Agents
         ' --------------------------------------------------------------- UI marshalling
 
         Private Shared Function RunOnUiAsync(action As Action) As Task
-            Dim tcs As New TaskCompletionSource(Of Boolean)()
+            Dim tcs As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
             _uiSync.Post(Sub()
                              Try : action() : tcs.SetResult(True)
                              Catch ex As Exception : tcs.SetException(ex)
@@ -612,7 +632,7 @@ Namespace Agents
         End Function
 
         Private Shared Function RunOnUiAsync(Of T)(func As Func(Of Task(Of T))) As Task(Of T)
-            Dim tcs As New TaskCompletionSource(Of T)()
+            Dim tcs As New TaskCompletionSource(Of T)(TaskCreationOptions.RunContinuationsAsynchronously)
             _uiSync.Post(Async Sub()
                              Try : tcs.SetResult(Await func().ConfigureAwait(True))
                              Catch ex As Exception : tcs.SetException(ex)
@@ -622,7 +642,7 @@ Namespace Agents
         End Function
 
         Private Shared Function RunOnUiAsync(func As Func(Of Task)) As Task
-            Dim tcs As New TaskCompletionSource(Of Boolean)()
+            Dim tcs As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
             _uiSync.Post(Async Sub()
                              Try : Await func().ConfigureAwait(True) : tcs.SetResult(True)
                              Catch ex As Exception : tcs.SetException(ex)

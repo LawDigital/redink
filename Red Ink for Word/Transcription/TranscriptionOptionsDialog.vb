@@ -31,6 +31,14 @@ Namespace Transcription
     Public Class TranscriptionOptionsDialog
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         Private Class NamedValueItem
             Public Property Name As String
             Public Property Value As String
@@ -189,6 +197,8 @@ Namespace Transcription
                 .VoskSimilarityThreshold = source.VoskSimilarityThreshold,
                 .MultiChannelDiarization = source.MultiChannelDiarization,
                 .AudioDebugDump = source.AudioDebugDump,
+                .PreferredMicrophoneDeviceId = source.PreferredMicrophoneDeviceId,
+                .PreferredMicrophoneDisplayName = source.PreferredMicrophoneDisplayName,
                 .TurnDetection = source.TurnDetection,
                 .Prompt = source.Prompt
             }
@@ -511,6 +521,8 @@ Namespace Transcription
 
                 Case EngineKind.WhisperLocal
                     AddFullWidthRow(grid, chkTrans)
+                    AddLabeledRow(grid, "Whisper runtime", BuildReadOnlyValueLabel(WhisperEngine.GetLoadedRuntimeDisplayText()))
+                    AddFullWidthRow(grid, BuildInfoLabel(WhisperEngine.GetRuntimeOptimizationHint()))
                     AddLabeledRow(grid, "Whisper VAD", nudVad)
                     AddLabeledRow(grid, "Model override", txtModel)
 
@@ -546,6 +558,16 @@ Namespace Transcription
 
             grp.Controls.Add(grid)
             Return grp
+        End Function
+
+        Private Shared Function BuildReadOnlyValueLabel(text As String) As Control
+            Return New Label() With {
+                .AutoSize = True,
+                .Text = text,
+                .Padding = New Padding(0, 4, 0, 4),
+                .Margin = New Padding(0),
+                .MaximumSize = New Size(650, 0)
+            }
         End Function
 
         Private Shared Function BuildInfoLabel(text As String) As Control

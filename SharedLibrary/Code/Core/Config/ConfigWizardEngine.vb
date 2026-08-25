@@ -151,63 +151,7 @@ Namespace SharedLibrary
             Return candidates.Values.Any(Function(v) String.Equals(v, path, StringComparison.OrdinalIgnoreCase))
         End Function
 
-        ''' <summary>
-        ''' Checks whether the current machine is allowed to launch the Configuration Wizard
-        ''' based on the CentralConfigClients INI key (same pattern as IsClientAllowedToUpdate).
-        ''' </summary>
-        Public Shared Function IsClientAllowedToUseWizard(context As ISharedContext) As Boolean
-            Try
-                Dim centralConfigClients As String = ""
-                Try
-                    centralConfigClients = GetSettingValue("CentralConfigClients", context)
-                Catch
-                    ' Key does not exist yet on context; treat as empty = allow all
-                End Try
 
-                If String.IsNullOrWhiteSpace(centralConfigClients) Then
-                    ' Fall back: read directly from the active INI file
-                    Try
-                        Dim iniPath As String = GetActiveConfigFilePath(context)
-                        If File.Exists(iniPath) Then
-                            For Each line In File.ReadAllLines(iniPath)
-                                Dim trimmed = line.Trim()
-                                If trimmed.StartsWith("CentralConfigClients", StringComparison.OrdinalIgnoreCase) Then
-                                    Dim parts = trimmed.Split({"="c}, 2)
-                                    If parts.Length = 2 Then
-                                        centralConfigClients = parts(1).Trim()
-                                    End If
-                                    Exit For
-                                End If
-                            Next
-                        End If
-                    Catch
-                    End Try
-                End If
-
-                If String.IsNullOrWhiteSpace(centralConfigClients) Then
-                    Return True
-                End If
-
-                Dim currentClient As String = GetCurrentClientIdentifier()
-                If String.IsNullOrWhiteSpace(currentClient) Then
-                    Return True
-                End If
-
-                Dim allowedClients = centralConfigClients.Split(","c).
-                    Select(Function(c) c.Trim()).
-                    Where(Function(c) Not String.IsNullOrWhiteSpace(c)).
-                    ToList()
-
-                If allowedClients.Count = 0 Then
-                    Return True
-                End If
-
-                Return allowedClients.Any(Function(c) c.Equals(currentClient, StringComparison.OrdinalIgnoreCase))
-
-            Catch
-                Return True
-            End Try
-        End Function
 
         ''' <summary>
         ''' Resolves the target INI path for the wizard. When both a central and local INI exist,
@@ -426,6 +370,64 @@ Namespace SharedLibrary
             Next
 
             ' Atomic write via temp file + replace (same pattern as CommitDryRunPlan)
+            Dim directory As String = Path.GetDirectoryName(iniPath)
+            Dim baseName As String = Path.GetFileNameWithoutExtension(iniPath)
+            Dim ext As String = Path.GetExtension(iniPath)
+            Dim tmpPath As String = Path.Combine(directory, baseName & "_tmp_" & Guid.NewGuid().ToString("N") & ext)
+
+            File.WriteAllText(tmpPath, updatedContent.ToString(), System.Text.Encoding.UTF8)
+
+            Try
+                If File.Exists(iniPath) Then
+                    File.Replace(tmpPath, iniPath, Nothing, True)
+                Else
+                    File.Move(tmpPath, iniPath)
+                End If
+            Catch
+                If File.Exists(iniPath) Then
+                    Try : File.Delete(iniPath) : Catch : End Try
+                End If
+                File.Move(tmpPath, iniPath)
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Removes the specified keys from the INI file, preserving comments and structure.
+        ''' Creates a timestamped backup before writing (same convention as <see cref="WriteIniValues"/>).
+        ''' </summary>
+        ''' <param name="iniPath">Path to the INI file to update.</param>
+        ''' <param name="keys">Keys to remove (case-insensitive).</param>
+        Public Shared Sub RemoveIniValues(iniPath As String, keys As IEnumerable(Of String))
+            If String.IsNullOrWhiteSpace(iniPath) Then
+                Throw New ArgumentNullException(NameOf(iniPath))
+            End If
+            If Not File.Exists(iniPath) Then Return
+
+            ' Create timestamped backup (same convention as WriteIniValues)
+            CreateWizardBackup(iniPath)
+
+            Dim removeSet As New HashSet(Of String)(keys, StringComparer.OrdinalIgnoreCase)
+
+            Dim updatedContent As New System.Text.StringBuilder()
+            For Each line In File.ReadAllLines(iniPath)
+                Dim trimmed = line.Trim()
+
+                ' Preserve comments and empty lines
+                If String.IsNullOrEmpty(trimmed) OrElse trimmed.StartsWith(";") Then
+                    updatedContent.AppendLine(line)
+                    Continue For
+                End If
+
+                Dim parts = trimmed.Split({"="c}, 2)
+                If parts.Length = 2 AndAlso removeSet.Contains(parts(0).Trim()) Then
+                    ' Drop this key line
+                    Continue For
+                End If
+
+                updatedContent.AppendLine(line)
+            Next
+
+            ' Atomic write via temp file + replace (same pattern as WriteIniValues)
             Dim directory As String = Path.GetDirectoryName(iniPath)
             Dim baseName As String = Path.GetFileNameWithoutExtension(iniPath)
             Dim ext As String = Path.GetExtension(iniPath)

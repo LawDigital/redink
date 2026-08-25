@@ -4,11 +4,17 @@
 '
 ' =============================================================================
 ' File: DrawioEditorForm.vb
-' Summary:
-'   Hosts the diagrams.net (draw.io) embedded editor inside a WinForms window
-'   using WebView2. Loads a diagram from an mxfile XML string and saves edited
-'   XML back to a local .drawio file. Supports export via the diagrams.net embed
-'   postMessage API.
+' Purpose:
+'   Hosts the diagrams.net embedded editor in WebView2 for editing a supplied mxfile XML
+'   document and saving/exporting the resulting diagram through the Word host workflow.
+'
+' Architecture / Function:
+'   - Uses the diagrams.net embed postMessage protocol; XML is exchanged with the page
+'     through structured host messages rather than injected as executable script.
+'   - Owns editor readiness, save/export requests and optional network disablement after
+'     initial load; edited XML is written only to the caller-supplied local save path.
+'   - Diagram-to-Word conversion/insertion is handled by the surrounding Word helper
+'     modules, keeping this class focused on the editor UI and message bridge.
 ' =============================================================================
 
 Option Strict On
@@ -91,13 +97,23 @@ Public Class DrawioEditorForm
     ''' </summary>
     Private Async Sub InitializeWebViewAsync()
         Try
-            Dim userDataFolder As String = Path.Combine(Path.GetTempPath(), "RedInk_WebView2_Drawio")
-            Directory.CreateDirectory(userDataFolder)
+            Dim userDataFolder As String = SharedLibrary.SharedLibrary.SharedMethods.GetWebView2UserDataFolder()
 
             Dim env As CoreWebView2Environment =
                 Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
 
             Await webView.EnsureCoreWebView2Async(env)
+
+            AddHandler webView.CoreWebView2.ProcessFailed,
+                Sub(s, e)
+                    SharedLibrary.SharedLibrary.SharedMethods.LogWebView2ProcessFailed("Drawio", e.ProcessFailedKind.ToString(), e.ExitCode.ToString())
+                    Try
+                        If e.ProcessFailedKind = CoreWebView2ProcessFailedKind.RenderProcessExited Then
+                            webView.Reload()
+                        End If
+                    Catch
+                    End Try
+                End Sub
 
             webView.CoreWebView2.Settings.AreDevToolsEnabled = True
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = True
