@@ -162,6 +162,42 @@ Namespace Agents
             Unknown
         End Enum
 
+        ''' <summary>
+        ''' Defines how an unresolved tool failure may be cleared by later successful work.
+        ''' The policy is host-agnostic and deliberately conservative: simply issuing another
+        ''' tool call never recovers a failure; recovery is recorded only after a successful
+        ''' substantive tool result.
+        ''' </summary>
+        Public Enum ToolFailureRecoveryPolicy
+            SameToolSuccessOnly
+            CompatibleAlternativeSuccessAllowed
+            DifferentAlternativeSuccessOnly
+            NoAutomaticRecovery
+        End Enum
+
+        Public NotInheritable Class ToolFailureRecord
+            Public Property Sequence As Long
+            Public Property ToolName As String = String.Empty
+            Public Property ErrorCode As String = String.Empty
+            Public Property ErrorMessage As String = String.Empty
+            Public Property SkippedByPolicy As Boolean
+            Public Property ReturnedToParent As Boolean
+            Public Property Terminal As Boolean
+            Public Property ToolErrorHandling As String = String.Empty
+            Public Property ToolClassification As ToolCallClassification = ToolCallClassification.Unknown
+            Public Property RecoveryScopeKey As String = String.Empty
+            Public Property RecoveryPolicy As ToolFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+            ' An alternative-path success is not always cleared immediately. When causal identity
+            ' cannot be proven by an explicit scope (or the failure was delegated to the parent),
+            ' success is recorded as recovery evidence and committed only on an accepted final turn.
+            Public Property RecoveryEvidenceObserved As Boolean
+            Public Property RecoveryEvidenceToolName As String = String.Empty
+            ' Substantive progress epoch at which this failure occurred. Consecutive fallback
+            ' failures created after the same prior substantive success share an epoch and may
+            ' be superseded together by one later successful alternative path.
+            Public Property ProgressEpoch As Long
+        End Class
+
         Public NotInheritable Class PlannedToolCall
             Public Property Index As Integer
             Public Property ToolName As String
@@ -272,12 +308,19 @@ Namespace Agents
             Public Property LastFailureHandledByBlockedFinal As Boolean
             Public Property LastFailureUltimatelyFatal As Boolean
             Public Property RecoveryToolName As String
+            Public Property LastFailureTerminal As Boolean
+            Public Property LastFailureRecoveryPolicy As ToolFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+            Public Property LastFailureToolClassification As ToolCallClassification = ToolCallClassification.Unknown
+            Public Property LastFailureToolErrorHandling As String = String.Empty
+            Public Property UnresolvedToolFailures As New List(Of ToolFailureRecord)()
+            Private _failureSequence As Long
+            Private _substantiveProgressEpoch As Long
 
             ' Tool-agnostic retry fidelity state. When a failed tool call carried a named
             ' design/template constraint, a retry of that same tool may not silently drop or
             ' replace it. The dispatcher uses the shared helper below in both Outlook and Word.
-            Public Property RetryInvariantArgumentsByTool As New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.OrdinalIgnoreCase)
-            Public Property RetryInvariantPendingFailureTools As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+            Public Property RetryInvariantArgumentsByTool As New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.Ordinal)
+            Public Property RetryInvariantPendingFailureTools As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.Ordinal)
 
             Public Property ActiveToolingSession As Boolean
             Public Property HasOpenToolWorkflow As Boolean
@@ -989,90 +1032,546 @@ Namespace Agents
                 End Get
             End Property
 
+            Public ReadOnly Property HasTerminalUnresolvedToolFailure As Boolean
+                Get
+                    If UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                        Return False
+                    End If
+
+                    For Each failure As ToolFailureRecord In UnresolvedToolFailures
+                        If failure IsNot Nothing AndAlso failure.Terminal Then
+                            Return True
+                        End If
+                    Next
+
+                    Return False
+                End Get
+            End Property
+
             Public Sub NoteToolFailure(toolName As String,
                                Optional errorCode As String = "",
                                Optional errorMessage As String = "",
                                Optional skippedByPolicy As Boolean = False,
-                               Optional returnedToParent As Boolean = False)
-                HasUnresolvedToolFailure = True
-                LastToolName = If(toolName, "")
-                LastErrorCode = If(errorCode, "")
-                LastErrorMessage = If(errorMessage, "")
-                LastFailureSkippedByPolicy = skippedByPolicy
-                LastFailureReturnedToParent = returnedToParent
-                LastFailureRecoveredByToolCall = False
-                LastFailureHandledByBlockedFinal = False
-                LastFailureUltimatelyFatal = False
-                RecoveryToolName = ""
-
+                               Optional returnedToParent As Boolean = False,
+                               Optional toolErrorHandling As String = "retry",
+                               Optional terminal As Boolean = False,
+                               Optional recoveryScopeKey As String = "")
                 Dim normalizedToolName As String = If(toolName, "").Trim()
-                If normalizedToolName <> "" AndAlso
+                Dim normalizedHandling As String = If(toolErrorHandling, "").Trim()
+                Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
+                Dim failurePolicy As ToolFailureRecoveryPolicy = ResolveFailureRecoveryPolicy(
+                    normalizedHandling,
+                    terminal,
+                    skippedByPolicy,
+                    returnedToParent)
+
+                _failureSequence += 1
+
+                If UnresolvedToolFailures Is Nothing Then
+                    UnresolvedToolFailures = New List(Of ToolFailureRecord)()
+                End If
+
+                ' A failed retry of the same tool updates its existing unresolved record instead
+                ' of creating duplicate stale failures. A failure of a different tool is retained
+                ' independently so later success cannot accidentally erase an older unresolved step.
+                Dim record As ToolFailureRecord = Nothing
+                For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+                    If System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                       RecoveryScopeKeysMatch(candidate.RecoveryScopeKey, normalizedRecoveryScopeKey) Then
+                        record = candidate
+                        Exit For
+                    End If
+                Next
+
+                If record Is Nothing Then
+                    record = New ToolFailureRecord()
+                    UnresolvedToolFailures.Add(record)
+                End If
+
+                record.Sequence = _failureSequence
+                record.ToolName = normalizedToolName
+                record.ErrorCode = If(errorCode, "")
+                record.ErrorMessage = If(errorMessage, "")
+                record.SkippedByPolicy = skippedByPolicy
+                record.ReturnedToParent = returnedToParent
+                record.Terminal = terminal
+                record.ToolErrorHandling = normalizedHandling
+                record.ToolClassification = ToolCallSequencing.ClassifyToolNameForRecovery(normalizedToolName)
+                record.RecoveryScopeKey = normalizedRecoveryScopeKey
+                record.RecoveryPolicy = failurePolicy
+                ' A new/failed retry invalidates any prior candidate recovery evidence for this
+                ' exact unresolved failure.
+                record.RecoveryEvidenceObserved = False
+                record.RecoveryEvidenceToolName = String.Empty
+                record.ProgressEpoch = _substantiveProgressEpoch
+
+                ProjectLatestUnresolvedFailure()
+
+                Dim retryInvariantKey As String = BuildRetryInvariantKey(normalizedToolName, normalizedRecoveryScopeKey)
+                If retryInvariantKey <> "" AndAlso
                    RetryInvariantArgumentsByTool IsNot Nothing AndAlso
-                   RetryInvariantArgumentsByTool.ContainsKey(normalizedToolName) Then
+                   RetryInvariantArgumentsByTool.ContainsKey(retryInvariantKey) Then
 
                     If RetryInvariantPendingFailureTools Is Nothing Then
-                        RetryInvariantPendingFailureTools = New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+                        RetryInvariantPendingFailureTools = New System.Collections.Generic.HashSet(Of String)(System.StringComparer.Ordinal)
                     End If
-                    RetryInvariantPendingFailureTools.Add(normalizedToolName)
+                    RetryInvariantPendingFailureTools.Add(retryInvariantKey)
                 End If
             End Sub
 
+            ''' <summary>
+            ''' Legacy compatibility hook. Merely issuing a later tool call is not evidence of
+            ''' recovery, so this method intentionally never clears the unresolved failure.
+            ''' Actual recovery is evaluated by NoteSuccessfulProgress after a successful result.
+            ''' </summary>
             Public Sub NoteRecoveryByLaterToolCall(toolName As String)
                 If Not HasUnresolvedToolFailure Then Return
-
-                Dim normalizedToolName As String = If(toolName, "").Trim()
-                If normalizedToolName <> "" AndAlso
-                   System.String.Equals(normalizedToolName, If(LastToolName, ""), System.StringComparison.OrdinalIgnoreCase) Then
-                    ' Issuing the same failed tool again is a retry, not a recovery. Keep the
-                    ' failure state until the retry has actually succeeded or a different path
-                    ' has recovered the workflow.
-                    Return
-                End If
-
-                HasUnresolvedToolFailure = False
-                LastFailureRecoveredByToolCall = True
-                LastFailureHandledByBlockedFinal = False
-                LastFailureUltimatelyFatal = False
-                RecoveryToolName = If(toolName, "")
+                RecoveryToolName = ""
             End Sub
 
             Public Sub NoteBlockedFinalHandled()
                 If Not HasUnresolvedToolFailure Then Return
+
+                If UnresolvedToolFailures IsNot Nothing Then
+                    UnresolvedToolFailures.Clear()
+                End If
 
                 HasUnresolvedToolFailure = False
                 LastFailureRecoveredByToolCall = False
                 LastFailureHandledByBlockedFinal = True
                 LastFailureUltimatelyFatal = False
                 RecoveryToolName = ""
+                LastToolName = ""
+                LastErrorCode = ""
+                LastErrorMessage = ""
+                LastFailureSkippedByPolicy = False
+                LastFailureReturnedToParent = False
+                LastFailureTerminal = False
+                LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                LastFailureToolClassification = ToolCallClassification.Unknown
+                LastFailureToolErrorHandling = ""
                 If RetryInvariantPendingFailureTools IsNot Nothing Then RetryInvariantPendingFailureTools.Clear()
                 If RetryInvariantArgumentsByTool IsNot Nothing Then RetryInvariantArgumentsByTool.Clear()
             End Sub
 
             Public Sub NoteFailureFatal()
                 If Not HasUnresolvedToolFailure Then Return
+
+                Dim latest As ToolFailureRecord = GetLatestUnresolvedFailure()
+                If latest IsNot Nothing Then
+                    latest.Terminal = True
+                    latest.RecoveryPolicy = ToolFailureRecoveryPolicy.NoAutomaticRecovery
+                End If
+
                 LastFailureUltimatelyFatal = True
+                LastFailureTerminal = True
+                LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.NoAutomaticRecovery
                 If RetryInvariantPendingFailureTools IsNot Nothing Then RetryInvariantPendingFailureTools.Clear()
                 If RetryInvariantArgumentsByTool IsNot Nothing Then RetryInvariantArgumentsByTool.Clear()
             End Sub
 
-            Public Sub NoteSuccessfulProgress(Optional toolName As String = "")
+            ''' <summary>
+            ''' Records successful substantive progress. An exact retry resolves only its matching
+            ''' failure. A different successful fallback may provide recovery evidence for the
+            ''' compatible unresolved failures created in the same substantive-progress epoch;
+            ''' failures from older epochs, retry-only/terminal barriers, and incompatible explicit
+            ''' scopes remain unresolved and continue to block false COMPLETE finalization.
+            ''' </summary>
+            Public Sub NoteSuccessfulProgress(Optional toolName As String = "",
+                                              Optional recoveryScopeKey As String = "")
                 Dim normalizedToolName As String = If(toolName, "").Trim()
-                If normalizedToolName <> "" AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
-                    RetryInvariantPendingFailureTools.Remove(normalizedToolName)
+                Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
+
+                ' Administrative/control-plane calls are intentionally not substantive progress.
+                ' In particular, tool_loader/report_progress/routing/context/memory calls must not
+                ' split a fallback chain or provide recovery evidence for a failed substantive step.
+                If IsRecoveryNeutralAdministrativeTool(normalizedToolName) Then
+                    Return
                 End If
 
-                HasUnresolvedToolFailure = False
-                LastToolName = ""
-                LastErrorCode = ""
-                LastErrorMessage = ""
-                LastFailureSkippedByPolicy = False
-                LastFailureReturnedToParent = False
+                Dim currentProgressEpoch As Long = _substantiveProgressEpoch
+
+                If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                    _substantiveProgressEpoch += 1
+                    Return
+                End If
+
+                Dim recoveryIndex As Integer = -1
+
+                ' Prefer an exact successful retry. This is deterministic and must not be confused
+                ' with merely issuing the same tool again; this method is called only after success.
+                For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+                    If Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If Not SuccessfulCallMatchesFailureScope(candidate, normalizedRecoveryScopeKey) Then Continue For
+
+                    If candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly OrElse
+                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
+                        recoveryIndex = i
+                    End If
+                    Exit For
+                Next
+
+                If recoveryIndex >= 0 Then
+                    Dim recovered As ToolFailureRecord = UnresolvedToolFailures(recoveryIndex)
+                    UnresolvedToolFailures.RemoveAt(recoveryIndex)
+
+                    If recovered IsNot Nothing AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
+                        RetryInvariantPendingFailureTools.Remove(
+                            BuildRetryInvariantKey(recovered.ToolName, recovered.RecoveryScopeKey))
+                    End If
+
+                    If UnresolvedToolFailures.Count > 0 Then
+                        ProjectLatestUnresolvedFailure()
+                    Else
+                        HasUnresolvedToolFailure = False
+                        LastToolName = ""
+                        LastErrorCode = ""
+                        LastErrorMessage = ""
+                        LastFailureSkippedByPolicy = False
+                        LastFailureReturnedToParent = False
+                        LastFailureTerminal = False
+                        LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                        LastFailureToolClassification = ToolCallClassification.Unknown
+                        LastFailureToolErrorHandling = ""
+                        LastFailureRecoveredByToolCall = True
+                        LastFailureHandledByBlockedFinal = False
+                        LastFailureUltimatelyFatal = False
+                        RecoveryToolName = normalizedToolName
+                    End If
+
+                    _substantiveProgressEpoch += 1
+                    Return
+                End If
+
+                ' Alternative-path recovery is phase-aware. Every compatible unresolved failure
+                ' created since the previous substantive success belongs to the same fallback chain.
+                ' A later successful substantive path may therefore supersede the whole compatible
+                ' chain, but it may not cross a prior substantive-success boundary, a terminal/retry
+                ' barrier, or an incompatible explicit recovery scope.
+                Dim immediateRecoveryIndexes As New System.Collections.Generic.List(Of Integer)()
+                For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+
+                    If candidate.ProgressEpoch <> currentProgressEpoch Then
+                        Exit For
+                    End If
+
+                    If candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
+                       candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
+                        Exit For
+                    End If
+
+                    If Not IsCompatibleAlternativeRecoveryTool(candidate, normalizedToolName, normalizedRecoveryScopeKey) Then
+                        Exit For
+                    End If
+
+                    Dim alternativeNeedsFinalCommit As Boolean =
+                        candidate.ReturnedToParent OrElse System.String.IsNullOrWhiteSpace(candidate.RecoveryScopeKey)
+
+                    If alternativeNeedsFinalCommit Then
+                        candidate.RecoveryEvidenceObserved = True
+                        candidate.RecoveryEvidenceToolName = normalizedToolName
+                    Else
+                        immediateRecoveryIndexes.Add(i)
+                    End If
+                Next
+
+                For Each index As Integer In immediateRecoveryIndexes
+                    Dim recovered As ToolFailureRecord = UnresolvedToolFailures(index)
+                    If recovered IsNot Nothing AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
+                        RetryInvariantPendingFailureTools.Remove(
+                            BuildRetryInvariantKey(recovered.ToolName, recovered.RecoveryScopeKey))
+                    End If
+                    UnresolvedToolFailures.RemoveAt(index)
+                Next
+
+                If UnresolvedToolFailures.Count > 0 Then
+                    ProjectLatestUnresolvedFailure()
+                Else
+                    HasUnresolvedToolFailure = False
+                    LastToolName = ""
+                    LastErrorCode = ""
+                    LastErrorMessage = ""
+                    LastFailureSkippedByPolicy = False
+                    LastFailureReturnedToParent = False
+                    LastFailureTerminal = False
+                    LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                    LastFailureToolClassification = ToolCallClassification.Unknown
+                    LastFailureToolErrorHandling = ""
+                    LastFailureRecoveredByToolCall = True
+                    LastFailureHandledByBlockedFinal = False
+                    LastFailureUltimatelyFatal = False
+                    RecoveryToolName = normalizedToolName
+                End If
+
+                _substantiveProgressEpoch += 1
+            End Sub
+
+            ''' <summary>
+            ''' Commits two-phase alternative recovery only after the host has accepted a final
+            ''' turn. This prevents unrelated intermediate successes from prematurely erasing an
+            ''' unresolved failure while still allowing generic fallback paths to complete.
+            ''' </summary>
+            Public Sub FinalizeObservedAlternativeRecoveries(Optional recoveryLabel As String = "alternative_recovery_finalized")
+                If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                    Return
+                End If
+
+                For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing OrElse Not candidate.RecoveryEvidenceObserved Then
+                        Continue For
+                    End If
+
+                    If RetryInvariantPendingFailureTools IsNot Nothing Then
+                        RetryInvariantPendingFailureTools.Remove(
+                            BuildRetryInvariantKey(candidate.ToolName, candidate.RecoveryScopeKey))
+                    End If
+                    UnresolvedToolFailures.RemoveAt(i)
+                Next
+
+                If UnresolvedToolFailures.Count > 0 Then
+                    ProjectLatestUnresolvedFailure()
+                Else
+                    HasUnresolvedToolFailure = False
+                    LastToolName = ""
+                    LastErrorCode = ""
+                    LastErrorMessage = ""
+                    LastFailureSkippedByPolicy = False
+                    LastFailureReturnedToParent = False
+                    LastFailureTerminal = False
+                    LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                    LastFailureToolClassification = ToolCallClassification.Unknown
+                    LastFailureToolErrorHandling = ""
+                    LastFailureRecoveredByToolCall = True
+                    LastFailureHandledByBlockedFinal = False
+                    LastFailureUltimatelyFatal = False
+                    RecoveryToolName = If(recoveryLabel, "")
+                End If
+            End Sub
+
+            Public Function ClearLatestFailureByCode(errorCode As String,
+                                                     recoveryLabel As String) As Boolean
+                If UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                    Return False
+                End If
+
+                Dim normalizedErrorCode As String = If(errorCode, "").Trim()
+                For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+                    If Not System.String.Equals(candidate.ErrorCode, normalizedErrorCode, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    UnresolvedToolFailures.RemoveAt(i)
+                    If UnresolvedToolFailures.Count > 0 Then
+                        ProjectLatestUnresolvedFailure()
+                    Else
+                        HasUnresolvedToolFailure = False
+                        LastToolName = ""
+                        LastErrorCode = ""
+                        LastErrorMessage = ""
+                        LastFailureSkippedByPolicy = False
+                        LastFailureReturnedToParent = False
+                        LastFailureTerminal = False
+                        LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                        LastFailureToolClassification = ToolCallClassification.Unknown
+                        LastFailureToolErrorHandling = ""
+                        LastFailureRecoveredByToolCall = True
+                        LastFailureHandledByBlockedFinal = False
+                        LastFailureUltimatelyFatal = False
+                        RecoveryToolName = If(recoveryLabel, "")
+                    End If
+                    Return True
+                Next
+
+                Return False
+            End Function
+
+            Private Function IsCompatibleAlternativeRecoveryTool(failure As ToolFailureRecord,
+                                                                  toolName As String,
+                                                                  recoveryScopeKey As String) As Boolean
+                If failure Is Nothing Then
+                    Return False
+                End If
+
+                Dim normalizedToolName As String = If(toolName, "").Trim()
+                Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
+                If normalizedToolName = "" Then
+                    Return False
+                End If
+
+                If System.String.Equals(failure.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return failure.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
+                           SuccessfulCallMatchesFailureScope(failure, normalizedRecoveryScopeKey)
+                End If
+
+                If IsRecoveryNeutralAdministrativeTool(normalizedToolName) Then
+                    Return False
+                End If
+
+                ' A delegated failure explicitly returned to the parent establishes a host-owned
+                ' hand-off. Any later *different substantive* successful capability may recover that
+                ' delegated path. Administrative calls never qualify, and a terminal delegated
+                ' failure cannot be "recovered" merely by invoking the same failed agent again.
+                If failure.ReturnedToParent Then
+                    Return True
+                End If
+
+                ' For direct tool failures, ToolErrorHandling=skip is the generic opt-in that permits
+                ' an alternative path. If the caller supplied an opaque operation/task/artifact scope,
+                ' the alternative must carry that exact same scope. Unscoped skip failures may be
+                ' recovered by the next different substantive success; retry/abort failures never use
+                ' this branch because their recovery policy does not permit alternatives.
+                If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
+                    Return False
+                End If
+
+                If String.IsNullOrWhiteSpace(failure.RecoveryScopeKey) Then
+                    Return True
+                End If
+
+                Return RecoveryScopeKeysMatch(failure.RecoveryScopeKey, normalizedRecoveryScopeKey)
+            End Function
+
+            Private Shared Function SuccessfulCallMatchesFailureScope(failure As ToolFailureRecord,
+                                                                     recoveryScopeKey As String) As Boolean
+                If failure Is Nothing Then
+                    Return False
+                End If
+
+                Dim failureScopeKey As String = If(failure.RecoveryScopeKey, "").Trim()
+                Dim successScopeKey As String = If(recoveryScopeKey, "").Trim()
+
+                ' Legacy/unscoped tools remain recoverable by an exact successful retry of the
+                ' same tool. Once an explicit opaque scope exists, it must match exactly.
+                If failureScopeKey = "" Then
+                    Return True
+                End If
+
+                Return RecoveryScopeKeysMatch(failureScopeKey, successScopeKey)
+            End Function
+
+            Private Shared Function RecoveryScopeKeysMatch(left As String,
+                                                           right As String) As Boolean
+                Return System.String.Equals(
+                    If(left, "").Trim(),
+                    If(right, "").Trim(),
+                    System.StringComparison.Ordinal)
+            End Function
+
+            Private Shared Function ResolveFailureRecoveryPolicy(toolErrorHandling As String,
+                                                                 terminal As Boolean,
+                                                                 skippedByPolicy As Boolean,
+                                                                 returnedToParent As Boolean) As ToolFailureRecoveryPolicy
+                Dim normalizedHandling As String = If(toolErrorHandling, "").Trim().ToLowerInvariant()
+                Dim parentAlternativeAllowed As Boolean = skippedByPolicy AndAlso returnedToParent
+
+                If terminal Then
+                    If parentAlternativeAllowed Then
+                        Return ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
+                    End If
+                    Return ToolFailureRecoveryPolicy.NoAutomaticRecovery
+                End If
+
+                If parentAlternativeAllowed Then
+                    Return ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed
+                End If
+
+                Select Case normalizedHandling
+                    Case "retry"
+                        Return ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                    Case "abort"
+                        Return ToolFailureRecoveryPolicy.NoAutomaticRecovery
+                    Case Else
+                        ' The host treats an empty/unknown ToolErrorHandling value as skip.
+                        ' Mirror that behavior here so the sequencing state machine and physical
+                        ' dispatcher cannot disagree about whether an alternative path is allowed.
+                        Return ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed
+                End Select
+            End Function
+
+            Private Function GetLatestUnresolvedFailure() As ToolFailureRecord
+                Dim index As Integer = GetLatestUnresolvedFailureIndex()
+                If index < 0 Then
+                    Return Nothing
+                End If
+                Return UnresolvedToolFailures(index)
+            End Function
+
+            Private Function GetLatestUnresolvedFailureIndex() As Integer
+                If UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                    Return -1
+                End If
+
+                Dim bestIndex As Integer = -1
+                Dim bestSequence As Long = Long.MinValue
+                For i As Integer = 0 To UnresolvedToolFailures.Count - 1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+                    If bestIndex < 0 OrElse candidate.Sequence > bestSequence Then
+                        bestIndex = i
+                        bestSequence = candidate.Sequence
+                    End If
+                Next
+                Return bestIndex
+            End Function
+
+            Private Sub ProjectLatestUnresolvedFailure()
+                Dim latest As ToolFailureRecord = GetLatestUnresolvedFailure()
+                If latest Is Nothing Then
+                    HasUnresolvedToolFailure = False
+                    Return
+                End If
+
+                HasUnresolvedToolFailure = True
+                LastToolName = If(latest.ToolName, "")
+                LastErrorCode = If(latest.ErrorCode, "")
+                LastErrorMessage = If(latest.ErrorMessage, "")
+                LastFailureSkippedByPolicy = latest.SkippedByPolicy
+                LastFailureReturnedToParent = latest.ReturnedToParent
+                LastFailureTerminal = latest.Terminal
+                LastFailureRecoveryPolicy = latest.RecoveryPolicy
+                LastFailureToolClassification = latest.ToolClassification
+                LastFailureToolErrorHandling = If(latest.ToolErrorHandling, "")
                 LastFailureRecoveredByToolCall = False
                 LastFailureHandledByBlockedFinal = False
                 LastFailureUltimatelyFatal = False
                 RecoveryToolName = ""
             End Sub
+
+            Private Shared Function IsRecoveryNeutralAdministrativeTool(toolName As String) As Boolean
+                If System.String.IsNullOrWhiteSpace(toolName) Then
+                    Return True
+                End If
+
+                Dim normalizedToolName As String = toolName.Trim()
+
+                If normalizedToolName.StartsWith("memory_", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                Return System.String.Equals(normalizedToolName, ToolLoaderTool.LoaderToolName, System.StringComparison.OrdinalIgnoreCase) OrElse
+                       System.String.Equals(normalizedToolName, CapabilityRoutingTool.ResolverToolName, System.StringComparison.OrdinalIgnoreCase) OrElse
+                       System.String.Equals(normalizedToolName, "report_progress", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       System.String.Equals(normalizedToolName, "tool_describe", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       System.String.Equals(normalizedToolName, "context_compact", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       System.String.Equals(normalizedToolName, "context_expand", System.StringComparison.OrdinalIgnoreCase)
+            End Function
         End Class
+
+        Private Shared Function BuildRetryInvariantKey(toolName As String, recoveryScopeKey As String) As String
+            Dim normalizedToolName As String = If(toolName, "").Trim().ToLowerInvariant()
+            Dim normalizedScopeKey As String = If(recoveryScopeKey, "").Trim()
+            If normalizedScopeKey = "" Then
+                Return normalizedToolName
+            End If
+            Return normalizedToolName & ChrW(&H1F) & normalizedScopeKey
+        End Function
 
         Private Shared ReadOnly RetryInvariantArgumentNames As String() = {"design_name", "template_attachment_name", "document_type", "document_language", "organization"}
 
@@ -1096,18 +1595,29 @@ Namespace Agents
 
             If runState.RetryInvariantArgumentsByTool Is Nothing Then
                 runState.RetryInvariantArgumentsByTool =
-                    New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.OrdinalIgnoreCase)
+                    New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.Ordinal)
             End If
 
+            Dim recoveryScopeKey As String = ResolveExplicitRecoveryScopeKey(arguments)
+            Dim retryInvariantKey As String = BuildRetryInvariantKey(normalizedToolName, recoveryScopeKey)
             Dim captured As System.Collections.Generic.Dictionary(Of String, String) = Nothing
-            runState.RetryInvariantArgumentsByTool.TryGetValue(normalizedToolName, captured)
+            runState.RetryInvariantArgumentsByTool.TryGetValue(retryInvariantKey, captured)
 
-            Dim isRetryOfFailedTool As Boolean =
-                runState.HasUnresolvedToolFailure AndAlso
-                System.String.Equals(If(runState.LastToolName, ""), normalizedToolName, System.StringComparison.OrdinalIgnoreCase)
+            Dim isRetryOfFailedTool As Boolean = False
+            If runState.HasUnresolvedToolFailure AndAlso runState.UnresolvedToolFailures IsNot Nothing Then
+                For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
+                    If failure Is Nothing Then Continue For
+                    If System.String.Equals(failure.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                       RecoveryScopeKeysMatch(failure.RecoveryScopeKey, recoveryScopeKey) Then
+                        isRetryOfFailedTool = True
+                        Exit For
+                    End If
+                Next
+            End If
+
             Dim hasPendingRetryFidelity As Boolean =
                 runState.RetryInvariantPendingFailureTools IsNot Nothing AndAlso
-                runState.RetryInvariantPendingFailureTools.Contains(normalizedToolName)
+                runState.RetryInvariantPendingFailureTools.Contains(retryInvariantKey)
 
             If (isRetryOfFailedTool OrElse hasPendingRetryFidelity) AndAlso captured IsNot Nothing AndAlso captured.Count > 0 Then
                 Dim restored As New System.Collections.Generic.List(Of String)()
@@ -1142,9 +1652,9 @@ Namespace Agents
             Next
 
             If currentCapture.Count > 0 Then
-                runState.RetryInvariantArgumentsByTool(normalizedToolName) = currentCapture
+                runState.RetryInvariantArgumentsByTool(retryInvariantKey) = currentCapture
             ElseIf Not isRetryOfFailedTool AndAlso Not hasPendingRetryFidelity Then
-                runState.RetryInvariantArgumentsByTool.Remove(normalizedToolName)
+                runState.RetryInvariantArgumentsByTool.Remove(retryInvariantKey)
             End If
 
             Return True
@@ -1164,9 +1674,11 @@ Namespace Agents
 
             If runState.RetryInvariantArgumentsByTool Is Nothing Then
                 runState.RetryInvariantArgumentsByTool =
-                    New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.OrdinalIgnoreCase)
+                    New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.Ordinal)
             End If
 
+            Dim recoveryScopeKey As System.String = ResolveExplicitRecoveryScopeKey(arguments)
+            Dim retryInvariantKey As System.String = BuildRetryInvariantKey(normalizedToolName, recoveryScopeKey)
             Dim capture As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
             For Each argumentName As System.String In RetryInvariantArgumentNames
                 Dim value As System.String = GetRetryInvariantArgumentValue(arguments, argumentName)
@@ -1174,7 +1686,7 @@ Namespace Agents
             Next
 
             If capture.Count > 0 Then
-                runState.RetryInvariantArgumentsByTool(normalizedToolName) = capture
+                runState.RetryInvariantArgumentsByTool(retryInvariantKey) = capture
             End If
         End Sub
 
@@ -1289,6 +1801,91 @@ Namespace Agents
             Return ToolCallClassification.Unknown
         End Function
 
+        Private Shared Function RecoveryScopeKeysMatch(left As String,
+                                                       right As String) As Boolean
+            Return System.String.Equals(
+                If(left, "").Trim(),
+                If(right, "").Trim(),
+                System.StringComparison.Ordinal)
+        End Function
+
+        Public Shared Function ResolveExplicitRecoveryScopeKey(arguments As IDictionary(Of String, Object)) As String
+            If arguments Is Nothing Then
+                Return ""
+            End If
+
+            Dim value As Object = Nothing
+            Dim operationId As String = ""
+            If arguments.TryGetValue("operation_id", value) AndAlso value IsNot Nothing Then
+                operationId = If(System.Convert.ToString(value), "").Trim()
+                If operationId <> "" Then
+                    Return "operation:" & operationId
+                End If
+            End If
+
+            value = Nothing
+            Dim subAgentTaskId As String = ""
+            If arguments.TryGetValue("subagent_task_id", value) AndAlso value IsNot Nothing Then
+                subAgentTaskId = If(System.Convert.ToString(value), "").Trim()
+                If subAgentTaskId <> "" Then
+                    Return "subagent:" & subAgentTaskId
+                End If
+            End If
+
+            Dim logicalDeliverableId As String = ""
+            Dim outputSlotId As String = ""
+
+            value = Nothing
+            If arguments.TryGetValue("logical_deliverable_id", value) AndAlso value IsNot Nothing Then
+                logicalDeliverableId = If(System.Convert.ToString(value), "").Trim()
+            End If
+
+            value = Nothing
+            If arguments.TryGetValue("output_slot_id", value) AndAlso value IsNot Nothing Then
+                outputSlotId = If(System.Convert.ToString(value), "").Trim()
+            End If
+
+            If logicalDeliverableId <> "" AndAlso outputSlotId <> "" Then
+                Return "artifact:" & logicalDeliverableId & "|" & outputSlotId
+            End If
+
+            Return ""
+        End Function
+
+        Friend Shared Function ClassifyToolNameForRecovery(toolName As String) As ToolCallClassification
+            Dim classification As ToolCallClassification = ClassifyToolName(toolName)
+            If classification <> ToolCallClassification.Unknown Then
+                Return classification
+            End If
+
+            Dim name As String = If(toolName, "").Trim().ToLowerInvariant()
+            If name = "" Then
+                Return ToolCallClassification.Unknown
+            End If
+
+            ' Recovery classification is deliberately broader than batching classification.
+            ' It is used only to decide whether a successful *different* tool may satisfy a
+            ' skipped failure; it never changes execution ordering or mutation barriers.
+            If HasAnyToken(name,
+                           "edit", "markup", "comment", "redact", "watermark", "merge", "split",
+                           "convert", "fill", "complete", "execute", "interact", "publish", "respond", "reply") Then
+                Return ToolCallClassification.Mutating
+            End If
+
+            If HasAnyToken(name,
+                           "open", "browse", "navigate") Then
+                Return ToolCallClassification.Stateful
+            End If
+
+            If HasAnyToken(name,
+                           "snapshot", "observe", "describe", "preview", "summarize", "analyze",
+                           "compare", "validate", "verify", "check", "cite") Then
+                Return ToolCallClassification.ReadOnlyIndependent
+            End If
+
+            Return ToolCallClassification.Unknown
+        End Function
+
         Public Shared Function IsBarrierClassification(classification As ToolCallClassification) As Boolean
             Select Case classification
                 Case ToolCallClassification.ReadOnlyIndependent
@@ -1318,13 +1915,20 @@ Namespace Agents
                                                          message As String,
                                                          Optional lastToolName As String = "",
                                                          Optional lastToolErrorCode As String = "",
-                                                         Optional lastToolErrorMessage As String = "") As String
+                                                         Optional lastToolErrorMessage As String = "",
+                                                         Optional retryable As System.Nullable(Of Boolean) = Nothing) As String
+            Dim errorObject As New JObject(
+                New JProperty("code", If(errorCode, "")),
+                New JProperty("phase", If(phase, "")),
+                New JProperty("message", If(message, "")))
+
+            If retryable.HasValue Then
+                errorObject("retryable") = retryable.Value
+            End If
+
             Dim obj As New JObject(
                 New JProperty("status", "blocked"),
-                New JProperty("error", New JObject(
-                    New JProperty("code", If(errorCode, "")),
-                    New JProperty("phase", If(phase, "")),
-                    New JProperty("message", If(message, "")))))
+                New JProperty("error", errorObject))
 
             If Not String.IsNullOrWhiteSpace(lastToolName) OrElse
                Not String.IsNullOrWhiteSpace(lastToolErrorCode) OrElse
@@ -1345,6 +1949,7 @@ Namespace Agents
                 End If
 
                 obj("lastToolFailure") = lastTool
+                errorObject("lastToolFailure") = lastTool.DeepClone()
             End If
 
             Return obj.ToString(Formatting.None)
@@ -3607,6 +4212,27 @@ Namespace Agents
                 Return False
             End If
 
+            If runState.UnresolvedToolFailures IsNot Nothing AndAlso runState.UnresolvedToolFailures.Count > 0 Then
+                For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
+                    If failure Is Nothing Then Continue For
+                    If String.Equals(
+                        If(failure.ErrorCode, "").Trim(),
+                        ToolNotExposedInCurrentTurnCode,
+                        StringComparison.OrdinalIgnoreCase) Then
+                        Continue For
+                    End If
+
+                    If failure.RecoveryEvidenceObserved Then
+                        Continue For
+                    End If
+
+                    Return True
+                Next
+                Return False
+            End If
+
+            ' Compatibility fallback for states created before the unresolved-failure registry
+            ' was introduced or for external callers that only populated the legacy projection.
             Return Not String.Equals(
                 If(runState.LastErrorCode, "").Trim(),
                 ToolNotExposedInCurrentTurnCode,
@@ -3619,6 +4245,15 @@ Namespace Agents
                 Return
             End If
 
+            Dim clearedRegistryFailure As Boolean = False
+            While runState.ClearLatestFailureByCode(ToolNotExposedInCurrentTurnCode, recoveryLabel)
+                clearedRegistryFailure = True
+            End While
+            If clearedRegistryFailure Then
+                Return
+            End If
+
+            ' Compatibility fallback for legacy states without a registry entry.
             If Not String.Equals(
                 If(runState.LastErrorCode, "").Trim(),
                 ToolNotExposedInCurrentTurnCode,

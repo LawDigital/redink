@@ -862,7 +862,10 @@ Partial Public Class ThisAddIn
     Public Async Function InLanguage1() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         TranslateLanguage = INI_Language1
-        Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+        Dim dictionarySelectionCancelled As System.Boolean = False
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        If dictionarySelectionCancelled Then Return False
+        Dim result As Boolean = Await ProcessSelectedRange(translatePrompt, True, False, False, False, True, False, SysCommandAlreadyInterpolated:=True)
         Return result
     End Function
 
@@ -873,7 +876,10 @@ Partial Public Class ThisAddIn
     Public Async Function InLanguage2() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         TranslateLanguage = INI_Language2
-        Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+        Dim dictionarySelectionCancelled As System.Boolean = False
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        If dictionarySelectionCancelled Then Return False
+        Dim result As Boolean = Await ProcessSelectedRange(translatePrompt, True, False, False, False, True, False, SysCommandAlreadyInterpolated:=True)
         Return result
     End Function
 
@@ -893,7 +899,10 @@ Partial Public Class ThisAddIn
             If selectedRange IsNot Nothing Then
                 selectedRange.Select()
             End If
-            Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+            Dim dictionarySelectionCancelled As System.Boolean = False
+            Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+            If dictionarySelectionCancelled Then Return False
+            Dim result As Boolean = Await ProcessSelectedRange(translatePrompt, True, False, False, False, True, False, SysCommandAlreadyInterpolated:=True)
             Return result
         End If
 
@@ -912,7 +921,10 @@ Partial Public Class ThisAddIn
             "",
             _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
-            Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, True, False, True, False)
+            Dim dictionarySelectionCancelled As System.Boolean = False
+            Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+            If dictionarySelectionCancelled Then Return False
+            Dim result As Boolean = Await ProcessSelectedRange(translatePrompt, True, False, True, False, True, False, SysCommandAlreadyInterpolated:=True)
             Return result
         End If
 
@@ -1715,6 +1727,7 @@ SkipPromptWin:
             {"PostCorrection", "Prompt to apply after queries"},
             {"Language1", "Default translation language 1"},
             {"Language2", "Default translation language 2"},
+            {"DictionarySegmentPrompt", "Ask for dictionary segment(s)"},
             {"PromptLibPath", "Prompt library file"},
             {"PromptLibPathLocal", "Prompt library file (local)"},
             {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
@@ -1737,6 +1750,7 @@ SkipPromptWin:
             {"PostCorrection", "Add a prompt that will be applied to each result before it is further processed (slow!)"},
             {"Language1", "The language (in English) that will be used for the first quick access button in the ribbon"},
             {"Language2", "The language (in English) that will be used for the second quick access button in the ribbon"},
+            {"DictionarySegmentPrompt", "Temporarily enable or disable the interactive dictionary-segment selection. When disabled, translations use only global dictionary content plus the common [TargetLanguage] block."},
             {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
             {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
             {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added authomatically)."},

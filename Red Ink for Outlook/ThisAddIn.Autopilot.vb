@@ -2801,7 +2801,17 @@ Partial Public Class ThisAddIn
                 If oversizedNote IsNot Nothing Then
                     userPrompt &= oversizedNote
                 End If
-                Dim systemPrompt As String = InterpolateAtRuntime(SP_AutoPilot)
+                LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
+                Dim senderDesignAccess As AutoPilotSenderDesignAccess = ResolveDesignAccessForSender(mailInfo.SenderEmail)
+                Dim systemPrompt As System.String
+                Using promptDesignScope As System.IDisposable =
+                    SharedLibrary.Agents.DesignRepository.PushAccessScope(
+                        senderDesignAccess.AllowDesigns, senderDesignAccess.AllowDesignSets)
+                    ' The design capability must already be active while SP_AutoPilot is
+                    ' interpolated; otherwise blocked repository names could leak into the
+                    ' prompt even though subsequent creator lookups are denied.
+                    systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+                End Using
 
                 ' ── Inject per-sender policy system-prompt instruction (hard, in-code) ──
                 Dim senderPromptAddition As String = ResolveSystemPromptAdditionForSender(mailInfo.SenderEmail)
@@ -2851,7 +2861,11 @@ Partial Public Class ThisAddIn
                 Dim previousMaxToolIterations = INI_ToolingMaximumIterations
                 INI_ToolingMaximumIterations = AP_MaxToolIterations
 
+                Dim senderDesignScope As System.IDisposable = Nothing
+
                 Try
+                    senderDesignScope = SharedLibrary.Agents.DesignRepository.PushAccessScope(
+                        senderDesignAccess.AllowDesigns, senderDesignAccess.AllowDesignSets)
                     ' Establish the per-mail workspace inside the guarded scope so any
                     ' setup failure still restores the previous Local-Agent/AutoPilot state.
                     _chatAgentWorkspace = BuildAutoPilotTempWorkspaceState()
@@ -2941,6 +2955,7 @@ Partial Public Class ThisAddIn
                         Throw ' Session-level cancel — propagate
                     End If
                 Finally
+                    If senderDesignScope IsNot Nothing Then senderDesignScope.Dispose()
                     _apCurrentTempDir = Nothing
                     _apCurrentAttachments = Nothing
                     _apCurrentMailInfo = Nothing
@@ -4749,7 +4764,7 @@ Partial Public Class ThisAddIn
             If legacyCompatibilityPaths.Count > 0 Then
                 ApDashboardLog(
                     $"Legacy deliverable compatibility surfaced {legacyCompatibilityPaths.Count} file(s) from explicitly deliverable-capable host tooling. Migrate these tools to artifacts[] when practical.",
-                    "warn")
+                    "info")
             End If
         End If
 
@@ -5570,11 +5585,14 @@ Partial Public Class ThisAddIn
                 contentHtml &= sourcesHtml
             End If
 
+            If _apConfig IsNot Nothing Then LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
+            Dim disclaimerHtml As System.String = BuildAutoPilotDisclaimerHtml(ResolveDisclaimerForSender(senderAddr))
             Dim footerHtml As String = BuildAutoPilotFooter()
             Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
-                PrepareAutoPilotOutgoingDelivery(contentHtml & footerHtml & originalThread, resultAttachments)
+                PrepareAutoPilotOutgoingDelivery(contentHtml & disclaimerHtml & footerHtml & originalThread, resultAttachments)
 
             contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            contentHtml &= disclaimerHtml
             contentHtml &= footerHtml
 
             reply.HTMLBody = contentHtml & originalThread
@@ -5769,7 +5787,8 @@ Partial Public Class ThisAddIn
                 cleanupGroupId,
                 cleanupIsEligible,
                 cleanupAnsweredUtc,
-                cleanupDeleteAfterUtc)
+                cleanupDeleteAfterUtc,
+                disclaimerHtml)
 
         Catch ex As System.Exception
             ApDashboardLog(
@@ -7573,11 +7592,18 @@ Partial Public Class ThisAddIn
             Dim previousMaxToolIterations = INI_ToolingMaximumIterations
             INI_ToolingMaximumIterations = AP_MaxToolIterations
 
+            If _apConfig IsNot Nothing Then LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
+            Dim senderDesignAccess As AutoPilotSenderDesignAccess = ResolveDesignAccessForSender(recipientEmail)
+            Dim senderDesignScope As System.IDisposable = Nothing
+
             ' Save references before Finally clears them
             Dim savedAttachments = _apCurrentAttachments
             voicemailAttachmentsForRecovery = savedAttachments
 
             Try
+                senderDesignScope = SharedLibrary.Agents.DesignRepository.PushAccessScope(
+                    senderDesignAccess.AllowDesigns, senderDesignAccess.AllowDesignSets)
+
                 ' Establish the per-voicemail workspace inside the guarded scope so a
                 ' setup exception cannot leak workspace/PathPolicy state into later runs.
                 _chatAgentWorkspace = BuildAutoPilotTempWorkspaceState()
@@ -7651,6 +7677,7 @@ Partial Public Class ThisAddIn
                                          binaryOutputDirectory:=tempDir)
                 End If
             Finally
+                If senderDesignScope IsNot Nothing Then senderDesignScope.Dispose()
                 _apCurrentTempDir = Nothing
                 _apCurrentAttachments = Nothing
                 _apCurrentMailInfo = Nothing
@@ -7826,11 +7853,14 @@ Partial Public Class ThisAddIn
                 contentHtml &= sourcesHtml
             End If
 
+            If _apConfig IsNot Nothing Then LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
+            Dim disclaimerHtml As System.String = BuildAutoPilotDisclaimerHtml(ResolveDisclaimerForSender(recipientEmail))
             Dim footerHtml As String = BuildAutoPilotFooter()
             Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
-                PrepareAutoPilotOutgoingDelivery(contentHtml & footerHtml, resultAttachments)
+                PrepareAutoPilotOutgoingDelivery(contentHtml & disclaimerHtml & footerHtml, resultAttachments)
 
             contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            contentHtml &= disclaimerHtml
             contentHtml &= footerHtml
             newMail.HTMLBody = contentHtml
 
@@ -7955,7 +7985,8 @@ Partial Public Class ThisAddIn
                 cleanupGroupId,
                 cleanupIsEligible,
                 cleanupAnsweredUtc,
-                cleanupDeleteAfterUtc)
+                cleanupDeleteAfterUtc,
+                disclaimerHtml)
 
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending voicemail reply: {ex.Message}", "error")

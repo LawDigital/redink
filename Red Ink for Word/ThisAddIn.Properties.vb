@@ -1937,6 +1937,24 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_PlayWrightPath As String
+        Get
+            Return _context.INI_PlayWrightPath
+        End Get
+        Set(value As String)
+            _context.INI_PlayWrightPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_PlayWrightUseLocalCache As Boolean
+        Get
+            Return _context.INI_PlayWrightUseLocalCache
+        End Get
+        Set(value As Boolean)
+            _context.INI_PlayWrightUseLocalCache = value
+        End Set
+    End Property
+
 
     Public Shared Property INI_UpdateCheckInterval As Integer
         Get
@@ -2091,6 +2109,16 @@ Partial Public Class ThisAddIn
             _context.INI_DictionaryPathLocal = value
         End Set
     End Property
+
+    Public Shared Property INI_DictionarySegmentPrompt As System.Boolean
+        Get
+            Return _context.INI_DictionarySegmentPrompt
+        End Get
+        Set(value As System.Boolean)
+            _context.INI_DictionarySegmentPrompt = value
+        End Set
+    End Property
+
 
     Public Shared Property INI_STT_Google As String
         Get

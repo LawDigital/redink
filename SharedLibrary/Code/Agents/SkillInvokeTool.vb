@@ -214,8 +214,10 @@ Namespace Agents
 
             idx("note") =
                 If(authorActive, "", "Author mode is OFF: skills and agents are READ-ONLY; do not attempt to create or edit any resource files. ") &
-                "To modify an EXISTING resource, edit the exact 'file' path shown for it (each entry carries its 'origin' = local or central). " &
-                "Do not invent new paths for existing resources, and do not copy a central resource into local_root unless the user asks to fork it."
+                "To modify an EXISTING local resource, edit the exact 'file' path shown for it. " &
+                "For an EXISTING central resource, edit that central path only when central_writes_allowed is true. " &
+                "When central_writes_allowed is false, treat the central entry as a read-only source and create/update the corresponding local override under local_root using the same resource-relative skills/agents path. " &
+                "Do not attempt a central write first and do not require the user to request an explicit fork when central writes are unavailable."
 
             If authorActive Then
                 Dim diagPrefix As String = SharedLibrary.SharedMethods.AN9

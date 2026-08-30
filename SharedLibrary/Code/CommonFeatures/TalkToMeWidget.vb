@@ -44,7 +44,11 @@ Namespace SharedLibrary
 
         Private Const DefaultPromptText As String = "Ready. Click ▶ to start."
         Private Const ListeningPromptText As String = "Listening…"
-        Private Const DispatchPauseMilliseconds As Integer = 250
+
+        ' Maximum time a single transcript dispatch (LLM classification + execution) may run
+        ' before it is cancelled. This prevents a single stuck LLM call from permanently
+        ' holding the dispatch gate and silently stalling all subsequent dictated text.
+        Private Const DispatchTimeoutMilliseconds As Integer = 60000
 
         Private ReadOnly _speechAdapter As ITalkToMeSpeechAdapter
         Private ReadOnly _coordinator As TalkToMeCoordinator
@@ -52,11 +56,11 @@ Namespace SharedLibrary
         Private _settings As WidgetSettings
         Private _isDisplaySettingsHooked As Boolean = False
         Private _isClosing As Boolean = False
-        Private _dispatchCts As CancellationTokenSource = Nothing
+        Private ReadOnly _dispatchGate As New System.Threading.SemaphoreSlim(1, 1)
+        Private ReadOnly _dispatchLifetimeCts As New System.Threading.CancellationTokenSource()
         Private _isBusy As Boolean = False
         Private _returnFocusAfterStart As Action = Nothing
         Private _speechOutputRefreshTimer As System.Windows.Forms.Timer
-        Private _dialogOwnerScope As System.IDisposable = Nothing
         Private ReadOnly _toolTip As New ToolTip() With {
             .AutoPopDelay = 10000,
             .InitialDelay = 300,
@@ -190,28 +194,10 @@ Namespace SharedLibrary
         Protected Overrides Sub OnHandleCreated(e As EventArgs)
             MyBase.OnHandleCreated(e)
 
-            If _dialogOwnerScope Is Nothing Then
-                _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
-            End If
-
             If Not _isDisplaySettingsHooked Then
                 AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
                 _isDisplaySettingsHooked = True
             End If
-        End Sub
-
-        Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
-            Dim scope As System.IDisposable = _dialogOwnerScope
-            _dialogOwnerScope = Nothing
-
-            If scope IsNot Nothing Then
-                Try
-                    scope.Dispose()
-                Catch
-                End Try
-            End If
-
-            MyBase.OnHandleDestroyed(e)
         End Sub
 
         Private _speechStopTask As Task = Nothing
@@ -247,9 +233,7 @@ Namespace SharedLibrary
             SaveSettings()
 
             Try
-                _dispatchCts?.Cancel()
-                _dispatchCts?.Dispose()
-                _dispatchCts = Nothing
+                _dispatchLifetimeCts.Cancel()
             Catch
             End Try
 
@@ -357,8 +341,15 @@ Namespace SharedLibrary
         End Sub
 
         Private Sub ConfigureSpeech()
-            Dim result As TalkToMeSpeechConfigurationResult =
-                _speechAdapter.Configure(Me, GetIncludeFullDocumentSetting())
+            Dim result As TalkToMeSpeechConfigurationResult
+
+            ' Push the widget only for the dialogs that are actually initiated by the
+            ' widget. Keeping it as an ambient owner for the widget's whole lifetime
+            ' would also parent dialogs opened by Word host commands (Correct, etc.)
+            ' to this TopMost form and return focus here when those dialogs close.
+            Using SharedMethods.PushDialogOwner(Me)
+                result = _speechAdapter.Configure(Me, GetIncludeFullDocumentSetting())
+            End Using
 
             If result IsNot Nothing AndAlso result.Applied Then
                 If _settings Is Nothing Then
@@ -475,51 +466,49 @@ Namespace SharedLibrary
                 Return
             End If
 
-            Try
-                _dispatchCts?.Cancel()
-            Catch
-            End Try
-
-            Dim localCts As New CancellationTokenSource()
-            _dispatchCts = localCts
+            Dim dispatchGateEntered As Boolean = False
 
             Try
-                Await Task.Delay(DispatchPauseMilliseconds, localCts.Token).ConfigureAwait(True)
+                ' Final transcript events are intentionally queued instead of cancelling the
+                ' previous dispatch. Cancelling an earlier LLM classification could silently
+                ' drop dictated text when an STT engine emits consecutive final chunks.
+                Await _dispatchGate.WaitAsync(_dispatchLifetimeCts.Token).ConfigureAwait(True)
+                dispatchGateEntered = True
 
-                Dim result As TalkToMeDispatchResult =
-                    Await _coordinator.ProcessTranscriptAsync(finalText, localCts.Token).ConfigureAwait(True)
+                ' Bound each dispatch with a timeout so a single stuck LLM classification call
+                ' cannot hold the gate forever and silently stall every following transcript.
+                Using timeoutCts As System.Threading.CancellationTokenSource =
+                    System.Threading.CancellationTokenSource.CreateLinkedTokenSource(_dispatchLifetimeCts.Token)
 
-                If localCts.IsCancellationRequested Then
-                    Return
-                End If
+                    timeoutCts.CancelAfter(DispatchTimeoutMilliseconds)
 
-                If result Is Nothing Then
-                    SetDisplayText("No result.")
-                ElseIf Not String.IsNullOrWhiteSpace(result.TranscriptToDisplay) Then
-                    SetDisplayText(result.TranscriptToDisplay)
-                ElseIf Not String.IsNullOrWhiteSpace(result.StatusText) Then
-                    SetDisplayText(result.StatusText)
-                ElseIf _speechAdapter.IsListening Then
-                    SetDisplayText(ListeningPromptText)
-                Else
-                    SetDisplayText(DefaultPromptText)
-                End If
-            Catch ex As OperationCanceledException
+                    Try
+                        Dim result As TalkToMeDispatchResult =
+                            Await _coordinator.ProcessTranscriptAsync(finalText, timeoutCts.Token).ConfigureAwait(True)
+
+                        If result Is Nothing Then
+                            SetDisplayText("No result.")
+                        ElseIf Not String.IsNullOrWhiteSpace(result.TranscriptToDisplay) Then
+                            SetDisplayText(result.TranscriptToDisplay)
+                        ElseIf Not String.IsNullOrWhiteSpace(result.StatusText) Then
+                            SetDisplayText(result.StatusText)
+                        ElseIf _speechAdapter.IsListening Then
+                            SetDisplayText(ListeningPromptText)
+                        Else
+                            SetDisplayText(DefaultPromptText)
+                        End If
+                    Catch ex As System.OperationCanceledException When timeoutCts.IsCancellationRequested AndAlso Not _dispatchLifetimeCts.IsCancellationRequested
+                        ' The dispatch exceeded its time budget. Release the gate (via Finally) so
+                        ' subsequent dictated text continues to be processed instead of stalling.
+                        SetDisplayText("The last dictation took too long and was skipped. Please repeat it.")
+                    End Try
+                End Using
+            Catch ex As System.OperationCanceledException
             Catch ex As System.Exception
                 SetDisplayText("Error: " & ex.Message)
             Finally
-                If ReferenceEquals(_dispatchCts, localCts) Then
-                    Try
-                        localCts.Dispose()
-                    Catch
-                    End Try
-
-                    _dispatchCts = Nothing
-                Else
-                    Try
-                        localCts.Dispose()
-                    Catch
-                    End Try
+                If dispatchGateEntered Then
+                    _dispatchGate.Release()
                 End If
             End Try
         End Sub

@@ -825,9 +825,8 @@ Namespace Agents
             Dim full As System.String = System.IO.Path.GetFullPath(expanded)
             If Not full.EndsWith(".exe", System.StringComparison.OrdinalIgnoreCase) OrElse Not System.IO.File.Exists(full) Then Throw New RedInkPythonAgentExecutableTrustException("EXECUTABLE_NOT_FOUND", "Executable was not found.")
             If (System.IO.File.GetAttributes(full) And System.IO.FileAttributes.ReparsePoint) <> 0 Then Throw New RedInkPythonAgentExecutableTrustException("EXECUTABLE_SIGNATURE_INVALID", "Executable must not be a reparse point.")
-            Dim root As System.String = System.IO.Path.GetPathRoot(full)
-            Dim drive As New System.IO.DriveInfo(root)
-            If drive.DriveType <> System.IO.DriveType.Fixed Then Throw New RedInkPythonAgentExecutableTrustException("EXECUTABLE_SIGNATURE_INVALID", "Executable must be on a local fixed drive.")
+            ' Network/UNC locations are allowed. Trust is established by the configured
+            ' Authenticode signer and/or SHA-256 validation below, not by drive type.
             Return full
         End Function
 

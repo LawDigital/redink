@@ -305,7 +305,7 @@ Partial Public Class ThisAddIn
         Dim result As String = template
 
         If Regex.IsMatch(template, "{Dictionary}", RegexOptions.IgnoreCase) Then
-            Dictionary = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context)
+            Dictionary = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context, TranslateLanguage)
         End If
 
         Dim placeholderPattern As String = "\{([^}]+)\}"

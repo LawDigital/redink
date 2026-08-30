@@ -337,6 +337,14 @@ flags from the `skill_use` `resource_index` BEFORE any write and act determinist
 - `new_resource_root` — authoritative target for NEW resources; already accounts for central
   permission. Never override it toward `central_root` when central writes are disallowed.
 
+**Write-target precedence for this authoring skill:** the rules in this section and Section 12 are
+authoritative for resource writes. If a generic `resource_index` hint says to edit an existing
+resource at its discovered `file` path or says not to copy a central resource locally, interpret that
+hint as applying only when the discovered path is writable. When `origin=central` and
+`central_writes_allowed=false`, the discovered central `file` path is a READ source only and MUST NOT
+be used as the write target. The corresponding path under `local_root` is the mandatory writable
+override. This is normal local shadowing, not an optional fork, and requires no additional user request.
+
 ### Resource layout
 
     <root>/
@@ -469,8 +477,16 @@ call `tool_loader` again later in the same run.
 
 1. Look up the resource by name in `resource_index`.
 2. Read its exact `file` path with `text_read`. Never guess a path; base every edit on actual content.
-3. Write changes back to the SAME `file` path with `text_write`. Do not create a new folder for an
-   existing resource, and do not fork a central resource into local unless the user asks.
+3. If its `origin` is `local`, write changes back to that SAME `file` path with `text_write`.
+4. If its `origin` is `central` and `central_writes_allowed` is `true`, write changes back to that exact
+   central `file` path only when the user actually wants the shared resource changed; otherwise prefer a
+   local override.
+5. If its `origin` is `central` and `central_writes_allowed` is `false`, NEVER attempt the central write.
+   Treat the central resource as the read-only source and create/update the corresponding local override
+   under `local_root`, preserving the resource-relative path below `skills/` or `agents/`. Copy any bundled
+   `scripts/` / `references/` assets that the revised local resource still depends on. This local shadowing
+   is the normal edit behavior when only the local skillset is writable; it does not require a separate
+   user request to "fork" the resource.
 
 ## 13. Authoring workflow
 
@@ -484,9 +500,10 @@ call `tool_loader` again later in the same run.
    limitations/safe-failure. Build the Section 7a dependency table and make `allowed-tools` the smallest
    complete set that lets the skill execute its own core workflow on every claimed host.
 5. Validate deterministically with `js_run` where useful.
-6. Write NEW resources to an absolute path under `new_resource_root`; edit EXISTING resources at their
-   exact `file` path. Ensure required `references/`/`scripts/` assets exist (binaries via `file_*`).
-   State every exact absolute path touched.
+6. Write NEW resources to an absolute path under `new_resource_root`. For EXISTING resources, follow
+   Section 12: edit the exact local/authorized-central `file` path, but shadow a read-only central resource
+   into `local_root` instead of attempting a forbidden central write. Ensure required `references/`/`scripts/`
+   assets exist (binaries via `file_*`). State every exact absolute path touched.
 7. Do not accumulate accidental duplicates. Remove a stale/superseded resource only when that status is clear and deletion is authorized; otherwise report the overlap instead of deleting it.
 
 ## 14. Review checklist
@@ -500,8 +517,9 @@ call `tool_loader` again later in the same run.
 7. Attachment vs. path vs. workspace-item vs. open-document representations handled correctly;
    handoffs verified.
 8. Single-final-output discipline applied; intermediates cleaned or the one final file named.
-9. Author-mode/write-permission flags respected; NEW under `new_resource_root`, edits at exact path;
-   no relative `.inky` paths.
+9. Author-mode/write-permission flags respected; NEW under `new_resource_root`; existing local or
+   authorized-central resources edited at their exact path; read-only central resources shadowed under
+   `local_root`; no relative `.inky` paths.
 10. Required `references/`/`scripts/` assets exist; binaries via `file_*`, not `text_write`.
 11. Frontmatter valid; `name` unique/kebab-case; `description` one sentence; `enabled:false` only on
     explicit request. `allowed-tools` satisfies the Section 7a dependency contract: references have their

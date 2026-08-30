@@ -121,6 +121,7 @@ Partial Public Class ThisAddIn
         Public Property PendingRejectedTurnExplanation As String = ""
 
         Public Property HostKind As String
+        Public Property IsSubAgentRun As Boolean
         Public Property AllowedToolNames As HashSet(Of String)
         Public Property EnforceAllowedToolScope As Boolean
         Public Property EmptyMainModelResponse As Boolean
@@ -172,6 +173,7 @@ Partial Public Class ThisAddIn
             ZeroChangeOperationCounts = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
             AllowedToolNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             EnforceAllowedToolScope = False
+            IsSubAgentRun = False
             EmptyMainModelResponse = False
             SubAgentEmptyResponseRetryCount = 0
             SequencingState = New SharedLibrary.Agents.ToolCallSequencing.ToolingRunState()
@@ -334,6 +336,9 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"[Tooling] {entry}")
 
             Dim normalizedLevel As String = If(level, "step").Trim().ToLowerInvariant()
+            If humanMessage.StartsWith("Legacy deliverable compatibility", System.StringComparison.OrdinalIgnoreCase) Then
+                normalizedLevel = "info"
+            End If
 
             Select Case normalizedLevel
                 Case "diag"

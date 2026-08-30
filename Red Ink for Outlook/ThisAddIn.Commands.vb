@@ -47,6 +47,12 @@ Partial Public Class ThisAddIn
         Public Property Style As Object
         Public Property Font As Microsoft.Office.Interop.Word.Font
         Public Property ParagraphFormat As Microsoft.Office.Interop.Word.ParagraphFormat
+        Public Property HasListFormat As System.Boolean
+        Public Property ListTemplate As Microsoft.Office.Interop.Word.ListTemplate
+        Public Property ListLevel As System.Int32
+        Public Property ListValue As System.Int32
+        Public Property ListStartAt As System.Int32 = 1
+        Public Property ListIsOrdered As System.Boolean
     End Class
 
     Private Shared Function RangeWithoutTrailingParagraphMark(sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
@@ -102,10 +108,39 @@ Partial Public Class ThisAddIn
             Dim textRange As Microsoft.Office.Interop.Word.Range =
             TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
 
+            Dim hasListFormat As System.Boolean = False
+            Dim listTemplate As Microsoft.Office.Interop.Word.ListTemplate = Nothing
+            Dim listLevel As System.Int32 = 0
+            Dim listValue As System.Int32 = 0
+            Dim listStartAt As System.Int32 = 1
+            Dim listIsOrdered As System.Boolean = False
+
+            Try
+                Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+                hasListFormat = listFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering
+                If hasListFormat Then
+                    listTemplate = listFormat.ListTemplate
+                    listLevel = listFormat.ListLevelNumber
+                    listValue = listFormat.ListValue
+                    listIsOrdered = IsOrderedWordList(listFormat, listFormat.ListType, If(listFormat.ListString, System.String.Empty))
+                    If listTemplate IsNot Nothing AndAlso listLevel > 0 Then
+                        listStartAt = listTemplate.ListLevels(listLevel).StartAt
+                    End If
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not capture Outlook list formatting: " & ex.Message)
+            End Try
+
             snapshots.Add(New ParagraphFormattingSnapshot() With {
             .Style = paragraphRange.Style,
             .Font = textRange.Font.Duplicate,
-            .ParagraphFormat = paragraphRange.ParagraphFormat.Duplicate
+            .ParagraphFormat = paragraphRange.ParagraphFormat.Duplicate,
+            .HasListFormat = hasListFormat,
+            .ListTemplate = listTemplate,
+            .ListLevel = listLevel,
+            .ListValue = listValue,
+            .ListStartAt = listStartAt,
+            .ListIsOrdered = listIsOrdered
         })
         Next
 
@@ -148,6 +183,140 @@ Partial Public Class ThisAddIn
             End Try
 
             index += 1
+        Next
+    End Sub
+
+    Private Shared Function TargetListStructureMatchesSource(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        snapshots As System.Collections.Generic.List(Of ParagraphFormattingSnapshot)) As System.Boolean
+
+        If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return False
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
+        Dim targetParagraphs As Microsoft.Office.Interop.Word.Paragraphs = effectiveRange.Paragraphs
+        If targetParagraphs Is Nothing OrElse targetParagraphs.Count <> snapshots.Count Then Return False
+
+        ' Do not short-circuit when the source selection starts inside an existing outer
+        ' list or in the middle of an ordered sequence. In those cases the native Word
+        ' template restore is required to reconnect the replacement to surrounding content.
+        Dim firstListSnapshot As ParagraphFormattingSnapshot =
+            snapshots.Find(Function(item) item IsNot Nothing AndAlso item.HasListFormat)
+        If firstListSnapshot IsNot Nothing Then
+            If firstListSnapshot.ListLevel > 1 Then Return False
+            If firstListSnapshot.ListIsOrdered AndAlso
+               firstListSnapshot.ListValue > 0 AndAlso
+               firstListSnapshot.ListValue <> firstListSnapshot.ListStartAt Then
+                Return False
+            End If
+        End If
+
+        For index As System.Int32 = 1 To targetParagraphs.Count
+            Dim snapshot As ParagraphFormattingSnapshot = snapshots(index - 1)
+            If snapshot Is Nothing Then Return False
+
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = targetParagraphs(index).Range.Duplicate
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Try
+                Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+                Dim targetHasList As System.Boolean =
+                    listFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering
+
+                If targetHasList <> snapshot.HasListFormat Then Return False
+                If Not snapshot.HasListFormat Then Continue For
+
+                If System.Math.Max(1, listFormat.ListLevelNumber) <> System.Math.Max(1, snapshot.ListLevel) Then
+                    Return False
+                End If
+
+                Dim targetIsOrdered As System.Boolean =
+                    IsOrderedWordList(listFormat, listFormat.ListType, If(listFormat.ListString, System.String.Empty))
+                If targetIsOrdered <> snapshot.ListIsOrdered Then Return False
+
+                ' Ordered lists carry semantically relevant numbering. If Word/HTML already
+                ' reproduced it exactly, there is no benefit in re-applying the source template.
+                If snapshot.ListIsOrdered AndAlso snapshot.ListValue > 0 AndAlso listFormat.ListValue <> snapshot.ListValue Then
+                    Return False
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not validate pasted Outlook list structure: " & ex.Message)
+                Return False
+            End Try
+        Next
+
+        Return True
+    End Function
+
+    Private Shared Sub ApplyListFormattingIfCompatible(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        snapshots As System.Collections.Generic.List(Of ParagraphFormattingSnapshot))
+
+        If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return
+        If Not snapshots.Exists(Function(item) item IsNot Nothing AndAlso item.HasListFormat) Then Return
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
+        Dim targetParagraphs As Microsoft.Office.Interop.Word.Paragraphs = effectiveRange.Paragraphs
+
+        If targetParagraphs Is Nothing OrElse targetParagraphs.Count <> snapshots.Count Then
+            System.Diagnostics.Debug.WriteLine(
+                $"List formatting restore skipped: source paragraphs={snapshots.Count}, target paragraphs={If(targetParagraphs Is Nothing, 0, targetParagraphs.Count)}.")
+            Return
+        End If
+
+        ' Markdown -> HTML -> Word often reconstructs the list hierarchy perfectly. Re-applying
+        ' ListTemplate paragraph-by-paragraph in that situation is harmful: Word can merge the
+        ' final item back into the outer list (format bleeding). Preserve the successful paste
+        ' and restore native list metadata only when the resulting structure actually differs.
+        If TargetListStructureMatchesSource(effectiveRange, snapshots) Then
+            System.Diagnostics.Debug.WriteLine("List formatting restore skipped: pasted list structure already matches source.")
+            Return
+        End If
+
+        For index As System.Int32 = 1 To targetParagraphs.Count
+            Dim snapshot As ParagraphFormattingSnapshot = snapshots(index - 1)
+            If snapshot Is Nothing Then Continue For
+
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = targetParagraphs(index).Range.Duplicate
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Try
+                If paragraphRange.ListFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                    paragraphRange.ListFormat.RemoveNumbers()
+                End If
+
+                ' When paragraph counts still match, list/non-list membership is part of the
+                ' source structure too. Do not let HTML/Markdown list formatting bleed into
+                ' a paragraph that was not a list item before the transformation.
+                If Not snapshot.HasListFormat Then Continue For
+                If snapshot.ListTemplate Is Nothing Then
+                    System.Diagnostics.Debug.WriteLine($"List formatting restore skipped for paragraph {index}: source list template is unavailable.")
+                    Continue For
+                End If
+
+                Dim continuePrevious As System.Boolean =
+                    index > 1 AndAlso snapshots(index - 2) IsNot Nothing AndAlso snapshots(index - 2).HasListFormat
+
+                If Not continuePrevious Then
+                    ' If the selected range begins in the middle of a list (or at a nested
+                    ' level), continue the compatible list that still exists immediately
+                    ' before/outside the replacement instead of restarting at 1.
+                    continuePrevious =
+                        snapshot.ListLevel > 1 OrElse
+                        (snapshot.ListValue > 0 AndAlso snapshot.ListValue > System.Math.Max(0, snapshot.ListStartAt))
+                End If
+
+                paragraphRange.ListFormat.ApplyListTemplateWithLevel(
+                    ListTemplate:=snapshot.ListTemplate,
+                    ContinuePreviousList:=continuePrevious,
+                    ApplyTo:=Microsoft.Office.Interop.Word.WdListApplyTo.wdListApplyToSelection,
+                    DefaultListBehavior:=Microsoft.Office.Interop.Word.WdDefaultListBehavior.wdWord10ListBehavior)
+
+                If snapshot.ListLevel > 0 Then
+                    paragraphRange.ListFormat.ListLevelNumber = snapshot.ListLevel
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("List formatting restore failed: " & ex.Message)
+            End Try
         Next
     End Sub
 
@@ -228,10 +397,16 @@ Partial Public Class ThisAddIn
                         INI_Language2,
                         _context)
                     If String.IsNullOrEmpty(TranslateLanguage) Then Return
-                    Command_InsertAfter(InterpolateAtRuntime(SP_Translate), False, INI_KeepFormat1, INI_ReplaceText1)
+                    Dim dictionarySelectionCancelled As System.Boolean = False
+                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    If dictionarySelectionCancelled Then Return
+                    Command_InsertAfter(translatePrompt, False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "PrimLang"
                     TranslateLanguage = INI_Language1
-                    Command_InsertAfter(InterpolateAtRuntime(SP_Translate), False, INI_KeepFormat1, INI_ReplaceText1)
+                    Dim dictionarySelectionCancelled As System.Boolean = False
+                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    If dictionarySelectionCancelled Then Return
+                    Command_InsertAfter(translatePrompt, False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "Correct"
                     Command_InsertAfter(InterpolateAtRuntime(SP_Correct), INI_DoMarkupOutlook, INI_KeepFormat2, Override(INI_ReplaceText2, INI_ReplaceText2Override), Override(INI_MarkupMethodOutlook, INI_MarkupMethodOutlookOverride))
                 Case "Summarize"
@@ -777,8 +952,11 @@ Partial Public Class ThisAddIn
     Private Async Sub ShowTranslate(selectedtext As String)
 
         Dim LLMResult As String = ""
+        Dim dictionarySelectionCancelled As System.Boolean = False
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        If dictionarySelectionCancelled Then Return
 
-        LLMResult = Await LLM(InterpolateAtRuntime(SP_Translate), "<TEXTTOPROCESS>" & selectedtext & "</TEXTTOPROCESS>", "", "", 0, EnsureUI:=False)
+        LLMResult = Await LLM(translatePrompt, "<TEXTTOPROCESS>" & selectedtext & "</TEXTTOPROCESS>", "", "", 0, EnsureUI:=False)
 
         If INI_PostCorrection <> "" Then
             LLMResult = Await PostCorrection(LLMResult)
@@ -1247,6 +1425,7 @@ Partial Public Class ThisAddIn
             Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
             Dim range As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate ' Duplicate to preserve original
             Dim SelectedText As String
+            Dim sourceParagraphFormatting As System.Collections.Generic.List(Of ParagraphFormattingSnapshot) = Nothing
 
             'Try
             'Using New WordUndoScope(wordEditor, $"{AN} Changes")
@@ -1256,6 +1435,10 @@ Partial Public Class ThisAddIn
             End If
 
             If INI_KeepFormatCap > 0 Then If Len(selection.Text) > INI_KeepFormatCap Then KeepFormat = False
+
+            If Not KeepFormat AndAlso INI_MarkdownConvert Then
+                sourceParagraphFormatting = CaptureParagraphFormatting(range)
+            End If
 
             If KeepFormat Then
                 SelectedText = SLib.GetRangeHtml(selection.Range)
@@ -1380,10 +1563,22 @@ Partial Public Class ThisAddIn
                     If Inplace Then
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
+                        Dim replacementStart As System.Int32 = range.Start
+
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                             SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR, INI_UseHostColorOutlook)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR, INI_UseHostColorOutlook)
+                        End If
+
+                        If sourceParagraphFormatting IsNot Nothing AndAlso sourceParagraphFormatting.Count > 0 Then
+                            Dim replacementEnd As System.Int32 =
+                                System.Math.Max(selection.Range.Start, selection.Range.End)
+                            If replacementEnd > replacementStart Then
+                                Dim insertedRange As Microsoft.Office.Interop.Word.Range =
+                                    wordEditor.Range(replacementStart, replacementEnd)
+                                ApplyListFormattingIfCompatible(insertedRange, sourceParagraphFormatting)
+                            End If
                         End If
 
                         If restoreReviewTrailingSpaces Then
@@ -2756,6 +2951,7 @@ SkipPromptWin:
                         {"PreCorrection", "Additional instruction for prompts"},
                         {"PostCorrection", "Prompt to apply after queries"},
                         {"Language1", "Default translation language"},
+                        {"DictionarySegmentPrompt", "Ask for dictionary segment(s)"},
                         {"PromptLibPath", "Prompt library file"},
                         {"PromptLibPathLocal", "Prompt library file (local)"},
                         {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
@@ -2795,6 +2991,7 @@ SkipPromptWin:
                         {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},
                         {"PostCorrection", "Add a prompt that will be applied to each result before it is further processed (slow!)"},
                         {"Language1", "The language (in English) that will be used for the quick access button in the ribbon"},
+                        {"DictionarySegmentPrompt", "Temporarily enable or disable the interactive dictionary-segment selection. When disabled, translations use only global dictionary content plus the common [TargetLanguage] block."},
                         {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
                         {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
                         {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added automatically)."},
