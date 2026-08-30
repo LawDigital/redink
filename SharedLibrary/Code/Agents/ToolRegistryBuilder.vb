@@ -28,7 +28,7 @@ Namespace Agents
         End Sub
 
         Public Shared Function ToSafeToolSuffix(value As String) As String
-            If String.IsNullOrWhiteSpace(value) Then
+            If System.String.IsNullOrWhiteSpace(value) Then
                 Return ""
             End If
 
@@ -36,8 +36,22 @@ Namespace Agents
             Dim lastWasUnderscore As Boolean = False
 
             For Each ch As Char In value.Trim()
-                If Char.IsLetterOrDigit(ch) Then
-                    sb.Append(Char.ToLowerInvariant(ch))
+                Dim normalizedChar As Char = System.Char.ToLowerInvariant(ch)
+                Dim codePoint As Integer = System.Convert.ToInt32(normalizedChar)
+                Dim isAsciiLetterOrDigit As Boolean =
+                    (codePoint >= 48 AndAlso codePoint <= 57) OrElse
+                    (codePoint >= 97 AndAlso codePoint <= 122)
+
+                If isAsciiLetterOrDigit Then
+                    sb.Append(normalizedChar)
+                    lastWasUnderscore = False
+                ElseIf System.Char.IsLetterOrDigit(normalizedChar) Then
+                    ' Dynamic tool/function identifiers must remain provider-safe ASCII even when
+                    ' the human-facing skill/agent name contains Unicode. Encode each non-ASCII
+                    ' UTF-16 code unit deterministically instead of dropping or transliterating it,
+                    ' so lookup remains stable and language-agnostic.
+                    sb.Append("u")
+                    sb.Append(codePoint.ToString("x4", System.Globalization.CultureInfo.InvariantCulture))
                     lastWasUnderscore = False
                 ElseIf Not lastWasUnderscore Then
                     sb.Append("_"c)

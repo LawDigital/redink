@@ -103,6 +103,94 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+    Public Function CaptureListFormatting(ByVal rng As Microsoft.Office.Interop.Word.Range) As ParagraphListFormatSnapshot()
+        If rng Is Nothing OrElse rng.Paragraphs Is Nothing OrElse rng.Paragraphs.Count = 0 Then Return Nothing
+
+        Dim snapshots(rng.Paragraphs.Count - 1) As ParagraphListFormatSnapshot
+        Dim hasAnyList As System.Boolean = False
+
+        For index As System.Int32 = 1 To rng.Paragraphs.Count
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = rng.Paragraphs(index).Range
+            Dim snapshot As New ParagraphListFormatSnapshot With {
+                .HasListFormat = False,
+                .ListTemplate = Nothing,
+                .ListLevel = 0,
+                .ListValue = 0,
+                .ListStartAt = 1
+            }
+
+            Try
+                Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+                snapshot.HasListFormat = listFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering
+                If snapshot.HasListFormat Then
+                    snapshot.ListTemplate = listFormat.ListTemplate
+                    snapshot.ListLevel = listFormat.ListLevelNumber
+                    snapshot.ListValue = listFormat.ListValue
+                    hasAnyList = True
+                    If snapshot.ListTemplate IsNot Nothing AndAlso snapshot.ListLevel > 0 Then
+                        snapshot.ListStartAt = snapshot.ListTemplate.ListLevels(snapshot.ListLevel).StartAt
+                    End If
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"Could not capture list formatting for paragraph {index}: {ex.Message}")
+            End Try
+
+            snapshots(index - 1) = snapshot
+        Next
+
+        If Not hasAnyList Then Return Nothing
+        Return snapshots
+    End Function
+
+    Public Sub ApplyListFormattingIfCompatible(ByRef rng As Microsoft.Office.Interop.Word.Range,
+                                                ByVal snapshots As ParagraphListFormatSnapshot())
+        If rng Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Length = 0 Then Return
+        If rng.Paragraphs Is Nothing OrElse rng.Paragraphs.Count <> snapshots.Length Then
+            System.Diagnostics.Debug.WriteLine(
+                $"List-only restore skipped: source paragraphs={snapshots.Length}, target paragraphs={If(rng.Paragraphs Is Nothing, 0, rng.Paragraphs.Count)}.")
+            Return
+        End If
+
+        For index As System.Int32 = 1 To rng.Paragraphs.Count
+            Dim snapshot As ParagraphListFormatSnapshot = snapshots(index - 1)
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = rng.Paragraphs(index).Range
+
+            Try
+                If paragraphRange.ListFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                    paragraphRange.ListFormat.RemoveNumbers()
+                End If
+
+                ' With a stable paragraph count, preserve the original list/non-list shape.
+                ' This prevents a Markdown-generated list from spilling into source paragraphs
+                ' that were ordinary body text.
+                If Not snapshot.HasListFormat Then Continue For
+                If snapshot.ListTemplate Is Nothing Then
+                    System.Diagnostics.Debug.WriteLine($"List-only restore skipped for paragraph {index}: source list template is unavailable.")
+                    Continue For
+                End If
+
+                Dim continuePrevious As System.Boolean =
+                    index > 1 AndAlso snapshots(index - 2).HasListFormat
+
+                If Not continuePrevious Then
+                    continuePrevious =
+                        snapshot.ListLevel > 1 OrElse
+                        (snapshot.ListValue > 0 AndAlso snapshot.ListValue > System.Math.Max(0, snapshot.ListStartAt))
+                End If
+
+                paragraphRange.ListFormat.ApplyListTemplateWithLevel(
+                    ListTemplate:=snapshot.ListTemplate,
+                    ContinuePreviousList:=continuePrevious,
+                    ApplyTo:=Microsoft.Office.Interop.Word.WdListApplyTo.wdListApplyToSelection,
+                    DefaultListBehavior:=Microsoft.Office.Interop.Word.WdDefaultListBehavior.wdWord10ListBehavior)
+
+                If snapshot.ListLevel > 0 Then paragraphRange.ListFormat.ListLevelNumber = snapshot.ListLevel
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("List-only restore failed: " & ex.Message)
+            End Try
+        Next
+    End Sub
+
     ''' <summary>
     ''' Ensures {{PFOR:n}} markers begin on their own line, except for {{PFOR:0}}.
     ''' </summary>
@@ -193,6 +281,153 @@ Partial Public Class ThisAddIn
         Return b.Length.CompareTo(a.Length)
     End Function
 
+    Private Shared Function IsOrderedWordListForMarkdown(ByVal listFormat As Microsoft.Office.Interop.Word.ListFormat,
+                                                            ByVal listType As Microsoft.Office.Interop.Word.WdListType,
+                                                            ByVal listString As System.String) As System.Boolean
+        Select Case listType
+            Case Microsoft.Office.Interop.Word.WdListType.wdListBullet,
+                 Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet
+                Return False
+            Case Microsoft.Office.Interop.Word.WdListType.wdListSimpleNumbering,
+                 Microsoft.Office.Interop.Word.WdListType.wdListOutlineNumbering,
+                 Microsoft.Office.Interop.Word.WdListType.wdListListNumOnly
+                Return True
+            Case Microsoft.Office.Interop.Word.WdListType.wdListMixedNumbering
+                ' Mixed numbering is also used by some custom bullet templates. Inspect the
+                ' native Word list-level style before falling back to the displayed marker.
+                Try
+                    If listFormat IsNot Nothing AndAlso listFormat.ListTemplate IsNot Nothing Then
+                        Dim levelNumber As System.Int32 = System.Math.Max(1, listFormat.ListLevelNumber)
+                        Dim level As Microsoft.Office.Interop.Word.ListLevel = listFormat.ListTemplate.ListLevels(levelNumber)
+                        Return level.NumberStyle <> Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleBullet AndAlso
+                               level.NumberStyle <> Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleNone
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Could not inspect mixed Word list number style: " & ex.Message)
+                End Try
+
+                Dim marker As System.String = If(listString, System.String.Empty).Trim()
+                If marker.Length = 0 Then Return False
+                Dim hasLetter As System.Boolean = False
+                For Each value As System.Char In marker
+                    If System.Char.IsDigit(value) Then Return True
+                    If System.Char.IsLetter(value) Then hasLetter = True
+                Next
+                Return marker.Length > 1 AndAlso hasLetter
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Shared Function BuildMarkdownListPrefixForWord(ByVal isOrdered As System.Boolean,
+                                                           ByVal originalLevel As System.Int32,
+                                                           ByVal blockBaseLevel As System.Int32,
+                                                           ByVal previousNormalizedLevel As System.Int32) As System.String
+        Dim desiredLevel As System.Int32 = System.Math.Max(1, originalLevel - blockBaseLevel + 1)
+        Dim normalizedLevel As System.Int32 =
+            If(previousNormalizedLevel <= 0, 1, System.Math.Min(desiredLevel, previousNormalizedLevel + 1))
+        Dim indentation As System.String = New System.String(" "c, (normalizedLevel - 1) * 4)
+        Return indentation & If(isOrdered, "1. ", "- ")
+    End Function
+
+    Private Shared Sub AddMarkdownListPrefixPlaceholders(ByVal rng As Microsoft.Office.Interop.Word.Range,
+                                                          ByVal placeholders As System.Collections.Generic.List(Of PlaceholderInfo))
+        If rng Is Nothing OrElse placeholders Is Nothing Then Return
+
+        Dim blockBaseLevel As System.Int32 = 0
+        Dim previousNormalizedLevel As System.Int32 = 0
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In rng.Paragraphs
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range
+            Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+            Dim listType As Microsoft.Office.Interop.Word.WdListType = listFormat.ListType
+
+            If listType = Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                blockBaseLevel = 0
+                previousNormalizedLevel = 0
+                Continue For
+            End If
+
+            ' A partial selection that starts inside the first paragraph must not invent
+            ' a list marker before text that did not include the paragraph start.
+            If paragraphRange.Start < rng.Start Then Continue For
+
+            Dim originalLevel As System.Int32 = System.Math.Max(1, listFormat.ListLevelNumber)
+            If blockBaseLevel <= 0 Then
+                blockBaseLevel = originalLevel
+                previousNormalizedLevel = 0
+            ElseIf originalLevel < blockBaseLevel Then
+                blockBaseLevel = originalLevel
+            End If
+
+            Dim listString As System.String = If(listFormat.ListString, System.String.Empty).Trim()
+            Dim prefix As System.String = BuildMarkdownListPrefixForWord(
+                IsOrderedWordListForMarkdown(listFormat, listType, listString),
+                originalLevel,
+                blockBaseLevel,
+                previousNormalizedLevel)
+
+            Dim leadingSpaces As System.Int32 = 0
+            While leadingSpaces < prefix.Length AndAlso prefix(leadingSpaces) = " "c
+                leadingSpaces += 1
+            End While
+            previousNormalizedLevel = (leadingSpaces \ 4) + 1
+
+            placeholders.Add(New PlaceholderInfo With {
+                .Offset = System.Math.Max(0, paragraphRange.Start - rng.Start),
+                .Length = 0,
+                .Token = prefix
+            })
+        Next
+    End Sub
+
+    Public Function GetVisibleTextWithMarkdownListPrefixes(ByVal workingrange As Microsoft.Office.Interop.Word.Range) As System.String
+        If workingrange Is Nothing Then Return System.String.Empty
+
+        Dim output As New System.Text.StringBuilder()
+        Dim blockBaseLevel As System.Int32 = 0
+        Dim previousNormalizedLevel As System.Int32 = 0
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In workingrange.Paragraphs
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+            Dim partStart As System.Int32 = System.Math.Max(workingrange.Start, paragraphRange.Start)
+            Dim partEnd As System.Int32 = System.Math.Min(workingrange.End, paragraphRange.End)
+            If partEnd <= partStart Then Continue For
+
+            Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+            Dim listType As Microsoft.Office.Interop.Word.WdListType = listFormat.ListType
+            If listType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering AndAlso partStart = paragraphRange.Start Then
+                Dim originalLevel As System.Int32 = System.Math.Max(1, listFormat.ListLevelNumber)
+                If blockBaseLevel <= 0 Then
+                    blockBaseLevel = originalLevel
+                    previousNormalizedLevel = 0
+                ElseIf originalLevel < blockBaseLevel Then
+                    blockBaseLevel = originalLevel
+                End If
+                Dim listString As System.String = If(listFormat.ListString, System.String.Empty).Trim()
+                Dim prefix As System.String = BuildMarkdownListPrefixForWord(
+                    IsOrderedWordListForMarkdown(listFormat, listType, listString),
+                    originalLevel,
+                    blockBaseLevel,
+                    previousNormalizedLevel)
+                Dim leadingSpaces As System.Int32 = 0
+                While leadingSpaces < prefix.Length AndAlso prefix(leadingSpaces) = " "c
+                    leadingSpaces += 1
+                End While
+                previousNormalizedLevel = (leadingSpaces \ 4) + 1
+                output.Append(prefix)
+            ElseIf listType = Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                blockBaseLevel = 0
+                previousNormalizedLevel = 0
+            End If
+
+            Dim partRange As Microsoft.Office.Interop.Word.Range = workingrange.Document.Range(partStart, partEnd)
+            output.Append(GetVisibleText(partRange))
+        Next
+
+        Return output.ToString()
+    End Function
+
     ''' <summary>
     ''' Extracts text from a Word range, replaces special elements with inline placeholders,
     ''' and optionally converts formatting to Markdown-compatible markers.
@@ -203,7 +438,9 @@ Partial Public Class ThisAddIn
     ''' <returns>Serialized text containing placeholder tokens.</returns>
     Public Function GetTextWithSpecialElementsInline(
         ByVal workingrange As Word.Range,
-        PreserveParagraphFormatInline As Boolean, DoMarkdown As Boolean) As String
+        PreserveParagraphFormatInline As Boolean,
+        DoMarkdown As Boolean,
+        Optional IncludeMarkdownListPrefixes As Boolean = False) As String
 
         Dim app As Word.Application = CType(workingrange.Application, Word.Application)
         Dim oldSU As Boolean = app.ScreenUpdating
@@ -441,6 +678,10 @@ Partial Public Class ThisAddIn
                 ' scan rng.Text itself for field markers (Chr(19)/Chr(20)/Chr(21)) and note
                 ' references (Chr(2)) and pair them with Word objects in document order.
                 Dim fullText As String = rng.Text
+
+                If (DoMarkdown OrElse IncludeMarkdownListPrefixes) AndAlso Not PreserveParagraphFormatInline Then
+                    AddMarkdownListPrefixPlaceholders(rng, placeholders)
+                End If
 
                 ' Snapshot notes in document order (their Chr(2) refs appear in fullText
                 ' in the same order as Reference.Start ascending).

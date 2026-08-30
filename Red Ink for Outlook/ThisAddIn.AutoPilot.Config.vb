@@ -150,9 +150,10 @@ Partial Public Class ThisAddIn
         Public Property EnablePrivacyProtection As Boolean = False
 
         ''' <summary>
-        ''' Full path to the optional per-sender tool policy file. When set, the file hard-limits
-        ''' (in code, not via the LLM) which tools/skills/agents/sources individual senders may use.
-        ''' Empty = no per-sender policy (all senders may use every selected tool).
+        ''' Full path to the optional per-sender policy file. When set, the file hard-limits
+        ''' (in code, not via the LLM) which tools/skills/agents/sources individual senders may use
+        ''' and may additionally block access to internal designs and/or active design sets.
+        ''' Empty = no per-sender policy (all senders may use every selected tool/resource).
         ''' </summary>
         Public Property SenderToolPolicyPath As String = ""
 
@@ -544,12 +545,23 @@ Partial Public Class ThisAddIn
         ' ── Step 6b: Per-sender tool policy file (optional) ──
         Dim defaultPolicyPath As String = If(saved.SenderToolPolicyPath, "")
         Dim policyInput = ShowCustomInputBox(
-            "Enter the full path to a per-sender tool policy file (optional):" & vbCrLf & vbCrLf &
-            "If set, this file hard-limits (in code, not via the AI) which tools, skills, " &
-            "agents, and sources individual senders may use. It does NOT affect your mail " &
-            "filters or the auto-send whitelist." & vbCrLf & vbCrLf &
-            "Leave empty to let every sender use all selected tools.",
-            $"{AN6} AutoPilot — Sender Tool Policy", True, defaultPolicyPath)
+            "Enter the full path to a per-sender AutoPilot policy file (optional). One rule per line; first matching rule wins:" & vbCrLf & vbCrLf &
+            "  *@example.com = ALL" & vbCrLf &
+            "  info@example.com = *, !knowledge*, !lexi*" & vbCrLf &
+            "  person@example.com = ONLY skill_example" & vbCrLf &
+            "  blocked@example.com = NONE" & vbCrLf &
+            "  DEFAULT = *, !internal_*" & vbCrLf & vbCrLf &
+            "TOOL RULES: ALL or * allows the selected AutoPilot tools; NONE keeps only the inability/safety path; ONLY <skill> confines the sender to that skill and its declared helpers. Comma-separated selectors support * and ? wildcards; prefix with ! or - to exclude." & vbCrLf & vbCrLf &
+            "OPTIONAL DIRECTIVES (comma or semicolon separated):" & vbCrLf &
+            "  designs=block|allow       Block/allow the internal named design repository." & vbCrLf &
+            "  design_sets=block|allow   Block/allow active design-set routing; designs=block also blocks design sets." & vbCrLf &
+            "  disclaimer=""text""        Host-appended disclaimer on every AutoPilot mail to the matching sender. Use \n for a line break. Quote values containing commas or semicolons." & vbCrLf & vbCrLf &
+            "SYSTEM-PROMPT ADDITION: append || followed by a hard per-sender instruction, e.g.:" & vbCrLf &
+            "  person@example.com = ONLY skill_example || Always answer through this skill." & vbCrLf & vbCrLf &
+            "Combined example:" & vbCrLf &
+            "  *@vischer.com = *, designs=block, design_sets=block, disclaimer=""Confidential.\nFor the intended recipient only.""" & vbCrLf & vbCrLf &
+            "The policy is re-read for each new AutoPilot mail. It does not change intake filters or the auto-send whitelist. Leave empty to disable per-sender policy restrictions.",
+            $"{AN6} AutoPilot — Per-Sender Rules", True, defaultPolicyPath)
         If policyInput Is Nothing Then Return Nothing
         config.SenderToolPolicyPath = If(String.IsNullOrWhiteSpace(policyInput), "", policyInput.Trim())
 

@@ -366,7 +366,6 @@ Namespace SharedLibrary
             Return selectedOption
         End Function
 
-
         ''' <summary>
         ''' Shows a modal input dialog supporting single-line or multi-line text entry.
         ''' </summary>

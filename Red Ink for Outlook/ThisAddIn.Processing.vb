@@ -239,93 +239,159 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Converts Word paragraphs and character formatting in a range to Markdown equivalents (headings, lists, bold, italic, underline via HTML <u>, strikethrough).
     ''' </summary>
-    Private Shared Sub ConvertRangeToMarkdown(WorkingRange As Word.Range)
+    Private Shared Function IsOrderedWordList(ByVal listFormat As Microsoft.Office.Interop.Word.ListFormat,
+                                                   ByVal listType As Microsoft.Office.Interop.Word.WdListType,
+                                                   ByVal listString As System.String) As System.Boolean
+        Select Case listType
+            Case Microsoft.Office.Interop.Word.WdListType.wdListBullet,
+                 Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet
+                Return False
 
-        Dim listRegex As New Regex("^(\s*)([-*+]|\d+[\.\)])\s+", RegexOptions.Compiled)
+            Case Microsoft.Office.Interop.Word.WdListType.wdListSimpleNumbering,
+                 Microsoft.Office.Interop.Word.WdListType.wdListOutlineNumbering,
+                 Microsoft.Office.Interop.Word.WdListType.wdListListNumOnly
+                Return True
 
-        Dim rng As Word.Range = WorkingRange.Duplicate
-        Dim expandedEndForParagraphMark As Boolean = False
+            Case Microsoft.Office.Interop.Word.WdListType.wdListMixedNumbering
+                ' Mixed numbering can also be used by custom bullet templates. Prefer the
+                ' actual Word list-level number style over guessing from the displayed glyph.
+                Try
+                    If listFormat IsNot Nothing AndAlso listFormat.ListTemplate IsNot Nothing Then
+                        Dim levelNumber As System.Int32 = System.Math.Max(1, listFormat.ListLevelNumber)
+                        Dim level As Microsoft.Office.Interop.Word.ListLevel = listFormat.ListTemplate.ListLevels(levelNumber)
+                        Return level.NumberStyle <> Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleBullet AndAlso
+                               level.NumberStyle <> Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleNone
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Could not inspect mixed Word list number style: " & ex.Message)
+                End Try
+
+                ' Conservative fallback for unusual/corrupt COM list templates. A single
+                ' alphabetic glyph (commonly "o") is treated as a bullet, while ordinary
+                ' numeric/alphabetic numbering markers still classify as ordered.
+                Dim marker As System.String = If(listString, System.String.Empty).Trim()
+                If marker.Length = 0 Then Return False
+                Dim hasLetter As System.Boolean = False
+                For Each value As System.Char In marker
+                    If System.Char.IsDigit(value) Then Return True
+                    If System.Char.IsLetter(value) Then hasLetter = True
+                Next
+                Return marker.Length > 1 AndAlso hasLetter
+
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Shared Function BuildMarkdownListPrefix(ByVal isOrdered As System.Boolean,
+                                                    ByVal originalLevel As System.Int32,
+                                                    ByVal blockBaseLevel As System.Int32,
+                                                    ByVal previousNormalizedLevel As System.Int32) As System.String
+
+        Dim desiredLevel As System.Int32 = System.Math.Max(1, originalLevel - blockBaseLevel + 1)
+        Dim normalizedLevel As System.Int32 =
+            If(previousNormalizedLevel <= 0,
+               1,
+               System.Math.Min(desiredLevel, previousNormalizedLevel + 1))
+
+        Dim indent As System.String = New System.String(" "c, (normalizedLevel - 1) * 4)
+        Dim marker As System.String = If(isOrdered, "1. ", "- ")
+        Return indent & marker
+    End Function
+
+    ''' <summary>
+    ''' Converts Word paragraphs and character formatting in a range to Markdown equivalents
+    ''' while normalizing Word list numbering to Markdown-safe markers.
+    ''' </summary>
+    Private Shared Sub ConvertRangeToMarkdown(WorkingRange As Microsoft.Office.Interop.Word.Range)
+
+        Dim rng As Microsoft.Office.Interop.Word.Range = WorkingRange.Duplicate
+        Dim expandedEndForParagraphMark As System.Boolean = False
 
         If ShouldExpandRangeToIncludeOwnParagraphMark(rng) Then
             rng.End = rng.End + 1
             expandedEndForParagraphMark = True
         End If
 
-        Dim originalEnd As Integer = rng.End
         Dim doc As Microsoft.Office.Interop.Word.Document = rng.Document
+        ' Keep a live end marker. Removing Word numbering and inserting Markdown prefixes
+        ' changes character positions; a fixed integer boundary can therefore skip later
+        ' paragraphs in the same selection. Word Range positions track those edits.
+        Dim logicalEndMarker As Microsoft.Office.Interop.Word.Range = doc.Range(rng.End, rng.End)
+        Dim listBlockBaseLevel As System.Int32 = 0
+        Dim previousNormalizedLevel As System.Int32 = 0
 
         ' 0) Headings & lists
         For Each para As Microsoft.Office.Interop.Word.Paragraph In rng.Paragraphs
-            If para.Range.Start >= originalEnd Then Continue For
+            If para.Range.Start >= logicalEndMarker.Start Then Continue For
 
-            Dim styleName As String = CType(para.Style, Microsoft.Office.Interop.Word.Style).NameLocal
+            Dim styleName As System.String = CType(para.Style, Microsoft.Office.Interop.Word.Style).NameLocal
 
             Select Case styleName
-                Case doc.Styles(Word.WdBuiltinStyle.wdStyleTitle).NameLocal
+                Case doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleTitle).NameLocal
                     para.Range.InsertBefore("# ")
-                Case doc.Styles(Word.WdBuiltinStyle.wdStyleHeading1).NameLocal
+                Case doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading1).NameLocal
                     para.Range.InsertBefore("# ")
-                Case doc.Styles(Word.WdBuiltinStyle.wdStyleHeading2).NameLocal
+                Case doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading2).NameLocal
                     para.Range.InsertBefore("## ")
-                Case doc.Styles(Word.WdBuiltinStyle.wdStyleHeading3).NameLocal
+                Case doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading3).NameLocal
                     para.Range.InsertBefore("### ")
-                Case doc.Styles(Word.WdBuiltinStyle.wdStyleHeading4).NameLocal
+                Case doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading4).NameLocal
                     para.Range.InsertBefore("#### ")
-                Case doc.Styles(Word.WdBuiltinStyle.wdStyleHeading5).NameLocal
+                Case doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading5).NameLocal
                     para.Range.InsertBefore("##### ")
-                Case doc.Styles(Word.WdBuiltinStyle.wdStyleHeading6).NameLocal
+                Case doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading6).NameLocal
                     para.Range.InsertBefore("###### ")
             End Select
 
-            ' — List detection
-            With para.Range.ListFormat
-                Try
-                    ' Proceed only if a list is present
-                    If .ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+            Try
+                Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = para.Range.ListFormat
+                If listFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                    Dim originalLevel As System.Int32 = System.Math.Max(1, listFormat.ListLevelNumber)
+                    Dim listType As Microsoft.Office.Interop.Word.WdListType = listFormat.ListType
+                    Dim listString As System.String = If(listFormat.ListString, "").Trim()
 
-                        ' 1) Store needed information before RemoveNumbers
-                        Dim lvl As Integer = .ListLevelNumber
-                        Dim lt As Microsoft.Office.Interop.Word.WdListType = .ListType
-                        Dim ls As String = .ListString.Trim()
-
-                        ' 2) Compute prefix (4 spaces per level)
-                        Dim indent As String = New String(" "c, (lvl - 1) * 4)
-                        Dim prefix As String
-                        Select Case lt
-                            Case Microsoft.Office.Interop.Word.WdListType.wdListBullet,
-                                 Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet
-                                prefix = indent & "- "
-                            Case Microsoft.Office.Interop.Word.WdListType.wdListSimpleNumbering,
-                                 Microsoft.Office.Interop.Word.WdListType.wdListOutlineNumbering,
-                                 Microsoft.Office.Interop.Word.WdListType.wdListMixedNumbering,
-                                 Microsoft.Office.Interop.Word.WdListType.wdListListNumOnly
-                                prefix = indent & ls & " "
-                            Case Else
-                                prefix = indent & "- "
-                        End Select
-
-                        ' 3) Remove list formatting
-                        .RemoveNumbers()
-
-                        ' 4) Insert Markdown prefix at line start
-                        Dim insertRange As Microsoft.Office.Interop.Word.Range = para.Range.Duplicate()
-                        insertRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
-                        insertRange.InsertBefore(prefix)
-
-                        ' Range for inserted prefix
-                        Dim prefixRange As Word.Range = insertRange.Duplicate
-                        prefixRange.End = prefixRange.Start + prefix.Length
-
-                        ' Reset font (standard formatting)
-                        prefixRange.Font.Reset()
-
+                    If listBlockBaseLevel <= 0 Then
+                        listBlockBaseLevel = originalLevel
+                        previousNormalizedLevel = 0
+                    ElseIf originalLevel < listBlockBaseLevel Then
+                        ' The selection may begin inside a nested list and later reach a
+                        ' shallower source level. From that point onward, use the newly visible
+                        ' shallower level as the relative base; do not keep flattening its children.
+                        listBlockBaseLevel = originalLevel
                     End If
 
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("Error during list conversion: " & ex.ToString())
-                End Try
-            End With
+                    Dim prefix As System.String =
+                        BuildMarkdownListPrefix(
+                            IsOrderedWordList(listFormat, listType, listString),
+                            originalLevel,
+                            listBlockBaseLevel,
+                            previousNormalizedLevel)
 
+                    Dim leadingSpaces As System.Int32 = 0
+                    While leadingSpaces < prefix.Length AndAlso prefix(leadingSpaces) = " "c
+                        leadingSpaces += 1
+                    End While
+                    previousNormalizedLevel = (leadingSpaces \ 4) + 1
+
+                    listFormat.RemoveNumbers()
+
+                    Dim insertRange As Microsoft.Office.Interop.Word.Range = para.Range.Duplicate()
+                    insertRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+                    insertRange.InsertBefore(prefix)
+
+                    Dim prefixRange As Microsoft.Office.Interop.Word.Range = insertRange.Duplicate
+                    prefixRange.End = prefixRange.Start + prefix.Length
+                    prefixRange.Font.Reset()
+                Else
+                    listBlockBaseLevel = 0
+                    previousNormalizedLevel = 0
+                End If
+            Catch ex As System.Exception
+                listBlockBaseLevel = 0
+                previousNormalizedLevel = 0
+                System.Diagnostics.Debug.WriteLine("Error during list conversion: " & ex.ToString())
+            End Try
         Next
 
         ' 1) Bold + Italic (Paragraph)
@@ -333,12 +399,12 @@ Partial Public Class ThisAddIn
                         Sub(f)
                             f.Font.Bold = True
                             f.Font.Italic = True
-                            f.Font.Underline = Word.WdUnderline.wdUnderlineNone
+                            f.Font.Underline = Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineNone
                             f.Text = "(*)^13"
                             f.MatchWildcards = True
                         End Sub,
                         "***\1***^13",
-                        Sub(rep)                          ' Disable Bold & Italic
+                        Sub(rep)
                             rep.Bold = False
                             rep.Italic = False
                         End Sub)
@@ -348,7 +414,7 @@ Partial Public Class ThisAddIn
                         Sub(f)
                             f.Font.Bold = True
                             f.Font.Italic = True
-                            f.Font.Underline = Word.WdUnderline.wdUnderlineNone
+                            f.Font.Underline = Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineNone
                             f.Text = ""
                             f.MatchWildcards = False
                         End Sub,
@@ -409,25 +475,25 @@ Partial Public Class ThisAddIn
         ' 7) Underline (Paragraph)
         ReplaceWithinRange(rng,
                         Sub(f)
-                            f.Font.Underline = Word.WdUnderline.wdUnderlineSingle
+                            f.Font.Underline = Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineSingle
                             f.Text = "(*)^13"
                             f.MatchWildcards = True
                         End Sub,
                         "<u>\1</u>^13",
                         Sub(rep)
-                            rep.Underline = Word.WdUnderline.wdUnderlineNone
+                            rep.Underline = Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineNone
                         End Sub)
 
         ' 8) Underline (Inline)
         ReplaceWithinRange(rng,
                         Sub(f)
-                            f.Font.Underline = Word.WdUnderline.wdUnderlineSingle
+                            f.Font.Underline = Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineSingle
                             f.Text = ""
                             f.MatchWildcards = False
                         End Sub,
                         "<u>^&</u>",
                         Sub(rep)
-                            rep.Underline = Word.WdUnderline.wdUnderlineNone
+                            rep.Underline = Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineNone
                         End Sub)
 
         ' 9) Strikethrough (Paragraph)
@@ -456,13 +522,11 @@ Partial Public Class ThisAddIn
 
         RemoveEmptyMarkdownFormattingMarkers(rng)
 
-        ' Restore selection
         If expandedEndForParagraphMark AndAlso rng.End > rng.Start Then
             rng.End = rng.End - 1
         End If
 
         rng.Select()
-
     End Sub
 
 

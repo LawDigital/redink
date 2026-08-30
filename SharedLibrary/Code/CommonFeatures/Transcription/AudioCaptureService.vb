@@ -72,6 +72,12 @@ Namespace Transcription
         Private _waveIn As WaveInEvent
         Private _micCapture As WasapiCapture
         Private _loopbackCapture As WasapiLoopbackCapture
+        Private _loopbackCaptureSecondary As WasapiLoopbackCapture
+        Private _loopbackPrimaryDeviceId As String = ""
+        Private _loopbackSecondaryDeviceId As String = ""
+        Private _activeLoopbackDeviceId As String = ""
+        Private _activeLoopbackLastSignalUtc As DateTime = DateTime.MinValue
+        Private ReadOnly _loopbackSelectionSyncRoot As New Object()
         Private _debugWriter As WaveFileWriter
         Private _running As Boolean
         Private _agcGain As Single = 1.0F
@@ -114,22 +120,7 @@ Namespace Transcription
             End If
 
             If SourceMode <> AudioSourceMode.MicrophoneOnly Then
-                Dim device As MMDevice = Nothing
-
-                If Not String.IsNullOrEmpty(SystemAudioRenderDeviceId) Then
-                    Try
-                        device = New MMDeviceEnumerator().GetDevice(SystemAudioRenderDeviceId)
-                    Catch ex As Exception
-                        RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs(
-                            "Selected output device is no longer available. Falling back to the default output device.",
-                            ex,
-                            False))
-                        device = Nothing
-                    End Try
-                End If
-
-                _loopbackCapture = If(device IsNot Nothing, New WasapiLoopbackCapture(device), New WasapiLoopbackCapture())
-                AddHandler _loopbackCapture.DataAvailable, AddressOf OnLoopbackData
+                ConfigureLoopbackCaptures()
             End If
 
             If AudioDebugDump Then
@@ -164,22 +155,8 @@ Namespace Transcription
                 End Try
             End If
 
-            If _loopbackCapture IsNot Nothing Then
-                Try
-                    _loopbackCapture.StartRecording()
-                Catch ex As Exception
-                    RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs("Cannot start loopback: " & ex.Message, ex, False))
-                    Try
-                        RemoveHandler _loopbackCapture.DataAvailable, AddressOf OnLoopbackData
-                    Catch
-                    End Try
-                    Try
-                        _loopbackCapture.Dispose()
-                    Catch
-                    End Try
-                    _loopbackCapture = Nothing
-                End Try
-            End If
+            StartLoopbackCapture(_loopbackCapture, "primary")
+            StartLoopbackCapture(_loopbackCaptureSecondary, "communications fallback")
 
             If _waveIn IsNot Nothing Then
                 _waveIn.StartRecording()
@@ -242,13 +219,22 @@ Namespace Transcription
         End Sub
 
         Private Sub OnLoopbackData(sender As Object, e As WaveInEventArgs)
-            If Not _running OrElse _loopbackCapture Is Nothing Then
+            If Not _running Then
+                Return
+            End If
+
+            Dim capture As WasapiLoopbackCapture = TryCast(sender, WasapiLoopbackCapture)
+            If capture Is Nothing Then
                 Return
             End If
 
             Try
-                Dim pcm As Byte() = ConvertToTargetPcm(e.Buffer, e.BytesRecorded, _loopbackCapture.WaveFormat)
+                Dim pcm As Byte() = ConvertToTargetPcm(e.Buffer, e.BytesRecorded, capture.WaveFormat)
                 If pcm Is Nothing OrElse pcm.Length <= 0 Then
+                    Return
+                End If
+
+                If Not ShouldAcceptLoopbackFrame(capture, pcm) Then
                     Return
                 End If
 
@@ -265,6 +251,159 @@ Namespace Transcription
                 RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs("OnLoopbackData: " & ex.Message, ex, False))
             End Try
         End Sub
+
+        Private Sub ConfigureLoopbackCaptures()
+            _loopbackCapture = Nothing
+            _loopbackCaptureSecondary = Nothing
+            _loopbackPrimaryDeviceId = ""
+            _loopbackSecondaryDeviceId = ""
+            _activeLoopbackDeviceId = ""
+            _activeLoopbackLastSignalUtc = DateTime.MinValue
+
+            Dim enumr As New MMDeviceEnumerator()
+
+            If Not String.IsNullOrWhiteSpace(SystemAudioRenderDeviceId) Then
+                Try
+                    Dim selected As MMDevice = enumr.GetDevice(SystemAudioRenderDeviceId)
+                    _loopbackPrimaryDeviceId = selected.ID
+                    _loopbackCapture = New WasapiLoopbackCapture(selected)
+                    AddHandler _loopbackCapture.DataAvailable, AddressOf OnLoopbackData
+                    System.Diagnostics.Debug.WriteLine("[AudioCapture] System audio uses explicitly selected render endpoint: " & selected.FriendlyName & " [" & selected.ID & "]")
+                    Return
+                Catch ex As Exception
+                    RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs(
+                        "Selected output device is no longer available. Falling back to automatic Multimedia/Communications output detection.",
+                        ex,
+                        False))
+                End Try
+            End If
+
+            Dim primary As MMDevice = Nothing
+            Dim communications As MMDevice = Nothing
+
+            Try
+                primary = enumr.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia)
+            Catch
+                Try
+                    primary = enumr.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console)
+                Catch
+                End Try
+            End Try
+
+            Try
+                communications = enumr.GetDefaultAudioEndpoint(DataFlow.Render, Role.Communications)
+            Catch
+            End Try
+
+            If primary Is Nothing AndAlso communications Is Nothing Then
+                _loopbackCapture = New WasapiLoopbackCapture()
+                AddHandler _loopbackCapture.DataAvailable, AddressOf OnLoopbackData
+                System.Diagnostics.Debug.WriteLine("[AudioCapture] System audio uses NAudio default loopback endpoint.")
+                Return
+            End If
+
+            If primary Is Nothing Then
+                primary = communications
+                communications = Nothing
+            End If
+
+            _loopbackPrimaryDeviceId = primary.ID
+            _loopbackCapture = New WasapiLoopbackCapture(primary)
+            AddHandler _loopbackCapture.DataAvailable, AddressOf OnLoopbackData
+            System.Diagnostics.Debug.WriteLine("[AudioCapture] Primary system-audio endpoint: " & primary.FriendlyName & " [" & primary.ID & "]")
+
+            If communications IsNot Nothing AndAlso Not String.Equals(communications.ID, primary.ID, StringComparison.OrdinalIgnoreCase) Then
+                _loopbackSecondaryDeviceId = communications.ID
+                _loopbackCaptureSecondary = New WasapiLoopbackCapture(communications)
+                AddHandler _loopbackCaptureSecondary.DataAvailable, AddressOf OnLoopbackData
+                System.Diagnostics.Debug.WriteLine("[AudioCapture] Communications fallback endpoint: " & communications.FriendlyName & " [" & communications.ID & "]")
+            End If
+        End Sub
+
+        Private Sub StartLoopbackCapture(capture As WasapiLoopbackCapture, label As String)
+            If capture Is Nothing Then
+                Return
+            End If
+
+            Try
+                capture.StartRecording()
+            Catch ex As Exception
+                RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs("Cannot start " & label & " loopback: " & ex.Message, ex, False))
+                Try
+                    RemoveHandler capture.DataAvailable, AddressOf OnLoopbackData
+                Catch
+                End Try
+                Try
+                    capture.Dispose()
+                Catch
+                End Try
+
+                If Object.ReferenceEquals(capture, _loopbackCapture) Then
+                    _loopbackCapture = Nothing
+                ElseIf Object.ReferenceEquals(capture, _loopbackCaptureSecondary) Then
+                    _loopbackCaptureSecondary = Nothing
+                End If
+            End Try
+        End Sub
+
+        Private Function ShouldAcceptLoopbackFrame(capture As WasapiLoopbackCapture, pcm As Byte()) As Boolean
+            Dim deviceId As String = If(Object.ReferenceEquals(capture, _loopbackCaptureSecondary), _loopbackSecondaryDeviceId, _loopbackPrimaryDeviceId)
+            If String.IsNullOrWhiteSpace(_loopbackSecondaryDeviceId) Then
+                Return True
+            End If
+
+            Dim hasSignal As Boolean = ContainsAudibleSignal(pcm)
+            Dim nowUtc As DateTime = DateTime.UtcNow
+
+            SyncLock _loopbackSelectionSyncRoot
+                If String.IsNullOrWhiteSpace(_activeLoopbackDeviceId) Then
+                    If hasSignal Then
+                        _activeLoopbackDeviceId = deviceId
+                        _activeLoopbackLastSignalUtc = nowUtc
+                        System.Diagnostics.Debug.WriteLine("[AudioCapture] Active system-audio endpoint selected: " & deviceId)
+                        Return True
+                    End If
+                    Return False
+                End If
+
+                If String.Equals(_activeLoopbackDeviceId, deviceId, StringComparison.OrdinalIgnoreCase) Then
+                    If hasSignal Then
+                        _activeLoopbackLastSignalUtc = nowUtc
+                    End If
+                    Return True
+                End If
+
+                If hasSignal AndAlso (nowUtc - _activeLoopbackLastSignalUtc) >= TimeSpan.FromMilliseconds(750) Then
+                    _activeLoopbackDeviceId = deviceId
+                    _activeLoopbackLastSignalUtc = nowUtc
+                    System.Diagnostics.Debug.WriteLine("[AudioCapture] Switched active system-audio endpoint: " & deviceId)
+                    SyncLock _systemPcmSyncRoot
+                        _systemPcmQueue.Clear()
+                    End SyncLock
+                    Return True
+                End If
+
+                Return False
+            End SyncLock
+        End Function
+
+        Private Shared Function ContainsAudibleSignal(pcm As Byte()) As Boolean
+            If pcm Is Nothing OrElse pcm.Length < 2 Then
+                Return False
+            End If
+
+            Dim peak As Integer = 0
+            Dim sampleCount As Integer = 0
+            For i As Integer = 0 To pcm.Length - 2 Step 2
+                Dim sample As Integer = Math.Abs(CInt(BitConverter.ToInt16(pcm, i)))
+                If sample > peak Then
+                    peak = sample
+                End If
+                sampleCount += 1
+            Next
+
+            Return sampleCount > 0 AndAlso peak >= 96
+        End Function
 
         Private Sub EnqueueSystemPcm(buffer As Byte(), bytesValid As Integer)
             If buffer Is Nothing OrElse bytesValid <= 0 Then
@@ -624,6 +763,21 @@ Namespace Transcription
                 End If
             Catch
             End Try
+
+            Try
+                If _loopbackCaptureSecondary IsNot Nothing Then
+                    RemoveHandler _loopbackCaptureSecondary.DataAvailable, AddressOf OnLoopbackData
+                    _loopbackCaptureSecondary.StopRecording()
+                    _loopbackCaptureSecondary.Dispose()
+                    _loopbackCaptureSecondary = Nothing
+                End If
+            Catch
+            End Try
+
+            _loopbackPrimaryDeviceId = ""
+            _loopbackSecondaryDeviceId = ""
+            _activeLoopbackDeviceId = ""
+            _activeLoopbackLastSignalUtc = DateTime.MinValue
 
             SyncLock _systemPcmSyncRoot
                 _systemPcmQueue.Clear()

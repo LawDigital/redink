@@ -147,11 +147,13 @@ Public NotInheritable Class WordTalkToMeHostAdapter
         Next
 
         Dim systemPrompt As String =
-            "You are the command resolver for Red Ink's 'Talk to me!' widget inside Microsoft Word. " &
-            "The transcript may contain speech-recognition errors, partial speech, or wake-word variations. " &
-            "You must decide whether the speaker was plausibly addressing this assistant. " &
-            "Only treat the transcript as addressed to the assistant if either (1) a wake-word is likely present despite recognition errors, or (2) the context makes it clear that this is a command or request directed at an assistant. " &
-            "If neither is true, return action='none'. " &
+            "You are the multilingual intent router and dictation assistant for Red Ink's 'Talk to me!' widget inside Microsoft Word. " &
+            "EVERY final speech transcript must be interpreted by you; the host does not use wake words, keyword matching, language-specific heuristics, or code-word detection. " &
+            "Decide from meaning and context whether the user is issuing a command/request or dictating ordinary text. " &
+            "If the utterance is not clearly a command or assistant request, treat it as DICTATION and return action='type_text' with text containing the cleaned dictated wording in the speaker's language. " &
+            "Do not require a wake word. Do not return action='none' for ordinary dictation. Use action='none' only for genuinely empty, unintelligible, or non-linguistic input. " &
+            "For dictation, preserve meaning, names, numbers, punctuation intent, and language; make only conservative speech-to-written-text cleanup and never answer the dictated content. " &
+            "When returning dictated text, act like a good writing assistant: produce clean, well-formed written text with correct punctuation (Interpunktion) such as '.', ',', '?', '!', ':', ';', correct sentence-ending punctuation, proper capitalization at sentence starts, and correct spacing, while faithfully preserving the user's meaning, wording, names, numbers, and language. Do not add a leading or trailing space to the text value; the host handles inter-sentence spacing. " &
             "Return exactly one structured action. " &
             "Allowed action values are: host_command, type_text, insert_text, freestyle, goto_text, find_text, word_command, none. " &
             "The supported host commands are provided with stable command id, visible button label, menu category, button description, and optional aliases. Treat those as authoritative. " &
@@ -198,19 +200,21 @@ Public NotInheritable Class WordTalkToMeHostAdapter
             "Use freestyle only when Red Ink itself should process document text, and only when CanWriteToDocument is true. " &
             "A text selection is context only; it does NOT by itself mean that the selected text should be changed, unless the user instructs so. " &
             "If the user wants you to redraft or otherwise change the selected text, always do so in the language of the text, unless directed otherwise. If the user wants you to provide a comment, an analysis or response, provide it in the language of the user's instruction." &
-            "When the user wants the selected text or other document text to be corrected, revised, translated, shortened, expanded, reformulated, improved, or otherwise transformed in the document, use freestyle and make instruction start exactly with 'Markup: ' followed by the instruction in the user's language. " &
-            "When the user wants new text to be drafted for insertion into the document, use freestyle with an instruction in the user's language that does NOT start with 'Clip: '. " &
+            "The 'Markup: ', 'Replace: ', and 'Append: ' prefixes require an existing text selection and are ONLY allowed when HasSelection is true. When HasSelection is false, never use 'Markup: ', 'Replace: ', or 'Append: '. " &
+            "When the user wants the selected text or other document text to be corrected, revised, translated, shortened, expanded, reformulated, improved, or otherwise transformed in the document, and HasSelection is true, use freestyle and make instruction start exactly with 'Markup: ' followed by the instruction in the user's language. " &
+            "When the user wants new text to be drafted for insertion into the document, use freestyle with an instruction in the user's language that does NOT start with any prefix (no 'Markup: ', 'Replace: ', 'Append: ', or 'Clip: '); this also applies when HasSelection is false and the user wants a summary, conclusion, or any additional text added to the document. " &
             "When the user wants analysis, explanation, comments, feedback, an opinion, an answer, brainstorming, or any response that should NOT be inserted into the document, use freestyle and make instruction start exactly with 'Clip: ' followed by the instruction." &
             "Use 'Clip: ' even if text is selected and even if the request is about that selected text. " &
-            "Use 'Markup: ' only when the selected or referenced document text should actually be changed in the document. " &
-            "Use 'Replace: ' only when the selected or referenced document text should actually be replaced in the document (for example because markup makes no sense, e.g., for a translation). " &
-            "Use 'Append: ' only when the selected or referenced document text should not be replaced but text added to it at the end (for example for a summary). " &
+            "Use 'Markup: ' only when HasSelection is true and the selected document text should actually be changed in the document. " &
+            "Use 'Replace: ' only when HasSelection is true and the selected document text should actually be replaced in the document (for example because markup makes no sense, e.g., for a translation). " &
+            "Use 'Append: ' only when HasSelection is true and the selected document text should not be replaced but text added to it at the end (for example for a summary). " &
             "Examples: " &
             "'translate this selection into German' => action='freestyle', instruction='Replace: translate the selected text into German'; " &
             "'improve this wording' => action='freestyle', instruction='Markup: improve the wording of the selected text'; " &
             "'what does this paragraph mean' => action='freestyle', instruction='Clip: explain what the selected paragraph means'; " &
             "'is this argument convincing' => action='freestyle', instruction='Clip: assess whether the selected argument is convincing'; " &
-            "'write a short conclusion about this topic' => action='freestyle', instruction='Append: write a short conclusion about this topic'. " &
+            "'write a short conclusion about this topic' (with text selected) => action='freestyle', instruction='Append: write a short conclusion about this topic'; " &
+            "'write a short conclusion about this topic' (with nothing selected) => action='freestyle', instruction='write a short conclusion about this topic'. " &
             "If the user asks for chat, chatbot, open chat, open chatbot, or the chat window, choose the chat command. " &
             "Use help_me only when the user explicitly asks for help about Red Ink itself, such as help, help me Inky, Red Ink help, or how Red Ink works. " &
             "Return ONLY compact JSON with these exact properties: " &
@@ -329,6 +333,12 @@ Public NotInheritable Class WordTalkToMeHostAdapter
         Catch
         End Try
 
+        ' Capture up front whether Word was already the foreground application. The focus is
+        ' only returned to the Word document after a dispatch if Word already had it before.
+        ' When the focus was in another application, Talk to me is being used to insert text
+        ' into that other program, so we must not steal the focus back to Word.
+        Dim wordWasForeground As Boolean = IsWordMainWindowForeground(app)
+
         Dim canWriteToDocument As Boolean = CanWriteToDocumentNow(app, doc, selection)
 
         If Not canWriteToDocument Then
@@ -340,6 +350,9 @@ Public NotInheritable Class WordTalkToMeHostAdapter
                         Await RunOnUiThreadAsync(
                             Sub()
                                 InsertLiteralText(fallbackText)
+                                If wordWasForeground Then
+                                    FocusCurrentSelection(app)
+                                End If
                             End Sub)
 
                         Return New SharedLibrary.SharedLibrary.TalkToMeDispatchResult With {
@@ -365,6 +378,9 @@ Public NotInheritable Class WordTalkToMeHostAdapter
                 Await RunOnUiThreadAsync(
                     Sub()
                         ExecuteHostCommand(response.HostCommandName)
+                        If wordWasForeground Then
+                            FocusCurrentSelection(app)
+                        End If
                     End Sub)
 
                 Return New SharedLibrary.SharedLibrary.TalkToMeDispatchResult With {
@@ -377,6 +393,9 @@ Public NotInheritable Class WordTalkToMeHostAdapter
                 Await RunOnUiThreadAsync(
                     Sub()
                         InsertLiteralText(response.Text)
+                        If wordWasForeground Then
+                            FocusCurrentSelection(app)
+                        End If
                     End Sub)
 
                 Return New SharedLibrary.SharedLibrary.TalkToMeDispatchResult With {
@@ -415,6 +434,9 @@ Public NotInheritable Class WordTalkToMeHostAdapter
                 Await RunOnUiThreadAsync(
                     Sub()
                         ExecuteFreestyleInstruction(response.Instruction)
+                        If wordWasForeground Then
+                            FocusCurrentSelection(app)
+                        End If
                     End Sub)
 
                 Return New SharedLibrary.SharedLibrary.TalkToMeDispatchResult With {
@@ -546,13 +568,15 @@ Public NotInheritable Class WordTalkToMeHostAdapter
             Dim originalTrackRevisions As Boolean = doc.TrackRevisions
 
             Try
-                doc.TrackRevisions = True
+                doc.TrackRevisions = False
 
                 If selection.Start <> selection.End Then
                     selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                 End If
 
-                TypeTextIntoWordSelection(selection, textToInsert)
+                Dim textWithSpacing As String = ApplyLeadingSpaceIfNeeded(doc, selection, textToInsert)
+
+                TypeTextIntoWordSelection(selection, textWithSpacing)
             Finally
                 doc.TrackRevisions = originalTrackRevisions
             End Try
@@ -562,6 +586,60 @@ Public NotInheritable Class WordTalkToMeHostAdapter
 
         TypeTextIntoActiveUiTarget(textToInsert)
     End Sub
+
+    Private Shared Function ApplyLeadingSpaceIfNeeded(doc As Microsoft.Office.Interop.Word.Document,
+                                                      selection As Microsoft.Office.Interop.Word.Selection,
+                                                      textToInsert As String) As String
+        Dim value As String = If(textToInsert, "")
+
+        If value.Length = 0 Then
+            Return value
+        End If
+
+        ' Do not add a leading space if the dictated text already starts with whitespace,
+        ' or starts with punctuation where a preceding space would be wrong.
+        Dim firstChar As Char = value(0)
+
+        If Char.IsWhiteSpace(firstChar) Then
+            Return value
+        End If
+
+        If ".,;:!?)]}".IndexOf(firstChar) >= 0 Then
+            Return value
+        End If
+
+        Try
+            ' Nothing precedes the caret at the very start of the document.
+            If selection.Start <= doc.Content.Start Then
+                Return value
+            End If
+
+            Dim precedingRange As Microsoft.Office.Interop.Word.Range =
+                doc.Range(selection.Start - 1, selection.Start)
+
+            Dim precedingText As String = If(precedingRange.Text, "")
+
+            If precedingText.Length = 0 Then
+                Return value
+            End If
+
+            Dim precedingChar As Char = precedingText(precedingText.Length - 1)
+
+            ' Only add a space if there is real, non-whitespace, non-paragraph text immediately before.
+            If Char.IsWhiteSpace(precedingChar) OrElse
+               precedingChar = ChrW(&HD) OrElse
+               precedingChar = ChrW(&HA) OrElse
+               precedingChar = ChrW(&H7) OrElse
+               precedingChar = ChrW(&HB) OrElse
+               precedingChar = ChrW(&HC) Then
+                Return value
+            End If
+
+            Return " " & value
+        Catch
+            Return value
+        End Try
+    End Function
 
     Private Function FindAndSelect(query As String) As Boolean
         Dim searchText As String = If(query, "").Trim()
@@ -1807,6 +1885,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
     Private _alternateOpenAiConfig As ModelConfig = Nothing
     Private _alternateGoogleConfig As ModelConfig = Nothing
+    Private _alternateGoogleApiKeyConfig As ModelConfig = Nothing
 
     Private _engine As ITranscriptionEngine = Nothing
     Private _capture As AudioCaptureService = Nothing
@@ -3132,12 +3211,9 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     End Function
 
     Private Shared Function EngineNeedsLocalAudioCapture(kind As EngineKind) As Boolean
-        Select Case kind
-            Case EngineKind.TeamsAcsRealtime
-                Return False
-            Case Else
-                Return True
-        End Select
+        ' Every engine offered by Talk To Me receives audio from the local capture
+        ' pipeline. Bridge-based capture is intentionally not part of this feature.
+        Return True
     End Function
 
     Private Function GetConfiguredSourceMode() As AudioSourceMode
@@ -3326,6 +3402,15 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             })
         End If
 
+        If HasConfiguredGeminiLiveProvider() Then
+            result.Add(New LiveEngineDescriptor With {
+                .DisplayName = GeminiTranscribeLiveEngine.DisplayNameValue,
+                .Kind = EngineKind.GeminiTranscribeLive,
+                .ModelOrTag = "gemini-3.5-transcribe",
+                .Languages = GoogleV2Engine.SupportedLanguages.OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).ToList()
+            })
+        End If
+
         If HasConfiguredOpenAiProvider() Then
             result.Add(New LiveEngineDescriptor With {
                 .DisplayName = OpenAiRealtimeEngine.DisplayNameValue,
@@ -3350,6 +3435,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     Private Sub LoadAlternateProviderFallbacks()
         _alternateOpenAiConfig = Nothing
         _alternateGoogleConfig = Nothing
+        _alternateGoogleApiKeyConfig = Nothing
 
         Try
             Dim altPath As String = SharedMethods.ExpandEnvironmentVariables(_owner.INI_AlternateModelPath)
@@ -3371,6 +3457,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
             _alternateOpenAiConfig = models.FirstOrDefault(Function(m) IsUsableOpenAiConfig(m))
             _alternateGoogleConfig = models.FirstOrDefault(Function(m) IsUsableGoogleConfig(m))
+            _alternateGoogleApiKeyConfig = models.FirstOrDefault(Function(m) IsUsableGoogleApiKeyConfig(m))
         Catch
         End Try
     End Sub
@@ -3428,6 +3515,23 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             .OAuth2Endpoint = If(useSecond, _owner.INI_OAuth2Endpoint_2, _owner.INI_OAuth2Endpoint),
             .OAuth2ATExpiry = If(useSecond, _owner.INI_OAuth2ATExpiry_2, _owner.INI_OAuth2ATExpiry),
             .APIKey = If(useSecond, _owner.INI_APIKey_2, _owner.INI_APIKey)
+        }
+    End Function
+
+    Private Function BuildConfiguredGoogleApiKeyModelConfig(useSecond As Boolean) As ModelConfig
+        Dim endpoint As String = If(useSecond, _owner.INI_Endpoint_2, _owner.INI_Endpoint)
+        Dim oauthEnabled As Boolean = If(useSecond, _owner.INI_OAuth2_2, _owner.INI_OAuth2)
+
+        If oauthEnabled OrElse
+           String.IsNullOrWhiteSpace(endpoint) OrElse
+           endpoint.IndexOf("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase) < 0 Then
+            Return Nothing
+        End If
+
+        Return New ModelConfig With {
+            .Endpoint = endpoint,
+            .APIKey = If(useSecond, _owner.INI_APIKey_2, _owner.INI_APIKey),
+            .DecodedAPI = If(useSecond, _owner.DecodedAPI_2, _owner.DecodedAPI)
         }
     End Function
 
@@ -3493,6 +3597,37 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Return Not String.IsNullOrWhiteSpace(config.APIKey)
     End Function
 
+    Private Function IsUsableGoogleApiKeyConfig(config As ModelConfig) As Boolean
+        If config Is Nothing Then
+            Return False
+        End If
+
+        If String.IsNullOrWhiteSpace(config.Endpoint) OrElse
+           config.Endpoint.IndexOf("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase) < 0 Then
+            Return False
+        End If
+
+        Return Not String.IsNullOrWhiteSpace(GetApiKeyFromModelConfig(config))
+    End Function
+
+    Private Function ResolveGoogleApiKeyConfig() As ModelConfig
+        Dim primaryConfig As ModelConfig = BuildConfiguredGoogleApiKeyModelConfig(False)
+        If IsUsableGoogleApiKeyConfig(primaryConfig) Then
+            Return primaryConfig
+        End If
+
+        Dim secondaryConfig As ModelConfig = BuildConfiguredGoogleApiKeyModelConfig(True)
+        If IsUsableGoogleApiKeyConfig(secondaryConfig) Then
+            Return secondaryConfig
+        End If
+
+        If IsUsableGoogleApiKeyConfig(_alternateGoogleApiKeyConfig) Then
+            Return _alternateGoogleApiKeyConfig
+        End If
+
+        Return Nothing
+    End Function
+
     Private Function ResolveGoogleTranscriptionConfig(ByRef cacheSlot As String) As ModelConfig
         Dim primaryConfig As ModelConfig = BuildConfiguredGoogleModelConfig(False)
         If IsUsableGoogleConfig(primaryConfig) Then
@@ -3547,6 +3682,17 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     Private Function HasConfiguredGoogleV2Provider() As Boolean
         Return HasConfiguredGoogleV1Provider() AndAlso
                Not String.IsNullOrWhiteSpace(ResolveGoogleProjectId())
+    End Function
+
+    Private Function HasConfiguredGeminiLiveProvider() As Boolean
+        Dim cacheSlot As String = ""
+        Dim vertexConfig As ModelConfig = ResolveGoogleTranscriptionConfig(cacheSlot)
+
+        If vertexConfig IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(ResolveGoogleProjectId()) Then
+            Return True
+        End If
+
+        Return ResolveGoogleApiKeyConfig() IsNot Nothing
     End Function
 
     Private Function HasConfiguredOpenAiProvider() As Boolean
@@ -3713,6 +3859,19 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     End Function
 
 
+    Private Shared Function ParseVocabularySetting(raw As String) As System.Collections.Generic.IEnumerable(Of String)
+        Dim normalized As String = If(raw, "").Trim()
+        If String.IsNullOrWhiteSpace(normalized) Then
+            Return New String() {}
+        End If
+
+        Return normalized.Split(New Char() {"|"c, ","c}, StringSplitOptions.RemoveEmptyEntries).
+            Select(Function(item As String) item.Trim()).
+            Where(Function(item As String) Not String.IsNullOrWhiteSpace(item)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToArray()
+    End Function
+
     Private Shared Function NormalizeIniValue(value As String) As String
         Dim result As String = If(value, "").Trim()
 
@@ -3870,6 +4029,47 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                         ResolveGoogleSttSetting(d.ModelOrTag, "language", ""),
                         googleConfig.OAuth2Scopes,
                         "TalkToMe")
+
+            Case EngineKind.GeminiTranscribeLive
+                Dim configuredModeLive As String = ResolveGoogleSttSetting(d.ModelOrTag, "mode", "VERBATIM")
+                Dim configuredVocabularyLive As System.Collections.Generic.IEnumerable(Of String) =
+                    ParseVocabularySetting(ResolveGoogleSttSetting(d.ModelOrTag, "custom_vocabulary", ""))
+
+                Dim googleCacheSlotGeminiLive As String = ""
+                Dim googleVertexConfigLive As ModelConfig = ResolveGoogleTranscriptionConfig(googleCacheSlotGeminiLive)
+                Dim projectIdLive As String = ResolveGoogleProjectId()
+
+                If googleVertexConfigLive IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(projectIdLive) Then
+                    Dim tokenFactoryLive As System.Func(Of System.Threading.Tasks.Task(Of String)) =
+                        Function() GetFreshGoogleTokenAsync(googleVertexConfigLive, googleCacheSlotGeminiLive)
+                    Dim configuredVertexLiveModel As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_model", GeminiTranscribeLiveEngine.DefaultVertexModel)
+                    Dim configuredLiveLocation As String = ResolveGoogleSttSetting(d.ModelOrTag, "location", GeminiTranscribeLiveEngine.DefaultLocation)
+                    Dim configuredVertexLiveEndpoint As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_vertex_endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "vertex_endpoint", ""))
+
+                    Return New GeminiTranscribeLiveEngine(
+                        projectIdLive,
+                        tokenFactoryLive,
+                        configuredVertexLiveModel,
+                        configuredLiveLocation,
+                        configuredModeLive,
+                        configuredVocabularyLive,
+                        configuredVertexLiveEndpoint)
+                End If
+
+                Dim googleApiKeyConfigLive As ModelConfig = ResolveGoogleApiKeyConfig()
+                If googleApiKeyConfigLive IsNot Nothing Then
+                    Dim configuredApiLiveModel As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_api_model", GeminiTranscribeLiveEngine.DefaultGeminiApiModel)
+                    Dim configuredApiLiveEndpoint As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_api_endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "api_endpoint", ""))
+
+                    Return New GeminiTranscribeLiveEngine(
+                        GetApiKeyFromModelConfig(googleApiKeyConfigLive),
+                        configuredApiLiveModel,
+                        configuredModeLive,
+                        configuredVocabularyLive,
+                        configuredApiLiveEndpoint)
+                End If
+
+                Throw New InvalidOperationException("No usable Google Vertex OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe Live.")
 
             Case EngineKind.OpenAiRealtime
                 Dim key As String = ResolveOpenAiKey()
@@ -4542,8 +4742,41 @@ Partial Public Class ThisAddIn
                 coordinator)
         End If
 
-        _talkToMeWidget.SetReturnFocusAfterStart(returnFocusAfterStart)
+        Dim effectiveReturnFocusAfterStart As System.Action = returnFocusAfterStart
+        If effectiveReturnFocusAfterStart Is Nothing Then
+            effectiveReturnFocusAfterStart = AddressOf RestoreWordFocusAfterTalkToMeStart
+        End If
+
+        _talkToMeWidget.SetReturnFocusAfterStart(effectiveReturnFocusAfterStart)
         _talkToMeWidget.ShowWidget()
+    End Sub
+
+    Private Sub RestoreWordFocusAfterTalkToMeStart()
+        Dim app As Microsoft.Office.Interop.Word.Application = Me.Application
+        If app Is Nothing Then
+            Return
+        End If
+
+        Try
+            app.Activate()
+        Catch
+        End Try
+
+        Try
+            Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+            If doc IsNot Nothing Then
+                doc.Activate()
+            End If
+        Catch
+        End Try
+
+        Try
+            Dim selection As Microsoft.Office.Interop.Word.Selection = app.Selection
+            If selection IsNot Nothing AndAlso selection.Range IsNot Nothing Then
+                selection.Range.Select()
+            End If
+        Catch
+        End Try
     End Sub
 
     Public Sub SubmitTalkToMeExternalSpeech(speakerName As String, text As String)
