@@ -328,6 +328,43 @@ Namespace Agents
 
             Return obj.ToString(Formatting.None)
         End Function
+        Public Shared Function TryGetEnvelopeErrorMessage(payload As String,
+                                                          ByRef errorMessage As String) As Boolean
+            errorMessage = ""
+            If String.IsNullOrWhiteSpace(payload) Then Return False
+
+            Try
+                Dim obj As JObject = JObject.Parse(payload)
+                Dim errObj As JObject = TryCast(obj("error"), JObject)
+                If errObj Is Nothing Then Return False
+
+                errorMessage = If(errObj.Value(Of String)("message"), "").Trim()
+                Return Not String.IsNullOrWhiteSpace(errorMessage)
+            Catch ex As System.Exception
+                Return False
+            End Try
+        End Function
+
+        Public Shared Function TryGetEnvelopeRetryable(payload As String,
+                                                       ByRef retryable As Boolean) As Boolean
+            retryable = False
+            If String.IsNullOrWhiteSpace(payload) Then Return False
+
+            Try
+                Dim obj As JObject = JObject.Parse(payload)
+                Dim errObj As JObject = TryCast(obj("error"), JObject)
+                If errObj Is Nothing Then Return False
+
+                Dim retryToken As JToken = errObj("retryable")
+                If retryToken Is Nothing OrElse retryToken.Type <> JTokenType.Boolean Then Return False
+
+                retryable = retryToken.Value(Of Boolean)()
+                Return True
+            Catch ex As System.Exception
+                Return False
+            End Try
+        End Function
+
         Public Shared Function TryGetEnvelopeErrorInfo(payload As String,
                                                        ByRef errorCode As String,
                                                        ByRef resultKind As String) As Boolean

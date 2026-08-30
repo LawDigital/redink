@@ -155,6 +155,19 @@ Namespace Agents
             sys.Append(ag.LoadBody())
             sys.AppendLine()
             sys.AppendLine()
+
+            If Not System.String.IsNullOrWhiteSpace(ag.DirectoryPath) Then
+                Dim agentResourceDirectory As System.String = System.IO.Path.GetFullPath(ag.DirectoryPath)
+                sys.AppendLine("Agent resource directory: " & agentResourceDirectory)
+
+                Dim agentReferencesDirectory As System.String = System.IO.Path.Combine(agentResourceDirectory, "references")
+                If System.IO.Directory.Exists(agentReferencesDirectory) Then
+                    sys.AppendLine("Agent references directory: " & agentReferencesDirectory)
+                End If
+                sys.AppendLine("Use these absolute resource paths when this agent instructs you to read files from its references directory.")
+                sys.AppendLine()
+            End If
+
             sys.AppendLine("Output contract: your FINAL message MUST be one usable final answer in the requested format. If you cannot complete the task, return a structured error object.")
 
             Dim baseUserMessage As New StringBuilder()

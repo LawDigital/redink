@@ -4433,9 +4433,19 @@ Partial Public Class ThisAddIn
                     Return ""
                 End If
                 TranslateLanguage = targetLang.Trim()
+
+                Dim dictionarySelectionCancelled As System.Boolean = False
+                Dim translatePrompt As System.String = Nothing
+                Await SwitchToUi(
+                    Sub()
+                        translatePrompt = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(
+                            _context, SP_Translate, AN & " Translate (for Browser)", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    End Sub)
+                If dictionarySelectionCancelled Then Return ""
+
                 ' ─── 2  call the LLM on the UI thread, get Task(Of String) ─────
                 Dim llmOut As String = Await RunLlmAsync(
-                    InterpolateAtRuntime(SP_Translate),
+                    translatePrompt,
                     $"<TEXTTOPROCESS>{textBody0}</TEXTTOPROCESS>")
                 ' ─── 3  clean up the wrapper tags / markdown ──────────────────
                 llmOut = llmOut.Replace("<TEXTTOPROCESS>", "") _

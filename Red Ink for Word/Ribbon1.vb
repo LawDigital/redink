@@ -256,6 +256,7 @@ Public Class Ribbon1
             New TalkToMeRibbonCommandEntry With {.Name = "chat", .Category = "Task", .Button = RI_Chat2, .Execute = AddressOf RunChatCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "discuss_inky", .Category = "Analyze", .Button = RI_DiscussInky, .Execute = AddressOf RunDiscussInkyCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "context_search", .Category = "Task", .Button = RI_Search, .Execute = AddressOf RunSearchCommand},
+            New TalkToMeRibbonCommandEntry With {.Name = "translator", .Category = "Word Helpers", .Button = RI_Translator, .Execute = AddressOf RunTranslatorWidgetCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "self_compare_selection", .Category = "Word Helpers", .Button = RI_Halves, .Execute = AddressOf RunHalvesCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "compare_active_docs", .Category = "Word Helpers", .Button = RI_LiveCompare, .Execute = AddressOf RunLiveCompareCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "accept_format_changes", .Category = "Word Helpers", .Button = RI_AcceptFormat, .Execute = AddressOf RunAcceptFormatCommand},
@@ -761,6 +762,10 @@ Public Class Ribbon1
         ExecuteLoggedCommand("Import_Word invoked", Sub() Globals.ThisAddIn.ImportTextFile())
     End Sub
 
+    Private Sub RunTranslatorWidgetCommand()
+        Globals.ThisAddIn.ShowTranslatorWidget()
+    End Sub
+
     Private Sub RunHalvesCommand()
         ExecuteLoggedCommand("Halves_Word invoked", Sub() Globals.ThisAddIn.CompareSelectionHalves())
     End Sub
@@ -1067,6 +1072,10 @@ Public Class Ribbon1
 
     Private Sub RI_Import_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs)
         RunImportCommand()
+    End Sub
+
+    Private Sub RI_Translator_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_Translator.Click
+        RunTranslatorWidgetCommand()
     End Sub
 
     Private Sub RI_Halves_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs)

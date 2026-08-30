@@ -331,6 +331,8 @@ Namespace SharedLibrary
                 context.INI_AllowLegacyDocFiles = ParseBoolean(configDict, "AllowLegacyDocFiles")
                 context.INI_JsRunDisable = ParseBoolean(configDict, "JsRunDisable")
                 context.INI_BrowserToolsDisable = ParseBoolean(configDict, "BrowserToolsDisable")
+                context.INI_PlayWrightPath = If(configDict.ContainsKey("PlayWrightPath"), configDict("PlayWrightPath"), "")
+                context.INI_PlayWrightUseLocalCache = ParseBoolean(configDict, "PlayWrightUseLocalCache")
                 context.INI_EnablePrivacyForSearch = ParseBoolean(configDict, "EnablePrivacyForSearch")
 
                 context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")
@@ -393,6 +395,7 @@ Namespace SharedLibrary
                 context.INI_LocalModelPath = If(configDict.ContainsKey("LocalModelPath"), configDict("LocalModelPath"), "")
                 context.INI_DictionaryPath = If(configDict.ContainsKey("DictionaryPath"), configDict("DictionaryPath"), "")
                 context.INI_DictionaryPathLocal = If(configDict.ContainsKey("DictionaryPathLocal"), configDict("DictionaryPathLocal"), "")
+                context.INI_DictionarySegmentPrompt = ParseBoolean(configDict, "DictionarySegmentPrompt", False)
 
                 context.INI_STT_Google = If(configDict.ContainsKey("STT_Google"), configDict("STT_Google"), "")
                 context.INI_STT_OpenAI = If(configDict.ContainsKey("STT_OpenAI"), configDict("STT_OpenAI"), "")

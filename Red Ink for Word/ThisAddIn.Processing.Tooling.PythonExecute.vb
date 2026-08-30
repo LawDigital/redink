@@ -58,16 +58,39 @@ Partial Public Class ThisAddIn
             })
         Catch ex As Exception
             ToolingFileLogger.LogWarn("python_execute is unavailable (configuration invalid or Python Agent below the minimum required version) and will not be advertised.", ex:=ex)
+            Try
+                Global.SharedLibrary.SharedLibrary.UpdateHandler.WriteUpdateLog("[ToolAvailability] python_execute unavailable; error=" & CompactPythonAvailabilityLogValue(ex.Message))
+            Catch logEx As System.Exception
+                System.Diagnostics.Trace.WriteLine("Could not write python_execute availability diagnostics: " & logEx.ToString())
+            End Try
             Return False
         End Try
 
-        Return Agents.PythonExecuteTool.TryBuild(_context, modelConfig, toolPriority:=996, displaySuffix:=InternalToolSuffix)
+        Dim availabilityErrorCode As System.String = System.String.Empty
+        If Not Agents.PythonExecuteTool.IsAvailable(availabilityErrorCode) Then
+            Try
+                Global.SharedLibrary.SharedLibrary.UpdateHandler.WriteUpdateLog(
+                    "[ToolAvailability] python_execute unavailable; code=" & If(availabilityErrorCode, "(none)") &
+                    "; path=" & CompactPythonAvailabilityLogValue(configuration.ExecutablePath))
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine("Could not write python_execute availability diagnostics: " & ex.ToString())
+            End Try
+            Return False
+        End If
+
+        modelConfig = Agents.PythonExecuteTool.Build(_context, toolPriority:=996, displaySuffix:=InternalToolSuffix)
+        Return True
     End Function
 
     ''' <summary>
     ''' Writes a python_execute output artifact to the Word host's default writable root
     ''' (the connected workspace, or the Desktop when no workspace is maintained).
     ''' </summary>
+    Private Shared Function CompactPythonAvailabilityLogValue(value As System.String) As System.String
+        If System.String.IsNullOrWhiteSpace(value) Then Return "(none)"
+        Return value.Replace(System.Environment.NewLine, " ").Replace(System.Convert.ToChar(13), " "c).Replace(System.Convert.ToChar(10), " "c).Trim()
+    End Function
+
     Private Sub PublishPythonAgentOutput(output As Agents.RedInkPythonAgentOutput)
         If output Is Nothing OrElse String.IsNullOrWhiteSpace(output.FullPath) OrElse Not System.IO.File.Exists(output.FullPath) Then
             Return

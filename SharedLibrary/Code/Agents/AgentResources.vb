@@ -289,22 +289,7 @@ Namespace Agents
         End Property
 
         Private Shared Function NormalizeResourceLookupKey(value As String) As String
-            If String.IsNullOrWhiteSpace(value) Then Return ""
-
-            Dim sb As New StringBuilder()
-            Dim lastWasUnderscore As Boolean = False
-
-            For Each ch As Char In value.Trim()
-                If Char.IsLetterOrDigit(ch) Then
-                    sb.Append(Char.ToLowerInvariant(ch))
-                    lastWasUnderscore = False
-                ElseIf Not lastWasUnderscore Then
-                    sb.Append("_"c)
-                    lastWasUnderscore = True
-                End If
-            Next
-
-            Return sb.ToString().Trim("_"c)
+            Return ToolRegistryBuilder.ToSafeToolSuffix(value)
         End Function
 
         Public Shared Function FindSkill(name As String) As SkillDescriptor
@@ -1988,10 +1973,56 @@ Namespace Agents
         Public Const ActiveDesignSetFileName As String = "active.json"
         Public Const SupportedSchemaVersion As Integer = 1
 
+        Private NotInheritable Class DesignAccessState
+            Public Property AllowDesigns As System.Boolean = True
+            Public Property AllowDesignSets As System.Boolean = True
+        End Class
+
+        Private NotInheritable Class DesignAccessScope
+            Implements System.IDisposable
+
+            Private ReadOnly _previous As DesignAccessState
+            Private _disposed As System.Boolean
+
+            Public Sub New(ByVal previous As DesignAccessState)
+                _previous = previous
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If _disposed Then Return
+                _disposed = True
+                _designAccessState.Value = _previous
+            End Sub
+        End Class
+
+        Private Shared ReadOnly _designAccessState As New System.Threading.AsyncLocal(Of DesignAccessState)()
+
         Private Sub New()
         End Sub
 
+        Public Shared Function PushAccessScope(ByVal allowDesigns As System.Boolean,
+                                               ByVal allowDesignSets As System.Boolean) As System.IDisposable
+            Dim previous As DesignAccessState = _designAccessState.Value
+            _designAccessState.Value = New DesignAccessState() With {
+                .AllowDesigns = allowDesigns,
+                .AllowDesignSets = allowDesigns AndAlso allowDesignSets
+            }
+            Return New DesignAccessScope(previous)
+        End Function
+
+        Private Shared Function DesignsAllowed() As System.Boolean
+            Dim state As DesignAccessState = _designAccessState.Value
+            Return state Is Nothing OrElse state.AllowDesigns
+        End Function
+
+        Private Shared Function DesignSetsAllowed() As System.Boolean
+            Dim state As DesignAccessState = _designAccessState.Value
+            Return state Is Nothing OrElse (state.AllowDesigns AndAlso state.AllowDesignSets)
+        End Function
+
         Public Shared Function GetDesigns() As IReadOnlyList(Of DocumentDesignDescriptor)
+            If Not DesignsAllowed() Then Return New System.Collections.Generic.List(Of DocumentDesignDescriptor)()
+
             Dim merged As New Dictionary(Of String, DocumentDesignDescriptor)(StringComparer.OrdinalIgnoreCase)
 
             ' Approved standalone Office template carriers placed in the conventional
@@ -2120,6 +2151,10 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildPromptFragment(Optional maxDesigns As Integer = 24) As String
+            If Not DesignsAllowed() Then
+                Return "DESIGN REPOSITORY: Named internal design profiles are not authorized in the current execution context. Do not list, infer, resolve, request, or apply repository designs or design sets. Use only another concrete authorized format source supplied for this task, otherwise use neutral professional formatting."
+            End If
+
             Dim designs As IReadOnlyList(Of DocumentDesignDescriptor) = GetDesigns()
             If designs Is Nothing OrElse designs.Count = 0 Then
                 Return "DESIGN REPOSITORY: No named Office design profiles or approved standalone template carriers are currently configured under AgentResourcesPath/AgentResourcesPathLocal\\designs. Named corporate designs must therefore not be claimed from model knowledge; use neutral professional design unless another concrete authorized source is available."
@@ -2177,6 +2212,8 @@ Namespace Agents
         End Function
 
         Public Shared Function GetCatalogPaths() As IReadOnlyList(Of String)
+            If Not DesignsAllowed() Then Return New System.Collections.Generic.List(Of System.String)()
+
             Dim result As New List(Of String)()
             AddCatalogPath(result, AgentResources.ConfiguredCentralPath)
             AddCatalogPath(result, AgentResources.ConfiguredLocalPath)
@@ -2187,6 +2224,8 @@ Namespace Agents
             If System.String.IsNullOrWhiteSpace(root) Then Return ""
             Try
                 Dim defaultDir As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, DesignsDirectoryName))
+                If Not DesignSetsAllowed() Then Return defaultDir
+
                 Dim selectorPath As String = System.IO.Path.Combine(root, DesignSetsDirectoryName, ActiveDesignSetFileName)
                 If Not System.IO.File.Exists(selectorPath) Then Return defaultDir
 

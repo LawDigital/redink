@@ -1701,8 +1701,8 @@ Namespace SharedLibrary
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "EnablePrivacyForSearch",
-        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "PlayWrightUseLocalCache", "EnablePrivacyForSearch",
+        "DictionarySegmentPrompt", "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
             Return booleanSettings.Contains(settingKey)
         End Function
@@ -1911,6 +1911,8 @@ Namespace SharedLibrary
                     Return context.INI_DictionaryPath
                 Case "DictionaryPathLocal"
                     Return context.INI_DictionaryPathLocal
+                Case "DictionarySegmentPrompt"
+                    Return context.INI_DictionarySegmentPrompt.ToString()
                 Case "STT_Google"
                     Return context.INI_STT_Google
                 Case "STT_Google_ProjectID"
@@ -2017,6 +2019,10 @@ Namespace SharedLibrary
                     Return context.INI_JsRunDisable.ToString()
                 Case "BrowserToolsDisable"
                     Return context.INI_BrowserToolsDisable.ToString()
+                Case "PlayWrightPath"
+                    Return context.INI_PlayWrightPath
+                Case "PlayWrightUseLocalCache"
+                    Return context.INI_PlayWrightUseLocalCache.ToString()
                 Case "EnablePrivacyForSearch"
                     Return context.INI_EnablePrivacyForSearch.ToString()
                 Case "UpdateCheckInterval"
@@ -2332,6 +2338,8 @@ Namespace SharedLibrary
                     context.INI_DictionaryPath = value
                 Case "DictionaryPathLocal"
                     context.INI_DictionaryPathLocal = value
+                Case "DictionarySegmentPrompt"
+                    context.INI_DictionarySegmentPrompt = System.Boolean.Parse(value)
                 Case "STT_Google"
                     context.INI_STT_Google = value
                 Case "STT_Google_ProjectID"
@@ -2438,6 +2446,10 @@ Namespace SharedLibrary
                     context.INI_JsRunDisable = Boolean.Parse(value)
                 Case "BrowserToolsDisable"
                     context.INI_BrowserToolsDisable = Boolean.Parse(value)
+                Case "PlayWrightPath"
+                    context.INI_PlayWrightPath = value
+                Case "PlayWrightUseLocalCache"
+                    context.INI_PlayWrightUseLocalCache = Boolean.Parse(value)
                 Case "EnablePrivacyForSearch"
                     context.INI_EnablePrivacyForSearch = Boolean.Parse(value)
                 Case "UpdateCheckInterval"
@@ -2817,6 +2829,8 @@ Namespace SharedLibrary
                     {"AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles.ToString()},
                     {"JsRunDisable", context.INI_JsRunDisable.ToString()},
                     {"BrowserToolsDisable", context.INI_BrowserToolsDisable.ToString()},
+                    {"PlayWrightPath", context.INI_PlayWrightPath},
+                    {"PlayWrightUseLocalCache", context.INI_PlayWrightUseLocalCache.ToString()},
                     {"EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
@@ -2836,6 +2850,7 @@ Namespace SharedLibrary
                     {"LocalModelPath", context.INI_LocalModelPath},
                     {"DictionaryPath", context.INI_DictionaryPath},
                     {"DictionaryPathLocal", context.INI_DictionaryPathLocal},
+                    {"DictionarySegmentPrompt", context.INI_DictionarySegmentPrompt.ToString()},
                     {"STT_Google", context.INI_STT_Google},
                     {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
                     {"STT_OpenAI", context.INI_STT_OpenAI},
@@ -3478,6 +3493,7 @@ Namespace SharedLibrary
                     {"LocalModelPath", context.INI_LocalModelPath},
                     {"DictionaryPath", context.INI_DictionaryPath},
                     {"DictionaryPathLocal", context.INI_DictionaryPathLocal},
+                    {"DictionarySegmentPrompt", context.INI_DictionarySegmentPrompt.ToString()},
                     {"STT_Google", context.INI_STT_Google},
                     {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
                     {"STT_OpenAI", context.INI_STT_OpenAI},
@@ -4344,6 +4360,8 @@ Namespace SharedLibrary
             variableValues.Add("AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles)
             variableValues.Add("JsRunDisable", context.INI_JsRunDisable)
             variableValues.Add("BrowserToolsDisable", context.INI_BrowserToolsDisable)
+            variableValues.Add("PlayWrightPath", context.INI_PlayWrightPath)
+            variableValues.Add("PlayWrightUseLocalCache", context.INI_PlayWrightUseLocalCache)
             variableValues.Add("EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch)
             variableValues.Add("UpdateCheckInterval", context.INI_UpdateCheckInterval)
             variableValues.Add("UpdatePath", context.INI_UpdatePath)
@@ -4363,6 +4381,7 @@ Namespace SharedLibrary
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
             variableValues.Add("DictionaryPath", context.INI_DictionaryPath)
             variableValues.Add("DictionaryPathLocal", context.INI_DictionaryPathLocal)
+            variableValues.Add("DictionarySegmentPrompt", context.INI_DictionarySegmentPrompt)
             variableValues.Add("STT_Google", context.INI_STT_Google)
             variableValues.Add("STT_Google_ProjectID", context.INI_STT_Google_ProjectID)
             variableValues.Add("STT_OpenAI", context.INI_STT_OpenAI)
@@ -4754,6 +4773,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("AllowLegacyDocFiles") Then context.INI_AllowLegacyDocFiles = CBool(updatedValues("AllowLegacyDocFiles"))
                 If updatedValues.ContainsKey("JsRunDisable") Then context.INI_JsRunDisable = CBool(updatedValues("JsRunDisable"))
                 If updatedValues.ContainsKey("BrowserToolsDisable") Then context.INI_BrowserToolsDisable = CBool(updatedValues("BrowserToolsDisable"))
+                If updatedValues.ContainsKey("PlayWrightPath") Then context.INI_PlayWrightPath = CStr(updatedValues("PlayWrightPath"))
+                If updatedValues.ContainsKey("PlayWrightUseLocalCache") Then context.INI_PlayWrightUseLocalCache = CBool(updatedValues("PlayWrightUseLocalCache"))
                 If updatedValues.ContainsKey("EnablePrivacyForSearch") Then context.INI_EnablePrivacyForSearch = CBool(updatedValues("EnablePrivacyForSearch"))
                 If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
                     If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
@@ -4773,6 +4794,7 @@ Namespace SharedLibrary
                     If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
                     If updatedValues.ContainsKey("DictionaryPath") Then context.INI_DictionaryPath = CStr(updatedValues("DictionaryPath"))
                     If updatedValues.ContainsKey("DictionaryPathLocal") Then context.INI_DictionaryPathLocal = CStr(updatedValues("DictionaryPathLocal"))
+                    If updatedValues.ContainsKey("DictionarySegmentPrompt") Then context.INI_DictionarySegmentPrompt = CBool(updatedValues("DictionarySegmentPrompt"))
                     If updatedValues.ContainsKey("STT_Google") Then context.INI_STT_Google = CStr(updatedValues("STT_Google"))
                     If updatedValues.ContainsKey("STT_Google_ProjectID") Then context.INI_STT_Google_ProjectID = CStr(updatedValues("STT_Google_ProjectID"))
                     If updatedValues.ContainsKey("STT_OpenAI") Then context.INI_STT_OpenAI = CStr(updatedValues("STT_OpenAI"))

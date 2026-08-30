@@ -10,7 +10,7 @@
 '  - browser_open:     Starts/reuses the shared browser session and navigates to
 '                      an absolute HTTP/HTTPS URL.
 '  - browser_snapshot: Captures Playwright's AI-optimized ARIA snapshot. The
-'                      snapshot contains native Playwright refs such as [ref=e7].
+'                      snapshot contains native Playwright refs such as [ref=e7] or frame-qualified refs such as [ref=f11e38].
 '  - browser_interact: Performs one browser action against a ref from the most
 '                      recent browser_snapshot result.
 '
@@ -25,8 +25,10 @@
 '  - The tool is host-agnostic and does not reference Outlook or Word interop.
 '  - browser_interact is write-capable: clicks, form filling, selections and key
 '    presses can change remote application state.
-'  - Refs are intentionally accepted only from the latest valid snapshot. After
-'    every interaction, a new browser_snapshot is required before another action.
+'  - Refs are intentionally accepted only from the latest valid snapshot. A
+'    successful fill/clear/focus/hover may retain that snapshot when the page and
+'    URL remain unchanged; responses with requires_snapshot=true require a fresh
+'    browser_snapshot before another action.
 ' =============================================================================
 
 Option Explicit On
@@ -64,10 +66,49 @@ Namespace Agents
             Return sharedContext IsNot Nothing AndAlso sharedContext.INI_BrowserToolsDisable
         End Function
 
+        Public Shared Function IsRuntimeAvailable(sharedContext As ISharedContext) As System.Boolean
+            Dim ignored As System.String = System.String.Empty
+            Return IsRuntimeAvailable(sharedContext, ignored)
+        End Function
+
+        Public Shared Function IsRuntimeAvailable(sharedContext As ISharedContext, ByRef errorMessage As System.String) As System.Boolean
+            errorMessage = System.String.Empty
+
+            Try
+                If sharedContext Is Nothing Then
+                    errorMessage = "Browser tools require a host context with PlayWrightPath configuration."
+                    Return False
+                End If
+
+                Dim configuredPath As System.String = If(sharedContext.INI_PlayWrightPath, System.String.Empty)
+                Dim useLocalCache As System.Boolean = sharedContext.INI_PlayWrightUseLocalCache
+                BrowserToolRuntime.ConfigureExternalRuntime(configuredPath, useLocalCache)
+
+                ' Availability stays non-blocking. When local caching is enabled the resolver starts
+                ' the one-time copy in the background, but immediately returns the valid source runtime.
+                Dim resolution As PlaywrightRuntimeResolution = Nothing
+                Return PlaywrightRuntimeResolver.TryResolve(
+                    configuredPath,
+                    useLocalCache,
+                    useLocalCache,
+                    resolution,
+                    errorMessage)
+            Catch ex As System.Exception
+                errorMessage = "The configured Playwright runtime could not be validated. Browser tools are unavailable for this run."
+                System.Diagnostics.Trace.WriteLine("Browser runtime availability check failed: " & ex.ToString())
+                Return False
+            End Try
+        End Function
+
         ''' <summary>
         ''' Applies browser runtime options used for future browser launches.
         ''' This is optional; sensible Windows/Office defaults are used otherwise.
         ''' </summary>
+        Private Shared Function CompactAvailabilityLogValue(value As System.String) As System.String
+            If System.String.IsNullOrWhiteSpace(value) Then Return "(none)"
+            Return value.Replace(System.Environment.NewLine, " ").Replace(System.Convert.ToChar(13), " "c).Replace(System.Convert.ToChar(10), " "c).Trim()
+        End Function
+
         Public Shared Sub Configure(options As BrowserToolOptions)
             If options Is Nothing Then
                 Throw New System.ArgumentNullException(NameOf(options))
@@ -84,6 +125,19 @@ Namespace Agents
             Dim result As New System.Collections.Generic.List(Of ModelConfig)()
 
             If IsDisabled(sharedContext) Then
+                Return result
+            End If
+
+            Dim runtimeError As System.String = System.String.Empty
+            If Not IsRuntimeAvailable(sharedContext, runtimeError) Then
+                If Not System.String.IsNullOrWhiteSpace(runtimeError) Then
+                    System.Diagnostics.Trace.WriteLine("Browser tools not exposed: " & runtimeError)
+                    Try
+                        Global.SharedLibrary.SharedLibrary.UpdateHandler.WriteUpdateLog("[ToolAvailability] browser unavailable; reason=" & CompactAvailabilityLogValue(runtimeError))
+                    Catch ex As System.Exception
+                        System.Diagnostics.Trace.WriteLine("Could not write browser availability diagnostics: " & ex.ToString())
+                    End Try
+                End If
                 Return result
             End If
 
@@ -150,6 +204,16 @@ Namespace Agents
                     False)
             End If
 
+            Dim runtimeError As System.String = System.String.Empty
+            If Not IsRuntimeAvailable(sharedContext, runtimeError) Then
+                Return BrowserToolRuntime.CreateErrorPayload(
+                    toolName,
+                    "PLAYWRIGHT_RUNTIME_UNAVAILABLE",
+                    runtimeError,
+                    False,
+                    False)
+            End If
+
             Dim safeArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object) = arguments
             If safeArguments Is Nothing Then
                 safeArguments = New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.OrdinalIgnoreCase)
@@ -177,7 +241,9 @@ Namespace Agents
                 .ToolInstructionsPrompt =
                     "Use browser_open when a specific website must be explored as a rendered browser page, especially to find links, menus, sections, downloads, pagination, JavaScript-rendered content, or controls that simple HTTP text retrieval may miss. " &
                     "Prefer web_grounding when the relevant site/page is not yet known and public-web discovery is required. Prefer retrieve_web_content for a known mostly-static URL when readable text/ordinary links are sufficient. " &
-                    "Pass an absolute http:// or https:// URL. The browser runs headless by default. This tool navigates only; after it succeeds, call browser_snapshot to inspect the rendered page before attempting interaction. The runtime may conservatively dismiss common reject/necessary-only cookie banners, but never grants optional tracking by clicking accept-all. Do not invent element refs."
+                    "Pass an absolute http:// or https:// URL. The browser runs headless by default. This tool navigates only; after it succeeds, call browser_snapshot to inspect the rendered page before attempting interaction. " &
+                    "AUTHENTICATION: authentication=auto (default) silently reuses a previously provisioned, Windows-DPAPI-protected browser session for this origin when available. If the rendered page requires sign-in and a live user is available, call browser_open again for the target URL with authentication=interactive. If the initial authentication=auto navigation itself returns BROWSER_OPEN_FAILED before a snapshot can be taken, a protected enterprise/intranet site may be waiting on browser-native authentication, SSO, network permission UI or another user challenge; when a live user is available, one interactive retry for the same URL/profile is allowed. Do not loop. Errors explicitly marked retryable=false are terminal and must not trigger authentication retries; PLAYWRIGHT_DRIVER_UNAVAILABLE, PLAYWRIGHT_RUNTIME_UNAVAILABLE, PLAYWRIGHT_BROWSER_UNAVAILABLE or PLAYWRIGHT_RUNTIME_FAILED are terminal runtime errors and must not trigger authentication retries. Red Ink opens a dedicated visible Playwright browser so the user can complete username/password, multi-page sign-in, SSO, MFA or other challenges without exposing secrets to the model; the visible browser intentionally remains usable even if its initial automated navigation cannot fully complete. After the user confirms sign-in, Red Ink keeps that exact authenticated browser/context alive for the current run (some enterprise sites require a fresh login in every new browser process), persists storage state for best-effort reuse, and hides the dedicated browser window while automation continues. In unattended AutoPilot/e-mail Scheduler runs interactive authentication is forbidden and returns AUTHENTICATION_REQUIRED; never loop or guess credentials. authentication=none explicitly suppresses loading a stored session. auth_profile may be supplied only to intentionally share a provisioned session across related URLs; otherwise omit it and the normalized origin is used. " &
+                    "The runtime may conservatively dismiss common reject/necessary-only cookie banners, but never grants optional tracking by clicking accept-all. Do not invent element refs and never place passwords, MFA codes, recovery codes or other authentication secrets in browser_interact values."
             }
         End Function
 
@@ -191,7 +257,7 @@ Namespace Agents
                 .ToolDefinition = BuildBrowserSnapshotDefinition(),
                 .ToolInstructionsPrompt =
                     "Use browser_snapshot to inspect the actually rendered page structure, including accessible links, buttons, menus, headings, form controls and other interactive elements. It is especially useful for scanning a specific website for relevant links/pages or for content/navigation produced by JavaScript. " &
-                    "The returned YAML snapshot contains Playwright refs such as [ref=e7]. Treat those refs as short-lived handles. Only refs from the most recent successful browser_snapshot may be passed to browser_interact. " &
+                    "The returned YAML snapshot contains native Playwright refs such as [ref=e7] and frame-qualified refs such as [ref=f11e38]. Treat the complete ref token as a short-lived handle. Only refs from the most recent successful browser_snapshot may be passed to browser_interact. " &
                     "If a cookie/consent overlay is still present, deal with that overlay FIRST before unrelated navigation; prefer reject/necessary-only choices over accept-all. Then take a fresh browser_snapshot. If the relevant link is already visible in the snapshot, use its current ref rather than falling back to a new web_grounding search."
             }
         End Function
@@ -206,8 +272,8 @@ Namespace Agents
                 .ToolDefinition = BuildBrowserInteractDefinition(),
                 .ToolInstructionsPrompt =
                     "Use browser_interact only when navigation or another browser action is actually needed after inspecting a browser_snapshot. For site exploration, click the relevant link/menu/pagination ref rather than restarting discovery with web_grounding. " &
-                    "Supported actions are click, double_click, fill, clear, press, select, check, uncheck, hover and focus. The value argument is required for fill, press and select and must be omitted for the other actions. " &
-                    "After every successful or attempted interaction, call browser_snapshot again before another browser_interact. Interactions can change remote state, submit forms or trigger navigation; apply the user's intent and normal safety rules."
+                    "Supported actions are click, double_click, fill, clear, press, select, check, uncheck, hover and focus. The value argument is required for fill, press and select and must be omitted for the other actions. Never put passwords, MFA/one-time codes, recovery codes or other authentication secrets in value; direct filling of detected password/one-time-code controls is rejected by the runtime. Use browser_open(authentication=interactive) for secret-bearing authentication. " &
+                    "A browser_interact result explicitly tells you whether a fresh snapshot is required. If requires_snapshot=true, call browser_snapshot before any further browser_interact. If requires_snapshot=false and snapshot_retained=true, you may continue a short same-form sequence with another ref from that same snapshot (for example fill a textbox and then click its submit button). For click/double_click, target_url contains the absolute href when the clicked element exposed one; treat it only as the captured target of that element, not as proof that a document was successfully retrieved. navigation_observed tells you whether the active page or URL changed. Never claim that a result/document was opened merely because the search page itself has a URL. Never assume refs survived a click, submit, navigation or other response that requires a new snapshot. Interactions can change remote state, submit forms or trigger navigation; apply the user's intent and normal safety rules."
             }
         End Function
 
@@ -224,7 +290,16 @@ Namespace Agents
                     New Newtonsoft.Json.Linq.JProperty("type", "integer"),
                     New Newtonsoft.Json.Linq.JProperty("minimum", 1000),
                     New Newtonsoft.Json.Linq.JProperty("maximum", 120000),
-                    New Newtonsoft.Json.Linq.JProperty("description", "Navigation timeout in milliseconds."))))
+                    New Newtonsoft.Json.Linq.JProperty("description", "Navigation timeout in milliseconds."))),
+                New Newtonsoft.Json.Linq.JProperty("authentication", New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                    New Newtonsoft.Json.Linq.JProperty("enum", New Newtonsoft.Json.Linq.JArray("auto", "interactive", "none")),
+                    New Newtonsoft.Json.Linq.JProperty("description", "Authentication handling. auto (default) reuses a securely provisioned browser session when available; interactive opens a visible browser for the live user to sign in and then securely persists the resulting session; none suppresses stored-session loading."))),
+                New Newtonsoft.Json.Linq.JProperty("auth_profile", New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                    New Newtonsoft.Json.Linq.JProperty("minLength", 1),
+                    New Newtonsoft.Json.Linq.JProperty("maxLength", 200),
+                    New Newtonsoft.Json.Linq.JProperty("description", "Optional stable session profile name. Omit to scope the saved session to the normalized URL origin. Use only when intentionally sharing one authenticated session across related URLs."))))
 
             Dim required As New Newtonsoft.Json.Linq.JArray()
             required.Add("url")
@@ -248,8 +323,8 @@ Namespace Agents
             Dim properties As New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("ref", New Newtonsoft.Json.Linq.JObject(
                     New Newtonsoft.Json.Linq.JProperty("type", "string"),
-                    New Newtonsoft.Json.Linq.JProperty("pattern", "^e[0-9]+$"),
-                    New Newtonsoft.Json.Linq.JProperty("description", "Playwright ref from the most recent browser_snapshot, for example e7."))),
+                    New Newtonsoft.Json.Linq.JProperty("pattern", "^[A-Za-z0-9_-]+$"),
+                    New Newtonsoft.Json.Linq.JProperty("description", "Native Playwright ref from the most recent browser_snapshot, for example e7 or f11e38."))),
                 New Newtonsoft.Json.Linq.JProperty("action", New Newtonsoft.Json.Linq.JObject(
                     New Newtonsoft.Json.Linq.JProperty("type", "string"),
                     New Newtonsoft.Json.Linq.JProperty("enum", New Newtonsoft.Json.Linq.JArray(

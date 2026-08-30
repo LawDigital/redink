@@ -12330,6 +12330,28 @@ Partial Public Class ThisAddIn
             Dim taskType = If(GetArgString(toolCall.Arguments, "task_type"), "other").Trim().ToLowerInvariant()
             Dim useOfflineDocs As Boolean = (taskType = "translate" OrElse taskType = "correct")
 
+            If taskType.Equals("translate", System.StringComparison.OrdinalIgnoreCase) Then
+                Dim targetLanguage As System.String = If(GetArgString(toolCall.Arguments, "target_language"), System.String.Empty).Trim()
+                If System.String.IsNullOrWhiteSpace(targetLanguage) Then
+                    response.Success = False
+                    response.ErrorMessage = "Missing required parameter for translation: target_language"
+                    Dim catalog As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionarySegmentCatalog(_context)
+                    response.Response = response.ErrorMessage & If(System.String.IsNullOrWhiteSpace(catalog), System.String.Empty, ". Optional dictionary segments available: " & catalog)
+                    Return response
+                End If
+                Dim selectedNames As System.Collections.Generic.List(Of System.String) = GetArgStringArray(toolCall.Arguments, "dictionary_segments")
+                Dim selectedKeys As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                For Each segmentName As System.String In selectedNames
+                    If System.String.IsNullOrWhiteSpace(segmentName) Then Continue For
+                    Dim n As System.String = segmentName.Trim()
+                    selectedKeys.Add(If(n.IndexOf(":"c) >= 0, n, targetLanguage & ":" & n))
+                Next
+                Dim translationDictionary As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context, targetLanguage, selectedKeys)
+                If Not System.String.IsNullOrWhiteSpace(translationDictionary) Then
+                    processorInstruction &= vbCrLf & vbCrLf & "[TRANSLATION DICTIONARY - authoritative for " & targetLanguage & "]" & vbCrLf & translationDictionary & vbCrLf & "[/TRANSLATION DICTIONARY]"
+                End If
+            End If
+
             Dim toProcess As List(Of AutoPilotAttachmentInfo)
             If targetNames.Count > 0 Then
                 ' Resolve each requested name via FindAttachment (supports output files)

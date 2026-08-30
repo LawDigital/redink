@@ -68,6 +68,12 @@ Partial Public Class ThisAddIn
         Public Property RequiredPowerPointDesignName As String = ""
         Public Property RequiredPowerPointTemplateAttachmentName As String = ""
 
+        ' Set after a no-op tool_loader confirms that requested tools are already loaded.
+        ' Prevents the model from falsely finalizing that such a tool is unavailable before
+        ' it has actually attempted one of the confirmed exposed tools.
+        Public Property ToolLoaderConfirmedAvailableToolsPendingUse As Boolean = False
+        Public Property ToolLoaderConfirmedAvailableTools As String = ""
+
         ''' <summary>All responses generated during this session (successful and failed).</summary>
         Public Property AllToolResponses As List(Of ToolResponse)
 
@@ -123,6 +129,7 @@ Partial Public Class ThisAddIn
             New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
         Public Property HostKind As String
+        Public Property IsSubAgentRun As Boolean
         Public Property AllowedToolNames As HashSet(Of String)
         Public Property EnforceAllowedToolScope As Boolean
         Public Property EmptyMainModelResponse As Boolean
@@ -170,6 +177,7 @@ Partial Public Class ThisAddIn
             ConsecutiveToolFailureAbortThreshold = 3
             AllowedToolNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             EnforceAllowedToolScope = False
+            IsSubAgentRun = False
             EmptyMainModelResponse = False
             SequencingState = New SharedLibrary.Agents.ToolCallSequencing.ToolingRunState()
             FinalizationBlocked = False
@@ -278,6 +286,9 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"[Tooling] {entry}")
 
             Dim normalizedLevel As String = If(level, "step").Trim().ToLowerInvariant()
+            If humanMessage.StartsWith("Legacy deliverable compatibility", System.StringComparison.OrdinalIgnoreCase) Then
+                normalizedLevel = "info"
+            End If
 
             Select Case normalizedLevel
                 Case "diag"

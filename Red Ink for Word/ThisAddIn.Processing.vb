@@ -142,6 +142,14 @@ Partial Public Class ThisAddIn
         Dim DisableLineHeightGrid As Boolean
     End Structure
 
+    Structure ParagraphListFormatSnapshot
+        Dim HasListFormat As System.Boolean
+        Dim ListTemplate As Microsoft.Office.Interop.Word.ListTemplate
+        Dim ListLevel As System.Int32
+        Dim ListValue As System.Int32
+        Dim ListStartAt As System.Int32
+    End Structure
+
     ''' <summary>
     ''' Module-level array holding paragraph format snapshots for the current selection.
     ''' </summary>
@@ -958,6 +966,15 @@ Partial Public Class ThisAddIn
                 trailingCR = False
                 trailingCRcount = 0
 
+                Dim listFormatSnapshot As ParagraphListFormatSnapshot() = Nothing
+                If Not NoSelectedText AndAlso InPlace AndAlso INI_MarkdownConvert Then
+                    Try
+                        listFormatSnapshot = CaptureListFormatting(rng)
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("Could not capture list-only formatting: " & ex.Message)
+                    End Try
+                End If
+
                 If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoSelectedText AndAlso Not NoFormatAndFieldSaving AndAlso Not (DoMarkup AndAlso MarkupMethod = 2) Then
 
                     paraCount = rng.Paragraphs.Count
@@ -1073,6 +1090,8 @@ Partial Public Class ThisAddIn
                         If NoFormatting OrElse NoFormatAndFieldSaving Then
                             If DoTPMarkup Then
                                 SelectedText = AddMarkupTags(rng, TPMarkupname)
+                            ElseIf INI_MarkdownConvert AndAlso InPlace Then
+                                SelectedText = GetVisibleTextWithMarkdownListPrefixes(rng)
                             Else
                                 SelectedText = GetVisibleText(rng)
                             End If
@@ -1154,7 +1173,8 @@ Partial Public Class ThisAddIn
                                                 SelectedText = GetTextWithSpecialElementsInline(
                                                     rng,
                                                     If(NoFormatting, False, ParaFormatInline),
-                                                    False)  ' Markdown already applied, don't redo
+                                                    False,
+                                                    IncludeMarkdownListPrefixes:=True)  ' Markdown already applied; list markers are virtual placeholders.
 
                                                 Debug.WriteLine($"RevisionFix: re-extracted SelectedText in Final view, len={SelectedText.Length}")
                                             Finally
@@ -1818,6 +1838,8 @@ Partial Public Class ThisAddIn
                                     CompareAndInsert(SelectedText, LLMResult, rng, MarkupMethod = 3, "This is the markup of the text inserted:", trailingCR)
                                     If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoFormatAndFieldSaving Then
                                         ApplyParagraphFormat(rng)
+                                    ElseIf listFormatSnapshot IsNot Nothing Then
+                                        ApplyListFormattingIfCompatible(rng, listFormatSnapshot)
                                     End If
                                     Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
                                     If Not NoFormatAndFieldSaving Or Regex.IsMatch(LLMResult, pattern) Then
@@ -1860,6 +1882,8 @@ Partial Public Class ThisAddIn
                                     Debug.WriteLine(vbCrLf & Left(rng.Text, 400) & vbCrLf)
 
                                     ApplyParagraphFormat(rng)
+                                ElseIf listFormatSnapshot IsNot Nothing Then
+                                    ApplyListFormattingIfCompatible(rng, listFormatSnapshot)
                                 End If
 
                                 Debug.WriteLine($"10Range Start = {rng.Start} Selection Start = {selection.Start}")

@@ -38,11 +38,13 @@ Namespace Transcription
         WhisperLocal
         GoogleV1
         GoogleV2
+        GeminiTranscribe
         OpenAiRest
         OpenAiRealtime
         AzureSpeechRealtime
         AzureSpeechFastRest
         TeamsAcsRealtime
+        GeminiTranscribeLive
     End Enum
 
     Public Class TranscriptionOptions

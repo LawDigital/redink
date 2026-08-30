@@ -39,6 +39,7 @@ Namespace AgentsXX
             TestEmptyOutputRetriesExactlyOnce()
             TestRetryFailureReturnsAgentEmptyResult()
             TestErrorEnvelopeIsNotSuccess()
+            TestStructuredErrorMetadataExtraction()
             TestEmptyMainModelResponsePayload()
             TestModelEmptyResponseRetryUsesCompactRecoveryPrompt()
             TestAllowedToolScoping()
@@ -130,6 +131,29 @@ Namespace AgentsXX
             AssertTrue(obj.Value(Of String)("resultKind") = "error", "Expected preserved error resultKind.")
             AssertTrue(obj("error") IsNot Nothing AndAlso obj("error").Value(Of String)("code") = "fake_error", "Expected preserved error code.")
             AssertTrue(obj("memory_key") Is Nothing, "Error payload must not be treated as normal success.")
+        End Sub
+
+        Private Shared Sub TestStructuredErrorMetadataExtraction()
+            Dim payload As System.String =
+                "{""status"":""error"",""error"":{""code"":""PLAYWRIGHT_DRIVER_UNAVAILABLE"",""message"":""driver assets missing"",""retryable"":false}}"
+
+            Dim errorCode As System.String = ""
+            Dim resultKind As System.String = ""
+            Dim errorMessage As System.String = ""
+            Dim retryable As System.Boolean = True
+
+            AssertTrue(
+                SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(payload, errorCode, resultKind),
+                "Expected structured error payload to be recognized.")
+            AssertTrue(errorCode = "PLAYWRIGHT_DRIVER_UNAVAILABLE", "Expected error code to be preserved.")
+            AssertTrue(
+                SubAgentRuntimeHardening.TryGetEnvelopeErrorMessage(payload, errorMessage),
+                "Expected structured error message to be available.")
+            AssertTrue(errorMessage = "driver assets missing", "Expected exact structured error message.")
+            AssertTrue(
+                SubAgentRuntimeHardening.TryGetEnvelopeRetryable(payload, retryable),
+                "Expected explicit retryable metadata to be available.")
+            AssertTrue(Not retryable, "Explicit retryable=false must remain false.")
         End Sub
 
         Private Shared Sub TestEmptyMainModelResponsePayload()

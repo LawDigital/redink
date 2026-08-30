@@ -536,24 +536,467 @@ Namespace SharedLibrary
             Return ExpandEnvironmentVariables(configuredPath)
         End Function
 
-        Public Shared Function GetTranslationDictionaryText(ByVal context As ISharedContext) As String
-            If context Is Nothing Then Return ""
+        Private NotInheritable Class TranslationDictionarySegment
+            Public Property Header As System.String
+            Public Property TargetLanguage As System.String
+            Public Property Name As System.String
+            Public Property Content As System.String
+            Public Property IsLanguageCommon As System.Boolean
+        End Class
 
-            Dim globalDictionary As String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, False))
-            Dim userDictionary As String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, True))
+        Private NotInheritable Class TranslationDictionaryDocument
+            Public Property GlobalContent As System.String = System.String.Empty
+            Public ReadOnly Property Segments As New System.Collections.Generic.List(Of TranslationDictionarySegment)()
+        End Class
 
-            Dim parts As New System.Collections.Generic.List(Of String)
+        Public Shared Function GetTranslationDictionaryText(ByVal context As ISharedContext,
+                                                             Optional ByVal targetLanguage As System.String = "") As System.String
+            Return GetTranslationDictionaryText(context, targetLanguage, Nothing)
+        End Function
 
-            If Not String.IsNullOrWhiteSpace(globalDictionary) Then
+        Public Shared Function GetTranslationDictionaryText(ByVal context As ISharedContext,
+                                                              ByVal targetLanguage As System.String,
+                                                              ByVal selectedSegmentKeys As System.Collections.Generic.HashSet(Of System.String)) As System.String
+            If context Is Nothing Then Return System.String.Empty
+
+            Dim globalDictionary As System.String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, False))
+            Dim userDictionary As System.String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, True))
+
+            globalDictionary = FilterTranslationDictionary(globalDictionary, targetLanguage, selectedSegmentKeys)
+            userDictionary = FilterTranslationDictionary(userDictionary, targetLanguage, selectedSegmentKeys)
+
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            If Not System.String.IsNullOrWhiteSpace(globalDictionary) Then
                 parts.Add("<globaldictionary>" & globalDictionary & "</globaldictionary>")
             End If
-
-            If Not String.IsNullOrWhiteSpace(userDictionary) Then
-                Dim userPrefix As String = If(parts.Count > 0, "(the userdictionary takes precedence) ", "")
+            If Not System.String.IsNullOrWhiteSpace(userDictionary) Then
+                Dim userPrefix As System.String = If(parts.Count > 0, "(the userdictionary takes precedence) ", System.String.Empty)
                 parts.Add("<userdictionary>" & userPrefix & userDictionary & "</userdictionary>")
             End If
+            Return System.String.Join(" ", parts)
+        End Function
 
-            Return String.Join(" ", parts)
+        Private Shared Function GetRelevantTranslationDictionarySegments(ByVal context As ISharedContext,
+                                                                          ByVal targetLanguage As System.String) As System.Collections.Generic.List(Of TranslationDictionarySegment)
+            Dim result As New System.Collections.Generic.List(Of TranslationDictionarySegment)()
+            If context Is Nothing Then Return result
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim sources As System.String() = {
+                ReadTranslationDictionaryFile(GetDictionaryFilePath(context, False)),
+                ReadTranslationDictionaryFile(GetDictionaryFilePath(context, True))
+            }
+            For Each source As System.String In sources
+                Dim document As TranslationDictionaryDocument = ParseTranslationDictionaryDocument(source, targetLanguage)
+                For Each segment As TranslationDictionarySegment In document.Segments
+                    If segment.IsLanguageCommon Then Continue For
+                    If Not System.String.IsNullOrWhiteSpace(segment.TargetLanguage) AndAlso
+                       Not LanguageNamesMatch(segment.TargetLanguage, targetLanguage) Then Continue For
+                    Dim key As System.String = segment.Header
+                    If Not System.String.IsNullOrWhiteSpace(key) AndAlso seen.Add(key) Then result.Add(segment)
+                Next
+            Next
+            Return result
+        End Function
+
+        Public Shared Function GetTranslationDictionarySegmentCatalog(ByVal context As ISharedContext) As System.String
+            If context Is Nothing Then Return System.String.Empty
+            Dim byLanguage As New System.Collections.Generic.SortedDictionary(Of System.String, System.Collections.Generic.SortedSet(Of System.String))(System.StringComparer.OrdinalIgnoreCase)
+            Dim sources As System.String() = {ReadTranslationDictionaryFile(GetDictionaryFilePath(context, False)), ReadTranslationDictionaryFile(GetDictionaryFilePath(context, True))}
+            For Each source As System.String In sources
+                Dim document As TranslationDictionaryDocument = ParseTranslationDictionaryDocument(source, System.String.Empty)
+                For Each segment As TranslationDictionarySegment In document.Segments
+                    If segment Is Nothing OrElse segment.IsLanguageCommon OrElse System.String.IsNullOrWhiteSpace(segment.TargetLanguage) OrElse System.String.IsNullOrWhiteSpace(segment.Name) Then Continue For
+                    Dim names As System.Collections.Generic.SortedSet(Of System.String) = Nothing
+                    If Not byLanguage.TryGetValue(segment.TargetLanguage.Trim(), names) Then
+                        names = New System.Collections.Generic.SortedSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                        byLanguage.Add(segment.TargetLanguage.Trim(), names)
+                    End If
+                    names.Add(segment.Name.Trim())
+                Next
+            Next
+            Dim lines As New System.Collections.Generic.List(Of System.String)()
+            For Each entry As System.Collections.Generic.KeyValuePair(Of System.String, System.Collections.Generic.SortedSet(Of System.String)) In byLanguage
+                lines.Add(entry.Key & ": " & System.String.Join(", ", entry.Value))
+            Next
+            Return System.String.Join("; ", lines)
+        End Function
+
+        Private Const TranslationDictionarySegmentSelectionsSettingName As System.String = "DictionarySegmentSelections"
+        Private Const TranslatorWidgetDictionarySegmentsSettingName As System.String = "TranslatorWidgetDictionarySegments"
+
+        Private Shared Function LoadPersistedTranslationDictionarySegmentSelections() As System.Collections.Generic.HashSet(Of System.String)
+            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Try
+                Dim rawValue As System.Object = My.Settings.Item(TranslationDictionarySegmentSelectionsSettingName)
+                Dim raw As System.String = System.Convert.ToString(rawValue)
+                If System.String.IsNullOrWhiteSpace(raw) Then Return result
+
+                Dim values As System.Collections.Generic.List(Of System.String) =
+                    Newtonsoft.Json.JsonConvert.DeserializeObject(Of System.Collections.Generic.List(Of System.String))(raw)
+                If values Is Nothing Then Return result
+
+                For Each value As System.String In values
+                    If Not System.String.IsNullOrWhiteSpace(value) Then result.Add(value.Trim())
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not load persisted dictionary segment selections: " & ex.Message)
+            End Try
+            Return result
+        End Function
+
+        Private Shared Sub SavePersistedTranslationDictionarySegmentSelections(
+            ByVal available As System.Collections.Generic.IEnumerable(Of TranslationDictionarySegment),
+            ByVal selected As System.Collections.Generic.HashSet(Of System.String))
+
+            Try
+                Dim persisted As System.Collections.Generic.HashSet(Of System.String) =
+                    LoadPersistedTranslationDictionarySegmentSelections()
+
+                ' Replace only the selection for the currently displayed language.
+                ' Selections for other target languages remain untouched.
+                If available IsNot Nothing Then
+                    For Each segment As TranslationDictionarySegment In available
+                        If segment IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(segment.Header) Then
+                            persisted.Remove(segment.Header.Trim())
+                        End If
+                    Next
+                End If
+
+                If selected IsNot Nothing Then
+                    For Each key As System.String In selected
+                        If Not System.String.IsNullOrWhiteSpace(key) Then persisted.Add(key.Trim())
+                    Next
+                End If
+
+                Dim ordered As New System.Collections.Generic.List(Of System.String)(persisted)
+                ordered.Sort(System.StringComparer.OrdinalIgnoreCase)
+                My.Settings.Item(TranslationDictionarySegmentSelectionsSettingName) =
+                    Newtonsoft.Json.JsonConvert.SerializeObject(ordered, Newtonsoft.Json.Formatting.None)
+                My.Settings.Save()
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not save persisted dictionary segment selections: " & ex.Message)
+            End Try
+        End Sub
+
+        Private Shared Function LoadPersistedTranslationDictionarySegmentSelections(ByVal settingName As System.String) As System.Collections.Generic.HashSet(Of System.String)
+            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            If System.String.IsNullOrWhiteSpace(settingName) Then Return result
+            Try
+                Dim rawValue As System.Object = My.Settings.Item(settingName)
+                Dim raw As System.String = System.Convert.ToString(rawValue)
+                If System.String.IsNullOrWhiteSpace(raw) Then Return result
+
+                Dim values As System.Collections.Generic.List(Of System.String) =
+                    Newtonsoft.Json.JsonConvert.DeserializeObject(Of System.Collections.Generic.List(Of System.String))(raw)
+                If values Is Nothing Then Return result
+
+                For Each value As System.String In values
+                    If Not System.String.IsNullOrWhiteSpace(value) Then result.Add(value.Trim())
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not load persisted dictionary segment selections from '" & settingName & "': " & ex.Message)
+            End Try
+            Return result
+        End Function
+
+        Private Shared Sub SavePersistedTranslationDictionarySegmentSelections(
+            ByVal settingName As System.String,
+            ByVal available As System.Collections.Generic.IEnumerable(Of TranslationDictionarySegment),
+            ByVal selected As System.Collections.Generic.HashSet(Of System.String))
+
+            If System.String.IsNullOrWhiteSpace(settingName) Then Return
+            Try
+                Dim persisted As System.Collections.Generic.HashSet(Of System.String) =
+                    LoadPersistedTranslationDictionarySegmentSelections(settingName)
+
+                If available IsNot Nothing Then
+                    For Each segment As TranslationDictionarySegment In available
+                        If segment IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(segment.Header) Then
+                            persisted.Remove(segment.Header.Trim())
+                        End If
+                    Next
+                End If
+
+                If selected IsNot Nothing Then
+                    For Each key As System.String In selected
+                        If Not System.String.IsNullOrWhiteSpace(key) Then persisted.Add(key.Trim())
+                    Next
+                End If
+
+                Dim ordered As New System.Collections.Generic.List(Of System.String)(persisted)
+                ordered.Sort(System.StringComparer.OrdinalIgnoreCase)
+                My.Settings.Item(settingName) =
+                    Newtonsoft.Json.JsonConvert.SerializeObject(ordered, Newtonsoft.Json.Formatting.None)
+                My.Settings.Save()
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not save persisted dictionary segment selections to '" & settingName & "': " & ex.Message)
+            End Try
+        End Sub
+
+        Public Shared Function HasTranslatorWidgetDictionarySegments(ByVal context As ISharedContext,
+                                                                     ByVal targetLanguage As System.String) As System.Boolean
+            Return GetRelevantTranslationDictionarySegments(context, targetLanguage).Count > 0
+        End Function
+
+        Public Shared Function GetTranslatorWidgetDictionarySegments(ByVal context As ISharedContext,
+                                                                      ByVal targetLanguage As System.String) As System.Collections.Generic.HashSet(Of System.String)
+            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim available As System.Collections.Generic.List(Of TranslationDictionarySegment) =
+                GetRelevantTranslationDictionarySegments(context, targetLanguage)
+            If available.Count = 0 Then Return result
+
+            Dim persisted As System.Collections.Generic.HashSet(Of System.String) =
+                LoadPersistedTranslationDictionarySegmentSelections(TranslatorWidgetDictionarySegmentsSettingName)
+            For Each segment As TranslationDictionarySegment In available
+                If segment IsNot Nothing AndAlso
+                   Not System.String.IsNullOrWhiteSpace(segment.Header) AndAlso
+                   persisted.Contains(segment.Header.Trim()) Then
+                    result.Add(segment.Header.Trim())
+                End If
+            Next
+            Return result
+        End Function
+
+        Public Shared Function GetTranslatorWidgetDictionarySegmentSummary(ByVal context As ISharedContext,
+                                                                            ByVal targetLanguage As System.String) As System.String
+            Dim available As System.Collections.Generic.List(Of TranslationDictionarySegment) =
+                GetRelevantTranslationDictionarySegments(context, targetLanguage)
+            If available.Count = 0 Then Return System.String.Empty
+
+            Dim selected As System.Collections.Generic.HashSet(Of System.String) =
+                GetTranslatorWidgetDictionarySegments(context, targetLanguage)
+            Dim names As New System.Collections.Generic.List(Of System.String)()
+            For Each segment As TranslationDictionarySegment In available
+                If segment IsNot Nothing AndAlso
+                   Not System.String.IsNullOrWhiteSpace(segment.Header) AndAlso
+                   selected.Contains(segment.Header.Trim()) Then
+                    names.Add(If(System.String.IsNullOrWhiteSpace(segment.Name), segment.Header.Trim(), segment.Name.Trim()))
+                End If
+            Next
+            Return System.String.Join(", ", names)
+        End Function
+
+        Public Shared Function SelectTranslatorWidgetDictionarySegments(ByVal context As ISharedContext,
+                                                                         ByVal title As System.String,
+                                                                         ByVal targetLanguage As System.String,
+                                                                         ByRef cancelled As System.Boolean) As System.Collections.Generic.HashSet(Of System.String)
+            cancelled = False
+            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim available As System.Collections.Generic.List(Of TranslationDictionarySegment) =
+                GetRelevantTranslationDictionarySegments(context, targetLanguage)
+            If available.Count = 0 Then Return result
+
+            Dim models As New System.Collections.Generic.List(Of ModelConfig)()
+            For Each segment As TranslationDictionarySegment In available
+                models.Add(New ModelConfig() With {
+                    .Model = segment.Header,
+                    .ModelDescription = segment.Name
+                })
+            Next
+
+            Dim preselected As System.Collections.Generic.HashSet(Of System.String) =
+                GetTranslatorWidgetDictionarySegments(context, targetLanguage)
+
+            Using selector As New MultiModelSelectorForm(
+                models,
+                Nothing,
+                If(System.String.IsNullOrWhiteSpace(title), "Translation dictionary", title),
+                False,
+                preselected,
+                "Select optional dictionary segments for this Translator widget. Global entries and [" & targetLanguage.Trim() & "] are always included.")
+                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
+                Dim dialogResult As System.Windows.Forms.DialogResult =
+                    If(ownerWnd IsNot Nothing, selector.ShowDialog(ownerWnd), selector.ShowDialog())
+                If dialogResult <> System.Windows.Forms.DialogResult.OK Then
+                    cancelled = True
+                    Return GetTranslatorWidgetDictionarySegments(context, targetLanguage)
+                End If
+
+                For Each selectedModel As ModelConfig In selector.SelectedModels
+                    If Not System.String.IsNullOrWhiteSpace(selectedModel.Model) Then result.Add(selectedModel.Model.Trim())
+                Next
+            End Using
+
+            SavePersistedTranslationDictionarySegmentSelections(
+                TranslatorWidgetDictionarySegmentsSettingName,
+                available,
+                result)
+            Return result
+        End Function
+
+        Public Shared Function ResolveInteractiveTranslationDictionarySegments(ByVal context As ISharedContext,
+                                                                                ByVal title As System.String,
+                                                                                ByVal targetLanguage As System.String,
+                                                                                ByRef cancelled As System.Boolean) As System.Collections.Generic.HashSet(Of System.String)
+            cancelled = False
+            Dim emptyResult As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            If context Is Nothing OrElse Not context.INI_DictionarySegmentPrompt Then Return emptyResult
+
+            Dim available As System.Collections.Generic.List(Of TranslationDictionarySegment) =
+                GetRelevantTranslationDictionarySegments(context, targetLanguage)
+            If available.Count = 0 Then Return emptyResult
+
+            Dim models As New System.Collections.Generic.List(Of ModelConfig)()
+            Dim availableHeaders As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each segment As TranslationDictionarySegment In available
+                models.Add(New ModelConfig() With {
+                    .Model = segment.Header,
+                    .ModelDescription = segment.Name
+                })
+                If Not System.String.IsNullOrWhiteSpace(segment.Header) Then availableHeaders.Add(segment.Header.Trim())
+            Next
+
+            Dim persisted As System.Collections.Generic.HashSet(Of System.String) =
+                LoadPersistedTranslationDictionarySegmentSelections()
+            Dim preselected As New System.Collections.Generic.List(Of System.String)()
+            For Each key As System.String In persisted
+                If availableHeaders.Contains(key) Then preselected.Add(key)
+            Next
+
+            Using selector As New MultiModelSelectorForm(
+                models,
+                Nothing,
+                If(System.String.IsNullOrWhiteSpace(title), "Translation dictionary", title),
+                False,
+                preselected,
+                "Select one or more dictionary segments. General entries for the target language are always included.")
+                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
+                Dim dialogResult As System.Windows.Forms.DialogResult =
+                    If(ownerWnd IsNot Nothing, selector.ShowDialog(ownerWnd), selector.ShowDialog())
+                If dialogResult <> System.Windows.Forms.DialogResult.OK Then
+                    cancelled = True
+                    Return emptyResult
+                End If
+
+                For Each selectedModel As ModelConfig In selector.SelectedModels
+                    If Not System.String.IsNullOrWhiteSpace(selectedModel.Model) Then emptyResult.Add(selectedModel.Model)
+                Next
+                SavePersistedTranslationDictionarySegmentSelections(available, emptyResult)
+            End Using
+            Return emptyResult
+        End Function
+
+        Public Shared Function InterpolateTranslationTemplateAtRuntime(
+            ByVal context As ISharedContext,
+            ByVal template As System.String,
+            ByVal targetLanguage As System.String,
+            ByVal selectedSegmentKeys As System.Collections.Generic.HashSet(Of System.String),
+            ByVal interpolator As System.Func(Of System.String, System.String)) As System.String
+
+            If interpolator Is Nothing Then Throw New System.ArgumentNullException(NameOf(interpolator))
+            If template Is Nothing Then Return interpolator(template)
+
+            Const dictionarySentinel As System.String = "@@RI_TRANSLATION_DICTIONARY_4F2C0F67@@"
+            If Not System.Text.RegularExpressions.Regex.IsMatch(template, "\{Dictionary\}",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase) Then
+                Return interpolator(template)
+            End If
+
+            Dim preparedTemplate As System.String = System.Text.RegularExpressions.Regex.Replace(
+                template, "\{Dictionary\}", dictionarySentinel,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            Dim resolvedPrompt As System.String = interpolator(preparedTemplate)
+            Dim dictionaryText As System.String = GetTranslationDictionaryText(context, targetLanguage, selectedSegmentKeys)
+            Return resolvedPrompt.Replace(dictionarySentinel, dictionaryText)
+        End Function
+
+        Public Shared Function BuildInteractiveTranslationPrompt(
+            ByVal context As ISharedContext,
+            ByVal template As System.String,
+            ByVal title As System.String,
+            ByVal targetLanguage As System.String,
+            ByVal interpolator As System.Func(Of System.String, System.String),
+            ByRef cancelled As System.Boolean) As System.String
+
+            cancelled = False
+            Dim selected As System.Collections.Generic.HashSet(Of System.String) =
+                ResolveInteractiveTranslationDictionarySegments(context, title, targetLanguage, cancelled)
+            If cancelled Then Return System.String.Empty
+            Return InterpolateTranslationTemplateAtRuntime(context, template, targetLanguage, selected, interpolator)
+        End Function
+
+        Private Shared Function FilterTranslationDictionary(ByVal rawDictionary As System.String,
+                                                             ByVal targetLanguage As System.String,
+                                                             ByVal selectedSegmentKeys As System.Collections.Generic.HashSet(Of System.String)) As System.String
+            If System.String.IsNullOrWhiteSpace(rawDictionary) Then Return System.String.Empty
+            Dim document As TranslationDictionaryDocument = ParseTranslationDictionaryDocument(rawDictionary, targetLanguage)
+            Dim output As New System.Text.StringBuilder()
+            If Not System.String.IsNullOrWhiteSpace(document.GlobalContent) Then output.Append(document.GlobalContent.Trim())
+
+            For Each segment As TranslationDictionarySegment In document.Segments
+                Dim include As System.Boolean = False
+                If segment.IsLanguageCommon Then
+                    include = LanguageNamesMatch(segment.TargetLanguage, targetLanguage)
+                ElseIf System.String.IsNullOrWhiteSpace(segment.TargetLanguage) Then
+                    include = selectedSegmentKeys IsNot Nothing AndAlso selectedSegmentKeys.Contains(segment.Header)
+                ElseIf LanguageNamesMatch(segment.TargetLanguage, targetLanguage) Then
+                    include = selectedSegmentKeys IsNot Nothing AndAlso selectedSegmentKeys.Contains(segment.Header)
+                End If
+                If Not include Then Continue For
+                If output.Length > 0 Then output.Append(vbCrLf & vbCrLf)
+                If Not System.String.IsNullOrWhiteSpace(segment.Content) Then output.Append(segment.Content.Trim())
+            Next
+            Return output.ToString().Trim()
+        End Function
+
+        Private Shared Function ParseTranslationDictionaryDocument(ByVal rawDictionary As System.String,
+                                                                    ByVal targetLanguage As System.String) As TranslationDictionaryDocument
+            Dim result As New TranslationDictionaryDocument()
+            If System.String.IsNullOrWhiteSpace(rawDictionary) Then Return result
+            Dim normalized As System.String = rawDictionary.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            Dim lines As System.String() = normalized.Split(New System.String() {vbLf}, System.StringSplitOptions.None)
+            Dim headerRegex As New System.Text.RegularExpressions.Regex("^\s*\[([^\]\r\n]+)\]\s*$",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+            Dim globalBuilder As New System.Text.StringBuilder()
+            Dim current As TranslationDictionarySegment = Nothing
+            Dim currentBuilder As System.Text.StringBuilder = Nothing
+
+            For Each line As System.String In lines
+                Dim m As System.Text.RegularExpressions.Match = headerRegex.Match(line)
+                If m.Success Then
+                    If current IsNot Nothing Then current.Content = currentBuilder.ToString().Trim()
+                    Dim header As System.String = m.Groups(1).Value.Trim()
+                    Dim language As System.String = System.String.Empty
+                    Dim name As System.String = header
+                    Dim languageCommon As System.Boolean = False
+                    Dim colon As System.Int32 = header.IndexOf(":"c)
+                    If colon > 0 Then
+                        language = header.Substring(0, colon).Trim()
+                        name = header.Substring(colon + 1).Trim()
+                    Else
+                        ' A bare [Language] header is the common block for that target language.
+                        ' Optional selectable segments use the explicit [Language:Segment] syntax.
+                        language = header
+                        name = header
+                        languageCommon = True
+                    End If
+                    current = New TranslationDictionarySegment() With {
+                        .Header = header,
+                        .TargetLanguage = language,
+                        .Name = name,
+                        .Content = System.String.Empty,
+                        .IsLanguageCommon = languageCommon
+                    }
+                    result.Segments.Add(current)
+                    currentBuilder = New System.Text.StringBuilder()
+                ElseIf current Is Nothing Then
+                    If globalBuilder.Length > 0 Then globalBuilder.Append(vbCrLf)
+                    globalBuilder.Append(line)
+                Else
+                    If currentBuilder.Length > 0 Then currentBuilder.Append(vbCrLf)
+                    currentBuilder.Append(line)
+                End If
+            Next
+            If current IsNot Nothing Then current.Content = currentBuilder.ToString().Trim()
+            result.GlobalContent = globalBuilder.ToString().Trim()
+            Return result
+        End Function
+
+        Private Shared Function LanguageNamesMatch(ByVal left As System.String, ByVal right As System.String) As System.Boolean
+            Return Not System.String.IsNullOrWhiteSpace(left) AndAlso
+                   Not System.String.IsNullOrWhiteSpace(right) AndAlso
+                   System.String.Equals(left.Trim(), right.Trim(), System.StringComparison.OrdinalIgnoreCase)
         End Function
 
         Public Shared Function PromptForTargetLanguage(ByVal prompt As String,
@@ -609,9 +1052,33 @@ Namespace SharedLibrary
 
                 If Not File.Exists(filePath) Then
                     Dim initialContent As String =
-                        "; This is the user dictionary." & vbCrLf &
-                        "; It can contain instructions on how to translate certain words or expressions." & vbCrLf &
-                        "; Example: Translate ""share purchase agreement"" as ""Aktienkaufvertrag""." & vbCrLf
+                        "; Red Ink translation dictionary" & vbCrLf &
+                        ";" & vbCrLf &
+                        "; STRUCTURE:" & vbCrLf &
+                        "; 1. Text before the first [Language] header is GLOBAL and is used for every target language." & vbCrLf &
+                        "; 2. [Language] starts the common block for that target language. It is always used when that language is selected." & vbCrLf &
+                        "; 3. [Language:Segment] starts an OPTIONAL segment for that target language." & vbCrLf &
+                        ";    If DictionarySegmentPrompt=True, normal interactive translations let the user select one or more such segments." & vbCrLf &
+                        "; 4. The Translator widget has its own persistent segment selection, independent of DictionarySegmentPrompt." & vbCrLf &
+                        "; 5. AutoPilot/agentic use never opens a dialog; optional segments are used only when explicitly selected by the agent/tool call." & vbCrLf &
+                        "; 6. Segment choices are remembered per language for the next interactive prompt/widget use." & vbCrLf &
+                        ";" & vbCrLf &
+                        "; EXAMPLE:" & vbCrLf &
+                        "; Global instruction: preserve product names unless explicitly translated below." & vbCrLf &
+                        ";" & vbCrLf &
+                        "; [German]" & vbCrLf &
+                        "; From English to German use: ""personal data"" -> ""Personendaten""" & vbCrLf &
+                        ";" & vbCrLf &
+                        "; [German:Hochdeutsch]" & vbCrLf &
+                        "; Sidewalk -> Bürgersteig" & vbCrLf &
+                        ";" & vbCrLf &
+                        "; [German:Schweizer Hochdeutsch]" & vbCrLf &
+                        "; Sidewalk -> Trottoir" & vbCrLf &
+                        ";" & vbCrLf &
+                        "; [French]" & vbCrLf &
+                        "; From English to French use: ""personal data"" -> ""données personnelles""" & vbCrLf &
+                        ";" & vbCrLf &
+                        "; Lines beginning with ';' are comments and are ignored." & vbCrLf & vbCrLf
 
                     File.WriteAllText(filePath, initialContent, New System.Text.UTF8Encoding(True))
                 End If

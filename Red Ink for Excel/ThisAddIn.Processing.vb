@@ -51,7 +51,7 @@ Partial Public Class ThisAddIn
     ''' <param name="FileObject">Path to a file or clipboard object to include in the LLM call.</param>
     ''' <param name="InsertWS">Text representation of additional worksheets to include in the prompt.</param>
     ''' <param name="BatchFilePath">Path to a directory containing files for batch processing.</param>
-    Private Async Function ProcessSelectedRange(ByVal SysCommand As String, CheckMaxToken As Boolean, DoRange As Boolean, DoFormulas As Boolean, DoBubbles As Boolean, SelectionMandatory As Boolean, ByVal UseSecondAPI As Boolean, Optional ShortenPercentValue As Integer = 0, Optional Freestyle As Boolean = False, Optional DoColor As Boolean = False, Optional DoPane As Boolean = False, Optional FileObject As String = "", Optional InsertWS As String = "", Optional BatchFilePath As String = "") As Task(Of Boolean)
+    Private Async Function ProcessSelectedRange(ByVal SysCommand As String, CheckMaxToken As Boolean, DoRange As Boolean, DoFormulas As Boolean, DoBubbles As Boolean, SelectionMandatory As Boolean, ByVal UseSecondAPI As Boolean, Optional ShortenPercentValue As Integer = 0, Optional Freestyle As Boolean = False, Optional DoColor As Boolean = False, Optional DoPane As Boolean = False, Optional FileObject As String = "", Optional InsertWS As String = "", Optional BatchFilePath As String = "", Optional SysCommandAlreadyInterpolated As System.Boolean = False) As System.Threading.Tasks.Task(Of Boolean)
 
         Dim excelApp As Excel.Application = CType(Runtime.InteropServices.Marshal.GetActiveObject("Excel.Application"), Excel.Application)
 
@@ -112,7 +112,7 @@ Partial Public Class ThisAddIn
 
         End If
 
-        If Not DoShorten And BatchFilePath = "" Then SysCommand = InterpolateAtRuntime(SysCommand)
+        If Not DoShorten And BatchFilePath = "" AndAlso Not SysCommandAlreadyInterpolated Then SysCommand = InterpolateAtRuntime(SysCommand)
 
         If DoBubbles Then SysCommand = InterpolateAtRuntime(SP_BubblesExcel)
 

@@ -63,7 +63,10 @@ Partial Public Class ThisAddIn
     Public Async Sub InLanguage1()
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         TranslateLanguage = INI_Language1
-        Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
+        Dim dictionarySelectionCancelled As System.Boolean = False
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        If dictionarySelectionCancelled Then Return
+        Dim result As String = Await ProcessSelectedText(translatePrompt, True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
     End Sub
 
     ''' <summary>
@@ -74,7 +77,10 @@ Partial Public Class ThisAddIn
 
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         TranslateLanguage = INI_Language2
-        Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
+        Dim dictionarySelectionCancelled As System.Boolean = False
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        If dictionarySelectionCancelled Then Return
+        Dim result As String = Await ProcessSelectedText(translatePrompt, True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
     End Sub
 
     ''' <summary>
@@ -98,7 +104,10 @@ Partial Public Class ThisAddIn
             "",
             _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
-            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
+            Dim dictionarySelectionCancelled As System.Boolean = False
+            Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+            If dictionarySelectionCancelled Then Return
+            Dim result As String = Await ProcessSelectedText(translatePrompt, True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
         End If
     End Sub
 
@@ -980,12 +989,25 @@ Partial Public Class ThisAddIn
 
         If _quickTranslateWidget Is Nothing OrElse _quickTranslateWidget.IsDisposed Then
             _quickTranslateWidget = New SharedLibrary.SharedLibrary.QuickTranslateWidget(
-            Async Function(text, lang, sourcelang, token)
+            Async Function(text As System.String,
+                           lang As System.String,
+                           sourcelang As System.String,
+                           selectedDictionarySegments As System.Collections.Generic.HashSet(Of System.String),
+                           token As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.String)
                 TranslateLanguage = lang
                 SourceLanguage = sourcelang
-                Dim SysPrompt As String = SP_Translate_Multi
-                If Not String.IsNullOrWhiteSpace(SourceLanguage) Then SysPrompt = SP_Translate_Multi_Source
-                Return Await LLM(InterpolateAtRuntime(SysPrompt),
+                Dim SysPrompt As System.String = SP_Translate_Multi
+                If Not System.String.IsNullOrWhiteSpace(SourceLanguage) Then SysPrompt = SP_Translate_Multi_Source
+
+                Dim resolvedPrompt As System.String =
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.InterpolateTranslationTemplateAtRuntime(
+                        _context,
+                        SysPrompt,
+                        TranslateLanguage,
+                        selectedDictionarySegments,
+                        AddressOf InterpolateAtRuntime)
+
+                Return Await LLM(resolvedPrompt,
                                 "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>",
                                 "", "", 0,
                                 UseSecondAPI:=False,
@@ -996,7 +1018,8 @@ Partial Public Class ThisAddIn
             INI_Language1,
             Sub()
                 Global.SharedLibrary.SharedLibrary.SharedMethods.EditUserDictionaryFile(_context)
-            End Sub)
+            End Sub,
+            _context)
         End If
         _quickTranslateWidget.ShowWidget()
     End Sub
@@ -1136,6 +1159,7 @@ Partial Public Class ThisAddIn
                 {"PostCorrection", "Prompt to apply after queries"},
                 {"Language1", "Default translation language 1"},
                 {"Language2", "Default translation language 2"},
+                {"DictionarySegmentPrompt", "Ask for dictionary segment(s)"},
                 {"PromptLibPath", "Prompt library file"},
                 {"PromptLibPathLocal", "Prompt library file (local)"},
                 {"PromptLibPath_Transcript", "Transcript prompt library file"},
@@ -1186,6 +1210,7 @@ Partial Public Class ThisAddIn
                 {"PostCorrection", "Add a prompt that will be applied to each result before it is further processed (slow!)"},
                 {"Language1", "The language (in English) that will be used for the first quick access button in the ribbon"},
                 {"Language2", "The language (in English) that will be used for the second quick access button in the ribbon"},
+                {"DictionarySegmentPrompt", "Temporarily enable or disable the interactive dictionary-segment selection. When disabled, translations use only global dictionary content plus the common [TargetLanguage] block."},
                 {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
                 {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
                 {"PromptLibPath_Transcript", "The filename (including path, support environmental variables) for your transcript prompt library (if any)"},

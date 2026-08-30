@@ -179,7 +179,8 @@ Partial Public Class ThisAddIn
                                                  cleanupGroupId As String,
                                                  cleanupIsEligible As Boolean,
                                                  cleanupAnsweredUtc As DateTime?,
-                                                 cleanupDeleteAfterUtc As DateTime?)
+                                                 cleanupDeleteAfterUtc As DateTime?,
+                                                 Optional disclaimerHtml As System.String = "")
         If plan Is Nothing OrElse Not plan.UsesAttachmentFollowUps Then Return
 
         Dim recipients As New System.Collections.Generic.List(Of String)()
@@ -226,7 +227,7 @@ Partial Public Class ThisAddIn
                 Dim partCount As Integer = plan.FollowUpBatches.Count
                 followUp.Subject = $"{If(baseSubject, "")} [Attachments {partNumber}/{partCount}]".Trim()
                 followUp.BodyFormat = Microsoft.Office.Interop.Outlook.OlBodyFormat.olFormatHTML
-                followUp.HTMLBody = BuildAutoPilotAttachmentFollowUpHtml(partNumber, partCount) & BuildAutoPilotFooter()
+                followUp.HTMLBody = BuildAutoPilotAttachmentFollowUpHtml(partNumber, partCount) & If(disclaimerHtml, System.String.Empty) & BuildAutoPilotFooter()
 
                 For Each attachPath As String In plan.FollowUpBatches(batchIndex)
                     If String.IsNullOrWhiteSpace(attachPath) OrElse Not System.IO.File.Exists(attachPath) Then
