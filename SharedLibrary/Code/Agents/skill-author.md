@@ -122,7 +122,7 @@ For **agents**, distinguish required and optional capabilities explicitly:
 - `allowed-tools`: every listed tool is a hard dependency; the host may block the isolated run if any required exact tool is absent.
 - `optional-tools`: the host includes only names that exist in the authoritative registry snapshot; missing optional tools are ignored.
 - Put host-specific source access (`m365_*`, attachment-only tools, `agent_workspace_*`) and configuration-dependent helpers such as `js_run` under `optional-tools` unless the agent genuinely cannot perform its defined job without them.
-- Do not use `python_execute` as a generic fallback.
+- Specialized/native tools are an efficiency/default preference, not an exclusivity rule. When `python_execute` or `js_run` is advertised, an authored workflow may use it as a safe alternative or recovery path if a specialized tool is unsuitable, hits protection/format/writability limits, or fails. Do not create a one-way rule that forbids an exposed deterministic sandbox merely because a specialized tool exists. Keep installation-dependent helpers optional unless the workflow genuinely cannot perform its core function without them.
 
 
 If a skill uses a tool that exists on only some hosts, it MUST check availability and block cleanly
@@ -274,6 +274,8 @@ When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a 
 - `network` (optional, default false): opt-in for tools that touch the network (`js_run` with navigation, web tools).
 - `timeout` (optional): seconds; 0 = default.
 - `enabled` (optional, default true): set `false` ONLY when the user explicitly asks for the resource to be created or kept inactive. A disabled resource remains on disk and editable but is not offered to the model.
+- `deliverable-count` (skills only, optional, default 0): exact number of user-facing final file artifacts the skill requires. Use this when file cardinality is part of the task contract. A positive value makes `expected_artifacts` mandatory at skill invocation and turns that exact slot set into a hard completion/delivery contract; it is not a filename or extension heuristic.
+- `required-successful-tools` (skills only, optional): comma-separated or YAML-list exact tool names whose successful execution is a hard prerequisite for `complete`. Use this only for workflow steps whose execution itself is an invariant (for example an independent evidence-verification pass), not as a general preference or routing hint. If a required tool cannot succeed, the workflow must remain blocked rather than silently bypassing the declared check.
 
 Never add `enabled: false` on your own initiative. A disabled resource stays on disk and editable in
 "Manage Skills & Agents" but is not offered to the model until re-enabled.
@@ -293,6 +295,16 @@ Binding rules:
 - If the skill creates or finalizes a user-facing file, include the actual create/save/export/finalizer tool
   that proves the file exists (for example `word_apply_template`, `word_save_as`, or the relevant
   create/export tool). Do not rely on prose or a helper agent to create the final file.
+- If the number of user-facing final files is fixed by the workflow, declare it with `deliverable-count`.
+  For example, a workflow whose only deliverable is one completed workbook uses `deliverable-count: 1`.
+  Do not use this field when the legitimate file count is variable; the runtime treats a positive count as
+  an exact cardinality contract and disables Legacy output promotion once the skill invocation registers its
+  opaque `expected_artifacts` slots.
+  Once a positive `deliverable-count` has locked the logical `expected_artifacts` slots, author the
+  skill around those stable logical slot ids; do **not** require the model to manufacture or rotate physical
+  `artifact_id` / `supersedes_artifact_id` revisions merely to call an optional file producer. The host owns
+  missing physical revision identity for a single locked slot and binds successive producer revisions
+  deterministically. A skill may still require exact logical slot reuse and must reject extra/mismatched slots.
 - If the skill reads attachments, active Word content, workspace files, or performs deterministic
   computation, include the exact corresponding tools it actually uses.
 - Dynamic `agent_*` helpers may be declared when useful, but a user-facing skill must remain capable of
@@ -521,8 +533,8 @@ call `tool_loader` again later in the same run.
    authorized-central resources edited at their exact path; read-only central resources shadowed under
    `local_root`; no relative `.inky` paths.
 10. Required `references/`/`scripts/` assets exist; binaries via `file_*`, not `text_write`.
-11. Frontmatter valid; `name` unique/kebab-case; `description` one sentence; `enabled:false` only on
-    explicit request. `allowed-tools` satisfies the Section 7a dependency contract: references have their
+11. Frontmatter is physically present at byte/character start (allowing only UTF-8 BOM before `---`), parses under the Red Ink runtime schema, and contains at least non-empty `name`, `description`, and `allowed-tools`; `name` is unique/kebab-case; `description` one sentence; `enabled:false` only on
+    explicit request. After every SKILL.md/AGENT.md write, re-read the written file and validate this frontmatter before reporting success. `allowed-tools` satisfies the Section 7a dependency contract: references have their
     reader, interactive clarification has `ask_user`, real outputs have a finalizer, and optional agents are
     not the sole implementation of the core workflow.
 12. Task-status footer contract and safe-failure behavior included; completion reflects the user task.
@@ -549,3 +561,8 @@ final response with a one-line confirmation, e.g.
 - The parent skill owns end-user interaction. Sub-agents must receive a bounded task and must not be expected to ask the user.
 - Every `agent_<name>` call must include a stable opaque `subagent_task_id` for that logical delegated task and `expected_artifacts`. Use `expected_artifacts: []` for analysis-only workers. If a delegated file-producing task is expected, pass the complete opaque artifact contract required by the host before the run; do not invent or broaden artifact identities later.
 - Treat an agent's missing optional host capability as a reason to adapt the bounded task or return a limitation, not as permission to bypass the selected workflow.
+
+### Transformations-Postcondition für Datei-Deliverables
+
+Wenn ein Skill für seine finalen Deliverables einen host-verifizierten Effekt verlangt, deklariere ihn generisch mit `deliverable-required-effects`, z. B. `deliverable-required-effects: content_mutated`. Effekt-IDs sind opak und werden vom Host nicht fachlich interpretiert. Ein Final-Artefakt erfüllt den Slot nur, wenn der erfolgreiche Produzent den verlangten Effekt deterministisch nachweist. Für `content_mutated` genügt daher eine reine `file_copy`-/`file_move`-/`file_rename`-Operation nicht. Verwende Required Effects nur, wenn die Aufgabe diese Wirkung wirklich verlangt; unveränderte Kopien/Weitergaben dürfen keinen Mutations-Effekt fordern.
+Für Excel-Transformationsskills kann der Host zusätzlich pro tatsächlich inhaltlich geändertem Arbeitsblatt den generischen Effekt `worksheet_mutated.<normalisierter_blattname>` nachweisen (Kleinbuchstaben, Umlaute als `ae/oe/ue`, sonstige Trennzeichen als `_`). Ein Skill darf solche Effekte deklarieren, wenn Completion zwingend Mutationen auf bestimmten Arbeitsblättern voraussetzt. Dadurch genügt eine Teilbearbeitung eines anderen Blatts nicht als vollständiger Erfolg.

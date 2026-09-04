@@ -188,12 +188,71 @@ Namespace Agents
             End If
             instr.Append(" (Skill, ").Append(originLabel).Append(".)")
 
-            Dim def As String =
-                "{""name"":""" & JsonEscape(toolName) & """," &
-                """description"":""" & JsonEscape(If(sk.Description, "Invokes the skill.")) & """," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """input"":{""type"":""string"",""description"":""Task or input for the skill.""}}," &
-                """required"":[""input""]}}"
+            Dim declaredDeliverableCount As System.Int32 =
+                SkillInvokeTool.GetDeclaredDeliverableCount(sk)
+
+            If declaredDeliverableCount > 0 Then
+                instr.Append(" This skill declares exactly ")
+                instr.Append(declaredDeliverableCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                instr.Append(" expected final artifact slot(s); expected_artifacts is mandatory before the skill runs.")
+            End If
+
+            Dim properties As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty(
+                    "input",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                        New Newtonsoft.Json.Linq.JProperty("description", "Task or input for the skill."))))
+
+            Dim required As New Newtonsoft.Json.Linq.JArray("input")
+
+            If declaredDeliverableCount > 0 Then
+                properties("expected_artifacts") =
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "array"),
+                        New Newtonsoft.Json.Linq.JProperty(
+                            "description",
+                            "REQUIRED exact expected-final-artifact contract declared by this skill. Use opaque logical_deliverable_id/output_slot_id pairs."),
+                        New Newtonsoft.Json.Linq.JProperty("minItems", declaredDeliverableCount),
+                        New Newtonsoft.Json.Linq.JProperty("maxItems", declaredDeliverableCount),
+                        New Newtonsoft.Json.Linq.JProperty(
+                            "items",
+                            New Newtonsoft.Json.Linq.JObject(
+                                New Newtonsoft.Json.Linq.JProperty("type", "object"),
+                                New Newtonsoft.Json.Linq.JProperty(
+                                    "properties",
+                                    New Newtonsoft.Json.Linq.JObject(
+                                        New Newtonsoft.Json.Linq.JProperty(
+                                            "logical_deliverable_id",
+                                            New Newtonsoft.Json.Linq.JObject(
+                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))),
+                                        New Newtonsoft.Json.Linq.JProperty(
+                                            "output_slot_id",
+                                            New Newtonsoft.Json.Linq.JObject(
+                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))))),
+                                New Newtonsoft.Json.Linq.JProperty(
+                                    "required",
+                                    New Newtonsoft.Json.Linq.JArray(
+                                        "logical_deliverable_id",
+                                        "output_slot_id")))))
+
+                required.Add("expected_artifacts")
+            End If
+
+            Dim definition As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("name", toolName),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "description",
+                    If(sk.Description, "Invokes the skill.")),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "parameters",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "object"),
+                        New Newtonsoft.Json.Linq.JProperty("properties", properties),
+                        New Newtonsoft.Json.Linq.JProperty("required", required))))
+
+            Dim def As System.String =
+                definition.ToString(Newtonsoft.Json.Formatting.None)
 
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = toolName,

@@ -107,7 +107,14 @@ Partial Public Class ThisAddIn
 
         Public Property PrematureTextRetryCount As Integer = 0
 
-        Public Const MaxContinuationRetries As Integer = 5
+        ''' <summary>Number of full finalization re-planning passes already consumed in this run.</summary>
+        Public Property FinalizationRecoveryRestartCount As Integer = 0
+        ''' <summary>Number of full tool-path recovery re-planning passes already consumed in this run.</summary>
+        Public Property TerminalToolRecoveryRestartCount As Integer = 0
+
+        Public Const MaxContinuationRetries As Integer = SharedLibrary.Agents.ToolingConstants.MaxContinuationRetries
+        Public Const MaxFinalizationRecoveryRestarts As Integer = SharedLibrary.Agents.ToolingConstants.MaxFinalizationRecoveryRestarts
+        Public Const MaxTerminalToolRecoveryRestarts As Integer = SharedLibrary.Agents.ToolingConstants.MaxTerminalToolRecoveryRestarts
         Public Const MaxEmptyResponseRetries As Integer = 1
 
         Public Property PendingRejectedAssistantTurn As String = ""

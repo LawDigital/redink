@@ -285,6 +285,12 @@ Namespace Agents
             Public Property SupersedesArtifactId As String = ""
             Public Property IsExplicitContract As Boolean
             Public Property RegisteredUtc As DateTime
+            ' Trusted host/tool evidence about what happened to this physical artifact.
+            ' "materialized" is added when an existing file is registered. Additional
+            ' opaque effects are added only by host-authored tool capabilities after
+            ' successful execution; model-supplied artifact JSON cannot forge them.
+            Public Property VerifiedEffects As System.Collections.Generic.HashSet(Of System.String) =
+                New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         End Class
 
         ''' <summary>
@@ -295,6 +301,9 @@ Namespace Agents
         Public NotInheritable Class ExpectedDeliverableSlot
             Public Property LogicalDeliverableId As String = ""
             Public Property OutputSlotId As String = ""
+            ' Opaque completion effects required in addition to physical existence.
+            Public Property RequiredEffects As System.Collections.Generic.HashSet(Of System.String) =
+                New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         End Class
 
         Public NotInheritable Class ToolingRunState
@@ -315,6 +324,7 @@ Namespace Agents
             Public Property UnresolvedToolFailures As New List(Of ToolFailureRecord)()
             Private _failureSequence As Long
             Private _substantiveProgressEpoch As Long
+            Private _artifactRevisionSequence As Long
 
             ' Tool-agnostic retry fidelity state. When a failed tool call carried a named
             ' design/template constraint, a retry of that same tool may not silently drop or
@@ -329,6 +339,8 @@ Namespace Agents
             Public Property LastCollectionSize As Integer?
             Public Property LastProcessedItemCount As Integer?
             Public Property LastSuccessfulToolCall As String
+            Public Property RequiredSuccessfulTools As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Public Property SuccessfulToolsThisRun As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
             Public Property LastMutationToolCall As String
             Public Property LastAgentToolCall As String
             Public Property LastReadOnlyStateToolCall As String
@@ -438,8 +450,47 @@ Namespace Agents
                 End Get
             End Property
 
-            Public Sub RegisterExpectedDeliverableSlot(logicalDeliverableId As String,
-                                                       outputSlotId As String)
+            Public Sub RegisterRequiredSuccessfulTools(toolNames As System.Collections.Generic.IEnumerable(Of System.String))
+                If toolNames Is Nothing Then Return
+                If RequiredSuccessfulTools Is Nothing Then
+                    RequiredSuccessfulTools = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                End If
+
+                For Each rawName As System.String In toolNames
+                    Dim toolName As System.String = If(rawName, System.String.Empty).Trim()
+                    If toolName = System.String.Empty Then Continue For
+                    RequiredSuccessfulTools.Add(toolName)
+                Next
+            End Sub
+
+            Public Sub RegisterSuccessfulTool(toolName As System.String)
+                Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
+                If normalizedToolName = System.String.Empty Then Return
+                If SuccessfulToolsThisRun Is Nothing Then
+                    SuccessfulToolsThisRun = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                End If
+                SuccessfulToolsThisRun.Add(normalizedToolName)
+            End Sub
+
+            Public Function GetMissingRequiredSuccessfulTools() As System.Collections.Generic.List(Of System.String)
+                Dim missing As New System.Collections.Generic.List(Of System.String)()
+                If RequiredSuccessfulTools Is Nothing OrElse RequiredSuccessfulTools.Count = 0 Then Return missing
+
+                For Each requiredTool As System.String In RequiredSuccessfulTools
+                    If SuccessfulToolsThisRun Is Nothing OrElse Not SuccessfulToolsThisRun.Contains(requiredTool) Then
+                        missing.Add(requiredTool)
+                    End If
+                Next
+
+                missing.Sort(System.StringComparer.OrdinalIgnoreCase)
+                Return missing
+            End Function
+
+            Public Sub RegisterExpectedDeliverableSlot(
+                logicalDeliverableId As String,
+                outputSlotId As String,
+                Optional requiredEffects As System.Collections.Generic.IEnumerable(Of System.String) = Nothing)
+
                 Dim logicalId As String = If(logicalDeliverableId, "").Trim()
                 Dim slotId As String = If(outputSlotId, "").Trim()
 
@@ -448,6 +499,9 @@ Namespace Agents
                 If ExpectedDeliverableSlots Is Nothing Then
                     ExpectedDeliverableSlots = New List(Of ExpectedDeliverableSlot)()
                 End If
+
+                Dim normalizedEffects As System.Collections.Generic.HashSet(Of System.String) =
+                    NormalizeArtifactEffectSet(requiredEffects, includeMaterialized:=True)
 
                 For Each existing As ExpectedDeliverableSlot In ExpectedDeliverableSlots
                     If existing Is Nothing Then Continue For
@@ -458,6 +512,10 @@ Namespace Agents
                        String.Equals(existing.OutputSlotId,
                                      slotId,
                                      StringComparison.Ordinal) Then
+                        If existing.RequiredEffects Is Nothing Then
+                            existing.RequiredEffects = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                        End If
+                        existing.RequiredEffects.UnionWith(normalizedEffects)
                         Return
                     End If
                 Next
@@ -465,10 +523,65 @@ Namespace Agents
                 ExpectedDeliverableSlots.Add(
                     New ExpectedDeliverableSlot With {
                         .LogicalDeliverableId = logicalId,
-                        .OutputSlotId = slotId
+                        .OutputSlotId = slotId,
+                        .RequiredEffects = normalizedEffects
                     })
 
                 RequestRequiresCreatedDeliverable = True
+            End Sub
+
+            Private Shared Function NormalizeArtifactEffectSet(
+                effects As System.Collections.Generic.IEnumerable(Of System.String),
+                Optional includeMaterialized As System.Boolean = False) As System.Collections.Generic.HashSet(Of System.String)
+
+                Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                If includeMaterialized Then result.Add("materialized")
+                If effects Is Nothing Then Return result
+
+                For Each rawEffect As System.String In effects
+                    Dim effect As System.String = If(rawEffect, System.String.Empty).Trim().ToLowerInvariant()
+                    If effect = System.String.Empty Then Continue For
+                    If Not System.Text.RegularExpressions.Regex.IsMatch(effect, "^[a-z][a-z0-9_.-]{0,63}$") Then Continue For
+                    result.Add(effect)
+                Next
+
+                Return result
+            End Function
+
+            Private Shared Function ParseRequiredEffects(
+                token As Newtonsoft.Json.Linq.JToken) As System.Collections.Generic.HashSet(Of System.String)
+
+                If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                    Return NormalizeArtifactEffectSet(Nothing, includeMaterialized:=True)
+                End If
+
+                Dim values As New System.Collections.Generic.List(Of System.String)()
+                If token.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                    For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+                        If item Is Nothing OrElse item.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Continue For
+                        values.Add(item.ToString())
+                    Next
+                Else
+                    values.AddRange(token.ToString().Split(New System.Char() {","c, ";"c, " "c}, System.StringSplitOptions.RemoveEmptyEntries))
+                End If
+
+                Return NormalizeArtifactEffectSet(values, includeMaterialized:=True)
+            End Function
+
+            Public Sub ApplyRequiredEffectsToExpectedDeliverables(
+                effects As System.Collections.Generic.IEnumerable(Of System.String))
+
+                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count = 0 Then Return
+                Dim normalized As System.Collections.Generic.HashSet(Of System.String) =
+                    NormalizeArtifactEffectSet(effects, includeMaterialized:=True)
+
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    If expected.RequiredEffects Is Nothing Then
+                        expected.RequiredEffects = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                    End If
+                    expected.RequiredEffects.UnionWith(normalized)
+                Next
             End Sub
 
             Public Shared Function IsExplicitSubAgentDelegationCall(
@@ -542,7 +655,8 @@ Namespace Agents
                         pendingSlots.Add(
                             New ExpectedDeliverableSlot With {
                                 .LogicalDeliverableId = logicalId,
-                                .OutputSlotId = slotId
+                                .OutputSlotId = slotId,
+                                .RequiredEffects = ParseRequiredEffects(obj("required_effects"))
                             })
                     End If
                 Next
@@ -552,7 +666,8 @@ Namespace Agents
                 For Each pending As ExpectedDeliverableSlot In pendingSlots
                     RegisterExpectedDeliverableSlot(
                         pending.LogicalDeliverableId,
-                        pending.OutputSlotId)
+                        pending.OutputSlotId,
+                        pending.RequiredEffects)
                 Next
             End Sub
 
@@ -674,7 +789,8 @@ Namespace Agents
                         suppliedSlots.Add(
                             New ExpectedDeliverableSlot With {
                                 .LogicalDeliverableId = logicalId,
-                                .OutputSlotId = slotId
+                                .OutputSlotId = slotId,
+                                .RequiredEffects = ParseRequiredEffects(obj("required_effects"))
                             })
                     End If
                 Next
@@ -714,6 +830,159 @@ Namespace Agents
                 Next
 
                 Return True
+            End Function
+
+            ''' <summary>
+            ''' Completes optional artifact metadata for an output-producing tool when this run
+            ''' has exactly one locked expected deliverable slot. The logical slot remains caller/skill
+            ''' authority; physical revision ids are host-owned and deterministic. Explicit conflicting
+            ''' logical/slot values are never overwritten and will be rejected by the normal validators.
+            ''' </summary>
+            Public Function ShouldNormalizeSingleLockedProducerArtifactArguments(
+                toolName As System.String,
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+                If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return False
+                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <> 1 Then Return False
+
+                ' Explicit artifact identity is an opt-in boundary: complete any missing host-owned
+                ' physical revision metadata, but never reinterpret an explicit logical contradiction.
+                If ArtifactDelivery.HasExplicitArtifactIdentityArguments(arguments) Then Return True
+
+                Dim stateText As System.String = GetArgumentText(arguments, "artifact_state")
+                Dim intentText As System.String = GetArgumentText(arguments, "artifact_delivery_intent")
+                If System.String.Equals(stateText, "final", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(intentText, "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(intentText, "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                ' A producer that explicitly names a new output file is a genuine output-producing
+                ' invocation. Staging/copy tools use different argument names and are intentionally
+                ' not promoted merely because they are deliverable-capable.
+                If GetArgumentText(arguments, "output_filename") <> System.String.Empty Then Return True
+
+                Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
+
+                ' python_execute is dual-use. Only bind the final artifact contract implicitly when
+                ' the script actually requests an output file. Pure inspection/calculation scripts
+                ' that only publish JSON/text must remain result-only calls.
+                If System.String.Equals(normalizedToolName, "python_execute", System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim code As System.String = GetArgumentText(arguments, "code")
+                    If code.IndexOf("agent_api.output_path", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+                    Return False
+                End If
+
+                ' Revisions of an already-current Excel deliverable are commonly edited in place.
+                ' Bind that mutation only when the call targets the basename of the current Final
+                ' and carries actual updates. A read/staging call cannot satisfy this branch.
+                If System.String.Equals(normalizedToolName, "excel_complete_live_workbook", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   arguments.ContainsKey("updates") AndAlso arguments("updates") IsNot Nothing Then
+
+                    Dim attachmentName As System.String = GetArgumentText(arguments, "attachment_name")
+                    If attachmentName <> System.String.Empty AndAlso RegisteredDeliverableArtifacts IsNot Nothing Then
+                        For i As System.Int32 = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
+                            Dim current As DeliverableArtifact = RegisteredDeliverableArtifacts(i)
+                            If current Is Nothing OrElse current.LifecycleState <> ArtifactLifecycleState.Final Then Continue For
+                            If System.String.IsNullOrWhiteSpace(current.SessionPath) Then Continue For
+                            Dim currentName As System.String = System.IO.Path.GetFileName(current.SessionPath)
+                            If System.String.Equals(currentName, attachmentName, System.StringComparison.OrdinalIgnoreCase) Then Return True
+                        Next
+                    End If
+                End If
+
+                Return False
+            End Function
+
+            Public Sub NormalizeSingleLockedProducerArtifactArguments(
+                arguments As IDictionary(Of String, Object),
+                toolCallId As String)
+
+                If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return
+                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <> 1 Then Return
+
+                Dim expected As ExpectedDeliverableSlot = ExpectedDeliverableSlots(0)
+                If expected Is Nothing Then Return
+
+                Dim expectedLogicalId As String = If(expected.LogicalDeliverableId, "").Trim()
+                Dim expectedSlotId As String = If(expected.OutputSlotId, "").Trim()
+                If expectedLogicalId = "" OrElse expectedSlotId = "" Then Return
+
+                Dim suppliedLogicalId As String = GetArgumentText(arguments, "logical_deliverable_id")
+                Dim suppliedSlotId As String = GetArgumentText(arguments, "output_slot_id")
+
+                ' Never repair an explicit contradiction. The locked-contract validator must surface it.
+                If suppliedLogicalId <> "" AndAlso
+                   Not System.String.Equals(suppliedLogicalId, expectedLogicalId, System.StringComparison.Ordinal) Then Return
+                If suppliedSlotId <> "" AndAlso
+                   Not System.String.Equals(suppliedSlotId, expectedSlotId, System.StringComparison.Ordinal) Then Return
+
+                If suppliedLogicalId = "" Then arguments("logical_deliverable_id") = expectedLogicalId
+                If suppliedSlotId = "" Then arguments("output_slot_id") = expectedSlotId
+
+                ' Physical revision identity is host-owned for a single locked logical slot.
+                ' Never depend on a model-generated artifact_id/supersedes pair: every producer
+                ' invocation gets a fresh run-local revision id and the host links it to the
+                ' current prior revision of the same slot when one exists.
+                Dim artifactId As String = BuildHostArtifactRevisionId(toolCallId, expectedLogicalId, expectedSlotId)
+                arguments("artifact_id") = artifactId
+                arguments.Remove("supersedes_artifact_id")
+
+                If RegisteredDeliverableArtifacts IsNot Nothing Then
+                    For i As Integer = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
+                        Dim prior As DeliverableArtifact = RegisteredDeliverableArtifacts(i)
+                        If prior Is Nothing Then Continue For
+                        If prior.LifecycleState = ArtifactLifecycleState.Superseded Then Continue For
+                        If Not System.String.Equals(If(prior.LogicalDeliverableId, "").Trim(), expectedLogicalId, System.StringComparison.Ordinal) Then Continue For
+                        If Not System.String.Equals(If(prior.OutputSlotId, "").Trim(), expectedSlotId, System.StringComparison.Ordinal) Then Continue For
+                        If Not System.String.IsNullOrWhiteSpace(prior.ArtifactId) Then
+                            arguments("supersedes_artifact_id") = prior.ArtifactId.Trim()
+                        End If
+                        Exit For
+                    Next
+                End If
+
+                If GetArgumentText(arguments, "artifact_state") = "" Then
+                    arguments("artifact_state") = "final"
+                End If
+                If GetArgumentText(arguments, "artifact_delivery_intent") = "" Then
+                    arguments("artifact_delivery_intent") = "deliver_to_user"
+                End If
+
+                Dim expectedRaw As Object = Nothing
+                If Not arguments.TryGetValue("expected_artifacts", expectedRaw) OrElse expectedRaw Is Nothing Then
+                    Dim expectedItem As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.Ordinal) From {
+                        {"logical_deliverable_id", expectedLogicalId},
+                        {"output_slot_id", expectedSlotId}
+                    }
+                    arguments("expected_artifacts") = New System.Collections.Generic.List(Of Object) From {expectedItem}
+                End If
+            End Sub
+
+            Private Shared Function GetArgumentText(arguments As IDictionary(Of String, Object), key As String) As String
+                If arguments Is Nothing OrElse System.String.IsNullOrWhiteSpace(key) Then Return ""
+                Dim raw As Object = Nothing
+                If Not arguments.TryGetValue(key, raw) OrElse raw Is Nothing Then Return ""
+                Return If(System.Convert.ToString(raw), "").Trim()
+            End Function
+
+            Private Function BuildHostArtifactRevisionId(toolCallId As String, logicalId As String, slotId As String) As String
+                _artifactRevisionSequence += 1
+                Dim seed As String =
+                    _artifactRevisionSequence.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                    If(toolCallId, "").Trim() & "|" &
+                    If(logicalId, "").Trim() & "|" &
+                    If(slotId, "").Trim()
+
+                Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                    Dim bytes As Byte() = System.Text.Encoding.UTF8.GetBytes(seed)
+                    Dim hash As Byte() = sha.ComputeHash(bytes)
+                    Dim builder As New System.Text.StringBuilder(24)
+                    For i As Integer = 0 To System.Math.Min(11, hash.Length - 1)
+                        builder.Append(hash(i).ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+                    Next
+                    Return "host_art_" & builder.ToString()
+                End Using
             End Function
 
             Public Function ValidateExplicitArtifactIdentityArguments(
@@ -850,6 +1119,171 @@ Namespace Agents
                 ExpectedDeliverableContractLocked = True
             End Sub
 
+            Public Function GetExpectedDeliverableSlot(
+                logicalDeliverableId As System.String,
+                outputSlotId As System.String) As ExpectedDeliverableSlot
+
+                Dim logicalId As System.String = If(logicalDeliverableId, System.String.Empty).Trim()
+                Dim slotId As System.String = If(outputSlotId, System.String.Empty).Trim()
+                If logicalId = System.String.Empty OrElse slotId = System.String.Empty OrElse ExpectedDeliverableSlots Is Nothing Then Return Nothing
+
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    If System.String.Equals(If(expected.LogicalDeliverableId, System.String.Empty), logicalId, System.StringComparison.Ordinal) AndAlso
+                       System.String.Equals(If(expected.OutputSlotId, System.String.Empty), slotId, System.StringComparison.Ordinal) Then
+                        Return expected
+                    End If
+                Next
+
+                Return Nothing
+            End Function
+
+            Public Function ArtifactSatisfiesExpectedEffects(
+                artifact As DeliverableArtifact,
+                expected As ExpectedDeliverableSlot) As System.Boolean
+
+                If artifact Is Nothing OrElse expected Is Nothing Then Return False
+                Dim required As System.Collections.Generic.HashSet(Of System.String) =
+                    NormalizeArtifactEffectSet(expected.RequiredEffects, includeMaterialized:=True)
+                Dim verified As System.Collections.Generic.HashSet(Of System.String) =
+                    NormalizeArtifactEffectSet(artifact.VerifiedEffects, includeMaterialized:=False)
+
+                For Each effect As System.String In required
+                    If Not verified.Contains(effect) Then Return False
+                Next
+                Return True
+            End Function
+
+            Public Function IsQualifiedFinalArtifactForDelivery(artifact As DeliverableArtifact) As System.Boolean
+                If artifact Is Nothing Then Return False
+                If Not HasExpectedDeliverableContract Then Return True
+
+                Dim expected As ExpectedDeliverableSlot = GetExpectedDeliverableSlot(
+                    artifact.LogicalDeliverableId,
+                    artifact.OutputSlotId)
+                If expected Is Nothing Then Return False
+                Return ArtifactSatisfiesExpectedEffects(artifact, expected)
+            End Function
+
+            Public Sub NoteVerifiedArtifactEffects(
+                effects As System.Collections.Generic.IEnumerable(Of System.String),
+                candidatePaths As System.Collections.Generic.IEnumerable(Of System.String),
+                Optional logicalDeliverableId As System.String = "",
+                Optional outputSlotId As System.String = "")
+
+                If RegisteredDeliverableArtifacts Is Nothing Then Return
+                Dim normalizedEffects As System.Collections.Generic.HashSet(Of System.String) =
+                    NormalizeArtifactEffectSet(effects, includeMaterialized:=False)
+                If normalizedEffects.Count = 0 Then Return
+
+                Dim normalizedPaths As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                If candidatePaths IsNot Nothing Then
+                    For Each rawPath As System.String In candidatePaths
+                        If System.String.IsNullOrWhiteSpace(rawPath) Then Continue For
+                        Try
+                            normalizedPaths.Add(System.IO.Path.GetFullPath(rawPath))
+                        Catch ex As System.Exception
+                        End Try
+                    Next
+                End If
+
+                Dim logicalId As System.String = If(logicalDeliverableId, System.String.Empty).Trim()
+                Dim slotId As System.String = If(outputSlotId, System.String.Empty).Trim()
+
+                For Each artifact As DeliverableArtifact In RegisteredDeliverableArtifacts
+                    If artifact Is Nothing Then Continue For
+                    Dim pathMatches As System.Boolean = False
+                    If Not System.String.IsNullOrWhiteSpace(artifact.SessionPath) AndAlso normalizedPaths.Count > 0 Then
+                        Try
+                            pathMatches = normalizedPaths.Contains(System.IO.Path.GetFullPath(artifact.SessionPath))
+                        Catch ex As System.Exception
+                        End Try
+                    End If
+
+                    Dim slotMatches As System.Boolean =
+                        logicalId <> System.String.Empty AndAlso slotId <> System.String.Empty AndAlso
+                        System.String.Equals(If(artifact.LogicalDeliverableId, System.String.Empty), logicalId, System.StringComparison.Ordinal) AndAlso
+                        System.String.Equals(If(artifact.OutputSlotId, System.String.Empty), slotId, System.StringComparison.Ordinal)
+
+                    If Not pathMatches AndAlso Not slotMatches Then Continue For
+                    If artifact.VerifiedEffects Is Nothing Then
+                        artifact.VerifiedEffects = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                    End If
+                    artifact.VerifiedEffects.UnionWith(normalizedEffects)
+                Next
+            End Sub
+
+            Public Sub NoteVerifiedArtifactEffectsFromSuccessfulTool(
+                toolConfig As SharedLibrary.ModelConfig,
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                responseText As System.String,
+                Optional runtimeVerifiedEffects As System.Collections.Generic.IEnumerable(Of System.String) = Nothing)
+
+                Dim effects As New System.Collections.Generic.List(Of System.String)()
+                If toolConfig IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(toolConfig.VerifiedArtifactEffects) Then
+                    effects.AddRange(
+                        toolConfig.VerifiedArtifactEffects.Split(
+                            New System.Char() {","c, ";"c, " "c},
+                            System.StringSplitOptions.RemoveEmptyEntries))
+                End If
+                If runtimeVerifiedEffects IsNot Nothing Then
+                    effects.AddRange(runtimeVerifiedEffects)
+                End If
+                If effects.Count = 0 Then Return
+
+                Dim paths As New System.Collections.Generic.List(Of System.String)()
+
+                Try
+                    If Not System.String.IsNullOrWhiteSpace(responseText) Then
+                        Dim root As Newtonsoft.Json.Linq.JObject = TryCast(Newtonsoft.Json.Linq.JToken.Parse(responseText), Newtonsoft.Json.Linq.JObject)
+                        If root IsNot Nothing Then
+                            CollectArtifactEffectPaths(root, paths)
+                            Dim result As Newtonsoft.Json.Linq.JObject = TryCast(root("result"), Newtonsoft.Json.Linq.JObject)
+                            If result IsNot Nothing Then CollectArtifactEffectPaths(result, paths)
+                        End If
+                    End If
+                Catch ex As System.Exception
+                End Try
+
+                Dim logicalId As System.String = System.String.Empty
+                Dim slotId As System.String = System.String.Empty
+                Dim raw As System.Object = Nothing
+                If arguments IsNot Nothing AndAlso arguments.TryGetValue("logical_deliverable_id", raw) AndAlso raw IsNot Nothing Then
+                    logicalId = System.Convert.ToString(raw).Trim()
+                End If
+                raw = Nothing
+                If arguments IsNot Nothing AndAlso arguments.TryGetValue("output_slot_id", raw) AndAlso raw IsNot Nothing Then
+                    slotId = System.Convert.ToString(raw).Trim()
+                End If
+
+                NoteVerifiedArtifactEffects(effects, paths, logicalId, slotId)
+            End Sub
+
+            Private Shared Sub CollectArtifactEffectPaths(
+                obj As Newtonsoft.Json.Linq.JObject,
+                target As System.Collections.Generic.List(Of System.String))
+
+                If obj Is Nothing OrElse target Is Nothing Then Return
+                For Each key As System.String In New System.String() {"output_path", "outputFilePath", "output_file_path", "file_path", "path"}
+                    Dim token As Newtonsoft.Json.Linq.JToken = obj(key)
+                    If token IsNot Nothing AndAlso token.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                        target.Add(token.ToString())
+                    End If
+                Next
+
+                Dim artifacts As Newtonsoft.Json.Linq.JToken = obj("artifacts")
+                If artifacts IsNot Nothing AndAlso artifacts.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                    For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(artifacts, Newtonsoft.Json.Linq.JArray)
+                        Dim artifactObj As Newtonsoft.Json.Linq.JObject = TryCast(item, Newtonsoft.Json.Linq.JObject)
+                        If artifactObj Is Nothing Then Continue For
+                        Dim pathToken As Newtonsoft.Json.Linq.JToken = artifactObj("path")
+                        If pathToken IsNot Nothing AndAlso pathToken.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                            target.Add(pathToken.ToString())
+                        End If
+                    Next
+                End If
+            End Sub
+
             Public Function IsExpectedDeliverableSlot(logicalDeliverableId As String, outputSlotId As String) As Boolean
                 Dim logicalId As String = If(logicalDeliverableId, "").Trim()
                 Dim slotId As String = If(outputSlotId, "").Trim()
@@ -859,6 +1293,57 @@ Namespace Agents
                     If String.Equals(If(expected.LogicalDeliverableId, ""), logicalId, StringComparison.Ordinal) AndAlso String.Equals(If(expected.OutputSlotId, ""), slotId, StringComparison.Ordinal) Then Return True
                 Next
                 Return False
+            End Function
+
+            Public Function IsExpectedDeliverableSlotSatisfied(
+                logicalDeliverableId As System.String,
+                outputSlotId As System.String) As System.Boolean
+
+                Dim expected As ExpectedDeliverableSlot =
+                    GetExpectedDeliverableSlot(logicalDeliverableId, outputSlotId)
+                If expected Is Nothing OrElse RegisteredDeliverableArtifacts Is Nothing Then Return False
+
+                Dim currentFinalCount As System.Int32 = 0
+                For Each artifact As DeliverableArtifact In RegisteredDeliverableArtifacts
+                    If artifact Is Nothing Then Continue For
+                    If artifact.LifecycleState <> ArtifactLifecycleState.Final Then Continue For
+                    If Not artifact.IsFinalDeliverable Then Continue For
+                    If Not artifact.IsExplicitContract Then Continue For
+                    If System.String.IsNullOrWhiteSpace(artifact.ArtifactId) Then Continue For
+                    If System.String.IsNullOrWhiteSpace(artifact.LogicalDeliverableId) Then Continue For
+                    If System.String.IsNullOrWhiteSpace(artifact.OutputSlotId) Then Continue For
+
+                    If artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverToUser AndAlso
+                       artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverAndPersist Then
+                        Continue For
+                    End If
+
+                    If Not System.String.Equals(
+                        If(artifact.LogicalDeliverableId, System.String.Empty),
+                        If(expected.LogicalDeliverableId, System.String.Empty),
+                        System.StringComparison.Ordinal) Then
+                        Continue For
+                    End If
+
+                    If Not System.String.Equals(
+                        If(artifact.OutputSlotId, System.String.Empty),
+                        If(expected.OutputSlotId, System.String.Empty),
+                        System.StringComparison.Ordinal) Then
+                        Continue For
+                    End If
+
+                    If System.String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
+                    If Not ArtifactSatisfiesExpectedEffects(artifact, expected) Then Continue For
+
+                    Try
+                        If System.IO.File.Exists(artifact.SessionPath) Then
+                            currentFinalCount += 1
+                        End If
+                    Catch ex As System.Exception
+                    End Try
+                Next
+
+                Return currentFinalCount = 1
             End Function
 
             Public ReadOnly Property HasAllExpectedDeliverableSlots As Boolean
@@ -873,49 +1358,13 @@ Namespace Agents
                     For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
                         If expected Is Nothing Then Return False
 
-                        Dim currentFinalCount As Integer = 0
-
-                        For Each artifact As DeliverableArtifact In RegisteredDeliverableArtifacts
-                            If artifact Is Nothing Then Continue For
-                            If artifact.LifecycleState <> ArtifactLifecycleState.Final Then Continue For
-                            If Not artifact.IsFinalDeliverable Then Continue For
-                            If Not artifact.IsExplicitContract Then Continue For
-                            If System.String.IsNullOrWhiteSpace(artifact.ArtifactId) Then Continue For
-                            If System.String.IsNullOrWhiteSpace(artifact.LogicalDeliverableId) Then Continue For
-                            If System.String.IsNullOrWhiteSpace(artifact.OutputSlotId) Then Continue For
-
-                            If artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverToUser AndAlso
-                               artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverAndPersist Then
-                                Continue For
-                            End If
-
-                            If Not System.String.Equals(
-                                If(artifact.LogicalDeliverableId, ""),
-                                If(expected.LogicalDeliverableId, ""),
-                                System.StringComparison.Ordinal) Then
-                                Continue For
-                            End If
-
-                            If Not System.String.Equals(
-                                If(artifact.OutputSlotId, ""),
-                                If(expected.OutputSlotId, ""),
-                                System.StringComparison.Ordinal) Then
-                                Continue For
-                            End If
-
-                            If System.String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
-
-                            Try
-                                If System.IO.File.Exists(artifact.SessionPath) Then
-                                    currentFinalCount += 1
-                                End If
-                            Catch
-                            End Try
-                        Next
-
                         ' Exactly one current, existing user-facing Final must satisfy each
                         ' expected slot. Zero is incomplete; more than one is ambiguous/corrupt.
-                        If currentFinalCount <> 1 Then Return False
+                        If Not IsExpectedDeliverableSlotSatisfied(
+                            expected.LogicalDeliverableId,
+                            expected.OutputSlotId) Then
+                            Return False
+                        End If
                     Next
 
                     Return True
@@ -1156,6 +1605,38 @@ Namespace Agents
                 If RetryInvariantArgumentsByTool IsNot Nothing Then RetryInvariantArgumentsByTool.Clear()
             End Sub
 
+            Public Sub BeginBoundedAlternativeRecovery(failedToolName As String,
+                                                       Optional recoveryLabel As String = "full_tool_path_recovery")
+                If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                    Return
+                End If
+
+                Dim normalizedToolName As String = If(failedToolName, String.Empty).Trim()
+                If normalizedToolName = String.Empty Then Return
+
+                For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+                    If Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    ' The local retry/circuit-breaker is exhausted, but the host has explicitly
+                    ' opened one bounded whole-workflow recovery pass. The failed tool itself
+                    ' remains exhausted; a materially different compatible substantive tool may
+                    ' now supersede this failure.
+                    candidate.Terminal = False
+                    candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
+                    candidate.RecoveryEvidenceObserved = False
+                    candidate.RecoveryEvidenceToolName = String.Empty
+                    candidate.ProgressEpoch = _substantiveProgressEpoch
+                Next
+
+                LastFailureUltimatelyFatal = False
+                LastFailureTerminal = False
+                LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
+                RecoveryToolName = If(recoveryLabel, String.Empty)
+                ProjectLatestUnresolvedFailure()
+            End Sub
+
             Public Sub NoteFailureFatal()
                 If Not HasUnresolvedToolFailure Then Return
 
@@ -1257,7 +1738,13 @@ Namespace Agents
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
 
-                    If candidate.ProgressEpoch <> currentProgressEpoch Then
+                    ' Explicit recovery scopes are stronger than the coarse progress epoch. A
+                    ' preparatory success (for example copying/staging the same workbook) must not
+                    ' make a later successful fallback on the SAME logical operation/artifact slot
+                    ' unable to recover the earlier failure. Legacy unscoped failures keep the epoch
+                    ' boundary to avoid unrelated late successes being treated as recovery evidence.
+                    If System.String.IsNullOrWhiteSpace(candidate.RecoveryScopeKey) AndAlso
+                       candidate.ProgressEpoch <> currentProgressEpoch Then
                         Exit For
                     End If
 
@@ -1268,6 +1755,16 @@ Namespace Agents
 
                     If Not IsCompatibleAlternativeRecoveryTool(candidate, normalizedToolName, normalizedRecoveryScopeKey) Then
                         Exit For
+                    End If
+
+                    ' For an explicit artifact-scoped failure, a different producer is recovery
+                    ' only when the artifact contract for the run is actually qualified. This
+                    ' prevents preparatory copy/staging operations on the same logical slot from
+                    ' erasing a failed transformation before the required verified effects exist.
+                    If candidate.RecoveryScopeKey.StartsWith("artifact:", System.StringComparison.Ordinal) AndAlso
+                       HasExpectedDeliverableContract AndAlso
+                       Not HasAllExpectedDeliverableSlots Then
+                        Continue For
                     End If
 
                     Dim alternativeNeedsFinalCommit As Boolean =
@@ -1292,6 +1789,19 @@ Namespace Agents
 
                 If UnresolvedToolFailures.Count > 0 Then
                     ProjectLatestUnresolvedFailure()
+
+                    ' During an explicitly opened whole-workflow alternative recovery, successful
+                    ' preparatory reads/inspection steps are useful but must not advance the
+                    ' recovery epoch. Otherwise the later compatible mutation/producer call would
+                    ' be prevented from resolving the very failure this recovery pass was opened for.
+                    Dim boundedAlternativeStillPending As Boolean =
+                        UnresolvedToolFailures.Any(
+                            Function(candidate As ToolFailureRecord)
+                                Return candidate IsNot Nothing AndAlso
+                                       candidate.ProgressEpoch = currentProgressEpoch AndAlso
+                                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
+                            End Function)
+                    If boundedAlternativeStillPending Then Return
                 Else
                     HasUnresolvedToolFailure = False
                     LastToolName = ""
@@ -1427,7 +1937,8 @@ Namespace Agents
                 ' the alternative must carry that exact same scope. Unscoped skip failures may be
                 ' recovered by the next different substantive success; retry/abort failures never use
                 ' this branch because their recovery policy does not permit alternatives.
-                If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
+                If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
+                   failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
                     Return False
                 End If
 
@@ -1521,7 +2032,7 @@ Namespace Agents
                 Return bestIndex
             End Function
 
-            Private Sub ProjectLatestUnresolvedFailure()
+            Friend Sub ProjectLatestUnresolvedFailure()
                 Dim latest As ToolFailureRecord = GetLatestUnresolvedFailure()
                 If latest Is Nothing Then
                     HasUnresolvedToolFailure = False
@@ -2653,6 +3164,16 @@ Namespace Agents
                         Return result
                     End If
 
+                    Dim missingRequiredTools As System.Collections.Generic.List(Of System.String) =
+                        If(runState Is Nothing,
+                           New System.Collections.Generic.List(Of System.String)(),
+                           runState.GetMissingRequiredSuccessfulTools())
+
+                    If missingRequiredTools.Count > 0 Then
+                        result.InvalidReason = "complete_missing_required_successful_tools:" & System.String.Join(",", missingRequiredTools)
+                        Return result
+                    End If
+
                     Dim memoryGroundingFailureReason As String =
                         GetRequiredMemoryGroundingFailureReason(
                             runState,
@@ -2712,6 +3233,11 @@ Namespace Agents
                                                       Optional invalidReason As String = "") As String
             Dim normalizedInvalidReason As String = If(invalidReason, "").Trim().ToLowerInvariant()
             Dim prompt As String
+
+            If normalizedInvalidReason.StartsWith("complete_missing_required_successful_tools:", System.StringComparison.Ordinal) Then
+                Dim missingTools As System.String = normalizedInvalidReason.Substring("complete_missing_required_successful_tools:".Length)
+                Return "The selected skill declares mandatory successful verification/tool steps that have not yet succeeded: " & missingTools & ". Do not finalize. Load/call those exact tools as prescribed by the skill, use their results, then continue the workflow. If a required tool genuinely cannot run, return a truthful blocked result rather than inventing the missing verification."
+            End If
 
             Select Case normalizedInvalidReason
                 Case "task_status_reason_too_long",
@@ -3970,6 +4496,7 @@ Namespace Agents
 
             If success Then
                 runState.LastSuccessfulToolCall = If(toolName, "")
+                runState.RegisterSuccessfulTool(toolName)
             End If
 
             Select Case classification
@@ -4226,6 +4753,15 @@ Namespace Agents
                         Continue For
                     End If
 
+                    ' Defensive finalization rule: an earlier artifact-scoped producer/inspection
+                    ' failure is no longer blocking when that exact expected logical slot is now
+                    ' fully qualified by one existing Final with all host-verified required effects.
+                    ' This is deliberately narrow: unscoped failures, operation/subagent scopes,
+                    ' different slots and incomplete deliverable contracts remain blocking.
+                    If IsArtifactScopedFailureSupersededByValidatedDeliverable(runState, failure) Then
+                        Continue For
+                    End If
+
                     Return True
                 Next
                 Return False
@@ -4239,6 +4775,30 @@ Namespace Agents
                 StringComparison.OrdinalIgnoreCase)
         End Function
 
+        Private Shared Function IsArtifactScopedFailureSupersededByValidatedDeliverable(
+            runState As ToolingRunState,
+            failure As ToolFailureRecord) As System.Boolean
+
+            If runState Is Nothing OrElse failure Is Nothing Then Return False
+            If Not runState.HasExpectedDeliverableContract Then Return False
+
+            Dim scope As System.String = If(failure.RecoveryScopeKey, System.String.Empty).Trim()
+            Const artifactPrefix As System.String = "artifact:"
+            If Not scope.StartsWith(artifactPrefix, System.StringComparison.Ordinal) Then Return False
+
+            Dim identity As System.String = scope.Substring(artifactPrefix.Length)
+            Dim separatorIndex As System.Int32 = identity.IndexOf("|"c)
+            If separatorIndex <= 0 OrElse separatorIndex >= identity.Length - 1 Then Return False
+            If identity.IndexOf("|"c, separatorIndex + 1) >= 0 Then Return False
+
+            Dim logicalId As System.String = identity.Substring(0, separatorIndex).Trim()
+            Dim slotId As System.String = identity.Substring(separatorIndex + 1).Trim()
+            If logicalId = System.String.Empty OrElse slotId = System.String.Empty Then Return False
+            If Not runState.IsExpectedDeliverableSlot(logicalId, slotId) Then Return False
+
+            Return runState.IsExpectedDeliverableSlotSatisfied(logicalId, slotId)
+        End Function
+
         Public Shared Sub ClearNonBlockingUnresolvedToolFailure(runState As ToolingRunState,
                                                          recoveryLabel As String)
             If runState Is Nothing OrElse Not runState.HasUnresolvedToolFailure Then
@@ -4249,6 +4809,37 @@ Namespace Agents
             While runState.ClearLatestFailureByCode(ToolNotExposedInCurrentTurnCode, recoveryLabel)
                 clearedRegistryFailure = True
             End While
+
+            If runState.UnresolvedToolFailures IsNot Nothing AndAlso runState.UnresolvedToolFailures.Count > 0 Then
+                For i As System.Int32 = runState.UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim failure As ToolFailureRecord = runState.UnresolvedToolFailures(i)
+                    If Not IsArtifactScopedFailureSupersededByValidatedDeliverable(runState, failure) Then Continue For
+                    runState.UnresolvedToolFailures.RemoveAt(i)
+                    clearedRegistryFailure = True
+                Next
+
+                If clearedRegistryFailure Then
+                    If runState.UnresolvedToolFailures.Count > 0 Then
+                        runState.ProjectLatestUnresolvedFailure()
+                    Else
+                        runState.HasUnresolvedToolFailure = False
+                        runState.LastToolName = System.String.Empty
+                        runState.LastErrorCode = System.String.Empty
+                        runState.LastErrorMessage = System.String.Empty
+                        runState.LastFailureSkippedByPolicy = False
+                        runState.LastFailureReturnedToParent = False
+                        runState.LastFailureTerminal = False
+                        runState.LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                        runState.LastFailureToolClassification = ToolCallClassification.Unknown
+                        runState.LastFailureToolErrorHandling = System.String.Empty
+                        runState.LastFailureRecoveredByToolCall = True
+                        runState.LastFailureHandledByBlockedFinal = False
+                        runState.LastFailureUltimatelyFatal = False
+                        runState.RecoveryToolName = If(recoveryLabel, System.String.Empty)
+                    End If
+                End If
+            End If
+
             If clearedRegistryFailure Then
                 Return
             End If

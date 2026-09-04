@@ -104,6 +104,11 @@ Partial Public Class ThisAddIn
         Public Property ConsecutiveToolFailureAbortThreshold As Integer
 
         Public Property PrematureTextRetryCount As Integer = 0
+
+        ''' <summary>Number of full finalization re-planning passes already consumed in this run.</summary>
+        Public Property FinalizationRecoveryRestartCount As Integer = 0
+        ''' <summary>Number of full tool-path recovery re-planning passes already consumed in this run.</summary>
+        Public Property TerminalToolRecoveryRestartCount As Integer = 0
         Public Property PendingContinuationGuardPrompt As String = ""
         Public Property PendingRejectedAssistantTurn As String = ""
         Public Property LastInvalidAssistantTurnSignature As String = ""
@@ -114,7 +119,9 @@ Partial Public Class ThisAddIn
         Public Property PendingGuardTitle As String = ""
         Public Property PendingRejectedTurnExplanation As String = ""
 
-        Public Const MaxContinuationRetries As Integer = 5
+        Public Const MaxContinuationRetries As Integer = SharedLibrary.Agents.ToolingConstants.MaxContinuationRetries
+        Public Const MaxFinalizationRecoveryRestarts As Integer = SharedLibrary.Agents.ToolingConstants.MaxFinalizationRecoveryRestarts
+        Public Const MaxTerminalToolRecoveryRestarts As Integer = SharedLibrary.Agents.ToolingConstants.MaxTerminalToolRecoveryRestarts
         Public Const MaxEmptyResponseRetries As Integer = 1
 
         ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>
