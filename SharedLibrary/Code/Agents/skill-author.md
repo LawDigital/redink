@@ -1,4 +1,4 @@
----
+﻿---
 name: skill-author
 description: Runs in Word or Outlook Local Chat to draft, review, revise, convert, diagnose, and explain how to author Red Ink skills, agents, and recipe-backed resource packages (including reference/design resources) for Word, Outlook Local Chat, and Outlook AutoPilot using host-verified tools and disciplined resource handling.
 allowed-tools:
@@ -45,6 +45,10 @@ When this skill authors or revises a resource for this foundation, preserve thes
 - **Interaction ownership:** `ask_user` belongs to an interactive parent skill/orchestrator, never to a sub-agent. Author parent skills to call it only when advertised; AutoPilot and other non-interactive runs must surface the minimum clarification requirement without calling it.
 - **Sub-agent call contract:** every authored parent workflow that invokes an `agent_<name>` must supply stable `subagent_task_id` and `expected_artifacts` on every invocation. Use `expected_artifacts: []` for non-file-producing workers.
 - **Context safety:** keep the parent context compact. Large-document reduction, bounded research, comparison, requirement checking, row extraction, and other source-heavy work should be delegated to the appropriate isolated agent when available rather than dumping raw source material into the parent.
+- **File-backed full-text analysis:** when a workflow needs one LLM to reason over an entire source and the source fits the configured full-text limit, prefer a file-backed path such as `text_export_to_text` -> `text_analyze_file`. This keeps the raw source out of the parent tool-response context while still giving the inner LLM the whole document. Use semantic retrieval only when the source is too large or the task is genuinely retrieval-oriented.
+- **Large-result discipline:** never add `context_expand` merely to re-read a complete structured tool result that the current turn already received. Use it only when a stored-by-reference result is actually truncated/omitted and the workflow truly needs a missing window. Prefer tools that return compact structured results.
+- **Runtime-schema verification:** never invent frontmatter keys or sequencing contracts from memory. Before authoring a non-basic key, verify that the current parser and runtime consume it in code or documented schema. Unsupported metadata is a defect even if it looks plausible.
+- **Code-backed tool verification:** when a task depends on a newly added or changed host tool, do not infer registration from one implementation file. Verify the full path from tool implementation -> shared dispatcher/registry -> host registration -> Word/Outlook Local Chat -> Outlook AutoPilot, plus the authoritative `.inky/Red_Ink_Tool_List.md` and its source-tree mirror when present. If the user supplies the code tree, inspect it before drafting the skill.
 - **Bounded research:** research one concrete unresolved question at a time, prefer authoritative/primary sources, reassess after each round, and stop when additional retrieval is unlikely to change the answer materially.
 - **Bounded mutation recovery:** exact-anchor document edits get one initial attempt plus at most two recovery attempts per logical operation. Once unresolved, do not reopen the same logical edit in the parent. Host-side circuit breakers may enforce stricter limits.
 - **Real file finalization:** when the requested outcome requires a file, the workflow must invoke an actual create/save/export/finalizing tool and use the path/reference returned by that successful tool. A path mentioned in prose, planned JSON, a read/extract result, or an in-place mutation is not proof of a final deliverable.
@@ -122,7 +126,7 @@ For **agents**, distinguish required and optional capabilities explicitly:
 - `allowed-tools`: every listed tool is a hard dependency; the host may block the isolated run if any required exact tool is absent.
 - `optional-tools`: the host includes only names that exist in the authoritative registry snapshot; missing optional tools are ignored.
 - Put host-specific source access (`m365_*`, attachment-only tools, `agent_workspace_*`) and configuration-dependent helpers such as `js_run` under `optional-tools` unless the agent genuinely cannot perform its defined job without them.
-- Specialized/native tools are an efficiency/default preference, not an exclusivity rule. When `python_execute` or `js_run` is advertised, an authored workflow may use it as a safe alternative or recovery path if a specialized tool is unsuitable, hits protection/format/writability limits, or fails. Do not create a one-way rule that forbids an exposed deterministic sandbox merely because a specialized tool exists. Keep installation-dependent helpers optional unless the workflow genuinely cannot perform its core function without them.
+- Prefer specialized/native deterministic tools for document and artifact workflows. Do not add `python_execute` or `js_run` as a spontaneous recovery path merely because they are advertised. Use them only when the workflow explicitly requires deterministic computation/transformation that the selected native tool cannot provide, and keep installation-dependent helpers optional unless the core workflow genuinely depends on them.
 
 
 If a skill uses a tool that exists on only some hosts, it MUST check availability and block cleanly
@@ -276,6 +280,7 @@ When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a 
 - `enabled` (optional, default true): set `false` ONLY when the user explicitly asks for the resource to be created or kept inactive. A disabled resource remains on disk and editable but is not offered to the model.
 - `deliverable-count` (skills only, optional, default 0): exact number of user-facing final file artifacts the skill requires. Use this when file cardinality is part of the task contract. A positive value makes `expected_artifacts` mandatory at skill invocation and turns that exact slot set into a hard completion/delivery contract; it is not a filename or extension heuristic.
 - `required-successful-tools` (skills only, optional): comma-separated or YAML-list exact tool names whose successful execution is a hard prerequisite for `complete`. Use this only for workflow steps whose execution itself is an invariant (for example an independent evidence-verification pass), not as a general preference or routing hint. If a required tool cannot succeed, the workflow must remain blocked rather than silently bypassing the declared check.
+  For workflows with a mandatory post-mutation QA read, include that QA tool here so `complete` cannot be accepted after the writer alone. This field proves at least one successful execution of each named tool; it does not distinguish multiple calls to the same tool or establish ordering. Do not emulate missing ordering semantics with invented frontmatter keys.
 
 Never add `enabled: false` on your own initiative. A disabled resource stays on disk and editable in
 "Manage Skills & Agents" but is not offered to the model until re-enabled.
@@ -539,11 +544,12 @@ call `tool_loader` again later in the same run.
     not the sole implementation of the core workflow.
 12. Task-status footer contract and safe-failure behavior included; completion reflects the user task.
 13. File-producing workflows create/finalize a real output; Word-return flows finalize after the last mutation; no model-visible host registry/delivery state is invented.
-14. Context-heavy work is delegated/compacted appropriately; research and edit retries are bounded.
-15. New review metadata defaults to author/reviewer `Inky` unless the user overrides it.
-16. Applicable resource-specific authoring recipe resolved and followed; resource-specific logic remains in references rather than being hard-coded into this generic skill.
-17. For how-to questions, provide copy/paste-ready natural-language prompts and required inputs without changing files unless requested.
-18. For consequential architecture changes, consider an isolated `agent_advisor` second pass when available; never use it as a substitute for host/tool verification.
+14. Context-heavy work uses the smallest reliable representation: file-backed full-text analysis when whole-document reasoning fits, semantic retrieval when it does not, and `context_expand` only for genuinely omitted result windows.
+15. Every non-basic frontmatter/sequencing key was verified against the current parser/runtime; no plausible-but-unsupported metadata was authored. Mandatory post-write QA tools are declared in `required-successful-tools` when completion must depend on them.
+16. New review metadata defaults to author/reviewer `Inky` unless the user overrides it.
+17. Applicable resource-specific authoring recipe resolved and followed; resource-specific logic remains in references rather than being hard-coded into this generic skill.
+18. For how-to questions, provide copy/paste-ready natural-language prompts and required inputs without changing files unless requested.
+19. For consequential architecture changes, consider an isolated `agent_advisor` second pass when available; never use it as a substitute for host/tool verification.
 
 ## 15. Output format
 

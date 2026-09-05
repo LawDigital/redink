@@ -2829,6 +2829,534 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
+    ''' Emits deterministic diagnostics for the Word-side Markdown conversion/paragraph-format
+    ''' restore boundary. Diagnostic-only: never mutates the document.
+    ''' </summary>
+    Private Shared Sub DebugDumpMarkdownConversionParagraph(
+        ByVal stage As System.String,
+        ByVal paragraph As Microsoft.Office.Interop.Word.Paragraph,
+        Optional ByVal note As System.String = Nothing
+    )
+        If paragraph Is Nothing Then
+            System.Diagnostics.Debug.WriteLine("[MDLIST] " & stage & " paragraph=(null)")
+            Return
+        End If
+
+        Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range
+        Dim paragraphText As System.String = System.String.Empty
+        Try
+            paragraphText = If(paragraphRange.Text, System.String.Empty)
+            paragraphText = paragraphText.Replace(vbCr, "\r").Replace(vbLf, "\n")
+            If paragraphText.Length > 220 Then paragraphText = paragraphText.Substring(0, 220) & "..."
+        Catch exText As System.Exception
+            paragraphText = "<text-error:" & exText.Message & ">"
+        End Try
+
+        Dim listTypeText As System.String = "<unavailable>"
+        Dim listLevelText As System.String = "<unavailable>"
+        Dim listStringText As System.String = "<unavailable>"
+        Dim styleText As System.String = "<unavailable>"
+        Dim leftIndentText As System.String = "<unavailable>"
+        Dim firstLineIndentText As System.String = "<unavailable>"
+        Dim rightIndentText As System.String = "<unavailable>"
+
+        Try
+            Dim listType As Microsoft.Office.Interop.Word.WdListType = paragraphRange.ListFormat.ListType
+            listTypeText = CInt(listType).ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" & listType.ToString()
+        Catch exListType As System.Exception
+            listTypeText = "<error:" & exListType.Message & ">"
+        End Try
+
+        Try
+            listLevelText = paragraphRange.ListFormat.ListLevelNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        Catch exLevel As System.Exception
+            listLevelText = "<error:" & exLevel.Message & ">"
+        End Try
+
+        Try
+            listStringText = System.Convert.ToString(paragraphRange.ListFormat.ListString, System.Globalization.CultureInfo.InvariantCulture).Replace(vbCr, "\r").Replace(vbLf, "\n")
+        Catch exListString As System.Exception
+            listStringText = "<error:" & exListString.Message & ">"
+        End Try
+
+        Try
+            styleText = CType(paragraphRange.Style, Microsoft.Office.Interop.Word.Style).NameLocal
+        Catch exStyle As System.Exception
+            styleText = "<error:" & exStyle.Message & ">"
+        End Try
+
+        Try
+            leftIndentText = paragraphRange.ParagraphFormat.LeftIndent.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            firstLineIndentText = paragraphRange.ParagraphFormat.FirstLineIndent.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            rightIndentText = paragraphRange.ParagraphFormat.RightIndent.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        Catch exIndent As System.Exception
+            leftIndentText = "<error:" & exIndent.Message & ">"
+        End Try
+
+        System.Diagnostics.Debug.WriteLine(
+            "[MDLIST] " & stage &
+            If(System.String.IsNullOrEmpty(note), System.String.Empty, " note=" & note) &
+            " range=" & paragraphRange.Start.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+            "-" & paragraphRange.End.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+            " listType=" & listTypeText &
+            " level=" & listLevelText &
+            " listString='" & listStringText & "'" &
+            " style='" & styleText & "'" &
+            " left=" & leftIndentText &
+            " first=" & firstLineIndentText &
+            " right=" & rightIndentText &
+            " text='" & paragraphText & "'")
+    End Sub
+
+    Private Shared Sub DebugDumpMarkdownConversionSelection(
+        ByVal stage As System.String,
+        ByVal selection As Microsoft.Office.Interop.Word.Selection
+    )
+        If selection Is Nothing Then
+            System.Diagnostics.Debug.WriteLine("[MDLIST] " & stage & " selection=(null)")
+            Return
+        End If
+
+        Dim paragraphIndex As System.Int32 = 0
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In selection.Range.Paragraphs
+            paragraphIndex += 1
+            DebugDumpMarkdownConversionParagraph(
+                stage,
+                paragraph,
+                "paragraphIndex=" & paragraphIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Word can expose indentation copied into a document as U+00A0 rather than U+0020.
+    ''' Markdig does not treat U+00A0 as Markdown indentation, so a visually indented child
+    ''' list can otherwise become plain text. Keep this normalization deliberately local to
+    ''' ConvertMarkdownToWord and deliberately narrow: only leading whitespace containing at
+    ''' least one U+00A0 is normalized, and only when the first non-whitespace token is a
+    ''' syntactically valid unordered or ordered Markdown list marker. Inline/typographic NBSPs
+    ''' and indentation on every other kind of line remain byte-for-byte unchanged.
+    ''' </summary>
+    Private Shared Function NormalizeWordSelectionListIndentationForMarkdown(ByVal markdown As System.String) As System.String
+        If System.String.IsNullOrEmpty(markdown) Then Return If(markdown, System.String.Empty)
+
+        ' Word.Selection.Text uses paragraph marks (Chr(13)) rather than LF-only line breaks.
+        ' Do not rely on RegexOptions.Multiline/^ here: .NET's multiline anchor is LF-oriented.
+        ' Consume and preserve the exact line separator so the normalization works for CR, CRLF,
+        ' LF, and the beginning of the selection without changing any other whitespace.
+        Dim pattern As System.String =
+            "(?<prefix>\A|\r\n|\r|\n)(?<indent>[ \t\u00A0]*\u00A0[ \t\u00A0]*)(?<marker>(?:[-+*]|\d{1,9}[.)]))(?=[ \t])"
+
+        Dim replacements As System.Int32 = 0
+        Dim normalized As System.String = System.Text.RegularExpressions.Regex.Replace(
+            markdown,
+            pattern,
+            Function(match As System.Text.RegularExpressions.Match) As System.String
+                Dim indent As System.String = match.Groups("indent").Value
+                If indent.IndexOf(ChrW(&HA0)) < 0 Then Return match.Value
+
+                replacements += 1
+                Return match.Groups("prefix").Value &
+                       indent.Replace(ChrW(&HA0), " "c) &
+                       match.Groups("marker").Value
+            End Function,
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        If replacements > 0 Then
+            System.Diagnostics.Debug.WriteLine(
+                "[MDLIST] NORMALIZE_WORD_LIST_INDENTATION replacements=" &
+                replacements.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End If
+
+        Return normalized
+    End Function
+
+    ''' <summary>
+    ''' Normalizes the narrow Pandoc-flavoured constructs that commonly survive copy/paste into
+    ''' the Word "Convert Markdown" helper but are not understood by Markdig's GFM-oriented
+    ''' advanced extensions. This routine is deliberately local to ConvertMarkdownToWord so it
+    ''' cannot change Markdown semantics in chat, Outlook, or other shared rendering surfaces.
+    '''
+    ''' Supported here:
+    '''  - Pandoc raw-HTML fenced blocks: ```{=html} ... ```
+    '''  - Pandoc raw inline HTML: `<br>`{=html} (plus the small HTML tag allow-list below)
+    '''  - Pandoc "simple tables" with a dashed separator row and two or more columns.
+    '''
+    ''' Everything else is returned unchanged.
+    ''' </summary>
+    Private Shared Function NormalizePandocMarkdownForWordConversion(ByVal markdown As System.String) As System.String
+        If System.String.IsNullOrEmpty(markdown) Then Return If(markdown, System.String.Empty)
+
+        Dim result As System.String = NormalizePandocRawHtmlForWordConversion(markdown)
+        result = NormalizePandocSimpleTablesForWordConversion(result)
+        Return result
+    End Function
+
+    Private Shared Function NormalizePandocRawHtmlForWordConversion(ByVal markdown As System.String) As System.String
+        If System.String.IsNullOrEmpty(markdown) Then Return If(markdown, System.String.Empty)
+
+        Dim blockReplacements As System.Int32 = 0
+        Dim inlineReplacements As System.Int32 = 0
+
+        ' Word.Selection.Text normally separates paragraphs with CR-only characters. Do not use
+        ' RegexOptions.Multiline/^ here: .NET multiline anchors are LF-oriented and therefore did
+        ' not recognize Pandoc fences after Word paragraph marks. Parse lines explicitly instead.
+        ' Only an exact Pandoc raw-HTML info string is unwrapped; ordinary fenced code remains code.
+        Dim sourceLines As System.String() = System.Text.RegularExpressions.Regex.Split(markdown, "\r\n|\r|\n")
+        Dim blockOutput As New System.Collections.Generic.List(Of System.String)(sourceLines.Length)
+        Dim sourceIndex As System.Int32 = 0
+
+        While sourceIndex < sourceLines.Length
+            Dim openingFence As System.String = sourceLines(sourceIndex).Trim()
+            If openingFence = "```{=html}" OrElse openingFence = "~~~{=html}" Then
+                Dim fenceCharacter As System.Char = openingFence.Chars(0)
+                Dim closingFence As System.String = New System.String(fenceCharacter, 3)
+                Dim closingIndex As System.Int32 = sourceIndex + 1
+
+                While closingIndex < sourceLines.Length AndAlso
+                      sourceLines(closingIndex).Trim() <> closingFence
+                    closingIndex += 1
+                End While
+
+                If closingIndex < sourceLines.Length Then
+                    For htmlLineIndex As System.Int32 = sourceIndex + 1 To closingIndex - 1
+                        blockOutput.Add(sourceLines(htmlLineIndex))
+                    Next
+                    blockReplacements += 1
+                    sourceIndex = closingIndex + 1
+                    Continue While
+                End If
+            End If
+
+            blockOutput.Add(sourceLines(sourceIndex))
+            sourceIndex += 1
+        End While
+
+        Dim result As System.String = System.String.Join(vbLf, blockOutput)
+
+        ' Pandoc raw inline HTML syntax. Keep the allow-list intentionally aligned with HTML
+        ' elements the existing Word insertion path already understands and transports safely.
+        Dim rawInlinePattern As System.String =
+            "`(?<html></?(?:br|strong|em|code|table|thead|tbody|tr|th|td|ul|ol|li|blockquote)\b[^`<>]*?/?>)`\{=html\}"
+
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result,
+            rawInlinePattern,
+            Function(match As System.Text.RegularExpressions.Match) As System.String
+                inlineReplacements += 1
+                Return match.Groups("html").Value
+            End Function,
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        If blockReplacements > 0 OrElse inlineReplacements > 0 Then
+            System.Diagnostics.Debug.WriteLine(
+                "[MDTABLE] PANDOC_RAW_HTML blockReplacements=" &
+                blockReplacements.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " inlineReplacements=" &
+                inlineReplacements.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End If
+
+        Return result
+    End Function
+
+    Private Shared Function TryGetPandocSimpleTableSeparatorStarts(
+        ByVal line As System.String,
+        ByRef columnStarts As System.Collections.Generic.List(Of System.Int32)) As System.Boolean
+
+        columnStarts = Nothing
+        If line Is Nothing Then Return False
+
+        ' A simple-table separator must consist solely of structural whitespace and at least two
+        ' runs of three-or-more dashes. Word may represent repeated ordinary spaces as NBSP in
+        ' Selection.Text, so U+00A0 is accepted here only as table-structural whitespace. This
+        ' strict shape still prevents prose rules / horizontal rules from being mistaken for tables.
+        If Not System.Text.RegularExpressions.Regex.IsMatch(
+            line,
+            "^[ \t\u00A0]*-{3,}(?:[ \t\u00A0]+-{3,})+[ \t\u00A0]*$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+            Return False
+        End If
+
+        Dim dashRuns As System.Text.RegularExpressions.MatchCollection =
+            System.Text.RegularExpressions.Regex.Matches(
+                line,
+                "-{3,}",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        If dashRuns.Count < 2 Then Return False
+
+        ' Keep the intentionally ambiguous minimal shape "--- ---" as ordinary text. It is
+        ' indistinguishable from prose made of short rules and is explicitly present in the
+        ' regression corpus as a fast/invalid table. Real simple-table separators have at least
+        ' one column rule wider than the Markdown minimum.
+        Dim hasWideColumnRule As System.Boolean = False
+        For Each dashRun As System.Text.RegularExpressions.Match In dashRuns
+            If dashRun.Length >= 4 Then
+                hasWideColumnRule = True
+                Exit For
+            End If
+        Next
+        If Not hasWideColumnRule Then Return False
+
+        columnStarts = New System.Collections.Generic.List(Of System.Int32)(dashRuns.Count)
+        For Each dashRun As System.Text.RegularExpressions.Match In dashRuns
+            columnStarts.Add(dashRun.Index)
+        Next
+
+        Return True
+    End Function
+
+    Private Shared Function IsPandocSimpleTableOuterRule(ByVal line As System.String) As System.Boolean
+        If line Is Nothing Then Return False
+        Return System.Text.RegularExpressions.Regex.IsMatch(
+            line,
+            "^[ \t\u00A0]*-{3,}[ \t\u00A0]*$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+    End Function
+
+    Private Shared Function ParsePandocSimpleTableRow(
+        ByVal line As System.String,
+        ByVal columnStarts As System.Collections.Generic.List(Of System.Int32)) As System.Collections.Generic.List(Of System.String)
+
+        Dim cells As New System.Collections.Generic.List(Of System.String)()
+        If columnStarts Is Nothing OrElse columnStarts.Count = 0 Then Return cells
+
+        Dim safeLine As System.String = If(line, System.String.Empty)
+
+        ' Prefer Pandoc's semantic column separator: two-or-more structural whitespace
+        ' characters. Word can expose repeated source spaces as U+00A0 in Selection.Text, so
+        ' treat NBSP like a separator only inside an already-recognized strict table candidate.
+        ' This avoids changing NBSP semantics in ordinary prose. Use this path only when it yields
+        ' the exact expected number of cells.
+        Dim trimmedLine As System.String = safeLine.Trim()
+        If trimmedLine.Length > 0 Then
+            Dim splitCells As System.String() = System.Text.RegularExpressions.Regex.Split(
+                trimmedLine,
+                "[ \t\u00A0]{2,}",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+            If splitCells.Length = columnStarts.Count Then
+                For Each splitCell As System.String In splitCells
+                    cells.Add(splitCell.Trim())
+                Next
+                Return cells
+            End If
+        End If
+
+        ' Fallback to the separator-rule column starts. This preserves intentionally empty
+        ' leading/middle cells and compact tables whose first columns contain only one space
+        ' between values (for example "ID Name     Status").
+        For columnIndex As System.Int32 = 0 To columnStarts.Count - 1
+            Dim startPosition As System.Int32 = columnStarts(columnIndex)
+            Dim endPosition As System.Int32 = If(
+                columnIndex + 1 < columnStarts.Count,
+                columnStarts(columnIndex + 1),
+                safeLine.Length)
+
+            If startPosition >= safeLine.Length Then
+                cells.Add(System.String.Empty)
+                Continue For
+            End If
+
+            endPosition = System.Math.Min(System.Math.Max(endPosition, startPosition), safeLine.Length)
+            cells.Add(safeLine.Substring(startPosition, endPosition - startPosition).Trim())
+        Next
+
+        Return cells
+    End Function
+
+    Private Shared Function EscapeMarkdownPipeTableCell(ByVal value As System.String) As System.String
+        If System.String.IsNullOrEmpty(value) Then Return If(value, System.String.Empty)
+
+        Dim output As New System.Text.StringBuilder(value.Length + 8)
+        For index As System.Int32 = 0 To value.Length - 1
+            Dim currentCharacter As System.Char = value(index)
+            If currentCharacter = "|"c Then
+                Dim precedingBackslashes As System.Int32 = 0
+                Dim lookBehind As System.Int32 = index - 1
+                While lookBehind >= 0 AndAlso value(lookBehind) = "\"c
+                    precedingBackslashes += 1
+                    lookBehind -= 1
+                End While
+
+                If precedingBackslashes Mod 2 = 0 Then output.Append("\"c)
+            End If
+
+            output.Append(currentCharacter)
+        Next
+
+        Return output.ToString()
+    End Function
+
+    Private Shared Function BuildMarkdownPipeTableRow(ByVal cells As System.Collections.Generic.List(Of System.String)) As System.String
+        Dim output As New System.Text.StringBuilder()
+        output.Append("| ")
+
+        For cellIndex As System.Int32 = 0 To cells.Count - 1
+            If cellIndex > 0 Then output.Append(" | ")
+            output.Append(EscapeMarkdownPipeTableCell(cells(cellIndex)))
+        Next
+
+        output.Append(" |")
+        Return output.ToString()
+    End Function
+
+    Private Shared Function NormalizePandocSimpleTablesForWordConversion(ByVal markdown As System.String) As System.String
+        If System.String.IsNullOrEmpty(markdown) Then Return If(markdown, System.String.Empty)
+
+        ' Work line-wise using all line-ending forms Word/clipboard text can contain. We only
+        ' rebuild the string if at least one strict simple-table block is recognized.
+        Dim lines As System.String() = System.Text.RegularExpressions.Regex.Split(markdown, "\r\n|\r|\n")
+        Dim outputLines As New System.Collections.Generic.List(Of System.String)(lines.Length)
+        Dim convertedTables As System.Int32 = 0
+        Dim lineIndex As System.Int32 = 0
+        Dim activeFenceCharacter As System.Char = ChrW(0)
+        Dim activeFenceLength As System.Int32 = 0
+
+        While lineIndex < lines.Length
+            ' Never reinterpret ordinary fenced code as a table. Pandoc {=html} fences were
+            ' intentionally removed by NormalizePandocRawHtmlForWordConversion before this
+            ' routine runs; all remaining backtick/tilde fences are opaque Markdown code.
+            Dim trimmedCurrentLine As System.String = lines(lineIndex).TrimStart()
+            Dim fenceMatch As System.Text.RegularExpressions.Match =
+                System.Text.RegularExpressions.Regex.Match(
+                    trimmedCurrentLine,
+                    "^(?<fence>`{3,}|~{3,})",
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+            If activeFenceLength > 0 Then
+                outputLines.Add(lines(lineIndex))
+                If fenceMatch.Success AndAlso
+                   fenceMatch.Groups("fence").Value.Chars(0) = activeFenceCharacter AndAlso
+                   fenceMatch.Groups("fence").Value.Length >= activeFenceLength Then
+                    activeFenceCharacter = ChrW(0)
+                    activeFenceLength = 0
+                End If
+                lineIndex += 1
+                Continue While
+            ElseIf fenceMatch.Success Then
+                activeFenceCharacter = fenceMatch.Groups("fence").Value.Chars(0)
+                activeFenceLength = fenceMatch.Groups("fence").Value.Length
+                outputLines.Add(lines(lineIndex))
+                lineIndex += 1
+                Continue While
+            End If
+
+            Dim hasOuterRule As System.Boolean = False
+            Dim headerIndex As System.Int32 = lineIndex
+            Dim separatorIndex As System.Int32 = lineIndex + 1
+            Dim columnStarts As System.Collections.Generic.List(Of System.Int32) = Nothing
+
+            If lineIndex + 2 < lines.Length AndAlso
+               IsPandocSimpleTableOuterRule(lines(lineIndex)) AndAlso
+               TryGetPandocSimpleTableSeparatorStarts(lines(lineIndex + 2), columnStarts) Then
+                hasOuterRule = True
+                headerIndex = lineIndex + 1
+                separatorIndex = lineIndex + 2
+            ElseIf separatorIndex < lines.Length AndAlso
+                   TryGetPandocSimpleTableSeparatorStarts(lines(separatorIndex), columnStarts) Then
+                hasOuterRule = False
+            Else
+                outputLines.Add(lines(lineIndex))
+                lineIndex += 1
+                Continue While
+            End If
+
+            If System.String.IsNullOrWhiteSpace(lines(headerIndex)) Then
+                outputLines.Add(lines(lineIndex))
+                lineIndex += 1
+                Continue While
+            End If
+
+            Dim headerCells As System.Collections.Generic.List(Of System.String) =
+                ParsePandocSimpleTableRow(lines(headerIndex), columnStarts)
+
+            Dim meaningfulHeaderCells As System.Int32 = 0
+            For Each headerCell As System.String In headerCells
+                If Not System.String.IsNullOrWhiteSpace(headerCell) Then meaningfulHeaderCells += 1
+            Next
+
+            If headerCells.Count < 2 OrElse meaningfulHeaderCells = 0 Then
+                outputLines.Add(lines(lineIndex))
+                lineIndex += 1
+                Continue While
+            End If
+
+            Dim bodyRows As New System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))()
+            Dim scanIndex As System.Int32 = separatorIndex + 1
+            Dim consumedClosingRule As System.Boolean = False
+
+            While scanIndex < lines.Length
+                Dim candidateLine As System.String = lines(scanIndex)
+
+                If hasOuterRule AndAlso IsPandocSimpleTableOuterRule(candidateLine) Then
+                    consumedClosingRule = True
+                    scanIndex += 1
+                    Exit While
+                End If
+
+                If System.String.IsNullOrWhiteSpace(candidateLine) Then
+                    ' Pandoc's ruled simple-table form may contain visually blank separator
+                    ' lines between rows; keep scanning until the closing rule. The unruled form
+                    ' uses a blank line as the table terminator.
+                    If hasOuterRule Then
+                        scanIndex += 1
+                        Continue While
+                    End If
+                    Exit While
+                End If
+
+                If candidateLine.TrimStart().StartsWith("#", System.StringComparison.Ordinal) Then Exit While
+
+                Dim rowCells As System.Collections.Generic.List(Of System.String) =
+                    ParsePandocSimpleTableRow(candidateLine, columnStarts)
+
+                If rowCells.Count <> headerCells.Count Then Exit While
+                bodyRows.Add(rowCells)
+                scanIndex += 1
+            End While
+
+            If bodyRows.Count = 0 Then
+                outputLines.Add(lines(lineIndex))
+                lineIndex += 1
+                Continue While
+            End If
+
+            outputLines.Add(BuildMarkdownPipeTableRow(headerCells))
+
+            Dim separatorCells As New System.Collections.Generic.List(Of System.String)(headerCells.Count)
+            For separatorCellIndex As System.Int32 = 0 To headerCells.Count - 1
+                separatorCells.Add("---")
+            Next
+            outputLines.Add(BuildMarkdownPipeTableRow(separatorCells))
+
+            For Each bodyRow As System.Collections.Generic.List(Of System.String) In bodyRows
+                outputLines.Add(BuildMarkdownPipeTableRow(bodyRow))
+            Next
+
+            convertedTables += 1
+            lineIndex = scanIndex
+
+            If hasOuterRule AndAlso Not consumedClosingRule Then
+                System.Diagnostics.Debug.WriteLine(
+                    "[MDTABLE] SIMPLE_TABLE missing closing rule near sourceLine=" &
+                    (headerIndex + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End If
+        End While
+
+        If convertedTables = 0 Then Return markdown
+
+        System.Diagnostics.Debug.WriteLine(
+            "[MDTABLE] SIMPLE_TABLE converted=" &
+            convertedTables.ToString(System.Globalization.CultureInfo.InvariantCulture))
+
+        ' Markdig accepts LF regardless of Word's original paragraph-mark representation. Only
+        ' recognized table blocks reach this rebuild path; untouched Markdown semantics are
+        ' otherwise unchanged.
+        Return System.String.Join(vbLf, outputLines)
+    End Function
+
+    ''' <summary>
     ''' Converts Markdown text to Word formatting in the current selection, preserving original paragraph styles where possible.
     ''' </summary>
     Public Shared Sub ConvertMarkdownToWord()
@@ -2869,7 +3397,20 @@ Partial Public Class ThisAddIn
         ' Perform the conversion
         Dim selectedText As String = sel.Text
         Dim trailingCR As Boolean = (selectedText.EndsWith(vbCrLf) OrElse selectedText.EndsWith(vbLf) OrElse selectedText.EndsWith(vbCr))
+
+        ' Word may expose leading indentation as U+00A0 even when the source text used normal
+        ' spaces. Normalize only list-leading indentation before Markdig sees the selection.
+        selectedText = NormalizeWordSelectionListIndentationForMarkdown(selectedText)
+
+        ' Accept the narrow Pandoc-flavoured table/raw-HTML forms commonly produced by
+        ' document converters. Keep this local to the Word command to avoid changing other
+        ' Markdown surfaces that deliberately follow the existing shared Markdig contract.
+        selectedText = NormalizePandocMarkdownForWordConversion(selectedText)
+
         InsertTextWithMarkdown(sel, selectedText, trailingCR, True)
+
+        System.Diagnostics.Debug.WriteLine("[MDLIST] CONVERT_AFTER_INSERT before paragraph-format restore")
+        DebugDumpMarkdownConversionSelection("CONVERT_AFTER_INSERT", sel)
 
         ' Re-apply the captured base style + format ONLY to paragraphs that the conversion left
         ' at the document default style AND without list formatting. Paragraphs that received a
@@ -2886,23 +3427,162 @@ Partial Public Class ThisAddIn
                     hasListFormat = False
                 End Try
 
-                Dim isDefaultStyle As Boolean = False
+                Dim isDefaultStyle As System.Boolean = False
                 Try
-                    Dim curStyleName As String = CType(p.Range.Style, Word.Style).NameLocal
-                    isDefaultStyle = (defaultStyleName IsNot Nothing AndAlso
-                                      String.Equals(curStyleName, defaultStyleName, StringComparison.Ordinal))
+                    Dim curStyleName As System.String =
+                        CType(p.Range.Style, Microsoft.Office.Interop.Word.Style).NameLocal
+                    isDefaultStyle =
+                        defaultStyleName IsNot Nothing AndAlso
+                        System.String.Equals(
+                            curStyleName,
+                            defaultStyleName,
+                            System.StringComparison.Ordinal)
                 Catch
                     isDefaultStyle = False
                 End Try
 
-                ' Skip conversion-produced structure (headings/lists); restore base only to plain paragraphs.
-                If hasListFormat OrElse Not isDefaultStyle Then Continue For
+                ' Word can import a nested HTML <ol>/<ul> item as an ordinary paragraph that
+                ' still carries the correct hanging indent but has ListType=wdListNoNumbering.
+                ' Do not overwrite that structural indentation with the captured base paragraph
+                ' format. The shared HTML renderer normally upgrades such a paragraph to a native
+                ' Word list before we get here; this guard is the controlled fallback if Word
+                ' refused that semantic repair.
+                Dim hasImportedHangingIndent As System.Boolean = False
+                Try
+                    Dim currentLeftIndent As System.Single = p.Range.ParagraphFormat.LeftIndent
+                    Dim currentFirstLineIndent As System.Single = p.Range.ParagraphFormat.FirstLineIndent
+                    hasImportedHangingIndent =
+                        currentLeftIndent > 0.5F AndAlso
+                        currentFirstLineIndent < -0.5F
+                Catch
+                    hasImportedHangingIndent = False
+                End Try
+
+                ' Skip conversion-produced structure (headings/native lists) and preserve a
+                ' structurally indented list fallback; restore base only to genuine plain body text.
+                Dim restoreDecision As System.String
+                If hasListFormat Then
+                    restoreDecision = "SKIP_NATIVE_LIST"
+                ElseIf hasImportedHangingIndent Then
+                    restoreDecision = "SKIP_HANGING_INDENT_FALLBACK"
+                ElseIf Not isDefaultStyle Then
+                    restoreDecision = "SKIP_NON_DEFAULT_STYLE"
+                Else
+                    restoreDecision = "RESTORE_BASE_STYLE_AND_FORMAT"
+                End If
+
+                DebugDumpMarkdownConversionParagraph("CONVERT_BEFORE_RESTORE_DECISION", p, restoreDecision)
+
+                If hasListFormat OrElse hasImportedHangingIndent OrElse Not isDefaultStyle Then Continue For
 
                 If baseStyle IsNot Nothing Then p.Range.Style = baseStyle
                 If baseFormat IsNot Nothing Then p.Range.ParagraphFormat = baseFormat
+                DebugDumpMarkdownConversionParagraph("CONVERT_AFTER_BASE_RESTORE", p, restoreDecision)
             Catch
             End Try
         Next
+
+        System.Diagnostics.Debug.WriteLine("[MDLIST] CONVERT_AFTER_RESTORE completed")
+        DebugDumpMarkdownConversionSelection("CONVERT_AFTER_RESTORE", sel)
+    End Sub
+
+    Private Shared Function BuildMarkdownHeadingMarker(ByVal runId As System.String, ByVal index As System.Int32) As System.String
+        Return "RIMDHEADING" & runId & "I" & index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "END"
+    End Function
+
+    Private Shared Function GetNativeWordHeadingStyle(ByVal headingLevel As System.Int32) As Word.WdBuiltinStyle
+        Select Case headingLevel
+            Case 1
+                Return Word.WdBuiltinStyle.wdStyleHeading1
+            Case 2
+                Return Word.WdBuiltinStyle.wdStyleHeading2
+            Case 3
+                Return Word.WdBuiltinStyle.wdStyleHeading3
+            Case 4
+                Return Word.WdBuiltinStyle.wdStyleHeading4
+            Case 5
+                Return Word.WdBuiltinStyle.wdStyleHeading5
+            Case Else
+                Return Word.WdBuiltinStyle.wdStyleHeading6
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' Converts semantic HTML heading markers inserted by InsertTextWithMarkdown into native
+    ''' Word Heading 1..6 paragraph styles. Word's HTML clipboard importer otherwise keeps the
+    ''' visual heading formatting as direct formatting while reporting Style=Normal; the later
+    ''' base-format restore would then mistake the heading for ordinary body text.
+    ''' </summary>
+    Private Shared Sub ApplyNativeMarkdownHeadingStylesAndRemoveMarkers(
+        ByVal insertedRange As Microsoft.Office.Interop.Word.Range,
+        ByVal headingMarkers As System.Collections.Generic.Dictionary(Of System.String, Word.WdBuiltinStyle))
+
+        If insertedRange Is Nothing OrElse headingMarkers Is Nothing OrElse headingMarkers.Count = 0 Then Return
+
+        Dim appliedCount As System.Int32 = 0
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In insertedRange.Paragraphs
+            Dim paragraphText As System.String = System.String.Empty
+            Try
+                paragraphText = If(paragraph.Range.Text, System.String.Empty)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("[MDLIST] HEADING read failed: " & ex.Message)
+                Continue For
+            End Try
+
+            For Each markerEntry As System.Collections.Generic.KeyValuePair(Of System.String, Word.WdBuiltinStyle) In headingMarkers
+                Dim markerPosition As System.Int32 = paragraphText.IndexOf(markerEntry.Key, System.StringComparison.Ordinal)
+                If markerPosition < 0 Then Continue For
+
+                Try
+                    ' Apply the semantic Word paragraph style first. This preserves inline
+                    ' character formatting while making the paragraph a real Heading instead of
+                    ' Normal plus direct formatting.
+                    paragraph.Range.Style = markerEntry.Value
+
+                    Dim markerRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+                    markerRange.Start = paragraph.Range.Start + markerPosition
+                    markerRange.End = markerRange.Start + markerEntry.Key.Length
+                    markerRange.Text = System.String.Empty
+
+                    appliedCount += 1
+                    System.Diagnostics.Debug.WriteLine(
+                        "[MDLIST] HEADING_NATIVE_STYLE style=" & markerEntry.Value.ToString() &
+                        " range=" & paragraph.Range.Start.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "-" & paragraph.Range.End.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[MDLIST] HEADING apply failed: " & ex.Message)
+                End Try
+
+                Exit For
+            Next
+        Next
+
+        ' Never leave an internal marker visible in the document, even when Word rejected a
+        ' style assignment for one paragraph. Remove any remaining marker text deterministically.
+        For Each marker As System.String In headingMarkers.Keys
+            For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In insertedRange.Paragraphs
+                Try
+                    Dim paragraphText As System.String = If(paragraph.Range.Text, System.String.Empty)
+                    Dim markerPosition As System.Int32 = paragraphText.IndexOf(marker, System.StringComparison.Ordinal)
+                    If markerPosition < 0 Then Continue For
+
+                    Dim markerRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+                    markerRange.Start = paragraph.Range.Start + markerPosition
+                    markerRange.End = markerRange.Start + marker.Length
+                    markerRange.Text = System.String.Empty
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[MDLIST] HEADING marker cleanup failed: " & ex.Message)
+                End Try
+            Next
+        Next
+
+        If appliedCount <> headingMarkers.Count Then
+            System.Diagnostics.Debug.WriteLine(
+                "[MDLIST] HEADING_NATIVE_STYLE incomplete expected=" &
+                headingMarkers.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " applied=" & appliedCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End If
     End Sub
 
     Private Shared Function BuildMarkdownOpaqueToken(kind As String, index As Integer) As String
@@ -3044,6 +3724,38 @@ Partial Public Class ThisAddIn
         Dim fullhtml As String
         htmlDoc.LoadHtml(htmlResult)
 
+        ' Mark semantic HTML headings before the Word clipboard import. The importer keeps the
+        ' visual CSS but commonly reports the resulting paragraph as Style=Normal. The marker
+        ' lets us deterministically map each h1..h6 back to its Word paragraph after the paste
+        ' and assign the native Heading 1..6 style before ConvertMarkdownToWord restores body
+        ' paragraph formatting. This is intentionally HTML-semantic rather than font-size based.
+        Dim headingMarkers As New System.Collections.Generic.Dictionary(Of System.String, Word.WdBuiltinStyle)(System.StringComparer.Ordinal)
+        Dim headingNodes As HtmlAgilityPack.HtmlNodeCollection =
+            htmlDoc.DocumentNode.SelectNodes("//h1 | //h2 | //h3 | //h4 | //h5 | //h6")
+
+        If headingNodes IsNot Nothing Then
+            Dim headingRunId As System.String = System.Guid.NewGuid().ToString("N")
+            Dim headingIndex As System.Int32 = 0
+
+            For Each headingNode As HtmlAgilityPack.HtmlNode In headingNodes
+                headingIndex += 1
+
+                Dim headingLevel As System.Int32 = 1
+                If headingNode.Name.Length > 1 Then
+                    System.Int32.TryParse(
+                        headingNode.Name.Substring(1),
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        headingLevel)
+                End If
+                headingLevel = System.Math.Max(1, System.Math.Min(6, headingLevel))
+
+                Dim headingMarker As System.String = BuildMarkdownHeadingMarker(headingRunId, headingIndex)
+                headingMarkers.Add(headingMarker, GetNativeWordHeadingStyle(headingLevel))
+                headingNode.PrependChild(htmlDoc.CreateTextNode(headingMarker))
+            Next
+        End If
+
         fullhtml = htmlDoc.DocumentNode.OuterHtml
 
         ' ============= RESTORE OPAQUE REGIONS AT THE LAST HTML BOUNDARY =============
@@ -3073,6 +3785,19 @@ Partial Public Class ThisAddIn
         Debug.WriteLine("HTML1=" & fullhtml)
 
         SLib.InsertTextWithFormat(fullhtml, range, True, Not TrailingCR)
+
+        ' InsertTextWithFormat leaves Word's Selection collapsed at the end of the inserted
+        ' content. Heading reconciliation must therefore use the actual inserted range, not
+        ' selection.Range (which is empty at this point).
+        Dim insertedHeadingEnd As System.Int32 = selection.Range.Start
+        If insertedHeadingEnd > insertionStart AndAlso headingMarkers.Count > 0 Then
+            Dim headingStartObject As System.Object = insertionStart
+            Dim headingEndObject As System.Object = insertedHeadingEnd
+            Dim insertedHeadingRange As Microsoft.Office.Interop.Word.Range =
+                selection.Document.Range(Start:=headingStartObject, End:=headingEndObject)
+
+            ApplyNativeMarkdownHeadingStylesAndRemoveMarkers(insertedHeadingRange, headingMarkers)
+        End If
 
         range = range.Application.Selection.Range
 

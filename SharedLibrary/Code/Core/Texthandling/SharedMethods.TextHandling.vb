@@ -189,10 +189,11 @@ Namespace SharedLibrary
         Public Shared Function NormalizeMarkdownForHtmlDisplay(markdown As String) As String
             If String.IsNullOrEmpty(markdown) Then Return If(markdown, String.Empty)
 
-            ' Keep this deliberately bounded. Red Ink is not a LaTeX renderer: it only
-            ' substitutes a known allow-list of common inline commands that models emit
-            ' in otherwise ordinary prose. Markdown link/image destinations are preserved
-            ' byte-for-byte so backslashes in paths and URLs cannot be damaged.
+            ' Keep ordinary text behavior stable, but never infer subscript/superscript from
+            ' underscores or carets outside an explicitly delimited math region. File names,
+            ' identifiers and paths such as report_9.docx or %appdata%\Microsoft\Word must
+            ' therefore remain unchanged. Explicit math is scanned deterministically below;
+            ' no regular expression is used to guess mathematical content.
             Return NormalizeKnownLatexCodesPreservingMarkdownLinks(markdown)
         End Function
 
@@ -204,29 +205,29 @@ Namespace SharedLibrary
             While index < value.Length
                 Dim linkStart As Integer = FindNextMarkdownLinkStart(value, index)
                 If linkStart < 0 Then
-                    output.Append(NormalizeKnownLatexCodes(value.Substring(index)))
+                    output.Append(NormalizeKnownLatexCodes(NormalizeExplicitMarkdownMath(value.Substring(index))))
                     Exit While
                 End If
 
-                If linkStart > index Then output.Append(NormalizeKnownLatexCodes(value.Substring(index, linkStart - index)))
+                If linkStart > index Then output.Append(NormalizeKnownLatexCodes(NormalizeExplicitMarkdownMath(value.Substring(index, linkStart - index))))
 
                 Dim labelOpen As Integer = If(value(linkStart) = "!"c, linkStart + 1, linkStart)
                 Dim labelClose As Integer = FindUnescapedMarkdownDelimiter(value, labelOpen + 1, "]"c)
                 If labelClose < 0 OrElse labelClose + 1 >= value.Length OrElse value(labelClose + 1) <> "("c Then
-                    output.Append(NormalizeKnownLatexCodes(value.Substring(linkStart, 1)))
+                    output.Append(NormalizeKnownLatexCodes(NormalizeExplicitMarkdownMath(value.Substring(linkStart, 1))))
                     index = linkStart + 1
                     Continue While
                 End If
 
                 Dim destinationClose As Integer = FindMarkdownLinkDestinationClose(value, labelClose + 2)
                 If destinationClose < 0 Then
-                    output.Append(NormalizeKnownLatexCodes(value.Substring(linkStart)))
+                    output.Append(NormalizeKnownLatexCodes(NormalizeExplicitMarkdownMath(value.Substring(linkStart))))
                     Exit While
                 End If
 
                 If value(linkStart) = "!"c Then output.Append("!")
                 output.Append("[")
-                output.Append(NormalizeKnownLatexCodes(value.Substring(labelOpen + 1, labelClose - labelOpen - 1)))
+                output.Append(NormalizeKnownLatexCodes(NormalizeExplicitMarkdownMath(value.Substring(labelOpen + 1, labelClose - labelOpen - 1))))
                 output.Append("](")
                 output.Append(value.Substring(labelClose + 2, destinationClose - labelClose - 2))
                 output.Append(")")
@@ -245,7 +246,6 @@ Namespace SharedLibrary
             ' and other backslash-containing text must remain byte-for-byte unchanged unless
             ' it contains one of the explicitly supported LaTeX forms below.
             result = ReplaceSimpleBracedLatexCommand(result, "\text", "", "")
-            result = ReplaceSimpleBracedLatexSubscript(result)
             result = ReplaceSimpleBracedLatexCommand(result, "\mathrm", "", "")
             result = ReplaceSimpleBracedLatexCommand(result, "\mathbf", "", "")
             result = ReplaceSimpleBracedLatexCommand(result, "\mathit", "", "")
@@ -275,9 +275,6 @@ Namespace SharedLibrary
             result = ReplaceBoundedSectionLatexToken(result, "\S", "§")
             result = ReplaceBoundedSectionLatexToken(result, "\P", "¶")
             result = result.Replace("\,", " ")
-            result = NormalizeSimpleLatexSubscriptsAndSuperscripts(result)
-            result = RemoveKnownLatexMathWrappers(result)
-            result = result.Replace("$>$", ">").Replace("$<$", "<")
 
             Return result
         End Function
@@ -320,43 +317,6 @@ Namespace SharedLibrary
                 output.Append(content)
                 output.Append(replacementSuffix)
                 index = commandEnd + 1
-            End While
-
-            Return output.ToString()
-        End Function
-
-        Private Shared Function ReplaceSimpleBracedLatexSubscript(value As String) As String
-            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
-
-            Const startToken As String = "_{"
-            Dim output As New System.Text.StringBuilder(value.Length)
-            Dim index As Integer = 0
-
-            While index < value.Length
-                Dim tokenStart As Integer = value.IndexOf(startToken, index, StringComparison.Ordinal)
-                If tokenStart < 0 Then
-                    output.Append(value.Substring(index))
-                    Exit While
-                End If
-
-                output.Append(value.Substring(index, tokenStart - index))
-                Dim contentStart As Integer = tokenStart + startToken.Length
-                Dim tokenEnd As Integer = value.IndexOf("}"c, contentStart)
-                If tokenEnd < 0 Then
-                    output.Append(value.Substring(tokenStart))
-                    Exit While
-                End If
-
-                Dim content As String = value.Substring(contentStart, tokenEnd - contentStart)
-                If content.IndexOf("{"c) >= 0 OrElse content.IndexOf("}"c) >= 0 Then
-                    output.Append(startToken)
-                    index = contentStart
-                    Continue While
-                End If
-
-                output.Append("_")
-                output.Append(content)
-                index = tokenEnd + 1
             End While
 
             Return output.ToString()
@@ -600,18 +560,371 @@ Namespace SharedLibrary
             Return -1
         End Function
 
-        Private Shared Function NormalizeSimpleLatexSubscriptsAndSuperscripts(value As String) As String
-            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
-            Dim result As String = value
-            Dim subDigits As String() = {"₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"}
-            Dim superDigits As String() = {"⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"}
-            For digit As Integer = 0 To 9
-                result = result.Replace("_" & digit.ToString(Globalization.CultureInfo.InvariantCulture), subDigits(digit))
-                result = result.Replace("_{" & digit.ToString(Globalization.CultureInfo.InvariantCulture) & "}", subDigits(digit))
-                result = result.Replace("^" & digit.ToString(Globalization.CultureInfo.InvariantCulture), superDigits(digit))
-                result = result.Replace("^{" & digit.ToString(Globalization.CultureInfo.InvariantCulture) & "}", superDigits(digit))
+        Private Shared Function NormalizeExplicitMarkdownMath(value As String) As String
+            If System.String.IsNullOrEmpty(value) Then Return If(value, System.String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length + 32)
+            Dim index As System.Int32 = 0
+            Dim convertedCount As System.Int32 = 0
+
+            While index < value.Length
+                ' Markdown code spans and fenced code blocks are opaque. A backtick run is
+                ' copied through the matching run without inspecting its content for math.
+                If value(index) = "`"c Then
+                    Dim tickCount As System.Int32 = CountRepeatedCharacter(value, index, "`"c)
+                    Dim codeCloseIndex As System.Int32 = FindMatchingCharacterRun(value, index + tickCount, "`"c, tickCount)
+                    If codeCloseIndex >= 0 Then
+                        output.Append(value.Substring(index, codeCloseIndex + tickCount - index))
+                        index = codeCloseIndex + tickCount
+                        Continue While
+                    End If
+                End If
+
+                Dim openToken As System.String = Nothing
+                Dim closeToken As System.String = Nothing
+                Dim contentStart As System.Int32 = -1
+                Dim allowLineBreaks As System.Boolean = False
+                Dim requireMathSignal As System.Boolean = False
+
+                If index + 1 < value.Length AndAlso value(index) = "$"c AndAlso value(index + 1) = "$"c AndAlso Not IsEscapedCharacter(value, index) Then
+                    openToken = "$$"
+                    closeToken = "$$"
+                    contentStart = index + 2
+                    allowLineBreaks = True
+                ElseIf value(index) = "$"c AndAlso Not IsEscapedCharacter(value, index) Then
+                    openToken = "$"
+                    closeToken = "$"
+                    contentStart = index + 1
+                    requireMathSignal = True
+                ElseIf index + 1 < value.Length AndAlso value(index) = "\"c AndAlso value(index + 1) = "("c Then
+                    openToken = "\("
+                    closeToken = "\)"
+                    contentStart = index + 2
+                ElseIf index + 1 < value.Length AndAlso value(index) = "\"c AndAlso value(index + 1) = "["c Then
+                    openToken = "\["
+                    closeToken = "\]"
+                    contentStart = index + 2
+                    allowLineBreaks = True
+                End If
+
+                If openToken Is Nothing Then
+                    output.Append(value(index))
+                    index += 1
+                    Continue While
+                End If
+
+                Dim closeIndex As System.Int32 = FindExplicitMathClose(value, contentStart, closeToken, allowLineBreaks)
+                If closeIndex < 0 Then
+                    output.Append(openToken)
+                    index += openToken.Length
+                    Continue While
+                End If
+
+                Dim content As System.String = value.Substring(contentStart, closeIndex - contentStart)
+                If requireMathSignal AndAlso Not HasConservativeInlineMathSignal(content) Then
+                    output.Append(value.Substring(index, closeIndex + closeToken.Length - index))
+                    index = closeIndex + closeToken.Length
+                    Continue While
+                End If
+
+                Dim normalizedContent As System.String = NormalizeExplicitMathContent(content)
+                output.Append(normalizedContent)
+                convertedCount += 1
+                index = closeIndex + closeToken.Length
+            End While
+
+            If convertedCount > 0 Then
+                System.Diagnostics.Debug.WriteLine("[MDMATH] EXPLICIT_MATH converted=" & convertedCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End If
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function CountRepeatedCharacter(value As System.String, startIndex As System.Int32, character As System.Char) As System.Int32
+            Dim count As System.Int32 = 0
+            Dim index As System.Int32 = startIndex
+            While index < value.Length AndAlso value(index) = character
+                count += 1
+                index += 1
+            End While
+            Return count
+        End Function
+
+        Private Shared Function FindMatchingCharacterRun(value As System.String, startIndex As System.Int32, character As System.Char, runLength As System.Int32) As System.Int32
+            If runLength <= 0 Then Return -1
+            Dim index As System.Int32 = System.Math.Max(0, startIndex)
+            While index < value.Length
+                If value(index) = character AndAlso CountRepeatedCharacter(value, index, character) = runLength Then Return index
+                index += 1
+            End While
+            Return -1
+        End Function
+
+        Private Shared Function IsEscapedCharacter(value As System.String, index As System.Int32) As System.Boolean
+            If System.String.IsNullOrEmpty(value) OrElse index <= 0 OrElse index >= value.Length Then Return False
+            Dim slashCount As System.Int32 = 0
+            Dim scan As System.Int32 = index - 1
+            While scan >= 0 AndAlso value(scan) = "\"c
+                slashCount += 1
+                scan -= 1
+            End While
+            Return (slashCount Mod 2) = 1
+        End Function
+
+        Private Shared Function FindExplicitMathClose(value As System.String, startIndex As System.Int32, closeToken As System.String, allowLineBreaks As System.Boolean) As System.Int32
+            Dim index As System.Int32 = System.Math.Max(0, startIndex)
+            While index <= value.Length - closeToken.Length
+                Dim ch As System.Char = value(index)
+                If Not allowLineBreaks AndAlso (ch = Microsoft.VisualBasic.ControlChars.Cr OrElse ch = Microsoft.VisualBasic.ControlChars.Lf) Then Return -1
+
+                If System.String.CompareOrdinal(value, index, closeToken, 0, closeToken.Length) = 0 Then
+                    If closeToken = "$" Then
+                        If Not IsEscapedCharacter(value, index) AndAlso
+                           Not (index + 1 < value.Length AndAlso value(index + 1) = "$"c) Then Return index
+                    ElseIf closeToken = "$$" Then
+                        If Not IsEscapedCharacter(value, index) Then Return index
+                    Else
+                        Return index
+                    End If
+                End If
+                index += 1
+            End While
+            Return -1
+        End Function
+
+        Private Shared Function HasConservativeInlineMathSignal(content As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(content) Then Return False
+
+            ' Single-dollar notation is ambiguous with currency. Only normalize it when the
+            ' content contains an unmistakable LaTeX/script signal. Display math ($$...$$)
+            ' and explicit \(...\)/\[...\] delimiters do not need this heuristic.
+            If content.IndexOf("\"c) >= 0 OrElse content.IndexOf("_"c) >= 0 OrElse content.IndexOf("^"c) >= 0 Then Return True
+            If ContainsKnownLatexReplacementSymbol(content) Then Return True
+
+            Dim trimmed As System.String = content.Trim()
+            Return trimmed = ">" OrElse trimmed = "<"
+        End Function
+
+        Private Shared Function NormalizeExplicitMathContent(content As System.String) As System.String
+            If System.String.IsNullOrEmpty(content) Then Return If(content, System.String.Empty)
+
+            Dim result As System.String = content
+            result = ReplaceSimpleMathFunction(result, "\frac", MathFunctionKind.Fraction)
+            result = ReplaceSimpleMathFunction(result, "\sqrt", MathFunctionKind.SquareRoot)
+
+            Dim mathReplacements As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal) From {
+                {"\sum", "∑"}, {"\prod", "∏"}, {"\int", "∫"}, {"\infty", "∞"},
+                {"\alpha", "α"}, {"\beta", "β"}, {"\gamma", "γ"}, {"\delta", "δ"}, {"\pi", "π"}, {"\Omega", "Ω"},
+                {"\leftrightarrow", "↔"}, {"\rightarrow", "→"}, {"\leftarrow", "←"}, {"\to", "→"}, {"\gets", "←"},
+                {"\leq", "≤"}, {"\le", "≤"}, {"\geq", "≥"}, {"\ge", "≥"}, {"\neq", "≠"}, {"\ne", "≠"},
+                {"\approx", "≈"}, {"\equiv", "≡"}, {"\pm", "±"}, {"\mp", "∓"}, {"\times", "×"}, {"\cdot", "·"}, {"\div", "÷"}
+            }
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In System.Linq.Enumerable.OrderByDescending(mathReplacements, Function(item) item.Key.Length)
+                result = ReplaceBoundedLatexToken(result, pair.Key, pair.Value)
             Next
-            Return result
+
+            result = result.Replace("^{\circ}", "°").Replace("^\circ", "°")
+            result = NormalizeSimpleLatexSubscriptsAndSuperscripts(result)
+            Return result.Trim()
+        End Function
+
+        Private Enum MathFunctionKind
+            Fraction
+            SquareRoot
+        End Enum
+
+        Private Shared Function ReplaceSimpleMathFunction(value As System.String, command As System.String, kind As MathFunctionKind) As System.String
+            If System.String.IsNullOrEmpty(value) Then Return If(value, System.String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As System.Int32 = 0
+            While index < value.Length
+                Dim commandIndex As System.Int32 = value.IndexOf(command, index, System.StringComparison.Ordinal)
+                If commandIndex < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, commandIndex - index))
+                Dim argumentStart As System.Int32 = commandIndex + command.Length
+                If argumentStart >= value.Length OrElse value(argumentStart) <> "{"c Then
+                    output.Append(command)
+                    index = argumentStart
+                    Continue While
+                End If
+
+                Dim firstClose As System.Int32 = FindBalancedBraceClose(value, argumentStart)
+                If firstClose < 0 Then
+                    output.Append(value.Substring(commandIndex))
+                    Exit While
+                End If
+                Dim firstArgument As System.String = value.Substring(argumentStart + 1, firstClose - argumentStart - 1)
+
+                If kind = MathFunctionKind.SquareRoot Then
+                    output.Append("√(")
+                    output.Append(NormalizeExplicitMathContent(firstArgument))
+                    output.Append(")")
+                    index = firstClose + 1
+                    Continue While
+                End If
+
+                Dim secondStart As System.Int32 = firstClose + 1
+                If secondStart >= value.Length OrElse value(secondStart) <> "{"c Then
+                    output.Append(value.Substring(commandIndex, firstClose - commandIndex + 1))
+                    index = firstClose + 1
+                    Continue While
+                End If
+                Dim secondClose As System.Int32 = FindBalancedBraceClose(value, secondStart)
+                If secondClose < 0 Then
+                    output.Append(value.Substring(commandIndex))
+                    Exit While
+                End If
+
+                Dim secondArgument As System.String = value.Substring(secondStart + 1, secondClose - secondStart - 1)
+                output.Append("(")
+                output.Append(NormalizeExplicitMathContent(firstArgument))
+                output.Append(")/(")
+                output.Append(NormalizeExplicitMathContent(secondArgument))
+                output.Append(")")
+                index = secondClose + 1
+            End While
+            Return output.ToString()
+        End Function
+
+        Private Shared Function FindBalancedBraceClose(value As System.String, openIndex As System.Int32) As System.Int32
+            If openIndex < 0 OrElse openIndex >= value.Length OrElse value(openIndex) <> "{"c Then Return -1
+            Dim depth As System.Int32 = 0
+            For index As System.Int32 = openIndex To value.Length - 1
+                If value(index) = "{"c Then
+                    depth += 1
+                ElseIf value(index) = "}"c Then
+                    depth -= 1
+                    If depth = 0 Then Return index
+                End If
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function NormalizeSimpleLatexSubscriptsAndSuperscripts(value As String) As String
+            If System.String.IsNullOrEmpty(value) Then Return If(value, System.String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As System.Int32 = 0
+            While index < value.Length
+                Dim marker As System.Char = value(index)
+                If marker <> "_"c AndAlso marker <> "^"c Then
+                    output.Append(marker)
+                    index += 1
+                    Continue While
+                End If
+
+                If index + 1 >= value.Length Then
+                    output.Append(marker)
+                    index += 1
+                    Continue While
+                End If
+
+                Dim scriptText As System.String = Nothing
+                Dim consumedLength As System.Int32 = 0
+                If value(index + 1) = "{"c Then
+                    Dim closeIndex As System.Int32 = FindBalancedBraceClose(value, index + 1)
+                    If closeIndex > index + 2 Then
+                        scriptText = value.Substring(index + 2, closeIndex - index - 2)
+                        consumedLength = closeIndex - index + 1
+                    End If
+                Else
+                    scriptText = value.Substring(index + 1, 1)
+                    consumedLength = 2
+                End If
+
+                If System.String.IsNullOrEmpty(scriptText) Then
+                    output.Append(marker)
+                    index += 1
+                    Continue While
+                End If
+
+                Dim mappedScript As System.String = MapUnicodeMathScript(scriptText, marker = "_"c)
+                If mappedScript Is Nothing Then
+                    output.Append(value.Substring(index, consumedLength))
+                Else
+                    output.Append(mappedScript)
+                End If
+                index += consumedLength
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function MapUnicodeMathScript(scriptText As System.String, isSubscript As System.Boolean) As System.String
+            If System.String.IsNullOrEmpty(scriptText) Then Return Nothing
+            Dim output As New System.Text.StringBuilder(scriptText.Length)
+            For Each ch As System.Char In scriptText
+                Dim mapped As System.String = If(isSubscript, MapSubscriptCharacter(ch), MapSuperscriptCharacter(ch))
+                If mapped Is Nothing Then Return Nothing
+                output.Append(mapped)
+            Next
+            Return output.ToString()
+        End Function
+
+        Private Shared Function MapSubscriptCharacter(ch As System.Char) As System.String
+            Select Case ch
+                Case "0"c : Return "₀"
+                Case "1"c : Return "₁"
+                Case "2"c : Return "₂"
+                Case "3"c : Return "₃"
+                Case "4"c : Return "₄"
+                Case "5"c : Return "₅"
+                Case "6"c : Return "₆"
+                Case "7"c : Return "₇"
+                Case "8"c : Return "₈"
+                Case "9"c : Return "₉"
+                Case "+"c : Return "₊"
+                Case "-"c : Return "₋"
+                Case "="c : Return "₌"
+                Case "("c : Return "₍"
+                Case ")"c : Return "₎"
+                Case "a"c : Return "ₐ"
+                Case "e"c : Return "ₑ"
+                Case "h"c : Return "ₕ"
+                Case "i"c : Return "ᵢ"
+                Case "j"c : Return "ⱼ"
+                Case "k"c : Return "ₖ"
+                Case "l"c : Return "ₗ"
+                Case "m"c : Return "ₘ"
+                Case "n"c : Return "ₙ"
+                Case "o"c : Return "ₒ"
+                Case "p"c : Return "ₚ"
+                Case "r"c : Return "ᵣ"
+                Case "s"c : Return "ₛ"
+                Case "t"c : Return "ₜ"
+                Case "u"c : Return "ᵤ"
+                Case "v"c : Return "ᵥ"
+                Case "x"c : Return "ₓ"
+                Case Else : Return Nothing
+            End Select
+        End Function
+
+        Private Shared Function MapSuperscriptCharacter(ch As System.Char) As System.String
+            Select Case ch
+                Case "0"c : Return "⁰"
+                Case "1"c : Return "¹"
+                Case "2"c : Return "²"
+                Case "3"c : Return "³"
+                Case "4"c : Return "⁴"
+                Case "5"c : Return "⁵"
+                Case "6"c : Return "⁶"
+                Case "7"c : Return "⁷"
+                Case "8"c : Return "⁸"
+                Case "9"c : Return "⁹"
+                Case "+"c : Return "⁺"
+                Case "-"c : Return "⁻"
+                Case "="c : Return "⁼"
+                Case "("c : Return "⁽"
+                Case ")"c : Return "⁾"
+                Case "i"c : Return "ⁱ"
+                Case "n"c : Return "ⁿ"
+                Case Else : Return Nothing
+            End Select
         End Function
 
         ''' <summary>
@@ -832,11 +1145,18 @@ Namespace SharedLibrary
 
             Dim htmlresult As String = Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(gptResult), pipeline)
 
+            ' Markdig emits literal line breaks inside <pre> blocks. The legacy HTML cleanup
+            ' removes renderer-only CR/LF globally; protect complete preformatted blocks first
+            ' so code/YAML/CSV/XML source line boundaries remain byte-for-byte intact.
+            Dim protectedPreformattedBlocks As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+            htmlresult = ProtectHtmlPreformattedBlocks(htmlresult, protectedPreformattedBlocks)
 
             htmlresult = htmlresult _
                 .Replace(vbCrLf, "") _
                 .Replace(vbCr, "") _
                 .Replace(vbLf, "")
+
+            htmlresult = RestoreHtmlPreformattedBlocks(htmlresult, protectedPreformattedBlocks)
 
 
             ' Load the HTML into HtmlDocument
@@ -851,6 +1171,550 @@ Namespace SharedLibrary
 
             InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR, UseHostDefaultFontColor, PreserveDestinationParagraphFormatting)
 
+        End Sub
+
+
+        Private Shared Function ProtectHtmlPreformattedBlocks(
+            ByVal html As System.String,
+            ByVal protectedBlocks As System.Collections.Generic.Dictionary(Of System.String, System.String)
+        ) As System.String
+            If System.String.IsNullOrEmpty(html) OrElse protectedBlocks Is Nothing Then Return If(html, System.String.Empty)
+
+            Dim output As New System.Text.StringBuilder(html.Length)
+            Dim index As System.Int32 = 0
+            Dim blockIndex As System.Int32 = 0
+
+            While index < html.Length
+                Dim preStart As System.Int32 = html.IndexOf("<pre", index, System.StringComparison.OrdinalIgnoreCase)
+                If preStart < 0 Then
+                    output.Append(html.Substring(index))
+                    Exit While
+                End If
+
+                Dim openEnd As System.Int32 = html.IndexOf(">"c, preStart)
+                If openEnd < 0 Then
+                    output.Append(html.Substring(index))
+                    Exit While
+                End If
+
+                Dim preEnd As System.Int32 = html.IndexOf("</pre>", openEnd + 1, System.StringComparison.OrdinalIgnoreCase)
+                If preEnd < 0 Then
+                    output.Append(html.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(html.Substring(index, preStart - index))
+                Dim blockEnd As System.Int32 = preEnd + "</pre>".Length
+                Dim blockHtml As System.String = html.Substring(preStart, blockEnd - preStart)
+                blockIndex += 1
+                Dim token As System.String =
+                    "RIPREFORMATTED" & System.Guid.NewGuid().ToString("N") &
+                    "B" & blockIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) & "END"
+                protectedBlocks(token) = blockHtml
+                output.Append(token)
+                index = blockEnd
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function RestoreHtmlPreformattedBlocks(
+            ByVal html As System.String,
+            ByVal protectedBlocks As System.Collections.Generic.Dictionary(Of System.String, System.String)
+        ) As System.String
+            If System.String.IsNullOrEmpty(html) OrElse protectedBlocks Is Nothing OrElse protectedBlocks.Count = 0 Then
+                Return If(html, System.String.Empty)
+            End If
+
+            Dim result As System.String = html
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In protectedBlocks
+                result = result.Replace(pair.Key, pair.Value)
+            Next
+            Return result
+        End Function
+
+        Private Shared Sub NormalizeHtmlStrikethroughAndTaskCheckboxes(ByVal htmlDocument As HtmlAgilityPack.HtmlDocument)
+            If htmlDocument Is Nothing OrElse htmlDocument.DocumentNode Is Nothing Then Return
+
+            ' Markdig's GFM strike node is <del>. Word can interpret <del> as tracked deletion
+            ' semantics rather than visual strikethrough. Convert only that explicit HTML node
+            ' to a neutral span with CSS line-through; ordinary text is never inspected.
+            Dim deletionNodes As HtmlAgilityPack.HtmlNodeCollection = htmlDocument.DocumentNode.SelectNodes("//del")
+            If deletionNodes IsNot Nothing Then
+                For Each deletionNode As HtmlAgilityPack.HtmlNode In deletionNodes.ToList()
+                    Dim parent As HtmlAgilityPack.HtmlNode = deletionNode.ParentNode
+                    If parent Is Nothing Then Continue For
+
+                    Dim strikeSpan As HtmlAgilityPack.HtmlNode = htmlDocument.CreateElement("span")
+                    For Each attribute As HtmlAgilityPack.HtmlAttribute In deletionNode.Attributes
+                        If Not attribute.Name.Equals("style", System.StringComparison.OrdinalIgnoreCase) Then
+                            strikeSpan.SetAttributeValue(attribute.Name, attribute.Value)
+                        End If
+                    Next
+
+                    Dim existingStyle As System.String = deletionNode.GetAttributeValue("style", System.String.Empty).Trim()
+                    If existingStyle.Length > 0 AndAlso Not existingStyle.EndsWith(";", System.StringComparison.Ordinal) Then existingStyle &= ";"
+                    strikeSpan.SetAttributeValue("style", existingStyle & "text-decoration:line-through;")
+
+                    For Each child As HtmlAgilityPack.HtmlNode In deletionNode.ChildNodes.ToList()
+                        deletionNode.RemoveChild(child)
+                        strikeSpan.AppendChild(child)
+                    Next
+                    parent.ReplaceChild(strikeSpan, deletionNode)
+                Next
+            End If
+
+            ' GFM task-list state is explicit in Markdig's <input type=checkbox>. Word's HTML
+            ' importer drops the control, so replace only those explicit checkbox elements with
+            ' deterministic Unicode state glyphs. No textual [x]/[ ] guessing is performed.
+            Dim checkboxNodes As HtmlAgilityPack.HtmlNodeCollection =
+                htmlDocument.DocumentNode.SelectNodes("//input[translate(@type,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')='checkbox']")
+            If checkboxNodes IsNot Nothing Then
+                For Each checkboxNode As HtmlAgilityPack.HtmlNode In checkboxNodes.ToList()
+                    Dim parent As HtmlAgilityPack.HtmlNode = checkboxNode.ParentNode
+                    If parent Is Nothing Then Continue For
+                    Dim isChecked As System.Boolean = checkboxNode.Attributes("checked") IsNot Nothing
+                    parent.ReplaceChild(htmlDocument.CreateTextNode(If(isChecked, "☒", "☐")), checkboxNode)
+                Next
+            End If
+        End Sub
+
+        Private NotInheritable Class HtmlListImportDescriptor
+            Public Property Token As System.String
+            Public Property ContainerId As System.Int32
+            Public Property ItemIndex As System.Int32
+            Public Property Level As System.Int32
+            Public Property IsOrdered As System.Boolean
+        End Class
+
+        Private NotInheritable Class HtmlListImportTarget
+            Public Property Source As HtmlListImportDescriptor
+            Public Property ParagraphRange As Microsoft.Office.Interop.Word.Range
+            Public Property ImportedLeftIndent As System.Single
+            Public Property ImportedFirstLineIndent As System.Single
+        End Class
+
+        ''' <summary>
+        ''' Adds temporary, text-only anchors to HTML list items immediately before CF_HTML import.
+        ''' The anchors let the post-paste renderer map each source &lt;li&gt; to the exact Word
+        ''' paragraph even when Word imports a nested list item as ordinary text instead of a
+        ''' native Word list. The Markdown-to-HTML DOM semantics are not changed.
+        ''' </summary>
+        Private Shared Function PrepareHtmlListImportMarkers(
+            ByVal htmlDocument As HtmlAgilityPack.HtmlDocument
+        ) As System.Collections.Generic.List(Of HtmlListImportDescriptor)
+
+            Dim descriptors As New System.Collections.Generic.List(Of HtmlListImportDescriptor)()
+            If htmlDocument Is Nothing OrElse htmlDocument.DocumentNode Is Nothing Then Return descriptors
+
+            Dim listContainers As HtmlAgilityPack.HtmlNodeCollection =
+                htmlDocument.DocumentNode.SelectNodes("//ul | //ol")
+            If listContainers Is Nothing Then Return descriptors
+
+            Dim nonce As System.String = System.Guid.NewGuid().ToString("N")
+            Dim containerId As System.Int32 = 0
+
+            For Each listContainer As HtmlAgilityPack.HtmlNode In listContainers
+                Dim directItems As HtmlAgilityPack.HtmlNodeCollection = listContainer.SelectNodes("./li")
+                If directItems Is Nothing OrElse directItems.Count = 0 Then Continue For
+
+                containerId += 1
+
+                Dim level As System.Int32 = 1
+                Dim ancestor As HtmlAgilityPack.HtmlNode = listContainer.ParentNode
+                Do While ancestor IsNot Nothing
+                    If ancestor.Name.Equals("ul", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       ancestor.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase) Then
+                        level += 1
+                    End If
+                    ancestor = ancestor.ParentNode
+                Loop
+
+                Dim isOrdered As System.Boolean =
+                    listContainer.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase)
+
+                Dim itemIndex As System.Int32 = 0
+                For Each listItem As HtmlAgilityPack.HtmlNode In directItems
+                    itemIndex += 1
+
+                    Dim descriptor As New HtmlListImportDescriptor With {
+                        .Token = "RILIST" & nonce &
+                                 "C" & containerId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                 "I" & itemIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                 "END",
+                        .ContainerId = containerId,
+                        .ItemIndex = itemIndex,
+                        .Level = level,
+                        .IsOrdered = isOrdered
+                    }
+
+                    ' Put the marker into the first content paragraph when one exists. This avoids
+                    ' creating a marker-only paragraph for the common <li><p>...</p><ol>...</ol></li>
+                    ' shape while still handling inline-only list items.
+                    Dim markerHost As HtmlAgilityPack.HtmlNode = listItem
+                    For Each child As HtmlAgilityPack.HtmlNode In listItem.ChildNodes
+                        If child.Name.Equals("ul", System.StringComparison.OrdinalIgnoreCase) OrElse
+                           child.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase) Then
+                            Continue For
+                        End If
+
+                        If child.Name.Equals("p", System.StringComparison.OrdinalIgnoreCase) Then
+                            markerHost = child
+                        End If
+                        Exit For
+                    Next
+
+                    markerHost.PrependChild(htmlDocument.CreateTextNode(descriptor.Token))
+                    descriptors.Add(descriptor)
+                Next
+            Next
+
+            Return descriptors
+        End Function
+
+        Private Shared Function FindHtmlListImportTokenRange(
+            ByVal searchScope As Microsoft.Office.Interop.Word.Range,
+            ByVal token As System.String
+        ) As Microsoft.Office.Interop.Word.Range
+
+            If searchScope Is Nothing OrElse System.String.IsNullOrEmpty(token) Then Return Nothing
+
+            Dim tokenRange As Microsoft.Office.Interop.Word.Range = searchScope.Duplicate()
+            With tokenRange.Find
+                .ClearFormatting()
+                .Replacement.ClearFormatting()
+                .Text = token
+                .Forward = True
+                .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                .Format = False
+                .MatchWildcards = False
+            End With
+
+            If tokenRange.Find.Execute() Then Return tokenRange
+            Return Nothing
+        End Function
+
+        Private Shared Function WordListFormatMatchesHtmlKind(
+            ByVal listFormat As Microsoft.Office.Interop.Word.ListFormat,
+            ByVal isOrdered As System.Boolean
+        ) As System.Boolean
+
+            If listFormat Is Nothing Then Return False
+
+            Dim listType As Microsoft.Office.Interop.Word.WdListType = listFormat.ListType
+            If listType = Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then Return False
+
+            ' For multilevel/mixed templates ListType alone is not enough: a level can be a
+            ' bullet inside an outline-numbered template. Prefer the active ListLevel's
+            ' NumberStyle and use ListType only as a compatibility fallback.
+            Try
+                Dim levelNumber As System.Int32 =
+                    System.Math.Max(1, listFormat.ListLevelNumber)
+                Dim listTemplate As Microsoft.Office.Interop.Word.ListTemplate =
+                    listFormat.ListTemplate
+                If listTemplate IsNot Nothing Then
+                    Dim numberStyle As Microsoft.Office.Interop.Word.WdListNumberStyle =
+                        listTemplate.ListLevels(levelNumber).NumberStyle
+                    Dim isBulletLevel As System.Boolean =
+                        numberStyle = Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleBullet
+                    Return If(isOrdered, Not isBulletLevel, isBulletLevel)
+                End If
+            Catch exLevel As System.Exception
+                System.Diagnostics.Debug.WriteLine(
+                    "HTML list reconciliation: active list-level type probe failed: " & exLevel.Message)
+            End Try
+
+            Dim isBulletType As System.Boolean =
+                listType = Microsoft.Office.Interop.Word.WdListType.wdListBullet OrElse
+                listType = Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet
+
+            Return If(isOrdered, Not isBulletType, isBulletType)
+        End Function
+
+        Private Shared Sub RemoveLiteralHtmlImporterListPrefix(
+            ByVal paragraphRange As Microsoft.Office.Interop.Word.Range,
+            ByVal token As System.String,
+            ByVal isOrdered As System.Boolean
+        )
+            If paragraphRange Is Nothing OrElse System.String.IsNullOrEmpty(token) Then Return
+
+            Dim tokenRange As Microsoft.Office.Interop.Word.Range =
+                FindHtmlListImportTokenRange(paragraphRange, token)
+            If tokenRange Is Nothing OrElse tokenRange.Start <= paragraphRange.Start Then Return
+
+            Dim prefixRange As Microsoft.Office.Interop.Word.Range = paragraphRange.Duplicate()
+            prefixRange.End = tokenRange.Start
+
+            Dim prefixText As System.String = If(prefixRange.Text, System.String.Empty)
+            prefixText = prefixText.Replace(Microsoft.VisualBasic.Strings.ChrW(160), " "c)
+
+            Dim isImporterPrefix As System.Boolean
+            If isOrdered Then
+                isImporterPrefix = System.Text.RegularExpressions.Regex.IsMatch(
+                    prefixText,
+                    "^\s*\d+[\.\)]\s*$",
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            Else
+                isImporterPrefix = System.Text.RegularExpressions.Regex.IsMatch(
+                    prefixText,
+                    "^\s*[\-\u2022\u00B7\u25CF\u25E6]\s*$",
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            End If
+
+            If isImporterPrefix Then prefixRange.Delete()
+        End Sub
+
+        ''' <summary>
+        ''' Repairs only list semantics that Word lost during CF_HTML import. Word's imported
+        ''' paragraph indentation is captured first and restored after applying native list
+        ''' formatting, so the HTML renderer remains the authority for visual nesting.
+        ''' </summary>
+        Private Shared Sub ReconcileHtmlListsAfterWordPaste(
+            ByVal insertedRange As Microsoft.Office.Interop.Word.Range,
+            ByVal descriptors As System.Collections.Generic.List(Of HtmlListImportDescriptor)
+        )
+            If insertedRange Is Nothing OrElse descriptors Is Nothing OrElse descriptors.Count = 0 Then Return
+
+            Dim targetsByContainer As New System.Collections.Generic.Dictionary(
+                Of System.Int32,
+                   System.Collections.Generic.List(Of HtmlListImportTarget))()
+
+            Dim expectedByContainer As New System.Collections.Generic.Dictionary(Of System.Int32, System.Int32)()
+
+            For Each descriptor As HtmlListImportDescriptor In descriptors
+                If Not expectedByContainer.ContainsKey(descriptor.ContainerId) Then
+                    expectedByContainer(descriptor.ContainerId) = 0
+                End If
+                expectedByContainer(descriptor.ContainerId) += 1
+
+                Dim tokenRange As Microsoft.Office.Interop.Word.Range =
+                    FindHtmlListImportTokenRange(insertedRange, descriptor.Token)
+                If tokenRange Is Nothing OrElse tokenRange.Paragraphs Is Nothing OrElse tokenRange.Paragraphs.Count = 0 Then
+                    System.Diagnostics.Debug.WriteLine(
+                        "HTML list reconciliation: marker not found for container " &
+                        descriptor.ContainerId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        ", item " &
+                        descriptor.ItemIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+                    Continue For
+                End If
+
+                Dim paragraphRange As Microsoft.Office.Interop.Word.Range =
+                    tokenRange.Paragraphs(1).Range.Duplicate()
+
+                Dim importedLeftIndent As System.Single = 0.0F
+                Dim importedFirstLineIndent As System.Single = 0.0F
+                Try
+                    importedLeftIndent = paragraphRange.ParagraphFormat.LeftIndent
+                    importedFirstLineIndent = paragraphRange.ParagraphFormat.FirstLineIndent
+                Catch exIndent As System.Exception
+                    System.Diagnostics.Debug.WriteLine(
+                        "HTML list reconciliation: could not capture imported indentation: " & exIndent.Message)
+                End Try
+
+                Dim target As New HtmlListImportTarget With {
+                    .Source = descriptor,
+                    .ParagraphRange = paragraphRange,
+                    .ImportedLeftIndent = importedLeftIndent,
+                    .ImportedFirstLineIndent = importedFirstLineIndent
+                }
+
+                If Not targetsByContainer.ContainsKey(descriptor.ContainerId) Then
+                    targetsByContainer(descriptor.ContainerId) =
+                        New System.Collections.Generic.List(Of HtmlListImportTarget)()
+                End If
+                targetsByContainer(descriptor.ContainerId).Add(target)
+            Next
+
+            For Each pair As System.Collections.Generic.KeyValuePair(
+                Of System.Int32,
+                   System.Collections.Generic.List(Of HtmlListImportTarget)) In targetsByContainer
+
+                Dim containerId As System.Int32 = pair.Key
+                Dim targets As System.Collections.Generic.List(Of HtmlListImportTarget) = pair.Value
+
+                Dim expectedCount As System.Int32 = 0
+                If expectedByContainer.ContainsKey(containerId) Then
+                    expectedCount = expectedByContainer(containerId)
+                End If
+
+                ' Never guess a partial source-to-target mapping.
+                If targets.Count <> expectedCount Then
+                    System.Diagnostics.Debug.WriteLine(
+                        "HTML list reconciliation skipped for container " &
+                        containerId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        ": expected " &
+                        expectedCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        " item marker(s), found " &
+                        targets.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+                    Continue For
+                End If
+
+                targets.Sort(
+                    Function(leftTarget As HtmlListImportTarget, rightTarget As HtmlListImportTarget) As System.Int32
+                        Return leftTarget.Source.ItemIndex.CompareTo(rightTarget.Source.ItemIndex)
+                    End Function)
+
+                Dim desiredOrdered As System.Boolean = targets(0).Source.IsOrdered
+                Dim needsSemanticRepair As System.Boolean = False
+
+                For Each target As HtmlListImportTarget In targets
+                    Try
+                        If Not WordListFormatMatchesHtmlKind(target.ParagraphRange.ListFormat, desiredOrdered) Then
+                            needsSemanticRepair = True
+                            Exit For
+                        End If
+                    Catch exListProbe As System.Exception
+                        needsSemanticRepair = True
+                        System.Diagnostics.Debug.WriteLine(
+                            "HTML list reconciliation: list probe failed: " & exListProbe.Message)
+                        Exit For
+                    End Try
+                Next
+
+                If Not needsSemanticRepair Then Continue For
+
+                ' Build one dedicated multi-level template for this source list container.
+                ' This is deliberately created only when Word lost list semantics. It prevents
+                ' us from mutating a gallery/document template that may be used elsewhere and
+                ' lets the repaired paragraph expose the real source nesting level to later
+                ' paragraph-format capture/restore code.
+                Dim targetLevelNumber As System.Int32 =
+                    System.Math.Max(1, System.Math.Min(9, targets(0).Source.Level))
+                Dim repairTemplate As Microsoft.Office.Interop.Word.ListTemplate = Nothing
+
+                Try
+                    repairTemplate =
+                        insertedRange.Document.ListTemplates.Add(OutlineNumbered:=True)
+
+                    Dim repairLevel As Microsoft.Office.Interop.Word.ListLevel =
+                        repairTemplate.ListLevels(targetLevelNumber)
+
+                    If desiredOrdered Then
+                        repairLevel.NumberStyle =
+                            Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleArabic
+                        repairLevel.NumberFormat =
+                            "%" &
+                            targetLevelNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "."
+                        repairLevel.StartAt = 1
+                    Else
+                        repairLevel.NumberStyle =
+                            Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleBullet
+                        repairLevel.NumberFormat = Microsoft.VisualBasic.Strings.ChrW(&H2022)
+                    End If
+
+                    ' Derive list-level geometry from Word's own HTML import before semantic
+                    ' repair. For a hanging indent, LeftIndent is the text position and
+                    ' LeftIndent + FirstLineIndent is the marker position.
+                    Dim importedTextPosition As System.Single =
+                        System.Math.Max(0.0F, targets(0).ImportedLeftIndent)
+                    Dim importedMarkerPosition As System.Single =
+                        System.Math.Max(
+                            0.0F,
+                            targets(0).ImportedLeftIndent + targets(0).ImportedFirstLineIndent)
+
+                    If importedMarkerPosition >= importedTextPosition AndAlso importedTextPosition > 0.0F Then
+                        importedMarkerPosition = System.Math.Max(0.0F, importedTextPosition - 18.0F)
+                    End If
+
+                    repairLevel.NumberPosition = importedMarkerPosition
+                    repairLevel.TextPosition = importedTextPosition
+                    repairLevel.TabPosition = importedTextPosition
+
+                Catch exTemplate As System.Exception
+                    System.Diagnostics.Debug.WriteLine(
+                        "HTML list reconciliation: could not create isolated repair template: " &
+                        exTemplate.Message)
+                    Continue For
+                End Try
+
+                ' If Word flattened even one item in this source list container, re-apply the
+                ' entire container with the isolated template. This keeps ordered sequences
+                ' continuous and gives every paragraph a true ListLevelNumber matching the HTML
+                ' depth rather than a merely visual indentation.
+                For targetIndex As System.Int32 = 0 To targets.Count - 1
+                    Dim target As HtmlListImportTarget = targets(targetIndex)
+                    Dim paragraphRange As Microsoft.Office.Interop.Word.Range = target.ParagraphRange
+
+                    Try
+                        Dim currentType As Microsoft.Office.Interop.Word.WdListType =
+                            paragraphRange.ListFormat.ListType
+
+                        If currentType = Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                            ' Some Word HTML importers materialize an <ol> marker as literal "1. "
+                            ' text. Because our token was the first source content, any such text can
+                            ' only occur immediately before the token and can be removed without
+                            ' inspecting or rewriting the user's actual list-item text.
+                            RemoveLiteralHtmlImporterListPrefix(
+                                paragraphRange,
+                                target.Source.Token,
+                                desiredOrdered)
+                        Else
+                            paragraphRange.ListFormat.RemoveNumbers(
+                                Microsoft.Office.Interop.Word.WdNumberType.wdNumberParagraph)
+                        End If
+
+                        ' Apply the native Word list at the SOURCE level in the same COM call.
+                        ' ApplyListTemplateWithLevel defaults to level 1 when ApplyLevel is omitted;
+                        ' assigning ListLevelNumber afterwards is not equivalent and Word can retain
+                        ' the paragraph as a flattened/non-native nested item. Existing Red Ink list
+                        ' restoration code uses ApplyLevel for exactly this reason.
+                        Dim applyLevel As System.Object = targetLevelNumber
+                        paragraphRange.ListFormat.ApplyListTemplateWithLevel(
+                            ListTemplate:=repairTemplate,
+                            ContinuePreviousList:=(targetIndex > 0),
+                            ApplyTo:=Microsoft.Office.Interop.Word.WdListApplyTo.wdListApplyToSelection,
+                            DefaultListBehavior:=Microsoft.Office.Interop.Word.WdDefaultListBehavior.wdWord10ListBehavior,
+                            ApplyLevel:=applyLevel)
+
+                        ' Preserve the HTML importer's already-correct visual nesting as a second
+                        ' invariant even after assigning the true Word list level.
+                        paragraphRange.ParagraphFormat.LeftIndent = target.ImportedLeftIndent
+                        paragraphRange.ParagraphFormat.FirstLineIndent = target.ImportedFirstLineIndent
+
+                        If Not WordListFormatMatchesHtmlKind(paragraphRange.ListFormat, desiredOrdered) OrElse
+                           paragraphRange.ListFormat.ListLevelNumber <> targetLevelNumber Then
+                            Throw New System.Exception(
+                                "Word did not retain the repaired native list semantics.")
+                        End If
+
+                    Catch exRepair As System.Exception
+                        System.Diagnostics.Debug.WriteLine(
+                            "HTML list reconciliation failed for container " &
+                            containerId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            ", item " &
+                            target.Source.ItemIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            ": " & exRepair.Message)
+                    End Try
+                Next
+            Next
+        End Sub
+
+        Private Shared Sub RemoveHtmlListImportMarkers(
+            ByVal document As Microsoft.Office.Interop.Word.Document,
+            ByVal rangeStart As System.Int32,
+            ByVal rangeEnd As System.Int32,
+            ByVal descriptors As System.Collections.Generic.List(Of HtmlListImportDescriptor)
+        )
+            If document Is Nothing OrElse descriptors Is Nothing OrElse descriptors.Count = 0 Then Return
+
+            For Each descriptor As HtmlListImportDescriptor In descriptors
+                Try
+                    Dim safeEnd As System.Int32 =
+                        System.Math.Min(document.Content.End, System.Math.Max(rangeStart, rangeEnd))
+                    Dim searchStart As System.Object = rangeStart
+                    Dim searchEnd As System.Object = safeEnd
+                    Dim searchScope As Microsoft.Office.Interop.Word.Range =
+                        document.Range(Start:=searchStart, End:=searchEnd)
+                    Dim tokenRange As Microsoft.Office.Interop.Word.Range =
+                        FindHtmlListImportTokenRange(searchScope, descriptor.Token)
+                    If tokenRange IsNot Nothing Then tokenRange.Delete()
+                Catch exCleanup As System.Exception
+                    Throw New System.Exception(
+                        "Internal HTML list marker cleanup failed.",
+                        exCleanup)
+                End Try
+            Next
         End Sub
 
 
@@ -886,6 +1750,7 @@ Namespace SharedLibrary
                 ' --- 1) Load HTML and split <br> into separate <p> elements ---
                 Dim doc As New HtmlAgilityPack.HtmlDocument()
                 doc.LoadHtml(formattedText)
+                NormalizeHtmlStrikethroughAndTaskCheckboxes(doc)
 
                 ' Select all <p> and <li> nodes
                 Dim nodes As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//p | //li")
@@ -908,17 +1773,49 @@ Namespace SharedLibrary
                             parent.RemoveChild(node)
 
                         ElseIf node.Name.Equals("li", System.StringComparison.OrdinalIgnoreCase) Then
+                            ' Preserve nested list structure. Markdig emits level-2+ Markdown lists as
+                            ' child <ul>/<ol> nodes inside the parent <li>. The previous RemoveAllChildren()
+                            ' path discarded those child lists whenever the parent item also contained a
+                            ' <br>, flattening/truncating nested Markdown during Word insertion.
+                            Dim nestedLists As New System.Collections.Generic.List(Of HtmlAgilityPack.HtmlNode)()
+                            For Each child As HtmlAgilityPack.HtmlNode In node.ChildNodes.ToList()
+                                If child.Name.Equals("ul", System.StringComparison.OrdinalIgnoreCase) OrElse
+                                   child.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase) Then
+                                    nestedLists.Add(child)
+                                    node.RemoveChild(child)
+                                End If
+                            Next
+
+                            Dim listItemSegments As String() =
+                                System.Text.RegularExpressions.Regex.Split(
+                                    node.InnerHtml,
+                                    "<br\s*/?>",
+                                    System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
                             node.RemoveAllChildren()
-                            For Each seg As String In segments
+                            For Each seg As String In listItemSegments
                                 Dim txt As String = seg.Trim()
                                 If System.String.IsNullOrEmpty(txt) Then Continue For
                                 Dim newP As HtmlAgilityPack.HtmlNode = doc.CreateElement("p")
                                 newP.InnerHtml = txt
                                 node.AppendChild(newP)
                             Next
+
+                            ' Re-attach the exact nested list nodes after the parent item's own text.
+                            ' This keeps existing simple-list behavior while retaining arbitrary deeper
+                            ' list levels and their already-normalized descendants.
+                            For Each nestedList As HtmlAgilityPack.HtmlNode In nestedLists
+                                node.AppendChild(nestedList)
+                            Next
                         End If
                     Next
                 End If
+
+                ' Add temporary anchors only after <br> normalization has finished, so the anchors
+                ' cannot be removed by the list-item restructuring above. They are deleted again
+                ' immediately after Word has imported the HTML.
+                Dim listImportDescriptors As System.Collections.Generic.List(Of HtmlListImportDescriptor) =
+                    PrepareHtmlListImportMarkers(doc)
 
                 formattedText = doc.DocumentNode.OuterHtml
 
@@ -1183,6 +2080,41 @@ Namespace SharedLibrary
 
                     System.Threading.Thread.Sleep(100)
                     range = range.Application.Selection.Range
+
+                    ' --- 7a) Reconcile HTML list semantics before any caller can restore
+                    '     destination paragraph formatting. Word sometimes imports nested <ol>/<ul>
+                    '     items as visually indented ordinary paragraphs with literal markers rather
+                    '     than native Word lists. The source anchors map those paragraphs exactly;
+                    '     native list semantics are repaired while Word's imported indentation is
+                    '     preserved as the visual authority.
+                    Dim insertedStartForLists As System.Int32 = origRange.Start
+                    Try
+                        If listImportDescriptors IsNot Nothing AndAlso listImportDescriptors.Count > 0 Then
+                            Dim insertedEndForLists As System.Int32 =
+                                range.Application.Selection.Range.End
+                            Dim insertedListStart As System.Object = insertedStartForLists
+                            Dim insertedListEnd As System.Object = insertedEndForLists
+                            Dim insertedListRange As Microsoft.Office.Interop.Word.Range =
+                                range.Document.Range(Start:=insertedListStart, End:=insertedListEnd)
+
+                            ReconcileHtmlListsAfterWordPaste(
+                                insertedListRange,
+                                listImportDescriptors)
+                        End If
+                    Catch exListRepair As System.Exception
+                        System.Diagnostics.Debug.WriteLine(
+                            "HTML list reconciliation skipped: " & exListRepair.Message)
+                    Finally
+                        ' Internal anchors are transport-only and must never survive in the document.
+                        If listImportDescriptors IsNot Nothing AndAlso listImportDescriptors.Count > 0 Then
+                            RemoveHtmlListImportMarkers(
+                                range.Document,
+                                insertedStartForLists,
+                                range.Application.Selection.Range.End,
+                                listImportDescriptors)
+                            range = range.Application.Selection.Range
+                        End If
+                    End Try
 
                     ' --- 7b) Strip automatic heading numbering that the pasted heading
                     '     Formatvorlagen (Überschrift 1..6) may carry, when the source markdown

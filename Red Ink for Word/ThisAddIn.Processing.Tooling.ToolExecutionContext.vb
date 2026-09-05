@@ -86,8 +86,32 @@ Partial Public Class ThisAddIn
         ''' <summary>Cancellation flag set by UI event handler.</summary>
         Public Property IsCancelled As Boolean
 
-        ''' <summary>In-memory log entries appended during session execution.</summary>
+        ''' <summary>Linked cancellation source for the complete current tooling run.</summary>
+        Public Property RunCancellationSource As System.Threading.CancellationTokenSource
+
+        ''' <summary>Parent tooling context for an isolated sub-agent run.</summary>
+        Public Property ParentToolingContext As ToolExecutionContext
+
+        ''' <summary>Requests cooperative cancellation through both the legacy flag and the live run token.</summary>
+        Public Sub RequestCancellation()
+            IsCancelled = True
+            Dim cts As System.Threading.CancellationTokenSource = RunCancellationSource
+            If cts Is Nothing Then Return
+            Try
+                If Not cts.IsCancellationRequested Then cts.Cancel()
+            Catch ex As System.ObjectDisposedException
+                ' The run is already terminating; the legacy flag remains authoritative.
+            End Try
+        End Sub
+
+        ''' <summary>In-memory diagnostic log entries appended during session execution.</summary>
         Public Property LogEntries As List(Of String)
+
+        ''' <summary>User-visible dashboard history, already filtered exactly like live dashboard output.</summary>
+        Public Property VisibleLogEntries As System.Collections.Generic.List(Of System.Tuple(Of System.String, System.String))
+
+        ''' <summary>Per-run cache mapping canonical workspace file paths to full extracted-text result references.</summary>
+        Public Property WorkspaceExtractionRefs As System.Collections.Generic.Dictionary(Of System.String, System.String)
 
         ''' <summary>Snapshot of the LLM/tooling model config used for tool call detection/extraction formats.</summary>
         Public Property ToolingModel As ModelConfig
@@ -168,6 +192,8 @@ Partial Public Class ThisAddIn
             SelectedTools = New List(Of ModelConfig)()
             AllToolResponses = New List(Of ToolResponse)()
             LogEntries = New List(Of String)()
+            VisibleLogEntries = New System.Collections.Generic.List(Of System.Tuple(Of System.String, System.String))()
+            WorkspaceExtractionRefs = New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
             CurrentIteration = 0
             MaxIterations = INI_ToolingMaximumIterations
             IsCancelled = False
@@ -312,6 +338,11 @@ Partial Public Class ThisAddIn
 
             Dim visibleMessage As String =
                 If(isSubAgent, "  [sub-agent] " & humanMessage, humanMessage)
+
+            ' Keep exactly the same filtered payload that a live dashboard receives.
+            ' A dashboard opened mid-run replays this collection rather than the broader
+            ' diagnostic LogEntries collection, so late enablement cannot expose extra noise.
+            VisibleLogEntries.Add(System.Tuple.Create(visibleMessage, normalizedLevel))
 
             If LogWindowForm IsNot Nothing AndAlso Not LogWindowForm.IsDisposed Then
                 Try

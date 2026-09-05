@@ -150,6 +150,8 @@ Namespace Agents
                     New Newtonsoft.Json.Linq.JArray(GetDeclaredDeliverableRequiredEffects(sk))
                 result("declared_required_successful_tools") =
                     New Newtonsoft.Json.Linq.JArray(GetDeclaredRequiredSuccessfulTools(sk))
+                result("declared_required_successful_tools_before_final_mutation") =
+                    New Newtonsoft.Json.Linq.JArray(GetDeclaredRequiredSuccessfulToolsBeforeFinalMutation(sk))
                 result("instructions") = body
                 result("scripts") = JArray.FromObject(scripts)
                 result("references") = JArray.FromObject(references)
@@ -333,6 +335,36 @@ Namespace Agents
             Return result
         End Function
 
+        Public Shared Function GetDeclaredRequiredSuccessfulToolsBeforeFinalMutation(
+            skill As SkillDescriptor) As System.Collections.Generic.List(Of System.String)
+
+            Dim result As New System.Collections.Generic.List(Of System.String)()
+            If skill Is Nothing OrElse skill.Frontmatter Is Nothing Then Return result
+
+            Dim raw As System.String = Nothing
+            If Not skill.Frontmatter.TryGetValue("required-successful-tools-before-final-mutation", raw) OrElse
+               System.String.IsNullOrWhiteSpace(raw) Then
+                Return result
+            End If
+
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim normalized As System.String = raw.Trim()
+            If normalized.StartsWith("[", System.StringComparison.Ordinal) AndAlso
+               normalized.EndsWith("]", System.StringComparison.Ordinal) AndAlso
+               normalized.Length >= 2 Then
+                normalized = normalized.Substring(1, normalized.Length - 2)
+            End If
+
+            For Each part As System.String In normalized.Split(New System.Char() {","c, ";"c, " "c}, System.StringSplitOptions.RemoveEmptyEntries)
+                Dim toolName As System.String = If(part, System.String.Empty).Trim().Trim("'"c, """"c)
+                If toolName = System.String.Empty Then Continue For
+                If Not System.Text.RegularExpressions.Regex.IsMatch(toolName, "^[A-Za-z][A-Za-z0-9_.-]{0,127}$") Then Continue For
+                If seen.Add(toolName) Then result.Add(toolName)
+            Next
+
+            Return result
+        End Function
+
         Public Shared Function GetDeclaredDeliverableCount(skill As SkillDescriptor) As System.Int32
             If skill Is Nothing OrElse skill.Frontmatter Is Nothing Then Return 0
 
@@ -490,6 +522,31 @@ Namespace Agents
             Try
                 Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(responseText)
                 Dim token As Newtonsoft.Json.Linq.JToken = obj("declared_required_successful_tools")
+                If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return result
+
+                Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+                    If item Is Nothing OrElse item.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Continue For
+                    Dim toolName As System.String = item.ToString().Trim()
+                    If toolName = System.String.Empty Then Continue For
+                    If Not System.Text.RegularExpressions.Regex.IsMatch(toolName, "^[A-Za-z][A-Za-z0-9_.-]{0,127}$") Then Continue For
+                    If seen.Add(toolName) Then result.Add(toolName)
+                Next
+            Catch ex As System.Exception
+            End Try
+
+            Return result
+        End Function
+
+        Public Shared Function GetDeclaredRequiredSuccessfulToolsBeforeFinalMutationFromResponse(
+            responseText As System.String) As System.Collections.Generic.List(Of System.String)
+
+            Dim result As New System.Collections.Generic.List(Of System.String)()
+            If System.String.IsNullOrWhiteSpace(responseText) Then Return result
+
+            Try
+                Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(responseText)
+                Dim token As Newtonsoft.Json.Linq.JToken = obj("declared_required_successful_tools_before_final_mutation")
                 If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return result
 
                 Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)

@@ -2665,6 +2665,15 @@ Partial Public Class ThisAddIn
         If _context IsNot Nothing Then
             _context.INI_ToolingLogWindow = value
         End If
+
+        ' Enabling the dashboard is also a live-run action, not only a next-run setting.
+        If value Then
+            Try
+                EnsureActiveToolingLogWindowVisible()
+            Catch ex As System.Exception
+                ToolingFileLogger.LogWarn("Failed to activate tooling dashboard during an active run.", ex:=ex)
+            End Try
+        End If
     End Sub
 
     Public Shared Property INI_ToolingDryRun As Boolean

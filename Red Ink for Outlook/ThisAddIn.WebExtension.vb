@@ -3236,6 +3236,16 @@ Partial Public Class ThisAddIn
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Cancel invoked")
 
+                        ' Cancel the live tooling context immediately as well as the browser job CTS.
+                        ' This covers waits inside nested tooling/sub-agent execution without waiting
+                        ' for the outer job loop to observe its own cancellation state.
+                        Try
+                            If _activeToolingContext IsNot Nothing Then
+                                _activeToolingContext.RequestCancellation()
+                            End If
+                        Catch
+                        End Try
+
                         ' (Cancellation logic preserved)
                         ' ------------------------------------------------------------------
                         ' Optional job id (preferred modern path)

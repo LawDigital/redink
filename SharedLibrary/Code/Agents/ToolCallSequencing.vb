@@ -340,6 +340,7 @@ Namespace Agents
             Public Property LastProcessedItemCount As Integer?
             Public Property LastSuccessfulToolCall As String
             Public Property RequiredSuccessfulTools As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Public Property RequiredSuccessfulToolsBeforeFinalMutation As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
             Public Property SuccessfulToolsThisRun As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
             Public Property LastMutationToolCall As String
             Public Property LastAgentToolCall As String
@@ -463,6 +464,20 @@ Namespace Agents
                 Next
             End Sub
 
+            Public Sub RegisterRequiredSuccessfulToolsBeforeFinalMutation(toolNames As System.Collections.Generic.IEnumerable(Of System.String))
+                If toolNames Is Nothing Then Return
+                If RequiredSuccessfulToolsBeforeFinalMutation Is Nothing Then
+                    RequiredSuccessfulToolsBeforeFinalMutation =
+                        New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                End If
+
+                For Each rawName As System.String In toolNames
+                    Dim toolName As System.String = If(rawName, System.String.Empty).Trim()
+                    If toolName = System.String.Empty Then Continue For
+                    RequiredSuccessfulToolsBeforeFinalMutation.Add(toolName)
+                Next
+            End Sub
+
             Public Sub RegisterSuccessfulTool(toolName As System.String)
                 Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
                 If normalizedToolName = System.String.Empty Then Return
@@ -477,6 +492,23 @@ Namespace Agents
                 If RequiredSuccessfulTools Is Nothing OrElse RequiredSuccessfulTools.Count = 0 Then Return missing
 
                 For Each requiredTool As System.String In RequiredSuccessfulTools
+                    If SuccessfulToolsThisRun Is Nothing OrElse Not SuccessfulToolsThisRun.Contains(requiredTool) Then
+                        missing.Add(requiredTool)
+                    End If
+                Next
+
+                missing.Sort(System.StringComparer.OrdinalIgnoreCase)
+                Return missing
+            End Function
+
+            Public Function GetMissingRequiredSuccessfulToolsBeforeFinalMutation() As System.Collections.Generic.List(Of System.String)
+                Dim missing As New System.Collections.Generic.List(Of System.String)()
+                If RequiredSuccessfulToolsBeforeFinalMutation Is Nothing OrElse
+                   RequiredSuccessfulToolsBeforeFinalMutation.Count = 0 Then
+                    Return missing
+                End If
+
+                For Each requiredTool As System.String In RequiredSuccessfulToolsBeforeFinalMutation
                     If SuccessfulToolsThisRun Is Nothing OrElse Not SuccessfulToolsThisRun.Contains(requiredTool) Then
                         missing.Add(requiredTool)
                     End If
@@ -3108,6 +3140,89 @@ Namespace Agents
             End Select
         End Function
 
+
+        Public Shared Function GetFinalMutationPrerequisiteFailureReason(
+            runState As ToolingRunState,
+            toolName As System.String,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.String
+
+            If runState Is Nothing Then Return System.String.Empty
+            If Not IsFinalArtifactMutationCall(arguments) Then Return System.String.Empty
+
+            Dim missing As System.Collections.Generic.List(Of System.String) =
+                runState.GetMissingRequiredSuccessfulToolsBeforeFinalMutation()
+
+            If missing.Count = 0 Then Return System.String.Empty
+
+            Return "final_mutation_missing_required_successful_tools:" &
+                   System.String.Join(",", missing)
+        End Function
+
+        Private Shared Function IsFinalArtifactMutationCall(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+            If arguments Is Nothing Then Return False
+
+            Dim rawValue As System.Object = Nothing
+
+            If TryGetArgumentValue(arguments, "artifact_state", rawValue) AndAlso rawValue IsNot Nothing Then
+                If System.String.Equals(
+                    rawValue.ToString().Trim(),
+                    "final",
+                    System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            End If
+
+            rawValue = Nothing
+            If TryGetArgumentValue(arguments, "artifact_delivery_intent", rawValue) AndAlso rawValue IsNot Nothing Then
+                Dim deliveryIntent As System.String = rawValue.ToString().Trim()
+                If System.String.Equals(deliveryIntent, "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(deliveryIntent, "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            End If
+
+            rawValue = Nothing
+            If TryGetArgumentValue(arguments, "expected_artifacts", rawValue) AndAlso rawValue IsNot Nothing Then
+                Dim token As Newtonsoft.Json.Linq.JToken = TryCast(rawValue, Newtonsoft.Json.Linq.JToken)
+                If token IsNot Nothing Then
+                    If token.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                        Return DirectCast(token, Newtonsoft.Json.Linq.JArray).Count > 0
+                    End If
+                End If
+
+                Dim enumerable As System.Collections.IEnumerable =
+                    TryCast(rawValue, System.Collections.IEnumerable)
+                If enumerable IsNot Nothing AndAlso Not TypeOf rawValue Is System.String Then
+                    For Each ignored As System.Object In enumerable
+                        Return True
+                    Next
+                End If
+            End If
+
+            Return False
+        End Function
+
+        Private Shared Function TryGetArgumentValue(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            key As System.String,
+            ByRef value As System.Object) As System.Boolean
+
+            value = Nothing
+            If arguments Is Nothing OrElse System.String.IsNullOrWhiteSpace(key) Then Return False
+
+            If arguments.TryGetValue(key, value) Then Return True
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Object) In arguments
+                If System.String.Equals(pair.Key, key, System.StringComparison.OrdinalIgnoreCase) Then
+                    value = pair.Value
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
 
         Public Shared Function ValidateActiveToolingTurn(responseText As String,
                                                          hasToolCalls As Boolean,

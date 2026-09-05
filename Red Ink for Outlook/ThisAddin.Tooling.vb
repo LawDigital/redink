@@ -636,6 +636,63 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ''' <summary>Creates or reveals the tooling dashboard for the currently active run.</summary>
+    Public Sub EnsureActiveToolingLogWindowVisible()
+        Dim activeContext As ToolExecutionContext = _activeToolingContext
+        If activeContext Is Nothing Then Return
+
+        Dim rootContext As ToolExecutionContext = activeContext
+        While rootContext.ParentToolingContext IsNot Nothing
+            rootContext = rootContext.ParentToolingContext
+        End While
+
+        Dim showOnUi As System.Action =
+            Sub()
+                If rootContext.LogWindowForm Is Nothing OrElse rootContext.LogWindowForm.IsDisposed Then
+                    Dim createdForm As New LogWindow()
+                    AddHandler createdForm.CancelRequested, Sub() rootContext.RequestCancellation()
+                    rootContext.LogWindowForm = createdForm
+
+                    ' Give a dashboard enabled mid-run enough history to be useful immediately.
+                    ' Replay only entries that passed the exact same visibility filter used
+                    ' by a dashboard that was open from the beginning. Do not replay the broader
+                    ' diagnostic/file-log history when the user enables the dashboard mid-run.
+                    If rootContext.VisibleLogEntries IsNot Nothing Then
+                        For Each visibleEntry As System.Tuple(Of System.String, System.String) In rootContext.VisibleLogEntries
+                            If visibleEntry IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(visibleEntry.Item1) Then
+                                createdForm.AppendLog(visibleEntry.Item1, visibleEntry.Item2)
+                            End If
+                        Next
+                    End If
+                    createdForm.Show()
+                Else
+                    rootContext.LogWindowForm.Show()
+                    rootContext.LogWindowForm.BringToFront()
+                    rootContext.LogWindowForm.Activate()
+                End If
+
+                ' If a sub-agent is active at the instant the dashboard is enabled, route
+                ' subsequent child messages into the newly-created root dashboard as well.
+                If activeContext IsNot rootContext Then
+                    activeContext.LogPrefix = "[subagent] "
+                    activeContext.ExternalLogSink =
+                        Sub(message As String, level As String)
+                            If rootContext.LogWindowForm IsNot Nothing AndAlso
+                               Not rootContext.LogWindowForm.IsDisposed Then
+                                rootContext.LogWindowForm.AppendLog(message, level)
+                            End If
+                        End Sub
+                End If
+            End Sub
+
+        If UiSyncContext IsNot Nothing AndAlso
+           System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+            UiSyncContext.Send(Sub() showOnUi(), Nothing)
+        Else
+            showOnUi()
+        End If
+    End Sub
+
     ''' <param name="sysCommand">Base system command prompt text.</param>
     ''' <param name="userText">User prompt text (used only if fullPromptOverride is empty).</param>
     ''' <param name="selectedTools">Tool configurations available to the model.</param>
@@ -701,7 +758,8 @@ Partial Public Class ThisAddIn
         Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus,
         Optional progressSink As Action(Of String) = Nothing,
         Optional subAgentExpectedArtifactsJson As String = Nothing,
-        Optional toolingLogArchivePath As String = Nothing) As Task(Of String)
+        Optional toolingLogArchivePath As String = Nothing,
+        Optional subAgentRequiredSuccessfulToolNames As IReadOnlyList(Of String) = Nothing) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -812,6 +870,7 @@ Partial Public Class ThisAddIn
 
         If subAgentMode Then
             context.SequencingState.LockExpectedDeliverableContractFromJson(subAgentExpectedArtifactsJson)
+            context.SequencingState.RegisterRequiredSuccessfulTools(subAgentRequiredSuccessfulToolNames)
         End If
 
         context.FinalResponseContract = finalResponseContract
@@ -1181,7 +1240,7 @@ Partial Public Class ThisAddIn
         context.ProgressSink = effectiveProgressSink
         context.ReportProgress("Preparing request: determining language, context and workflow...")
 
-        context.Log("Starting tooling session...")
+        context.Log(If(subAgentMode, "Starting subagent workflow...", "Starting tooling session..."))
         If selectedTools IsNot Nothing Then
             context.Log($"Selected tools: {String.Join(", ", selectedTools.Select(Function(t) t.ToolName))}")
         Else
@@ -1260,7 +1319,7 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogStep("[PERF] Post-bootstrap selected tools: " &
                                           If(selectedTools.Count = 0, "(none)", String.Join(", ", selectedTools.Select(Function(t) t.ToolName))))
             End If
-            context.ReportProgress("Request prepared. Starting workflow...")
+            context.ReportProgress(If(subAgentMode, "Request prepared. Starting subagent workflow...", "Request prepared. Starting workflow..."))
 
             If Not subAgentMode Then
                 Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
@@ -3162,6 +3221,51 @@ Partial Public Class ThisAddIn
                     End If
 
                     If context.FinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText Then
+                        Dim missingRequiredSubAgentTools As System.Collections.Generic.List(Of System.String) =
+                            If(context.SequencingState Is Nothing,
+                               New System.Collections.Generic.List(Of System.String)(),
+                               context.SequencingState.GetMissingRequiredSuccessfulTools())
+
+                        If missingRequiredSubAgentTools.Count > 0 Then
+                            If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                context.PrematureTextRetryCount += 1
+                                context.PendingContinuationGuardPrompt =
+                                    "HOST SUB-AGENT GROUNDING CONTRACT: Before returning the final caller-defined JSON, successfully call the required tool(s): " &
+                                    System.String.Join(", ", missingRequiredSubAgentTools) &
+                                    ". For canonical source handles, use context_expand on the supplied result_ref. Parent task/context text is not source evidence."
+                                context.PendingGuardTitle = "HOST SUB-AGENT GROUNDING CONTRACT"
+                                context.PendingRejectedTurnExplanation =
+                                    "The delegated task cannot finalize before its required grounding tool has succeeded."
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                context.Log(
+                                    "Rejected raw caller-defined sub-agent final response because required successful tools are missing: " &
+                                    System.String.Join(", ", missingRequiredSubAgentTools),
+                                    "warn")
+                                Continue While
+                            End If
+
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason =
+                                "subagent_missing_required_successful_tools:" &
+                                System.String.Join(",", missingRequiredSubAgentTools)
+                            acceptedFinalStatus = "blocked"
+                            currentResponse =
+                                "{""summary"":""The delegated task could not satisfy its mandatory source-grounding contract."",""result"":null,""resultKind"":""error"",""error"":{""code"":""subagent_missing_required_successful_tools"",""phase"":""subagent_finalization"",""message"":""Required grounding tool(s) did not succeed before finalization: " &
+                                EscapeJsonString(System.String.Join(", ", missingRequiredSubAgentTools)) &
+                                ".""}}"
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.Log(
+                                "Blocked raw caller-defined sub-agent final response because required successful tools are still missing: " &
+                                System.String.Join(", ", missingRequiredSubAgentTools),
+                                "warn")
+                            Exit While
+                        End If
+
                         context.PrematureTextRetryCount = 0
 
                         If context.SequencingState IsNot Nothing Then
@@ -4395,10 +4499,13 @@ Partial Public Class ThisAddIn
     Private Function IsToolAllowedForCurrentContext(toolName As String, context As ToolExecutionContext) As Boolean
         If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then Return False
 
-        ' report_progress is a host-owned, side-effect-free control channel. It must remain
-        ' available inside isolated sub-agent loops without becoming part of the sub-agent's
-        ' substantive allowed-tool registry.
+        ' Host-owned control/safety channels remain available even when a skill or
+        ' isolated sub-agent narrows the substantive tool surface. They cannot be used
+        ' to bypass the declared helper contract because tool_loader itself re-checks
+        ' every requested substantive tool through this same function.
         If IsReportProgressToolName(toolName) Then Return True
+        If toolName.Trim().Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then Return True
+        If toolName.Trim().Equals("report_inability", StringComparison.OrdinalIgnoreCase) Then Return True
 
         If Not context.EnforceAllowedToolScope Then Return True
         If context.AllowedToolNames Is Nothing Then Return False
@@ -5221,9 +5328,23 @@ Partial Public Class ThisAddIn
                 requestedToolNames,
                 context.AllowedToolRegistry)
 
+            ' A loaded skill is an execution boundary, not merely a preload hint.
+            ' Restrict the parent run to exactly the helpers declared by that skill.
+            ' This prevents undeclared lazy loads (for example context_expand) while
+            ' keeping the mechanism completely skill-agnostic and identical across hosts.
+            context.AllowedToolNames = New HashSet(Of String)(expandedToolNames, StringComparer.OrdinalIgnoreCase)
+            context.EnforceAllowedToolScope = True
+
             For Each toolName As String In expandedToolNames
                 EnsureVisibleToolLoaded(toolName, context)
             Next
+
+            context.Log(
+                "Skill allowed-tool scope enforced: " &
+                If(context.AllowedToolNames.Count = 0,
+                   "(none)",
+                   String.Join(", ", context.AllowedToolNames.OrderBy(Function(n) n))),
+                "diag")
         Catch
         End Try
     End Sub
