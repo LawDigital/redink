@@ -238,8 +238,7 @@ Partial Public Class ThisAddIn
             OriginalClauseSnapshots.Add(New ClauseSnapshot(label, selectedText))
 
         Catch ex As System.Exception
-            MessageBox.Show($"Error in StoreOriginalClause:{Environment.NewLine}{ex.Message}",
-                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in StoreOriginalClause:{Environment.NewLine}{ex.Message}", "Error")
         End Try
     End Sub
 
@@ -346,8 +345,7 @@ Partial Public Class ThisAddIn
             OriginalClauseSnapshots.RemoveAt(picked - 1)
 
         Catch ex As System.Exception
-            MessageBox.Show($"Error in JustifyMarkup:{Environment.NewLine}{ex.Message}",
-                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in JustifyMarkup:{Environment.NewLine}{ex.Message}", "Error")
         End Try
     End Sub
 
@@ -598,9 +596,7 @@ Partial Public Class ThisAddIn
             InsertJustificationBubble(doc, anchorForBubble, justification, "")
 
         Catch ex As System.Exception
-            MessageBox.Show(
-                $"Error in BalloonMergeWithJustification:{Environment.NewLine}{ex.Message}",
-                "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in BalloonMergeWithJustification:{Environment.NewLine}{ex.Message}", "Error")
         End Try
     End Function
 

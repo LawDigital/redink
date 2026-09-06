@@ -116,7 +116,7 @@ Partial Public Class ThisAddIn
             tcs.SetResult(True)
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in ConsultInternet: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ConsultInternet: " & ex.Message, "Error")
             tcs.SetResult(False)
         End Try
 

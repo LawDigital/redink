@@ -497,7 +497,7 @@ Partial Public Class ThisAddIn
                 End If
 
             Catch ex As Exception
-                MessageBox.Show("Error in Range: " & ex.Message)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Range: " & ex.Message)
             End Try
 
         End If

@@ -464,7 +464,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As Exception
-            MessageBox.Show("Error in RunSearch_Embed: " & ex.Message)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in RunSearch_Embed: " & ex.Message)
         End Try
     End Sub
 
@@ -688,7 +688,7 @@ Partial Public Class ThisAddIn
                 ShowCustomMessageBox($"The (next) {hits.Count} have been found for '{SearchContext}', with a maximum of {Top_K} hits. Comments have been added to them.")
             End If
         Catch ex As System.Exception
-            MessageBox.Show("Error in RunSearch_BoW: " & ex.Message)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in RunSearch_BoW: " & ex.Message)
         End Try
     End Sub
 

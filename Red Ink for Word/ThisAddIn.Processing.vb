@@ -1837,7 +1837,7 @@ Partial Public Class ThisAddIn
                                     Dim SaveRng As Range = rng.Duplicate
                                     CompareAndInsert(SelectedText, LLMResult, rng, MarkupMethod = 3, "This is the markup of the text inserted:", trailingCR)
                                     If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoFormatAndFieldSaving Then
-                                        ApplyParagraphFormat(rng)
+                                        ApplyParagraphFormat(rng, PreserveRenderedFormatting:=True)
                                     ElseIf listFormatSnapshot IsNot Nothing Then
                                         ApplyListFormattingIfCompatible(rng, listFormatSnapshot)
                                     End If
@@ -1881,7 +1881,7 @@ Partial Public Class ThisAddIn
                                     Debug.WriteLine($"Range End = {rng.End} Selection End = {selection.End}")
                                     Debug.WriteLine(vbCrLf & Left(rng.Text, 400) & vbCrLf)
 
-                                    ApplyParagraphFormat(rng)
+                                    ApplyParagraphFormat(rng, PreserveRenderedFormatting:=True)
                                 ElseIf listFormatSnapshot IsNot Nothing Then
                                     ApplyListFormattingIfCompatible(rng, listFormatSnapshot)
                                 End If
@@ -1921,7 +1921,7 @@ Partial Public Class ThisAddIn
                                     Dim SaveRng As Range = rng.Duplicate
                                     CompareAndInsert(SelectedText, LLMResult, rng.Duplicate, MarkupMethod = 3, "This is the markup of the text inserted:", trailingCR)
                                     If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoFormatAndFieldSaving Then
-                                        ApplyParagraphFormat(rng)
+                                        ApplyParagraphFormat(rng, PreserveRenderedFormatting:=True)
                                     End If
                                     Pattern = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
                                     If Not NoFormatAndFieldSaving Or Regex.IsMatch(LLMResult, Pattern) Then
@@ -1957,7 +1957,7 @@ Partial Public Class ThisAddIn
                                 rng = selection.Range
                                 Dim SaveRng As Range = rng.Duplicate
                                 If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoFormatAndFieldSaving Then
-                                    ApplyParagraphFormat(rng)
+                                    ApplyParagraphFormat(rng, PreserveRenderedFormatting:=True)
                                 End If
                                 If Not NoFormatting Then
                                     pattern = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
@@ -2025,7 +2025,7 @@ Partial Public Class ThisAddIn
 
             System.Diagnostics.Debugger.Break()
 #End If
-            MessageBox.Show("Error in TrueProcessSelectedText:  " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in TrueProcessSelectedText:  " & ex.Message, "Error")
             INIloaded = False
 
         Finally
@@ -2586,7 +2586,7 @@ Partial Public Class ThisAddIn
             Dim selection As Microsoft.Office.Interop.Word.Selection = app.Selection
 
             If selection Is Nothing OrElse selection.Range Is Nothing Then
-                MessageBox.Show("Error In MarkupSelectedTextWithRegex: No text selected (anymore). Can't proceed.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error In MarkupSelectedTextWithRegex: No text selected (anymore). Can't proceed.", "Error")
                 Return
             End If
 
@@ -2684,7 +2684,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As Exception
-            MessageBox.Show($"Error in MarkupSelectedTextWithRegex: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in MarkupSelectedTextWithRegex: {ex.Message}", "Error")
         End Try
     End Sub
 
@@ -3607,7 +3607,7 @@ Partial Public Class ThisAddIn
     Public Shared Sub InsertTextWithMarkdown(selection As Microsoft.Office.Interop.Word.Selection, Result As String, Optional TrailingCR As Boolean = False, Optional AddTrailingIfNeeded As Boolean = False)
 
         If selection Is Nothing Then
-            MessageBox.Show("Error in InsertTextWithMarkdown: The selection object is null", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in InsertTextWithMarkdown: The selection object is null", "Error")
             Return
         End If
 
@@ -3682,42 +3682,13 @@ Partial Public Class ThisAddIn
             End Function,
             RegexOptions.IgnoreCase Or RegexOptions.Singleline)
 
-        Result = Result.Replace(vbLf & " " & vbLf, vbLf & vbLf)
-
-        Dim pattern As String = "((\r\n|\n|\r){2,})"
-        Result = Regex.Replace(Result, pattern, Function(m As Match)
-                                                    If m.Index + m.Length = Result.Length Then
-                                                        Return m.Value
-                                                    Else
-                                                        Dim breaks As String = m.Value
-                                                        Dim regexBreaks As New Regex("(\r\n|\n|\r)")
-                                                        Dim splitBreaks = regexBreaks.Matches(breaks)
-                                                        If splitBreaks.Count <= 1 Then Return breaks
-                                                        Dim resultx As String = splitBreaks(0).Value
-                                                        For i As Integer = 1 To splitBreaks.Count - 1
-                                                            resultx &= vbCrLf & "&nbsp;" & vbCrLf & splitBreaks(i).Value
-                                                        Next
-                                                        Return resultx
-                                                    End If
-                                                End Function)
-
-        ' Use the shared HTML pipeline so Word insertion follows the same Markdown/LaTeX
-        ' contract as the other Red Ink HTML surfaces. In particular, Mathematics stays
-        ' disabled and only NormalizeMarkdownForHtmlDisplay's explicit allow-list handles
-        ' supported LaTeX notation.
-        Dim markdownPipeline As MarkdownPipeline =
-            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(
-                useSoftlineBreakAsHardlineBreak:=True)
-
+        ' Use exactly the same Markdown-to-HTML contract as Outlook and every other Office
+        ' insertion path. Word-specific placeholder masking has already happened above; heading
+        ' reconciliation remains Word-specific below the shared conversion boundary.
         Debug.WriteLine("Result=" & Result)
 
-        Dim htmlResult As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(Result), markdownPipeline).Trim
-
-        ' Remove all real newlines so they are not converted as text
-        htmlResult = htmlResult _
-        .Replace(vbCrLf, "") _
-        .Replace(vbCr, "") _
-        .Replace(vbLf, "")
+        Dim htmlResult As System.String =
+            SLib.ConvertMarkdownToHtmlForWordInsertion(Result).Trim()
 
         ' Load the HTML into HtmlDocument
         Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
@@ -4077,7 +4048,7 @@ Partial Public Class ThisAddIn
             targetDoc.TrackRevisions = True
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in CompareAndInsertComparedoc: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in CompareAndInsertComparedoc: " & ex.Message, "Error")
         Finally
             ' Restore screen updating
             wordApp.ScreenUpdating = originalScreenUpdating
@@ -4143,7 +4114,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in CompareAndInsertText: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in CompareAndInsertText: " & ex.Message, "Error")
         End Try
     End Sub
 

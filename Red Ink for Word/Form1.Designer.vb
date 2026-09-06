@@ -106,7 +106,7 @@ Public Class MyTextBox
                 ' Update the font while preserving the font family and style.
                 Me.Font = New System.Drawing.Font(Me.Font.FontFamily, newSize, Me.Font.Style)
             Catch ex As System.Exception
-                MessageBox.Show("Error changing font size: " & ex.Message)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error changing font size: " & ex.Message)
             End Try
         End If
 

@@ -324,7 +324,7 @@ Namespace SharedLibrary
                                    Optional actionButtonValue As Integer = 0) As Integer
 
             If items Is Nothing Then
-                System.Windows.Forms.MessageBox.Show("SelectValue Error: Items collection must not be null.")
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("SelectValue Error: Items collection must not be null.")
                 Return 0
             End If
 

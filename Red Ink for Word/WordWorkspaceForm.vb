@@ -376,8 +376,11 @@ Public Class WordWorkspaceForm
     End Sub
 
     Private Sub OnClearClicked(sender As Object, e As EventArgs)
-        If MessageBox.Show("Clear the configured workspace? The agent will then write to your Desktop.", "Workspace",
-                           MessageBoxButtons.YesNo, MessageBoxIcon.Question) = DialogResult.Yes Then
+        If Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomYesNoBox(
+               "Clear the configured workspace? The agent will then write to your Desktop.",
+               "Yes",
+               "No",
+               "Workspace") = 1 Then
             WorkspaceStore.Clear(HostKey)
             WorkspaceTools.SetActive(New WorkspaceState())
             SharedLibrary.Agents.WordHostPolicy.ActiveDocReadOnly = True

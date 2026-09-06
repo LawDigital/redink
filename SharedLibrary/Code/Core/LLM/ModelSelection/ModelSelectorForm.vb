@@ -269,7 +269,7 @@ Namespace SharedLibrary
                 Me.DialogResult = DialogResult.OK
                 Me.Close()
             Catch ex As System.Exception
-                MessageBox.Show("Error processing selection: " & ex.Message)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error processing selection: " & ex.Message)
             End Try
         End Sub
 

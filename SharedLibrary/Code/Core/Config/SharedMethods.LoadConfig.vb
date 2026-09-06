@@ -598,7 +598,7 @@ Namespace SharedLibrary
                     Else
                         context.DecodedAPI_2 = RealAPIKey(context.INI_APIKey_2, True, False, context)
                         If String.IsNullOrWhiteSpace(context.DecodedAPI_2) Then
-                            MessageBox.Show("Internal error: Could not determine API key for second API (likely a decryption error).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Internal error: Could not determine API key for second API (likely a decryption error).", "Error")
                             Return
                         End If
                     End If
@@ -620,7 +620,7 @@ Namespace SharedLibrary
                 context.INIloaded = True
 
             Catch ex As System.Exception
-                MessageBox.Show($"Error in InitializeConfig: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in InitializeConfig: {ex.Message}", "Error")
             End Try
         End Sub
 
@@ -896,7 +896,7 @@ Namespace SharedLibrary
                                                    Dim boolValue As Boolean = DirectCast(control, System.Windows.Forms.CheckBox).Checked
                                                    SetSettingValue(settingKey, boolValue.ToString(), context)
                                                Else
-                                                   MessageBox.Show($"Error in MissingSettingsWindow - unsupported control type for setting '{settingKey}' in MissingSettingsWindow.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                                   Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in MissingSettingsWindow - unsupported control type for setting '{settingKey}' in MissingSettingsWindow.", "Error")
                                                End If
                                            Next
                                            UpdateAppConfig(context) ' Save the configuration.

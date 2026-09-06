@@ -398,9 +398,9 @@ Partial Public Class ThisAddIn
             Dim errorToShow As Exception = ex
             Try
                 mainThreadControl.Invoke(New MethodInvoker(
-                    Sub() MessageBox.Show("Error in ImportMCPServer: " & errorToShow.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)))
+                    Sub() Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ImportMCPServer: " & errorToShow.Message, "Error")))
             Catch
-                MessageBox.Show("Error in ImportMCPServer: " & errorToShow.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ImportMCPServer: " & errorToShow.Message, "Error")
             End Try
         Finally
             ' Dispose directly (Await not allowed in Finally)

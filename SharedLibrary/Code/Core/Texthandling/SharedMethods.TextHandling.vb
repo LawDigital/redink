@@ -1111,68 +1111,91 @@ Namespace SharedLibrary
                                                  gptResult As String,
                                                  TrailingCR As Boolean,
                                                  Optional UseHostDefaultFontColor As Boolean = False,
-                                                 Optional PreserveDestinationParagraphFormatting As Boolean = False)
+                                                 Optional PreserveDestinationParagraphFormatting As Boolean = False,
+                                                 Optional FormattingSourceRange As Microsoft.Office.Interop.Word.Range = Nothing)
 
             Dim wordSelection As Microsoft.Office.Interop.Word.Selection = CType(selection, Microsoft.Office.Interop.Word.Selection)
             Dim wordRange As Microsoft.Office.Interop.Word.Range = wordSelection.Range
 
             Debug.WriteLine("ITWM: " & gptResult)
 
-            gptResult = gptResult.Replace(vbLf & " " & vbLf, vbLf & vbLf)
-
-            Dim pattern As String = "((\r\n|\n|\r){2,})"
-            gptResult = Regex.Replace(gptResult, pattern, Function(m As Match)
-                                                              ' Check whether the match reaches to the end of the string
-                                                              If m.Index + m.Length = gptResult.Length Then
-                                                                  ' At the end: return the line breaks as they are
-                                                                  Return m.Value
-                                                              Else
-                                                                  ' Otherwise: insert &nbsp; between the line breaks
-                                                                  Dim breaks As String = m.Value
-                                                                  Dim regexBreaks As New Regex("(\r\n|\n|\r)")
-                                                                  Dim splitBreaks = regexBreaks.Matches(breaks)
-                                                                  If splitBreaks.Count <= 1 Then Return breaks
-                                                                  Dim result As String = splitBreaks(0).Value
-                                                                  For i As Integer = 1 To splitBreaks.Count - 1
-                                                                      result &= vbCrLf & "&nbsp;" & vbCrLf & splitBreaks(i).Value
-                                                                  Next
-                                                                  Return result
-                                                              End If
-                                                          End Function)
-
-
-            Dim pipeline As MarkdownPipeline = CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
-
-            Dim htmlresult As String = Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(gptResult), pipeline)
-
-            ' Markdig emits literal line breaks inside <pre> blocks. The legacy HTML cleanup
-            ' removes renderer-only CR/LF globally; protect complete preformatted blocks first
-            ' so code/YAML/CSV/XML source line boundaries remain byte-for-byte intact.
-            Dim protectedPreformattedBlocks As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
-            htmlresult = ProtectHtmlPreformattedBlocks(htmlresult, protectedPreformattedBlocks)
-
-            htmlresult = htmlresult _
-                .Replace(vbCrLf, "") _
-                .Replace(vbCr, "") _
-                .Replace(vbLf, "")
-
-            htmlresult = RestoreHtmlPreformattedBlocks(htmlresult, protectedPreformattedBlocks)
-
-
-            ' Load the HTML into HtmlDocument
-            Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
-            Dim fullhtml As String
-            htmlDoc.LoadHtml(htmlresult)
-            NormalizeMarkdigHtmlBlockBoundaryWhitespace(htmlDoc)
-
-            fullhtml = htmlDoc.DocumentNode.OuterHtml
+            Dim fullhtml As System.String = ConvertMarkdownToHtmlForWordInsertion(gptResult)
 
             Debug.WriteLine("ITWM: " & fullhtml)
 
-            InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR, UseHostDefaultFontColor, PreserveDestinationParagraphFormatting)
+            InsertTextWithFormat(
+                fullhtml,
+                wordRange,
+                True,
+                Not TrailingCR,
+                UseHostDefaultFontColor,
+                PreserveDestinationParagraphFormatting,
+                FormattingSourceRange)
 
         End Sub
 
+        ''' <summary>
+        ''' Converts Markdown to the normalized HTML fragment consumed by the Word/Outlook
+        ''' CF_HTML insertion pipeline. This is the single Markdown-to-HTML contract for Office
+        ''' insertion; host-specific placeholder or document preprocessing must happen before it.
+        ''' </summary>
+        Public Shared Function ConvertMarkdownToHtmlForWordInsertion(ByVal markdown As System.String) As System.String
+            Dim normalizedMarkdown As System.String = If(markdown, System.String.Empty)
+
+            normalizedMarkdown = normalizedMarkdown.Replace(vbLf & " " & vbLf, vbLf & vbLf)
+
+            Dim blankLinePattern As System.String = "((\r\n|\n|\r){2,})"
+            normalizedMarkdown = System.Text.RegularExpressions.Regex.Replace(
+                normalizedMarkdown,
+                blankLinePattern,
+                Function(match As System.Text.RegularExpressions.Match) As System.String
+                    If match.Index + match.Length = normalizedMarkdown.Length Then
+                        Return match.Value
+                    End If
+
+                    Dim breaks As System.String = match.Value
+                    Dim regexBreaks As New System.Text.RegularExpressions.Regex("(\r\n|\n|\r)")
+                    Dim splitBreaks As System.Text.RegularExpressions.MatchCollection = regexBreaks.Matches(breaks)
+                    If splitBreaks.Count <= 1 Then Return breaks
+
+                    Dim replacement As System.String = splitBreaks(0).Value
+                    For breakIndex As System.Int32 = 1 To splitBreaks.Count - 1
+                        replacement &= vbCrLf & "&nbsp;" & vbCrLf & splitBreaks(breakIndex).Value
+                    Next
+                    Return replacement
+                End Function)
+
+            Dim pipeline As Markdig.MarkdownPipeline =
+                CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
+
+            Dim htmlResult As System.String =
+                Markdig.Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(normalizedMarkdown), pipeline)
+
+            ' Renderer-only line breaks are removed for stable CF_HTML, but literal line
+            ' boundaries inside <pre> blocks are opaque source content and must survive.
+            Dim protectedPreformattedBlocks As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+            htmlResult = ProtectHtmlPreformattedBlocks(htmlResult, protectedPreformattedBlocks)
+
+            htmlResult = htmlResult _
+                .Replace(vbCrLf, System.String.Empty) _
+                .Replace(vbCr, System.String.Empty) _
+                .Replace(vbLf, System.String.Empty)
+
+            htmlResult = RestoreHtmlPreformattedBlocks(htmlResult, protectedPreformattedBlocks)
+
+            Dim htmlDocument As New HtmlAgilityPack.HtmlDocument()
+            htmlDocument.LoadHtml(htmlResult)
+            NormalizeMarkdigHtmlBlockBoundaryWhitespace(htmlDocument)
+
+            Dim normalizedHtml As System.String = htmlDocument.DocumentNode.OuterHtml
+            If normalizedMarkdown.IndexOf("**", System.StringComparison.Ordinal) >= 0 AndAlso
+               normalizedHtml.IndexOf("**", System.StringComparison.Ordinal) >= 0 Then
+                System.Diagnostics.Debug.WriteLine(
+                    "[MDINLINE] Literal '**' survived Markdown-to-HTML conversion. Inspect source whitespace/escaping/code context before applying any delimiter rewrite.")
+            End If
+
+            Return normalizedHtml
+        End Function
 
         Private Shared Function ProtectHtmlPreformattedBlocks(
             ByVal html As System.String,
@@ -1285,6 +1308,7 @@ Namespace SharedLibrary
             Public Property ItemIndex As System.Int32
             Public Property Level As System.Int32
             Public Property IsOrdered As System.Boolean
+            Public Property StartAt As System.Int32 = 1
         End Class
 
         Private NotInheritable Class HtmlListImportTarget
@@ -1333,6 +1357,19 @@ Namespace SharedLibrary
                 Dim isOrdered As System.Boolean =
                     listContainer.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase)
 
+                Dim orderedStartAt As System.Int32 = 1
+                If isOrdered Then
+                    Dim startAttribute As System.String = listContainer.GetAttributeValue("start", "1")
+                    Dim parsedStartAt As System.Int32
+                    If System.Int32.TryParse(
+                        startAttribute,
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        parsedStartAt) AndAlso parsedStartAt > 0 Then
+                        orderedStartAt = parsedStartAt
+                    End If
+                End If
+
                 Dim itemIndex As System.Int32 = 0
                 For Each listItem As HtmlAgilityPack.HtmlNode In directItems
                     itemIndex += 1
@@ -1345,7 +1382,8 @@ Namespace SharedLibrary
                         .ContainerId = containerId,
                         .ItemIndex = itemIndex,
                         .Level = level,
-                        .IsOrdered = isOrdered
+                        .IsOrdered = isOrdered,
+                        .StartAt = orderedStartAt
                     }
 
                     ' Put the marker into the first content paragraph when one exists. This avoids
@@ -1471,7 +1509,9 @@ Namespace SharedLibrary
         ''' </summary>
         Private Shared Sub ReconcileHtmlListsAfterWordPaste(
             ByVal insertedRange As Microsoft.Office.Interop.Word.Range,
-            ByVal descriptors As System.Collections.Generic.List(Of HtmlListImportDescriptor)
+            ByVal descriptors As System.Collections.Generic.List(Of HtmlListImportDescriptor),
+            ByVal destinationFontName As System.String,
+            ByVal destinationFontSize As System.Single
         )
             If insertedRange Is Nothing OrElse descriptors Is Nothing OrElse descriptors.Count = 0 Then Return
 
@@ -1559,8 +1599,20 @@ Namespace SharedLibrary
 
                 For Each target As HtmlListImportTarget In targets
                     Try
-                        If Not WordListFormatMatchesHtmlKind(target.ParagraphRange.ListFormat, desiredOrdered) Then
+                        Dim expectedLevel As System.Int32 =
+                            System.Math.Max(1, System.Math.Min(9, target.Source.Level))
+                        Dim importedLevel As System.Int32 =
+                            System.Math.Max(1, target.ParagraphRange.ListFormat.ListLevelNumber)
+
+                        If Not WordListFormatMatchesHtmlKind(target.ParagraphRange.ListFormat, desiredOrdered) OrElse
+                           importedLevel <> expectedLevel Then
                             needsSemanticRepair = True
+                            System.Diagnostics.Debug.WriteLine(
+                                "HTML list reconciliation: semantic mismatch for container " &
+                                containerId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                ", item " & target.Source.ItemIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                ": expected level=" & expectedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                ", imported level=" & importedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
                             Exit For
                         End If
                     Catch exListProbe As System.Exception
@@ -1596,7 +1648,7 @@ Namespace SharedLibrary
                             "%" &
                             targetLevelNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                             "."
-                        repairLevel.StartAt = 1
+                        repairLevel.StartAt = System.Math.Max(1, targets(0).Source.StartAt)
                     Else
                         repairLevel.NumberStyle =
                             Microsoft.Office.Interop.Word.WdListNumberStyle.wdListNumberStyleBullet
@@ -1620,6 +1672,26 @@ Namespace SharedLibrary
                     repairLevel.NumberPosition = importedMarkerPosition
                     repairLevel.TextPosition = importedTextPosition
                     repairLevel.TabPosition = importedTextPosition
+
+                    ' The RILIST transport marker is NOT a formatting authority. Outlook can
+                    ' import that artificial run using its own default font (for example Aptos),
+                    ' even while InsertTextWithFormat correctly resolved Verdana from the real
+                    ' destination text. Use that already-resolved destination base font instead.
+                    ' Set all Word font-name slots because list markers and list text can use
+                    ' different script slots in Outlook's WordEditor. No emphasis attributes are
+                    ' touched here.
+                    If Not System.String.IsNullOrWhiteSpace(destinationFontName) AndAlso
+                       destinationFontName <> CStr(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) Then
+                        repairLevel.Font.Name = destinationFontName
+                        repairLevel.Font.NameAscii = destinationFontName
+                        repairLevel.Font.NameOther = destinationFontName
+                        repairLevel.Font.NameFarEast = destinationFontName
+                        repairLevel.Font.NameBi = destinationFontName
+                    End If
+
+                    If destinationFontSize > 0.0F AndAlso destinationFontSize < 1000.0F Then
+                        repairLevel.Font.Size = destinationFontSize
+                    End If
 
                 Catch exTemplate As System.Exception
                     System.Diagnostics.Debug.WriteLine(
@@ -1672,6 +1744,65 @@ Namespace SharedLibrary
                         paragraphRange.ParagraphFormat.LeftIndent = target.ImportedLeftIndent
                         paragraphRange.ParagraphFormat.FirstLineIndent = target.ImportedFirstLineIndent
 
+                        ' ApplyListTemplateWithLevel can reset BOTH authorities independently in
+                        ' Outlook: the ListLevel marker font and the paragraph text font. Reassert
+                        ' the destination base family after the COM call as well. Only family/size
+                        ' are restored, so Markdown Bold/Italic/Underline/Color runs remain intact.
+                        Try
+                            ' ApplyListTemplateWithLevel may cause WordEditor to attach an internal
+                            ' copy of the template. Therefore also address the ACTUAL active level
+                            ' obtained back from the paragraph after the COM call. This is the
+                            ' authority that renders the visible bullet/number.
+                            Dim activeListTemplate As Microsoft.Office.Interop.Word.ListTemplate =
+                                paragraphRange.ListFormat.ListTemplate
+                            Dim activeListLevelNumber As System.Int32 =
+                                System.Math.Max(1, System.Math.Min(9, paragraphRange.ListFormat.ListLevelNumber))
+                            If activeListTemplate IsNot Nothing Then
+                                Dim activeListLevel As Microsoft.Office.Interop.Word.ListLevel =
+                                    activeListTemplate.ListLevels(activeListLevelNumber)
+                                If Not System.String.IsNullOrWhiteSpace(destinationFontName) AndAlso
+                                   destinationFontName <> CStr(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) Then
+                                    activeListLevel.Font.Name = destinationFontName
+                                    activeListLevel.Font.NameAscii = destinationFontName
+                                    activeListLevel.Font.NameOther = destinationFontName
+                                    activeListLevel.Font.NameFarEast = destinationFontName
+                                    activeListLevel.Font.NameBi = destinationFontName
+                                End If
+                                If destinationFontSize > 0.0F AndAlso destinationFontSize < 1000.0F Then
+                                    activeListLevel.Font.Size = destinationFontSize
+                                End If
+                            End If
+
+                            Dim listTextRange As Microsoft.Office.Interop.Word.Range = paragraphRange.Duplicate()
+                            If listTextRange.End > listTextRange.Start Then
+                                Dim lastCharacterRange As Microsoft.Office.Interop.Word.Range = listTextRange.Duplicate()
+                                lastCharacterRange.SetRange(listTextRange.End - 1, listTextRange.End)
+                                Dim lastCharacter As System.String = lastCharacterRange.Text
+                                If lastCharacter = vbCr OrElse lastCharacter = vbLf Then
+                                    listTextRange.End -= 1
+                                End If
+                            End If
+
+                            If listTextRange.End > listTextRange.Start Then
+                                If Not System.String.IsNullOrWhiteSpace(destinationFontName) AndAlso
+                                   destinationFontName <> CStr(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) Then
+                                    listTextRange.Font.Name = destinationFontName
+                                    listTextRange.Font.NameAscii = destinationFontName
+                                    listTextRange.Font.NameOther = destinationFontName
+                                    listTextRange.Font.NameFarEast = destinationFontName
+                                    listTextRange.Font.NameBi = destinationFontName
+                                End If
+                                If destinationFontSize > 0.0F AndAlso destinationFontSize < 1000.0F Then
+                                    listTextRange.Font.Size = destinationFontSize
+                                End If
+                            End If
+
+                        Catch exFontRestore As System.Exception
+                            System.Diagnostics.Debug.WriteLine(
+                                "HTML list reconciliation: could not restore destination base font after native list repair: " &
+                                exFontRestore.Message)
+                        End Try
+
                         If Not WordListFormatMatchesHtmlKind(paragraphRange.ListFormat, desiredOrdered) OrElse
                            paragraphRange.ListFormat.ListLevelNumber <> targetLevelNumber Then
                             Throw New System.Exception(
@@ -1718,6 +1849,115 @@ Namespace SharedLibrary
         End Sub
 
 
+        Private Shared Function IsWordStructuralFormattingCharacter(ByVal character As System.Char) As System.Boolean
+            Select Case Microsoft.VisualBasic.Strings.AscW(character)
+                Case 7, 10, 11, 12, 13
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function FindConcreteFormattingCharacter(
+            ByVal candidateRange As Microsoft.Office.Interop.Word.Range,
+            ByVal searchForward As System.Boolean
+        ) As Microsoft.Office.Interop.Word.Range
+
+            If candidateRange Is Nothing OrElse candidateRange.End <= candidateRange.Start Then Return Nothing
+
+            Dim candidateText As System.String = If(candidateRange.Text, System.String.Empty)
+            If candidateText.Length = 0 Then Return Nothing
+
+            If searchForward Then
+                For characterIndex As System.Int32 = 0 To candidateText.Length - 1
+                    If IsWordStructuralFormattingCharacter(candidateText(characterIndex)) Then Continue For
+
+                    Dim characterStart As System.Int32 = candidateRange.Start + characterIndex
+                    If characterStart >= candidateRange.End Then Exit For
+                    Dim result As Microsoft.Office.Interop.Word.Range = candidateRange.Duplicate()
+                    result.SetRange(characterStart, System.Math.Min(characterStart + 1, candidateRange.End))
+                    Return result
+                Next
+            Else
+                For characterIndex As System.Int32 = candidateText.Length - 1 To 0 Step -1
+                    If IsWordStructuralFormattingCharacter(candidateText(characterIndex)) Then Continue For
+
+                    Dim characterStart As System.Int32 = candidateRange.Start + characterIndex
+                    If characterStart >= candidateRange.End Then Continue For
+                    Dim result As Microsoft.Office.Interop.Word.Range = candidateRange.Duplicate()
+                    result.SetRange(characterStart, System.Math.Min(characterStart + 1, candidateRange.End))
+                    Return result
+                Next
+            End If
+
+            Return Nothing
+        End Function
+
+        ''' <summary>
+        ''' Resolves a real text character for destination font inheritance. Paragraph marks,
+        ''' table-cell end markers and line-break control characters are never used as the font
+        ''' authority because Word/Outlook can expose host-default formatting on those markers.
+        ''' </summary>
+        Private Shared Function ResolveWordFormattingSourceRange(
+            ByVal targetRange As Microsoft.Office.Interop.Word.Range,
+            ByRef inheritInlineEmphasis As System.Boolean
+        ) As Microsoft.Office.Interop.Word.Range
+
+            inheritInlineEmphasis = True
+            If targetRange Is Nothing Then Return Nothing
+
+            If targetRange.End > targetRange.Start Then
+                Dim insideTarget As Microsoft.Office.Interop.Word.Range =
+                    FindConcreteFormattingCharacter(targetRange, searchForward:=True)
+                If insideTarget IsNot Nothing Then Return insideTarget
+
+                ' A non-empty selection containing only structural characters is typical for
+                ' Outlook InsertAfter (the two temporary paragraph marks). In that case inherit
+                ' the surrounding base font, but do not promote incidental bold/italic from the
+                ' adjacent run to the entire inserted block.
+                inheritInlineEmphasis = False
+            End If
+
+            Dim document As Microsoft.Office.Interop.Word.Document = targetRange.Document
+            If document Is Nothing Then Return targetRange.Duplicate()
+
+            Dim documentStart As System.Int32 = document.Content.Start
+            Dim documentEnd As System.Int32 = document.Content.End
+            Const probeWindow As System.Int32 = 4096
+
+            If targetRange.Start > documentStart Then
+                Dim beforeStart As System.Int32 = System.Math.Max(documentStart, targetRange.Start - probeWindow)
+                Dim beforeRange As Microsoft.Office.Interop.Word.Range = document.Content.Duplicate()
+                beforeRange.SetRange(beforeStart, targetRange.Start)
+                Dim beforeCharacter As Microsoft.Office.Interop.Word.Range =
+                    FindConcreteFormattingCharacter(beforeRange, searchForward:=False)
+                If beforeCharacter IsNot Nothing Then Return beforeCharacter
+            End If
+
+            If targetRange.End < documentEnd Then
+                Dim afterEnd As System.Int32 = System.Math.Min(documentEnd, targetRange.End + probeWindow)
+                Dim afterRange As Microsoft.Office.Interop.Word.Range = document.Content.Duplicate()
+                afterRange.SetRange(targetRange.End, afterEnd)
+                Dim afterCharacter As Microsoft.Office.Interop.Word.Range =
+                    FindConcreteFormattingCharacter(afterRange, searchForward:=True)
+                If afterCharacter IsNot Nothing Then Return afterCharacter
+            End If
+
+            ' Controlled fallback: preserve the previous behavior only when no real text
+            ' character exists nearby (for example in a completely empty document).
+            Dim fallbackRange As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate()
+            If fallbackRange.Start = fallbackRange.End Then
+                If fallbackRange.Start > documentStart Then
+                    fallbackRange.SetRange(fallbackRange.Start - 1, fallbackRange.Start)
+                ElseIf fallbackRange.End < documentEnd Then
+                    fallbackRange.SetRange(fallbackRange.Start, fallbackRange.Start + 1)
+                End If
+            ElseIf fallbackRange.Start < fallbackRange.End Then
+                fallbackRange.SetRange(fallbackRange.Start, fallbackRange.Start + 1)
+            End If
+            Return fallbackRange
+        End Function
+
         ''' <summary>
         ''' Inserts HTML-formatted content into a Word range using CF_HTML clipboard formatting and Word paste APIs.
         ''' </summary>
@@ -1730,7 +1970,8 @@ Namespace SharedLibrary
                                                ReplaceSelection As Boolean,
                                                Optional NoTrailingCR As Boolean = False,
                                                Optional UseHostDefaultFontColor As Boolean = False,
-                                               Optional PreserveDestinationParagraphFormatting As Boolean = False)
+                                               Optional PreserveDestinationParagraphFormatting As Boolean = False,
+                                               Optional FormattingSourceRange As Microsoft.Office.Interop.Word.Range = Nothing)
             Try
                 If formattedText Is Nothing OrElse formattedText.Trim() = "" Then
                     Return
@@ -1819,41 +2060,45 @@ Namespace SharedLibrary
 
                 formattedText = doc.DocumentNode.OuterHtml
 
-                ' --- 2) Read font and paragraph properties from a concrete character of the range ---
-                '     Two distinct cases must be handled:
-                '     * Non-empty selection (about to be replaced): read the FIRST character of the
-                '       selection (forward), matching the text that will be overwritten.
-                '     * Collapsed insertion point (e.g. a follow-up pipeline round continuing on the
-                '       same line): reading the character AFTER the cursor would pick up the trailing
-                '       paragraph mark / default run (often Times New Roman) instead of the preceding
-                '       text just inserted. Read the character BEFORE the cursor so the continuation
-                '       inherits the font of the text it follows (e.g. Aptos).
-                Dim fontSourceRange As Microsoft.Office.Interop.Word.Range = range.Duplicate()
-                If fontSourceRange.Start = fontSourceRange.End Then
-                    ' Collapsed: prefer the character before the cursor; fall back to the one after.
-                    If fontSourceRange.Start > 0 Then
-                        fontSourceRange.SetRange(fontSourceRange.Start - 1, fontSourceRange.Start)
-                    Else
-                        fontSourceRange.SetRange(fontSourceRange.Start, fontSourceRange.Start + 1)
-                    End If
-                ElseIf fontSourceRange.Characters.Count > 0 Then
-                    ' Non-empty selection: read from the first concrete character.
-                    fontSourceRange.SetRange(fontSourceRange.Start, fontSourceRange.Start + 1)
+                ' --- 2) Read font and paragraph properties from a real text character. ---
+                '     Structural characters such as paragraph marks are not formatting authorities:
+                '     Outlook can expose the host default (for example Aptos) on a newly inserted
+                '     paragraph mark even when the surrounding mail text is Verdana.
+                Dim inheritInlineEmphasis As System.Boolean = True
+                Dim fontSourceRange As Microsoft.Office.Interop.Word.Range = Nothing
+
+                If FormattingSourceRange IsNot Nothing Then
+                    ' A caller that creates a temporary insertion range can provide the actual
+                    ' formatting authority from before that structural edit. This is important for
+                    ' Outlook InsertAfter: searching around the temporary paragraph marks can reach
+                    ' unrelated text below the insertion point and inherit its font/size.
+                    fontSourceRange = FormattingSourceRange.Duplicate()
+                    inheritInlineEmphasis = False
+                Else
+                    fontSourceRange = ResolveWordFormattingSourceRange(range, inheritInlineEmphasis)
+                End If
+
+                If fontSourceRange Is Nothing Then
+                    fontSourceRange = range.Duplicate()
                 End If
 
                 Dim fontName As String = fontSourceRange.Font.Name
                 Dim fontSize As Single = fontSourceRange.Font.Size
-                Dim isBold As Boolean = (fontSourceRange.Font.Bold = 1)
-                Dim isItalic As Boolean = (fontSourceRange.Font.Italic = 1)
+                Dim isBold As Boolean = inheritInlineEmphasis AndAlso (fontSourceRange.Font.Bold = 1)
+                Dim isItalic As Boolean = inheritInlineEmphasis AndAlso (fontSourceRange.Font.Italic = 1)
                 Dim fontColor As Integer = fontSourceRange.Font.Color
                 Dim hexColor As String = String.Empty
 
-                ' Guard against ambiguous values (9999999 = mixed formatting in selection)
+                ' Guard against ambiguous values (9999999 = mixed formatting in selection).
                 If fontSize <= 0 OrElse fontSize > 1000 Then fontSize = 11.0F
                 If fontName Is Nothing OrElse fontName = "" Then fontName = "Calibri"
 
-                If Not UseHostDefaultFontColor Then
-                    ' Convert Word BGR color to RGB hex string
+                Dim applyFontColor As System.Boolean =
+                    Not UseHostDefaultFontColor AndAlso
+                    fontColor <> CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined)
+
+                If applyFontColor Then
+                    ' Convert Word BGR color to RGB hex string.
                     Dim bgr As Integer = fontColor And &HFFFFFF
                     Dim r As Integer = (bgr And &HFF)
                     Dim g As Integer = ((bgr >> 8) And &HFF)
@@ -1886,7 +2131,7 @@ Namespace SharedLibrary
 
                 ' --- 3) Build CSS strings ---
                 Dim cssBody As String = $"font-family:'{fontName}'; line-height:{lineHeightCss};"
-                If Not UseHostDefaultFontColor Then
+                If applyFontColor Then
                     cssBody &= $" color:{hexColor};"
                 End If
                 Dim cssPara As String = cssBody & $" font-size:{fontSize}pt; margin-top:{spaceBefore}pt; margin-bottom:{spaceAfter}pt;"
@@ -2099,7 +2344,9 @@ Namespace SharedLibrary
 
                             ReconcileHtmlListsAfterWordPaste(
                                 insertedListRange,
-                                listImportDescriptors)
+                                listImportDescriptors,
+                                fontName,
+                                fontSize)
                         End If
                     Catch exListRepair As System.Exception
                         System.Diagnostics.Debug.WriteLine(
@@ -2192,7 +2439,7 @@ Namespace SharedLibrary
 
             Catch ex As System.Exception
                 If PreserveDestinationParagraphFormatting Then Throw
-                System.Windows.Forms.MessageBox.Show("InsertTextWithFormat Error: " & ex.Message)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("InsertTextWithFormat Error: " & ex.Message)
             End Try
         End Sub
 
@@ -2493,7 +2740,7 @@ Namespace SharedLibrary
                     End If
                 Next
             Catch ex As System.Exception
-                System.Windows.Forms.MessageBox.Show("RemoveTrailingCr Error: " & ex.Message)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("RemoveTrailingCr Error: " & ex.Message)
             End Try
         End Sub
 
@@ -2920,13 +3167,21 @@ Namespace SharedLibrary
         ''' Works both in Word and in an Outlook mail editor that uses WordEditor.
         ''' </summary>
         Public Shared Sub ResetSelectedTextParagraphSpacing()
+            Dim selection As Microsoft.Office.Interop.Word.Selection = TryGetActiveWordSelection()
+
+            If selection Is Nothing Then
+                selection = TryGetActiveOutlookEditorSelection()
+            End If
+
+            ResetSelectedTextParagraphSpacing(selection)
+        End Sub
+
+        ''' <summary>
+        ''' Resets paragraph spacing for the supplied Word selection. The host passes its
+        ''' actual selection explicitly so Word and Outlook WordEditor ranges cannot be mixed.
+        ''' </summary>
+        Public Shared Sub ResetSelectedTextParagraphSpacing(ByVal selection As Microsoft.Office.Interop.Word.Selection)
             Try
-                Dim selection As Microsoft.Office.Interop.Word.Selection = TryGetActiveOutlookEditorSelection()
-
-                If selection Is Nothing Then
-                    selection = TryGetActiveWordSelection()
-                End If
-
                 If selection Is Nothing OrElse selection.Range Is Nothing Then
                     Return
                 End If
@@ -2939,19 +3194,16 @@ Namespace SharedLibrary
                     Return
                 End If
 
-                For Each para As Microsoft.Office.Interop.Word.Paragraph In selection.Range.Paragraphs
-                    para.SpaceBeforeAuto = 0
-                    para.SpaceAfterAuto = 0
-                    para.SpaceBefore = 0.0F
-                    para.SpaceAfter = 0.0F
-                    para.LineSpacingRule = Microsoft.Office.Interop.Word.WdLineSpacing.wdLineSpaceSingle
-                    para.LineSpacing = selection.Application.LinesToPoints(1.0F)
-                Next
+                Dim paragraphFormat As Microsoft.Office.Interop.Word.ParagraphFormat = selection.Range.ParagraphFormat
+                paragraphFormat.SpaceBeforeAuto = 0
+                paragraphFormat.SpaceAfterAuto = 0
+                paragraphFormat.SpaceBefore = 0.0F
+                paragraphFormat.SpaceAfter = 0.0F
+                paragraphFormat.LineSpacingRule = Microsoft.Office.Interop.Word.WdLineSpacing.wdLineSpaceSingle
             Catch ex As System.Exception
-                System.Windows.Forms.MessageBox.Show("ResetSelectedTextParagraphSpacing Error: " & ex.Message)
+                ShowCustomMessageBox("ResetSelectedTextParagraphSpacing Error: " & ex.Message, "Error")
             End Try
         End Sub
-
         ''' <summary>
         ''' Returns the active selection from an Outlook compose inspector's WordEditor, if available.
         ''' Uses reflection so SharedLibrary does not take a direct dependency on Outlook interop.

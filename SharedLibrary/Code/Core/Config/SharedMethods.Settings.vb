@@ -526,7 +526,7 @@ Namespace SharedLibrary
                                                            Dim boolValue As Boolean = DirectCast(control, System.Windows.Forms.CheckBox).Checked
                                                            SetSettingValue(settingKey, boolValue.ToString(), CapturedContext)
                                                        Else
-                                                           MessageBox.Show($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (Switch).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                                           Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (Switch).", "Error")
                                                        End If
                                                    Next
                                                    SwitchModels(CapturedContext)
@@ -586,7 +586,7 @@ Namespace SharedLibrary
                                                            Dim boolValue As Boolean = DirectCast(control, System.Windows.Forms.CheckBox).Checked
                                                            SetSettingValue(settingKey, boolValue.ToString(), CapturedContext)
                                                        Else
-                                                           MessageBox.Show($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (Save).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                                           Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (Save).", "Error")
                                                        End If
                                                    Next
 
@@ -708,7 +708,7 @@ Namespace SharedLibrary
                                                    Dim boolValue As Boolean = DirectCast(control, System.Windows.Forms.CheckBox).Checked
                                                    SetSettingValue(settingKey, boolValue.ToString(), CapturedContext)
                                                Else
-                                                   MessageBox.Show($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (OK).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                                   Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (OK).", "Error")
                                                End If
                                            Next
 
@@ -2546,7 +2546,7 @@ Namespace SharedLibrary
                     context.SP_Assemble_Summarize = value
 
                 Case Else
-                    MessageBox.Show($"Error in SetSettingValue - could not save the value for '{settingName}'.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in SetSettingValue - could not save the value for '{settingName}'.", "Error")
             End Select
 
             If context.INI_PromptLibPath.Trim() = "" And context.INI_PromptLibPathLocal.Trim() = "" Then context.INI_PromptLib = False Else context.INI_PromptLib = True
