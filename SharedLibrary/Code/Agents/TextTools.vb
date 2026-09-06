@@ -44,6 +44,9 @@ Namespace Agents
                 Case ToolRead, ToolWrite, ToolSearch
                     Return True
                 Case Else
+                    If IsAnalyzeTextTool(name) Then
+                        Return True
+                    End If
                     Return IsExtendedTextTool(name)
             End Select
         End Function
@@ -55,6 +58,7 @@ Namespace Agents
                 BuildSearch()
             }
 
+            tools.AddRange(BuildAnalyzeTools())
             tools.AddRange(BuildExtendedTools())
             Return tools
         End Function
@@ -81,6 +85,13 @@ Namespace Agents
                         Return ExecuteSearch(arguments)
 
                     Case Else
+                        Dim analyzeResult As String =
+                            Await ExecuteAnalyzeAsync(toolName, arguments, context, cancellationToken).ConfigureAwait(False)
+
+                        If analyzeResult IsNot Nothing Then
+                            Return analyzeResult
+                        End If
+
                         Dim extendedResult As String =
                             Await ExecuteExtendedAsync(toolName, arguments, context, cancellationToken).ConfigureAwait(False)
 

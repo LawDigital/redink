@@ -688,6 +688,20 @@ Namespace Agents
         End Sub
 
         ''' <summary>
+        ''' Clears the bounded Python repair-attempt history for one explicit host-level full recovery re-plan.
+        ''' Successful observable-output memory is intentionally preserved by ResetSession so the redundant-
+        ''' success guard still prevents re-verifying an already produced identical result.
+        ''' </summary>
+        Public Shared Sub ResetForFullRecovery(sessionKey As System.Object)
+            Try
+                Dim session As PythonExecuteRepairSession = GetOrCreateSession(sessionKey)
+                ResetSession(session)
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            End Try
+        End Sub
+
+        ''' <summary>
         ''' Computes a stable signature of a successful run's observable output: the published result plus the
         ''' set of output-file names, byte counts and (when present) hashes. Returns an empty string when the run
         ''' produced no observable output at all, so a result-less run is never treated as a reproducible result.
@@ -852,7 +866,9 @@ Namespace Agents
             Select Case code
                 Case "PYTHON_SYNTAX_ERROR", "PYTHON_NAME_ERROR", "PYTHON_IMPORT_ERROR",
                      "PYTHON_ATTRIBUTE_ERROR", "PYTHON_TYPE_ERROR", "PYTHON_VALUE_ERROR",
-                     "PYTHON_KEY_ERROR", "PYTHON_INDEX_ERROR", "TASK_POSTCONDITION_FAILED"
+                     "PYTHON_KEY_ERROR", "PYTHON_INDEX_ERROR", "TASK_POSTCONDITION_FAILED",
+                     "OUTPUT_VALIDATION_FAILED", "ARTIFACT_REQUIRED_EFFECT_NOT_VERIFIED",
+                     "EXPLICIT_ARTIFACT_OUTPUT_COUNT_MISMATCH"
                     Return True
                 Case Else
                     Return False
@@ -954,62 +970,22 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Capability-driven, tool-agnostic check: returns True when the currently executing tool is a fallback
-        ''' strategy (IsFallbackStrategy) and at least one OTHER selected non-fallback tool declares an overlapping
-        ''' CapabilityTags entry. Contains no host- or tool-name logic. Used by hosts to decide whether a failed
-        ''' fallback execution should be re-routed to a specialized alternative instead of repaired in place.
+        ''' Compatibility hook retained for older host call sites. Specialized tools may be
+        ''' preferred for efficiency, but the presence of an overlapping non-fallback tool
+        ''' must never make python_execute unavailable or bypass its normal repair path.
         ''' </summary>
         Public Shared Function HasCapableNonFallbackAlternative(
             selectedTools As System.Collections.Generic.IEnumerable(Of ModelConfig),
             currentToolName As System.String
         ) As System.Boolean
 
-            If selectedTools Is Nothing OrElse System.String.IsNullOrWhiteSpace(currentToolName) Then Return False
-
-            Dim current As ModelConfig = Nothing
-            For Each tool As ModelConfig In selectedTools
-                If tool IsNot Nothing AndAlso
-                   System.String.Equals(tool.ToolName, currentToolName, System.StringComparison.OrdinalIgnoreCase) Then
-                    current = tool
-                    Exit For
-                End If
-            Next
-
-            If current Is Nothing OrElse Not current.IsFallbackStrategy Then Return False
-
-            Dim currentTags As System.Collections.Generic.HashSet(Of System.String) = ParseCapabilityTags(current.CapabilityTags)
-            If currentTags.Count = 0 Then Return False
-
-            For Each tool As ModelConfig In selectedTools
-                If tool Is Nothing Then Continue For
-                If tool.IsFallbackStrategy Then Continue For
-                If System.String.Equals(tool.ToolName, currentToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
-                For Each tag As System.String In ParseCapabilityTags(tool.CapabilityTags)
-                    If currentTags.Contains(tag) Then Return True
-                Next
-            Next
-
             Return False
         End Function
 
-        Private Shared Function ParseCapabilityTags(tags As System.String) As System.Collections.Generic.HashSet(Of System.String)
-            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
-            If System.String.IsNullOrWhiteSpace(tags) Then Return result
-            For Each part As System.String In tags.Split(New System.Char() {","c, ";"c, " "c}, System.StringSplitOptions.RemoveEmptyEntries)
-                Dim trimmed As System.String = part.Trim()
-                If trimmed.Length > 0 Then result.Add(trimmed)
-            Next
-            Return result
-        End Function
-
         ''' <summary>
-        ''' First-failure reroute gate for a fallback tool. When <paramref name="alternativesAvailable"/> is True
-        ''' and this is the first (not yet offered) deterministic/unknown failure of the fallback in the current
-        ''' task, emits a synthetic non-repairable payload advising the model to re-evaluate routing and prefer the
-        ''' specialized alternative, and returns True. It deliberately does NOT enter the code-repair loop. It marks
-        ''' the session so any subsequent failure of the same fallback is treated as a genuine repair (the
-        ''' alternative could not perform the operation). Transient and fatal outcomes are never rerouted. Never
-        ''' throws; on any problem it returns False so normal repair handling proceeds. Fully tool-agnostic.
+        ''' Compatibility hook retained for older host call sites. Hard rerouting away from
+        ''' python_execute is disabled: callers must use the normal repair/re-plan loop so
+        ''' Python remains an authorized alternative even when a specialized tool exists.
         ''' </summary>
         Public Shared Function TryBuildRerouteInsteadOfRepairPayload(
             sessionKey As System.Object,
@@ -1022,71 +998,7 @@ Namespace Agents
 
             reroutePayload = System.String.Empty
             rerouteReason = System.String.Empty
-
-            If Not alternativesAvailable Then Return False
-            If System.String.IsNullOrWhiteSpace(failedPayloadJson) Then Return False
-
-            Try
-                Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(failedPayloadJson)
-
-                ' Only genuine execution failures are rerouted; never a success.
-                If System.String.Equals(ReadString(payload("status")), "success", System.StringComparison.Ordinal) Then
-                    Return False
-                End If
-
-                Dim errorObj As Newtonsoft.Json.Linq.JObject = TryCast(payload("error"), Newtonsoft.Json.Linq.JObject)
-                Dim code As System.String = If(errorObj Is Nothing, System.String.Empty, ReadString(errorObj("code")))
-
-                ' Fatal outcomes go to the abort path; transient outcomes are a genuine unchanged retry, not a
-                ' routing problem. Neither should be rerouted.
-                If IsFatalCode(code) OrElse IsTransientCode(code) Then Return False
-
-                Dim session As PythonExecuteRepairSession = GetOrCreateSession(sessionKey)
-
-                ' Only the FIRST failure reroutes. If a reroute was already offered, the alternative was evidently
-                ' unable to perform the operation, so let the normal repair loop take over.
-                If session.RerouteToAlternativeOffered Then Return False
-                If session.Attempts.Count > 0 Then Return False
-
-                session.RerouteToAlternativeOffered = True
-
-                rerouteReason =
-                    "The previous python_execute call was a fallback execution and it failed on its first attempt, while a specialized tool that can perform this operation directly is available in this session. Do not enter a code-repair loop for the fallback. Re-evaluate routing and prefer the specialized tool. Use python_execute again only if the specialized tool genuinely cannot perform the required operation."
-
-                Dim advisorObj As New Newtonsoft.Json.Linq.JObject(
-                    New Newtonsoft.Json.Linq.JProperty("classification", "REROUTE_TO_ALTERNATIVE"),
-                    New Newtonsoft.Json.Linq.JProperty("reroute_to_alternative", True),
-                    New Newtonsoft.Json.Linq.JProperty("worker_invoked", True),
-                    New Newtonsoft.Json.Linq.JProperty("guidance", rerouteReason))
-
-                Dim newErrorObj As New Newtonsoft.Json.Linq.JObject(
-                    New Newtonsoft.Json.Linq.JProperty("code", "REROUTE_TO_ALTERNATIVE"),
-                    New Newtonsoft.Json.Linq.JProperty("phase", "routing"),
-                    New Newtonsoft.Json.Linq.JProperty("retryable", False),
-                    New Newtonsoft.Json.Linq.JProperty("repairable", False),
-                    New Newtonsoft.Json.Linq.JProperty("source", Newtonsoft.Json.Linq.JValue.CreateNull()),
-                    New Newtonsoft.Json.Linq.JProperty("message", "python_execute is a fallback here and failed on its first attempt; a specialized tool for this operation is available. Not entering the Python repair loop."),
-                    New Newtonsoft.Json.Linq.JProperty("advisor", advisorObj))
-
-                Dim reroute As New Newtonsoft.Json.Linq.JObject(
-                    New Newtonsoft.Json.Linq.JProperty("status", "failed"),
-                    New Newtonsoft.Json.Linq.JProperty("exit_code", 1),
-                    New Newtonsoft.Json.Linq.JProperty("duration_ms", 0),
-                    New Newtonsoft.Json.Linq.JProperty("diagnostic_id", System.Guid.NewGuid().ToString("D")),
-                    New Newtonsoft.Json.Linq.JProperty("human_log_available", False),
-                    New Newtonsoft.Json.Linq.JProperty("result", Newtonsoft.Json.Linq.JValue.CreateNull()),
-                    New Newtonsoft.Json.Linq.JProperty("output_files", New Newtonsoft.Json.Linq.JArray()),
-                    New Newtonsoft.Json.Linq.JProperty("error", newErrorObj))
-
-                reroutePayload = reroute.ToString(Newtonsoft.Json.Formatting.None)
-                Return True
-
-            Catch ex As System.Exception
-                System.Diagnostics.Trace.WriteLine(ex.ToString())
-                reroutePayload = System.String.Empty
-                rerouteReason = System.String.Empty
-                Return False
-            End Try
+            Return False
         End Function
 
         ''' <summary>

@@ -879,7 +879,7 @@ Public Class Ribbon1
     End Sub
 
     Private Sub RunResetSpacingCommand()
-        ExecuteLoggedCommand("ResetSpacing_Word invoked", Sub() SharedMethods.ResetSelectedTextParagraphSpacing())
+        ExecuteLoggedCommand("ResetSpacing_Word invoked", Sub() SharedMethods.ResetSelectedTextParagraphSpacing(Globals.ThisAddIn.Application.Selection))
     End Sub
 
     Private Sub RunFindHiddenCommand()

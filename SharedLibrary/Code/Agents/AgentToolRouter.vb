@@ -101,6 +101,18 @@ Namespace Agents
                 Dim ctxBlob As String =
                     GetStr(arguments, "context")
 
+                Dim canonicalSourceResultRefs As IReadOnlyList(Of String) =
+                    ParseCanonicalSourceResultRefs(arguments)
+
+                If canonicalSourceResultRefs Is Nothing Then
+                    Return "{""summary"":""Sub-agent invocation rejected.""," &
+                           """result"":null," &
+                           """resultKind"":""error""," &
+                           """error"":{""code"":""invalid_canonical_source_result_refs""," &
+                           """phase"":""agent_router_validation""," &
+                           """message"":""canonical_source_result_refs must be an array of non-empty result_ref strings when supplied.""}}"
+                End If
+
                 Dim subAgentTaskId As String =
                     GetStr(arguments, "subagent_task_id").Trim()
 
@@ -185,7 +197,8 @@ Namespace Agents
                     storeResultInMemory:=True,
                     subAgentTaskId:=subAgentTaskId,
                     cancellationToken:=cancellationToken,
-                    expectedArtifactsJson:=expectedArtifactsJson).
+                    expectedArtifactsJson:=expectedArtifactsJson,
+                    canonicalSourceResultRefs:=canonicalSourceResultRefs).
                     ConfigureAwait(False)
             End If
 
@@ -211,6 +224,48 @@ Namespace Agents
 
 
 
+
+        Private Shared Function ParseCanonicalSourceResultRefs(args As IDictionary(Of String, Object)) As IReadOnlyList(Of String)
+            Dim result As New List(Of String)()
+            If args Is Nothing Then Return result.AsReadOnly()
+
+            Dim raw As Object = Nothing
+            If Not args.TryGetValue("canonical_source_result_refs", raw) OrElse raw Is Nothing Then
+                Return result.AsReadOnly()
+            End If
+
+            Dim token As Newtonsoft.Json.Linq.JToken = Nothing
+            Try
+                token = Newtonsoft.Json.Linq.JToken.FromObject(raw)
+            Catch
+                Return Nothing
+            End Try
+
+            If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+                Return Nothing
+            End If
+
+            Dim seen As New HashSet(Of String)(StringComparer.Ordinal)
+            For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+                If item Is Nothing OrElse item.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                    Return Nothing
+                End If
+
+                Dim value As String = If(item.ToObject(Of String)(), "").Trim()
+                If value = "" Then Return Nothing
+
+                Dim stored As ToolResultStore.StoredResult = Nothing
+                If Not ToolResultStore.TryGet(value, stored) OrElse stored Is Nothing Then
+                    Return Nothing
+                End If
+
+                If seen.Add(value) Then
+                    result.Add(value)
+                End If
+            Next
+
+            Return result.AsReadOnly()
+        End Function
 
         Private Shared Function GetStr(args As IDictionary(Of String, Object), name As String) As String
             If args Is Nothing Then Return ""

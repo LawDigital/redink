@@ -89,6 +89,12 @@ Namespace SharedLibrary
         ' specialized alternatives that provide the same capability; never contains host- or tool-name logic.
         Public Property CapabilityTags As String = ""
 
+        ' Host-authored, capability-level evidence emitted after a successful tool call.
+        ' Values are comma/semicolon/space separated opaque effect identifiers such as
+        ' "content_mutated". The orchestrator never infers these effects from tool names.
+        ' A tool should declare only effects that its success result proves deterministically.
+        Public Property VerifiedArtifactEffects As String = ""
+
         Public Function Clone() As ModelConfig
             Return DirectCast(Me.MemberwiseClone(), ModelConfig)
         End Function

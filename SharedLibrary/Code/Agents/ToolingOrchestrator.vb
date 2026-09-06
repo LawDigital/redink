@@ -135,9 +135,9 @@ Namespace Agents
             ' (d) Deliverable-existence gate. Applies to COMPLETE finals:
             '     if the request requires a created deliverable, the host must possess a
             '     validated (on-disk) final artifact. A 'complete' claim without a real,
-            '     existing file is rejected and repaired. This is bounded by the host's
-            '     continuation-retry budget, so a genuinely un-registerable deliverable
-            '     still finalizes after the budget is exhausted (no hard deadlock).
+            '     existing file is rejected and repaired. The host keeps this as a hard
+            '     completion postcondition: after ordinary repairs it performs one bounded
+            '     full recovery re-plan, then returns blocked rather than accepting a false complete.
             If parsed.Kind = TaskStatusKind.Complete _
                AndAlso requestRequiresCreatedDeliverable _
                AndAlso Not hasValidatedFinalDeliverable Then
@@ -167,6 +167,48 @@ Namespace Agents
                 Next
             End If
             sb.AppendLine("If the deliverable genuinely cannot be created, declare 'blocked' with a short reason instead of 'complete', and do not announce future work.")
+            Return sb.ToString().TrimEnd()
+        End Function
+
+        ''' <summary>
+        ''' Builds the single bounded full-recovery prompt used after the ordinary final-turn repair
+        ''' budget is exhausted. Existing verified side effects and registered artifacts are preserved;
+        ''' only the planning path is restarted.
+        ''' </summary>
+        Public Function BuildFinalizationRecoveryRestartPrompt(reason As String, previousGuardPrompt As String) As String
+            Dim sb As New StringBuilder()
+            sb.AppendLine("HOST FINALIZATION RECOVERY RESTART: The previous completion attempts exhausted the ordinary repair budget, but a hard completion postcondition is still not satisfied.")
+            If Not String.IsNullOrWhiteSpace(reason) Then sb.AppendLine("Unresolved postcondition: " & reason.Trim())
+            sb.AppendLine("Re-plan the remaining work from the ORIGINAL user request and the CURRENT verified runtime state.")
+            sb.AppendLine("Preserve and reuse every successful, verified side effect and current artifact. Do NOT repeat successful or irreversible actions merely to start over.")
+            sb.AppendLine("Choose a materially different authorized execution path for the unresolved part. Specialized tools are efficiency preferences only: if python_execute or js_run is exposed and better suited, it remains fully authorized even when a specialized tool exists or has already been tried.")
+            sb.AppendLine("Do not finalize as complete until the failed postcondition is actually satisfied. If no safe completion path remains after this recovery pass, return blocked with the concrete reason and no promise of future work.")
+            If Not String.IsNullOrWhiteSpace(previousGuardPrompt) Then
+                sb.AppendLine("The specific gate guidance remains binding:")
+                sb.AppendLine(previousGuardPrompt.Trim())
+            End If
+            Return sb.ToString().TrimEnd()
+        End Function
+
+        ''' <summary>
+        ''' Builds the bounded full-recovery prompt used after a concrete tool has exhausted its own
+        ''' repair/circuit-breaker budget. The failed call is not replayed automatically; planning restarts
+        ''' against the current verified state with every still-authorized tool remaining available.
+        ''' </summary>
+        Public Function BuildTerminalToolRecoveryRestartPrompt(failedToolName As System.String,
+                                                               reason As System.String) As System.String
+            Dim sb As New System.Text.StringBuilder()
+            sb.AppendLine("HOST TOOL-PATH RECOVERY RESTART: A concrete tool path exhausted its normal repair/circuit-breaker budget, but the overall user task is not yet allowed to stop solely for that reason.")
+            If Not System.String.IsNullOrWhiteSpace(failedToolName) Then
+                sb.AppendLine("Failed tool path: " & failedToolName.Trim())
+            End If
+            If Not System.String.IsNullOrWhiteSpace(reason) Then
+                sb.AppendLine("Observed terminal reason: " & reason.Trim())
+            End If
+            sb.AppendLine("Re-plan the REMAINING work from the ORIGINAL user request and the CURRENT verified runtime state. Preserve successful mutations, verified facts, checkpoints, and registered artifacts; do not replay successful or irreversible operations.")
+            sb.AppendLine("Do not resubmit the same disproven call unchanged. Fix the root cause or choose a materially different authorized path.")
+            sb.AppendLine("Specialized/native tools are efficiency preferences, never exclusivity rules. If python_execute or js_run is exposed, either remains fully authorized as an alternative or recovery path even when a specialized tool exists or failed. Likewise, a specialized tool may replace a failing sandbox path when it can actually satisfy the operation.")
+            sb.AppendLine("Continue using tools while a safe authorized path remains. Only return blocked when the task truly depends on missing user information, an unavailable capability, or another concrete condition that cannot be resolved in this run. Never claim complete while a required postcondition or deliverable remains unsatisfied.")
             Return sb.ToString().TrimEnd()
         End Function
 

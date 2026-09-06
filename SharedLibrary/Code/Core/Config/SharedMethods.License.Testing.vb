@@ -138,7 +138,7 @@ Namespace SharedLibrary
                                       Try
                                           action()
                                       Catch ex As Exception
-                                          MessageBox.Show($"Error: {ex.Message}", "Test Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                          Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error: {ex.Message}", "Test Error")
                                       End Try
                                   End Sub
             panel.Controls.Add(btn)
@@ -184,9 +184,12 @@ Namespace SharedLibrary
         End Sub
 
         Private Shared Sub TestClearAllData(lbl As Label)
-            Dim result = MessageBox.Show("This will clear ALL license data. Continue?",
-                                          "Confirm Clear", MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
-            If result = DialogResult.Yes Then
+            Dim result As System.Int32 = Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomYesNoBox(
+                "This will clear ALL license data. Continue?",
+                "Yes",
+                "No",
+                "Confirm Clear")
+            If result = 1 Then
                 ClearStoredLicense()
                 LogLicenseEvent("TEST", "All license data cleared", alwaysLog:=True)
                 lbl.Text = "All license data cleared"
@@ -826,7 +829,7 @@ Namespace SharedLibrary
                 AddHandler btnCopy.Click, Sub()
                                               Try
                                                   Clipboard.SetText(content)
-                                                  MessageBox.Show("Copied!", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information)
+                                                  Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Copied!", "Info")
                                               Catch
                                               End Try
                                           End Sub

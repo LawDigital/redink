@@ -179,16 +179,47 @@ Partial Public Class ThisAddIn
                     GoTo __AfterDispatch
                 End If
 
-                Dim extracted As String = ""
+                Dim fullText As String = ""
+                Dim extractionRef As String = ""
                 Try
-                    extracted = Await GetFileContent(fullPath, Silent:=True, DoOCR:=True, AskUser:=False)
-                Catch ex As Exception
+                    cancellationToken.ThrowIfCancellationRequested()
+
+                    Dim cachedRef As String = ""
+                    Dim cachedResult As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+                    If context.WorkspaceExtractionRefs IsNot Nothing AndAlso
+                       context.WorkspaceExtractionRefs.TryGetValue(fullPath, cachedRef) AndAlso
+                       SharedLibrary.Agents.ToolResultStore.TryGet(cachedRef, cachedResult) Then
+                        fullText = If(cachedResult.FullContent, "")
+                        extractionRef = cachedRef
+                    Else
+                        Dim extractionTask As System.Threading.Tasks.Task(Of String) =
+                            System.Threading.Tasks.Task.Run(
+                                Async Function() As System.Threading.Tasks.Task(Of String)
+                                    Return Await GetFileContent(
+                                        fullPath,
+                                        Silent:=True,
+                                        DoOCR:=True,
+                                        AskUser:=False,
+                                        CancellationToken:=cancellationToken).ConfigureAwait(False)
+                                End Function)
+
+                        fullText = If(Await AwaitCancelableToolTask(extractionTask, cancellationToken).ConfigureAwait(False), "")
+                        cancellationToken.ThrowIfCancellationRequested()
+
+                        Dim stored = SharedLibrary.Agents.ToolResultStore.Put(context.WorkflowId, toolCall.ToolName, fullText)
+                        extractionRef = stored.Ref
+                        If context.WorkspaceExtractionRefs IsNot Nothing Then
+                            context.WorkspaceExtractionRefs(fullPath) = extractionRef
+                        End If
+                    End If
+                Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As System.Exception
                     response.Success = False
                     response.ErrorMessage = "Extraction failed: " & ex.Message
                     GoTo __AfterDispatch
                 End Try
 
-                Dim fullText As String = If(extracted, "")
                 Dim totalChars As Integer = fullText.Length
                 Dim safeStart As Integer = Math.Min(startChar, totalChars)
                 Dim remaining As Integer = Math.Max(totalChars - safeStart, 0)
@@ -199,13 +230,14 @@ Partial Public Class ThisAddIn
 
                 Dim payload As New JObject(
         New JProperty("path", If(relPath, "")),
+        New JProperty("result_ref", extractionRef),
         New JProperty("text", chunk),
         New JProperty("excerpt", BuildResultExcerpt(chunk, 800)),
         New JProperty("total_chars", totalChars),
         New JProperty("start_char", safeStart),
         New JProperty("returned_chars", takeChars),
         New JProperty("truncated", truncated),
-        New JProperty("continuation", "If more content is needed, call workspace_extract_text again with start_char=next_offset and a suitable max_chars value."))
+        New JProperty("continuation", "The full extraction is cached for this run. If more content is needed, call context_expand with result_ref and a suitable start_char/max_chars window; do not re-extract the file."))
 
                 If truncated Then
                     payload("next_offset") = nextOffset
@@ -242,8 +274,8 @@ Partial Public Class ThisAddIn
 
             ' ── workspace_extract_text_many: extract text from multiple files via GetFileContent ──
             If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractTextMany, StringComparison.OrdinalIgnoreCase) Then
-                Dim manyMaxFiles As Integer = 20
-                Dim manyMaxCharsPerFile As Integer = 100000
+                Dim manyMaxFiles As Integer = 8
+                Dim manyMaxCharsPerFile As Integer = 12000
                 Try
                     If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_files") Then
                         Integer.TryParse(toolCall.Arguments("max_files").ToString(), manyMaxFiles)
@@ -283,18 +315,53 @@ Partial Public Class ThisAddIn
                     End If
 
                     Try
-                        Dim manyExtracted As String = Await GetFileContent(manyFullPath, Silent:=True, DoOCR:=True, AskUser:=False)
-                        Dim manyTruncated As Boolean = False
-                        If Not String.IsNullOrWhiteSpace(manyExtracted) AndAlso manyExtracted.Length > manyMaxCharsPerFile Then
-                            manyExtracted = manyExtracted.Substring(0, manyMaxCharsPerFile) & Environment.NewLine & "[Truncated at " & manyMaxCharsPerFile & " characters.]"
-                            manyTruncated = True
+                        cancellationToken.ThrowIfCancellationRequested()
+                        Dim manyFullText As String = ""
+                        Dim manyRef As String = ""
+                        Dim cachedManyRef As String = ""
+                        Dim cachedManyResult As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+
+                        If context.WorkspaceExtractionRefs IsNot Nothing AndAlso
+                           context.WorkspaceExtractionRefs.TryGetValue(manyFullPath, cachedManyRef) AndAlso
+                           SharedLibrary.Agents.ToolResultStore.TryGet(cachedManyRef, cachedManyResult) Then
+                            manyFullText = If(cachedManyResult.FullContent, "")
+                            manyRef = cachedManyRef
+                        Else
+                            Dim manyExtractionTask As System.Threading.Tasks.Task(Of String) =
+                                System.Threading.Tasks.Task.Run(
+                                    Async Function() As System.Threading.Tasks.Task(Of String)
+                                        Return Await GetFileContent(
+                                            manyFullPath,
+                                            Silent:=True,
+                                            DoOCR:=True,
+                                            AskUser:=False,
+                                            CancellationToken:=cancellationToken).ConfigureAwait(False)
+                                    End Function)
+
+                            manyFullText = If(Await AwaitCancelableToolTask(manyExtractionTask, cancellationToken).ConfigureAwait(False), "")
+                            cancellationToken.ThrowIfCancellationRequested()
+                            Dim manyStored = SharedLibrary.Agents.ToolResultStore.Put(context.WorkflowId, toolCall.ToolName, manyFullText)
+                            manyRef = manyStored.Ref
+                            If context.WorkspaceExtractionRefs IsNot Nothing Then
+                                context.WorkspaceExtractionRefs(manyFullPath) = manyRef
+                            End If
                         End If
+
+                        Dim manyReturnedChars As System.Int32 = System.Math.Min(manyMaxCharsPerFile, manyFullText.Length)
+                        Dim manyPreview As System.String = If(manyReturnedChars > 0, manyFullText.Substring(0, manyReturnedChars), "")
+                        Dim manyTruncated As Boolean = manyReturnedChars < manyFullText.Length
                         manyItems.Add(New With {
                             Key .path = manyFullPath,
+                            Key .result_ref = manyRef,
+                            Key .total_chars = manyFullText.Length,
+                            Key .returned_chars = manyReturnedChars,
                             Key .truncated = manyTruncated,
-                            Key .text = If(manyExtracted, "")
+                            Key .text = manyPreview,
+                            Key .continuation = "Full extraction cached. Use context_expand with result_ref for additional ranges; do not re-extract this file."
                         })
-                    Catch ex As Exception
+                    Catch ex As System.OperationCanceledException
+                        Throw
+                    Catch ex As System.Exception
                         manyItems.Add(New With {Key .path = manyRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
                     End Try
                 Next
@@ -303,6 +370,8 @@ Partial Public Class ThisAddIn
                 response.Response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
                     Key .requested_count = manyRequestedCount,
                     Key .processed_count = manySelected.Count,
+                    Key .remaining_count = System.Math.Max(0, manyRequestedCount - manySelected.Count),
+                    Key .has_more = (manyRequestedCount > manySelected.Count),
                     Key .items = manyItems
                 })
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
@@ -481,13 +550,11 @@ __AfterDispatch:
                         userMessage:="A processing step could not be completed.")
             End If
 
-        Catch ex As OperationCanceledException
-            response.Success = False
-            response.ErrorMessage = "Operation was cancelled"
-            context.Log($"Tool {toolCall.ToolName} cancelled")
+        Catch ex As System.OperationCanceledException
+            context.RequestCancellation()
             ToolingFileLogger.LogWarn($"Tool {toolCall.ToolName} cancelled.")
-
-        Catch ex As Exception
+            Throw
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             context.Log($"Tool {toolCall.ToolName} error: {ex.Message}")
@@ -865,7 +932,11 @@ __AfterDispatch:
                 RestoreDefaults(_context, backupConfig)
             End Try
 
-        Catch ex As Exception
+        Catch ex As System.OperationCanceledException
+            context.RequestCancellation()
+            ToolingFileLogger.LogWarn($"Tool {toolCall.ToolName} cancelled.")
+            Throw
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             ToolingFileLogger.LogError("Tool execution error.", details:=$"ToolName='{toolCall.ToolName}'", ex:=ex)
@@ -876,5 +947,23 @@ __AfterDispatch:
 
 
 
+    Private Async Function AwaitCancelableToolTask(Of T)(operationTask As System.Threading.Tasks.Task(Of T),
+                                                         cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of T)
+        If operationTask Is Nothing Then Throw New System.ArgumentNullException(NameOf(operationTask))
+        If Not cancellationToken.CanBeCanceled Then
+            Return Await operationTask.ConfigureAwait(False)
+        End If
+
+        Dim cancelSignal As System.Threading.Tasks.Task =
+            System.Threading.Tasks.Task.Delay(System.Threading.Timeout.Infinite, cancellationToken)
+        Dim completed As System.Threading.Tasks.Task =
+            Await System.Threading.Tasks.Task.WhenAny(operationTask, cancelSignal).ConfigureAwait(False)
+
+        If completed IsNot operationTask Then
+            cancellationToken.ThrowIfCancellationRequested()
+        End If
+
+        Return Await operationTask.ConfigureAwait(False)
+    End Function
 
 End Class

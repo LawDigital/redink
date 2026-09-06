@@ -1020,7 +1020,7 @@ Namespace Agents
         Private Shared Function BuildExtractText() As ModelConfig
             Dim def =
                 "{""name"":""" & ToolExtractText & """," &
-                """description"":""Extract readable text from one workspace file of any supported format (PDF with OCR fallback, DOCX, DOC, RTF, XLSX, XLS, PPTX, PPT, EML, MSG, TXT/CSV/JSON/XML/HTML/Markdown, and images/audio/video via the configured model). Supports incremental retrieval by character window and optional page-range hints when available. This tool is for a single file only and is not OK for many files. Use workspace_extract_text_many when you need to extract multiple files.""," &
+                """description"":""Extract readable text from one workspace file of any supported format (PDF with OCR fallback, DOCX, DOC, RTF, XLSX, XLS, PPTX, PPT, EML, MSG, TXT/CSV/JSON/XML/HTML/Markdown, and images/audio/video via the configured model). The host may cache the complete extraction for the current run and return a result_ref while exposing only a bounded inline window. Reuse result_ref with context_expand for later ranges instead of physically re-extracting the file. This tool is for a single file only; use workspace_extract_text_many for multiple files.""," &
                 """parameters"":{""type"":""object""," &
                 """properties"":{" &
                 """path"":{""type"":""string"",""description"":""Workspace-relative path of the file to extract.""}," &
@@ -1034,7 +1034,7 @@ Namespace Agents
             Return New ModelConfig() With {
                 .ToolName = ToolExtractText,
                 .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolExtractText & ": Extract text from one supported workspace file. Do not use this for many files; use " & ToolExtractTextMany & " instead.",
+                .ToolInstructionsPrompt = ToolExtractText & ": Extract one supported workspace file once. When the response contains result_ref, reuse that cached extraction with context_expand for further ranges instead of re-extracting the file. Do not use this for many files; use " & ToolExtractTextMany & " instead.",
                 .ModelDescription = "Workspace file text extractor",
                 .Tool = True,
                 .ToolPriority = 905,
@@ -1045,18 +1045,18 @@ Namespace Agents
         Private Shared Function BuildExtractTextMany() As ModelConfig
             Dim def =
                 "{""name"":""" & ToolExtractTextMany & """," &
-                """description"":""Extract readable text from multiple workspace files of supported formats in one call. Use this instead of repeated workspace_extract_text calls when you need many files.""," &
+                """description"":""Extract bounded readable-text windows from multiple workspace files in one call. This is a bulk extraction primitive, not a collection-analysis strategy: for summarizing/reviewing many substantial documents, keep the parent context compact and delegate bounded source batches to an isolated document analyzer when available. Do not bulk-extract large document bodies into the parent context merely to summarize them.""," &
                 """parameters"":{""type"":""object""," &
                 """properties"":{" &
                 """paths"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Workspace-relative paths of the files to extract.""}," &
-                """max_chars_per_file"":{""type"":""integer"",""description"":""Optional cap on returned characters for each file (default 100000, max 500000).""}," &
-                """max_files"":{""type"":""integer"",""description"":""Maximum files to process from 'paths' (default 20, capped 100).""}}," &
+                """max_chars_per_file"":{""type"":""integer"",""description"":""Optional inline-preview cap for each file (default 12000, max 500000). The host may cache the complete extraction and return a result_ref, so this value controls context size rather than physical extraction depth.""}," &
+                """max_files"":{""type"":""integer"",""description"":""Maximum files to process from 'paths' (default 8, capped 100). If requested_count exceeds processed_count, continue in later bounded batches until coverage is reconciled.""}}," &
                 """required"":[""paths""]}}"
 
             Return New ModelConfig() With {
                 .ToolName = ToolExtractTextMany,
                 .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolExtractTextMany & ": Extract text from many supported workspace files in one call.",
+                .ToolInstructionsPrompt = ToolExtractTextMany & ": Extract multiple supported workspace files once and keep the parent context bounded. When a result_ref is returned, reuse it with context_expand for later ranges instead of physically re-extracting that source. For substantial collections, prefer isolated bounded document-analysis batches and reconcile coverage before finalizing.",
                 .ModelDescription = "Workspace file text extractor (many)",
                 .Tool = True,
                 .ToolPriority = 905,

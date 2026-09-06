@@ -449,7 +449,7 @@ Namespace Agents
                 End If
 
                 If isResourceRoot Then
-                    SkillAuthoringPostcondition.NoteResourceRootWrite()
+                    SkillAuthoringPostcondition.NoteResourceRootWrite(full)
                     Return
                 End If
 

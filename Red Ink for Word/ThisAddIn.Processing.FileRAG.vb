@@ -78,7 +78,7 @@ Partial Public Class ThisAddIn
             Return True
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in ConsultLibrary: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ConsultLibrary: " & ex.Message, "Error")
             Return False
         End Try
 

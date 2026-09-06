@@ -60,6 +60,13 @@ Namespace Agents
         ''' The nested tooling run locks this contract and may not broaden it.
         ''' </summary>
         Public Property ExpectedArtifactsJson As String = Nothing
+
+        ' <summary>
+        ' Exact tool names that must succeed inside this isolated run before a raw
+        ' caller-defined final response may be accepted. This is runtime policy
+        ' supplied by SubAgentRunner, not model-authored metadata.
+        ' </summary>
+        Public Property RequiredSuccessfulToolNames As IReadOnlyList(Of String)
     End Class
 
     Public Interface ISubAgentHost

@@ -527,7 +527,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in SpecialModel: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in SpecialModel: " & ex.Message, "Error")
         Finally
             If originalConfig IsNot Nothing Then
                 RestoreDefaults(_context, originalConfig)

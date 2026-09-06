@@ -1202,7 +1202,7 @@ Namespace SharedLibrary
                 Me.Close()
 
             Catch ex As System.Exception
-                MessageBox.Show("Error finalizing configuration: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error finalizing configuration: " & ex.Message, "Error")
             End Try
         End Sub
 
@@ -1352,7 +1352,7 @@ Namespace SharedLibrary
                 Dim link = e.Link.LinkData.ToString()
                 System.Diagnostics.Process.Start(link)
             Catch ex As System.Exception
-                MessageBox.Show("Could not open link. Error: " & ex.Message)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Could not open link. Error: " & ex.Message)
             End Try
         End Sub
 
