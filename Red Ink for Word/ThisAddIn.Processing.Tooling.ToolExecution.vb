@@ -448,6 +448,7 @@ Partial Public Class ThisAddIn
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
 
                 ApplyStructuredAgentResult(response, context)
+                ApplySubAgentTaskLifecyclePolicy(response, toolCall, context)
 
                 If Not response.Success AndAlso String.IsNullOrWhiteSpace(response.ErrorMessage) Then
                     response.ErrorMessage = "Agent-layer tool returned no usable result."

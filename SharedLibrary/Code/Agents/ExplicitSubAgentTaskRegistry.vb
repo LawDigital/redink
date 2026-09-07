@@ -7,8 +7,9 @@
 '
 ' Purpose:
 '   Tracks explicitly identified logical sub-agent tasks within one tooling run.
-'   It prevents a completed, unresolved, or blocked sub-agent task from starting
-'   another isolated model run under the same exact task id.
+'   It tracks bounded execution attempts for one logical sub-agent task. A failed
+'   attempt may be retried under the SAME exact task id; completion and exhausted
+'   retry budgets are terminal.
 '
 ' Identity contract:
 '   - Task identity comes ONLY from an explicit caller-supplied SubAgentTaskId.
@@ -22,14 +23,14 @@
 '   an agent remains handled separately by ExplicitOperationRegistry.
 '
 ' Lifecycle:
-'       Active
+'       Active attempt
 '         |
 '         +--> Completed
-'         +--> TerminalUnresolved
-'         +--> TerminalBlocked
+'         +--> RetryableFailure --> Active next attempt
+'         +--> TerminalUnresolved / TerminalBlocked (retry budget exhausted)
 '
-'   All three terminal states prevent another isolated sub-agent model run for
-'   the same exact SubAgentTaskId in the same ToolingRunState.
+'   Runner-internal continuation retries do not consume another logical attempt.
+'   Parent retries do consume the bounded per-task attempt budget.
 '
 ' =============================================================================
 
@@ -43,9 +44,10 @@ Namespace Agents
 
     Public Enum ExplicitSubAgentTaskStatus
         Active = 0
-        Completed = 1
-        TerminalUnresolved = 2
-        TerminalBlocked = 3
+        RetryableFailure = 1
+        Completed = 2
+        TerminalUnresolved = 3
+        TerminalBlocked = 4
     End Enum
 
     Public NotInheritable Class ExplicitSubAgentTaskRecord
@@ -54,10 +56,13 @@ Namespace Agents
         Public Property Status As ExplicitSubAgentTaskStatus =
             ExplicitSubAgentTaskStatus.Active
         Public Property TerminalReason As String = ""
+        Public Property AttemptCount As System.Int32 = 0
         Public Property UpdatedUtc As DateTime = System.DateTime.UtcNow
     End Class
 
     Public NotInheritable Class ExplicitSubAgentTaskRegistry
+
+        Public Const MaxAttemptsPerTask As System.Int32 = 3
 
         Private ReadOnly _records As New Dictionary(Of String, ExplicitSubAgentTaskRecord)(
             System.StringComparer.Ordinal)
@@ -82,17 +87,65 @@ Namespace Agents
         Public Function TryBegin(agentName As String, taskId As String, Optional allowActiveContinuation As Boolean = False) As Boolean
             Dim key As String = BuildKey(agentName, taskId)
             If key = "" Then Return False
+
             SyncLock _syncRoot
                 Dim record As ExplicitSubAgentTaskRecord = Nothing
                 If Not _records.TryGetValue(key, record) OrElse record Is Nothing Then
-                    _records(key) = New ExplicitSubAgentTaskRecord With {.TaskId = If(taskId, "").Trim(), .AgentName = If(agentName, "").Trim(), .Status = ExplicitSubAgentTaskStatus.Active, .UpdatedUtc = System.DateTime.UtcNow}
+                    _records(key) =
+                        New ExplicitSubAgentTaskRecord With {
+                            .TaskId = If(taskId, "").Trim(),
+                            .AgentName = If(agentName, "").Trim(),
+                            .Status = ExplicitSubAgentTaskStatus.Active,
+                            .AttemptCount = 1,
+                            .UpdatedUtc = System.DateTime.UtcNow
+                        }
                     Return True
                 End If
+
                 If record.Status = ExplicitSubAgentTaskStatus.Active AndAlso allowActiveContinuation Then
+                    ' SubAgentRunner owns its internal continuation retry. It is still
+                    ' part of the same parent-level logical attempt and consumes no new slot.
                     record.UpdatedUtc = System.DateTime.UtcNow
                     Return True
                 End If
+
+                If record.Status = ExplicitSubAgentTaskStatus.RetryableFailure AndAlso
+                   record.AttemptCount < MaxAttemptsPerTask Then
+
+                    record.Status = ExplicitSubAgentTaskStatus.Active
+                    record.AttemptCount += 1
+                    record.TerminalReason = ""
+                    record.UpdatedUtc = System.DateTime.UtcNow
+                    Return True
+                End If
+
                 Return False
+            End SyncLock
+        End Function
+
+        Public Function IsRetryable(agentName As String, taskId As String) As Boolean
+            Dim key As String = BuildKey(agentName, taskId)
+            If key = "" Then Return False
+
+            SyncLock _syncRoot
+                Dim record As ExplicitSubAgentTaskRecord = Nothing
+                If Not _records.TryGetValue(key, record) OrElse record Is Nothing Then Return False
+                Return record.Status = ExplicitSubAgentTaskStatus.RetryableFailure AndAlso
+                       record.AttemptCount < MaxAttemptsPerTask
+            End SyncLock
+        End Function
+
+        Public Function GetRemainingAttempts(agentName As String, taskId As String) As System.Int32
+            Dim key As String = BuildKey(agentName, taskId)
+            If key = "" Then Return 0
+
+            SyncLock _syncRoot
+                Dim record As ExplicitSubAgentTaskRecord = Nothing
+                If Not _records.TryGetValue(key, record) OrElse record Is Nothing Then Return MaxAttemptsPerTask
+                If record.Status = ExplicitSubAgentTaskStatus.Completed OrElse
+                   record.Status = ExplicitSubAgentTaskStatus.TerminalUnresolved OrElse
+                   record.Status = ExplicitSubAgentTaskStatus.TerminalBlocked Then Return 0
+                Return System.Math.Max(0, MaxAttemptsPerTask - record.AttemptCount)
             End SyncLock
         End Function
 
@@ -107,6 +160,7 @@ Namespace Agents
                             .TaskId = If(taskId, "").Trim(),
                             .AgentName = If(agentName, "").Trim(),
                             .Status = ExplicitSubAgentTaskStatus.Active,
+                            .AttemptCount = 1,
                             .UpdatedUtc = System.DateTime.UtcNow
                         }
                 End If
@@ -121,20 +175,64 @@ Namespace Agents
                 "")
         End Sub
 
-        Public Sub MarkUnresolved(agentName As String, taskId As String, reason As String)
-            SetTerminal(
+        Public Sub MarkUnresolved(agentName As String,
+                                  taskId As String,
+                                  reason As String,
+                                  Optional forceTerminal As Boolean = False)
+            SetFailure(
                 agentName,
                 taskId,
                 ExplicitSubAgentTaskStatus.TerminalUnresolved,
-                reason)
+                reason,
+                forceTerminal)
         End Sub
 
-        Public Sub MarkBlocked(agentName As String, taskId As String, reason As String)
-            SetTerminal(
+        Public Sub MarkBlocked(agentName As String,
+                               taskId As String,
+                               reason As String,
+                               Optional forceTerminal As Boolean = False)
+            SetFailure(
                 agentName,
                 taskId,
                 ExplicitSubAgentTaskStatus.TerminalBlocked,
-                reason)
+                reason,
+                forceTerminal)
+        End Sub
+
+        Private Sub SetFailure(agentName As String,
+                               taskId As String,
+                               exhaustedStatus As ExplicitSubAgentTaskStatus,
+                               reason As String,
+                               forceTerminal As Boolean)
+            Dim key As String = BuildKey(agentName, taskId)
+            If key = "" Then Return
+
+            SyncLock _syncRoot
+                Dim record As ExplicitSubAgentTaskRecord = Nothing
+                If Not _records.TryGetValue(key, record) OrElse record Is Nothing Then
+                    record =
+                        New ExplicitSubAgentTaskRecord With {
+                            .TaskId = If(taskId, "").Trim(),
+                            .AgentName = If(agentName, "").Trim(),
+                            .Status = ExplicitSubAgentTaskStatus.Active,
+                            .AttemptCount = 1
+                        }
+                    _records(key) = record
+                End If
+
+                If record.Status = ExplicitSubAgentTaskStatus.Completed OrElse
+                   record.Status = ExplicitSubAgentTaskStatus.TerminalUnresolved OrElse
+                   record.Status = ExplicitSubAgentTaskStatus.TerminalBlocked Then Return
+
+                If forceTerminal OrElse record.AttemptCount >= MaxAttemptsPerTask Then
+                    record.Status = exhaustedStatus
+                Else
+                    record.Status = ExplicitSubAgentTaskStatus.RetryableFailure
+                End If
+
+                record.TerminalReason = If(reason, "")
+                record.UpdatedUtc = System.DateTime.UtcNow
+            End SyncLock
         End Sub
 
         Private Sub SetTerminal(
@@ -159,7 +257,7 @@ Namespace Agents
                     _records(key) = record
                 End If
 
-                ' Terminal state is monotonic and cannot be replaced by a later result.
+                ' True terminal state is monotonic. Retryable failures are handled by SetFailure.
                 If record.Status = ExplicitSubAgentTaskStatus.Completed OrElse
                    record.Status = ExplicitSubAgentTaskStatus.TerminalUnresolved OrElse
                    record.Status = ExplicitSubAgentTaskStatus.TerminalBlocked Then

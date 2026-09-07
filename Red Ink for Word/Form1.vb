@@ -879,6 +879,32 @@ Public Class frmAIChat
 
         Dim promptToRestore As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userPrompt}".Trim(), userPrompt)
 
+        ' Pin the Word document/selection that was active when the user submitted this
+        ' request. Awaited model/tool work must not retarget itself when the user changes
+        ' Word windows while the request is in flight.
+        Dim requestTargetDocumentName As String = ""
+        Dim requestTargetDocumentFullName As String = ""
+        Dim requestTargetSelectionStart As Integer = -1
+        Dim requestTargetSelectionEnd As Integer = -1
+
+        Try
+            Dim requestDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
+            If requestDoc IsNot Nothing Then
+                requestTargetDocumentName = requestDoc.Name
+                Try : requestTargetDocumentFullName = requestDoc.FullName : Catch : requestTargetDocumentFullName = "" : End Try
+
+                Try
+                    Dim requestSelection As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
+                    If requestSelection IsNot Nothing Then
+                        requestTargetSelectionStart = requestSelection.Start
+                        requestTargetSelectionEnd = requestSelection.End
+                    End If
+                Catch
+                End Try
+            End If
+        Catch
+        End Try
+
         Try
             My.Settings.LastPromptChat = promptToRestore
             My.Settings.Save()
@@ -923,14 +949,14 @@ Public Class frmAIChat
             If My.Settings.DoCommands AndAlso (chkIncludeDocText.Checked Or chkIncludeselection.Checked) Then
                 Dim activeDocumentNameForCommands As String = ""
 
-                Try
-                    activeDocumentNameForCommands = Globals.ThisAddIn.Application.ActiveDocument.Name
-                Catch
-                    activeDocumentNameForCommands = "the currently active Word document"
-                End Try
+                If Not String.IsNullOrWhiteSpace(requestTargetDocumentName) Then
+                    activeDocumentNameForCommands = requestTargetDocumentName
+                Else
+                    activeDocumentNameForCommands = "the Word document active when this request started"
+                End If
 
                 SystemPrompt &= vbLf &
-                    $"Command scope: All commands are executed only against the currently active Word document '{activeDocumentNameForCommands}'. " &
+                    $"Command scope: All commands are executed only against the Word document that was active when this request started '{activeDocumentNameForCommands}'. " &
                     "Other open documents, if provided, are read-only context. Never issue a command for text that appears only in another document. " &
                     "If the user asks to work on another document, tell the user to activate that document first."
             End If
@@ -1283,7 +1309,11 @@ Public Class frmAIChat
                                               Me.BeginInvoke(New MethodInvoker(Sub() UpdateAssistantThinking(status)))
                                           Catch
                                           End Try
-                                      End Sub)
+                                      End Sub,
+                        pinnedWordDocumentName:=requestTargetDocumentName,
+                        pinnedWordDocumentFullName:=requestTargetDocumentFullName,
+                        pinnedWordSelectionStart:=requestTargetSelectionStart,
+                        pinnedWordSelectionEnd:=requestTargetSelectionEnd)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -1376,7 +1406,7 @@ Public Class frmAIChat
 
                                     If My.Settings.DoCommands And Not String.IsNullOrWhiteSpace(CommandsString) Then
                                         Try
-                                            ExecuteAnyCommands(CommandsString, chkIncludeselection.Checked)
+                                            ExecuteAnyCommands(CommandsString, chkIncludeselection.Checked, requestTargetDocumentName, requestTargetDocumentFullName, requestTargetSelectionStart, requestTargetSelectionEnd)
                                         Catch cmdEx As Exception
                                             ' Report command execution error to chat
                                             ReportCommandExecutionError(cmdEx.Message)
@@ -1484,8 +1514,8 @@ Public Class frmAIChat
             Dim docEnd As Integer = activeDoc.Content.End
 
             ' Calculate context window boundaries (clamped to document range)
-            Dim contextStart As Integer = Math.Max(docStart, cursorPos - charCount)
-            Dim contextEnd As Integer = Math.Min(docEnd, cursorPos + charCount)
+            Dim contextStart As Integer = System.Math.Max(docStart, cursorPos - charCount)
+            Dim contextEnd As Integer = System.Math.Min(docEnd, cursorPos + charCount)
 
             ' Extract text before cursor
             Dim beforeRange As Microsoft.Office.Interop.Word.Range = activeDoc.Range(contextStart, cursorPos)
@@ -2858,6 +2888,56 @@ Public Class frmAIChat
     ''' <summary>End position of the last document action performed by chat commands.</summary>
     Private _lastActionEnd As Integer = -1
 
+    Private Function IsSameChatWordDocument(first As Microsoft.Office.Interop.Word.Document,
+                                                second As Microsoft.Office.Interop.Word.Document) As Boolean
+        If first Is Nothing OrElse second Is Nothing Then Return False
+        Try
+            Dim firstFullName As String = If(first.FullName, "")
+            Dim secondFullName As String = If(second.FullName, "")
+            If firstFullName <> "" AndAlso secondFullName <> "" Then
+                Return String.Equals(firstFullName, secondFullName, StringComparison.OrdinalIgnoreCase)
+            End If
+        Catch
+        End Try
+        Try
+            Return String.Equals(first.Name, second.Name, StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function ResolveChatCommandTargetDocument(targetDocumentName As String,
+                                                      targetDocumentFullName As String) As Microsoft.Office.Interop.Word.Document
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.Documents Is Nothing Then Return Nothing
+
+            Dim fullName As String = If(targetDocumentFullName, "").Trim()
+            Dim name As String = If(targetDocumentName, "").Trim()
+
+            If fullName <> "" Then
+                For Each candidate As Microsoft.Office.Interop.Word.Document In app.Documents
+                    Try
+                        If String.Equals(candidate.FullName, fullName, StringComparison.OrdinalIgnoreCase) Then Return candidate
+                    Catch
+                    End Try
+                Next
+                Return Nothing
+            End If
+
+            If name <> "" Then
+                For Each candidate As Microsoft.Office.Interop.Word.Document In app.Documents
+                    If String.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase) Then Return candidate
+                Next
+                Return Nothing
+            End If
+
+            Return app.ActiveDocument
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
     ' =========================================================================
     ' Main Command Execution Orchestrator
     ' =========================================================================
@@ -2870,8 +2950,8 @@ Public Class frmAIChat
             Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
             If doc Is Nothing Then Return
 
-            Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(startPos, doc.Content.End))
-            Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(endPos, doc.Content.End))
+            Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(startPos, doc.Content.End))
+            Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(endPos, doc.Content.End))
 
             If safeEnd < safeStart Then
                 safeEnd = safeStart
@@ -2896,8 +2976,8 @@ Public Class frmAIChat
             Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
             If doc Is Nothing Then Return False
 
-            Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(startPos, doc.Content.End))
-            Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(endPos, doc.Content.End))
+            Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(startPos, doc.Content.End))
+            Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(endPos, doc.Content.End))
 
             If safeEnd < safeStart Then
                 safeEnd = safeStart
@@ -3008,7 +3088,12 @@ Public Class frmAIChat
     ''' ESC key polling via GetAsyncKeyState allows user to abort mid-execution.
     ''' InfoBox displays progress for operations that modify document (replace, insert*).
     ''' </remarks>
-    Public Sub ExecuteAnyCommands(teststring As String, OnlySelection As Boolean)
+    Public Sub ExecuteAnyCommands(teststring As String,
+                                  OnlySelection As Boolean,
+                                  Optional targetDocumentName As String = "",
+                                  Optional targetDocumentFullName As String = "",
+                                  Optional targetSelectionStart As Integer = -1,
+                                  Optional targetSelectionEnd As Integer = -1)
 
         Dim commands = ParseCommands(teststring)
         Dim topmost As Boolean = Me.TopMost
@@ -3020,9 +3105,62 @@ Public Class frmAIChat
         Dim LastCommandsList As String = ""
         Dim activateDocumentAfterCommands As Boolean = False
 
-        Dim wordApp As Microsoft.Office.Interop.Word.Application
-        Dim doc As Word.Document = Globals.ThisAddIn.Application.ActiveDocument
+        Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+        Dim doc As Microsoft.Office.Interop.Word.Document = ResolveChatCommandTargetDocument(targetDocumentName, targetDocumentFullName)
+        If doc Is Nothing Then
+            FailedCommandsList.Add("Failed: The Word document that was active when this request started is no longer open.")
+            ReportFailedCommands()
+            Me.TopMost = topmost
+            Return
+        End If
 
+        Dim userWindowBeforeCommands As Microsoft.Office.Interop.Word.Window = Nothing
+        Dim originalScreenUpdating As Boolean = True
+        Dim focusLeaseActive As Boolean = False
+        Dim targetContextEstablished As Boolean = False
+
+        Try
+            userWindowBeforeCommands = wordApp.ActiveWindow
+            originalScreenUpdating = wordApp.ScreenUpdating
+
+            Dim activeDocBeforeCommands As Microsoft.Office.Interop.Word.Document = wordApp.ActiveDocument
+            If Not IsSameChatWordDocument(activeDocBeforeCommands, doc) Then
+                wordApp.ScreenUpdating = False
+                doc.Activate()
+                focusLeaseActive = True
+            End If
+
+            If targetSelectionStart >= 0 AndAlso wordApp.Selection IsNot Nothing Then
+                Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(targetSelectionStart, doc.Content.End))
+                Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(If(targetSelectionEnd >= 0, targetSelectionEnd, safeStart), doc.Content.End))
+                If safeEnd < safeStart Then safeEnd = safeStart
+                wordApp.Selection.SetRange(safeStart, safeEnd)
+            End If
+
+            targetContextEstablished = IsSameChatWordDocument(wordApp.ActiveDocument, doc)
+        Catch ex As System.Exception
+            Debug.WriteLine($"ExecuteAnyCommands: could not establish pinned Word target: {ex.Message}")
+        End Try
+
+        If Not targetContextEstablished Then
+            FailedCommandsList.Add("Failed: Could not establish the Word document that was active when this request started.")
+            ReportFailedCommands()
+            Try
+                If focusLeaseActive AndAlso userWindowBeforeCommands IsNot Nothing Then userWindowBeforeCommands.Activate()
+            Catch ex As System.Exception
+                Debug.WriteLine($"ExecuteAnyCommands: could not restore user Word window after target setup failure: {ex.Message}")
+            Finally
+                Try
+                    If wordApp IsNot Nothing Then wordApp.ScreenUpdating = originalScreenUpdating
+                Catch ex As System.Exception
+                    Debug.WriteLine($"ExecuteAnyCommands: could not restore ScreenUpdating after target setup failure: {ex.Message}")
+                End Try
+            End Try
+            Me.TopMost = topmost
+            Return
+        End If
+
+        Try
         ' ═════════════════════════════════════════════════════════════════════════════
         ' ENSURE CURSOR IN MAIN STORY (NOT HEADER/FOOTER/COMMENT/FOOTNOTE)
         ' ═════════════════════════════════════════════════════════════════════════════
@@ -3048,10 +3186,7 @@ Public Class frmAIChat
             Debug.WriteLine($"Warning: Could not reset to main story: {ex.Message}")
         End Try
 
-        wordApp = Globals.ThisAddIn.Application
-
         If commands.Count() > 0 Then
-            Globals.ThisAddIn.Application.Activate()
             System.Threading.Thread.Sleep(200)
 
             If wordApp IsNot Nothing AndAlso wordApp.ActiveWindow IsNot Nothing Then
@@ -3177,12 +3312,28 @@ Public Class frmAIChat
             End With
         End If
 
-        If wordApp IsNot Nothing Then
-            System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
-            wordApp = Nothing
-        End If
-
-        Me.TopMost = topmost
+        Finally
+            Try
+                If focusLeaseActive AndAlso Not activateDocumentAfterCommands AndAlso userWindowBeforeCommands IsNot Nothing Then
+                    userWindowBeforeCommands.Activate()
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"ExecuteAnyCommands: could not restore user Word window: {ex.Message}")
+            Finally
+                Try
+                    If wordApp IsNot Nothing Then wordApp.ScreenUpdating = originalScreenUpdating
+                Catch
+                End Try
+                Try
+                    If wordApp IsNot Nothing Then
+                        System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
+                        wordApp = Nothing
+                    End If
+                Catch
+                End Try
+                Me.TopMost = topmost
+            End Try
+        End Try
 
         Dim documentActivated As Boolean = False
 
@@ -3431,8 +3582,8 @@ Public Class frmAIChat
             Try
                 If app IsNot Nothing AndAlso doc IsNot Nothing AndAlso hadSel Then
                     app.ActiveWindow.View.Type = Microsoft.Office.Interop.Word.WdViewType.wdPrintView
-                    Dim s As Integer = Math.Max(doc.Content.Start, Math.Min(origStart, doc.Content.End))
-                    Dim e As Integer = Math.Max(doc.Content.Start, Math.Min(origEnd, doc.Content.End))
+                    Dim s As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(origStart, doc.Content.End))
+                    Dim e As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(origEnd, doc.Content.End))
                     doc.Range(s, e).Select()
                 End If
             Catch
@@ -3652,8 +3803,8 @@ Public Class frmAIChat
 
         Finally
             Try
-                Dim s As Integer = Math.Max(doc.Content.Start, Math.Min(originalSelStart, doc.Content.End))
-                Dim e As Integer = Math.Max(doc.Content.Start, Math.Min(originalSelEnd, doc.Content.End))
+                Dim s As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(originalSelStart, doc.Content.End))
+                Dim e As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(originalSelEnd, doc.Content.End))
                 doc.Range(s, e).Select()
             Catch
             End Try
@@ -3687,9 +3838,6 @@ Public Class frmAIChat
         Dim found As Boolean = False
 
         Try
-            doc.Application.Activate()
-            doc.Activate()
-
             doc.TrackRevisions = True
 
             ' Normalize paragraph marks
@@ -3874,9 +4022,6 @@ Public Class frmAIChat
                 Return False
             End If
 
-            doc.Application.Activate()
-            doc.Activate()
-
             doc.TrackRevisions = True
 
             ' Show markup during replacement for visibility
@@ -3968,7 +4113,7 @@ Public Class frmAIChat
                 ' return a hit that spans cells. Word's Selection then auto-
                 ' expands to include both cells, which corrupts the replacement.
                 Try
-                    Dim probeRange As Word.Range = doc.Range(selStart, Math.Min(selStart + 1, doc.Content.End))
+                    Dim probeRange As Word.Range = doc.Range(selStart, System.Math.Min(selStart + 1, doc.Content.End))
                     Dim startInTable As Boolean = False
                     Try
                         startInTable = CBool(probeRange.Information(Word.WdInformation.wdWithInTable))
@@ -3990,14 +4135,14 @@ Public Class frmAIChat
                             LogReplaceDiag($"PASS1 REJECTING cell-crossing match [{selStart},{selEnd}]; startCellEnd={startCellEnd}")
                             Debug.WriteLine($"ExecuteReplaceCommand: rejecting cell-crossing match [{selStart},{selEnd}], cellEnd={startCellEnd}")
 
-                            Dim escapePos As Integer = Math.Min(startCellEnd, searchEnd)
+                            Dim escapePos As Integer = System.Math.Min(startCellEnd, searchEnd)
                             If escapePos <= requestedSearchStart Then
                                 Exit Do
                             End If
 
                             doc.Application.Selection.SetRange(escapePos, escapePos)
                             requestedSearchStart = escapePos
-                            lastFoundEnd = Math.Max(lastFoundEnd, escapePos - 1)
+                            lastFoundEnd = System.Math.Max(lastFoundEnd, escapePos - 1)
                             Continue Do
                         End If
                     End If
@@ -4016,7 +4161,7 @@ Public Class frmAIChat
                     Debug.WriteLine($"ExecuteReplaceCommand: rejecting stale/backward hit [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart}, lastFoundEnd={lastFoundEnd})")
                     LogReplaceDiag($"PASS1 rejecting stale/backward hit; hitWentBackwards={hitWentBackwards}; hitDidNotAdvance={hitDidNotAdvance}; {DescribeSelectionState(doc.Application.Selection)}")
 
-                    Dim forcePos As Integer = Math.Max(requestedSearchStart + 1, lastFoundEnd + 1)
+                    Dim forcePos As Integer = System.Math.Max(requestedSearchStart + 1, lastFoundEnd + 1)
 
                     If forcePos >= searchEnd Then
                         Debug.WriteLine("ExecuteReplaceCommand: forced position past searchEnd, exiting")
@@ -4190,7 +4335,7 @@ Public Class frmAIChat
                             doc.Application.Selection.Text = adjustedNewText
                             Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                            Dim actionEnd As Integer = Math.Min(mStart + newText.Length, doc.Content.End)
+                            Dim actionEnd As Integer = System.Math.Min(mStart + newText.Length, doc.Content.End)
                             RememberLastActionRange(mStart, actionEnd)
 
                             Try
@@ -4232,8 +4377,8 @@ Public Class frmAIChat
             ' RESTORE SELECTION
             ' ─────────────────────────────────────────────────────────────────────
             Try
-                Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(savedSelectionStart, doc.Content.End))
-                Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(savedSelectionEnd, doc.Content.End))
+                Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(savedSelectionStart, doc.Content.End))
+                Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(savedSelectionEnd, doc.Content.End))
                 Debug.WriteLine($"ExecuteReplaceCommand: restoring selection to [{safeStart},{safeEnd}]")
                 doc.Application.Selection.SetRange(safeStart, safeEnd)
                 doc.Application.Selection.Select()
@@ -4324,7 +4469,7 @@ Public Class frmAIChat
                 cellInfo = $" cellInfoError='{ex.Message}'"
             End Try
 
-            Return $"selection=[{sel.Start},{sel.End}] len={Math.Max(0, sel.End - sel.Start)} inTable={isInTable}{cellInfo} text='{preview}'"
+            Return $"selection=[{sel.Start},{sel.End}] len={System.Math.Max(0, sel.End - sel.Start)} inTable={isInTable}{cellInfo} text='{preview}'"
         Catch ex As Exception
             Return $"selectionStateError='{ex.Message}'"
         End Try
@@ -4375,8 +4520,6 @@ Public Class frmAIChat
                 Return False
             End If
 
-            doc.Application.Activate()
-            doc.Activate()
             doc.TrackRevisions = True
 
             ' Determine working range
@@ -4449,7 +4592,7 @@ Public Class frmAIChat
                         If tocEnd > 0 Then
                             Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Match in TOC -> skipping")
                             Dim searchLimit As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
-                            Dim continuePos As Integer = Math.Min(tocEnd, searchLimit)
+                            Dim continuePos As Integer = System.Math.Min(tocEnd, searchLimit)
                             If continuePos >= searchLimit Then
                                 Exit Do
                             Else
@@ -4472,20 +4615,20 @@ Public Class frmAIChat
                                 insertPosition = docContentEnd - 1
                             End If
                         End If
-                        insertPosition = Math.Max(doc.Content.Start, Math.Min(insertPosition, docContentEnd - 1))
+                        insertPosition = System.Math.Max(doc.Content.Start, System.Math.Min(insertPosition, docContentEnd - 1))
 
                         Try
                             ' Primary method: create Range and insert
                             Dim insertRange As Word.Range = doc.Range(insertPosition, insertPosition)
                             insertRange.Text = newText
 
-                            RememberLastActionRange(insertPosition, Math.Min(insertPosition + Len(newText), doc.Content.End))
+                            RememberLastActionRange(insertPosition, System.Math.Min(insertPosition + Len(newText), doc.Content.End))
 
                             ' Apply Markdown if enabled
                             If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
                                 Try
                                     Dim conversionStart As Integer = insertPosition
-                                    Dim conversionEnd As Integer = Math.Min(insertPosition + Len(newText), doc.Content.End)
+                                    Dim conversionEnd As Integer = System.Math.Min(insertPosition + Len(newText), doc.Content.End)
                                     doc.Range(conversionStart, conversionEnd).Select()
                                     Globals.ThisAddIn.ConvertMarkdownToWord()
                                 Catch
@@ -4528,7 +4671,7 @@ Public Class frmAIChat
                         ' Check if reached end of search range
                         If OnlySelection Then
                             If continuePosition >= selectionEnd Then Exit Do
-                            Dim safeEnd As Integer = Math.Min(selectionEnd, doc.Content.End)
+                            Dim safeEnd As Integer = System.Math.Min(selectionEnd, doc.Content.End)
                             doc.Application.Selection.SetRange(continuePosition, safeEnd)
                         Else
                             If continuePosition >= doc.Content.End Then Exit Do
@@ -4544,8 +4687,8 @@ Public Class frmAIChat
 
             ' Restore original selection with boundary guards
             Try
-                Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(selectionStart, doc.Content.End))
-                Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(selectionEnd, doc.Content.End))
+                Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(selectionStart, doc.Content.End))
+                Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(selectionEnd, doc.Content.End))
                 doc.Application.Selection.SetRange(safeStart, safeEnd)
                 doc.Application.Selection.Select()
             Catch
@@ -4601,7 +4744,7 @@ Public Class frmAIChat
                 Dim insertStart As Integer = selection.Start
                 selection.Text = newText
 
-                RememberLastActionRange(insertStart, Math.Min(insertStart + newText.Length, doc.Content.End))
+                RememberLastActionRange(insertStart, System.Math.Min(insertStart + newText.Length, doc.Content.End))
 
                 If chkConvertMarkdown.Checked Then
                     Globals.ThisAddIn.ConvertMarkdownToWord()

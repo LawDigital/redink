@@ -471,7 +471,6 @@
     <Compile Include="Code\Agents\FileTools.vb" />
     <Compile Include="Code\Agents\LargeToolResultProcessor.vb" />
     <Compile Include="Code\Agents\PythonExecuteRepairAdvisor.vb" />
-    <Compile Include="Code\Agents\PythonExecuteRepairAdvisorSelfTests.vb" />
     <Compile Include="Code\Agents\PythonExecuteToolConfig.vb" />
     <Compile Include="Code\Agents\RedinkPythonAgentClient.vb" />
     <Compile Include="Code\Agents\HostToolRegistration.vb" />

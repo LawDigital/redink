@@ -124,6 +124,90 @@ Namespace Agents
             }
         End Function
 
+        Public NotInheritable Class ToolLoaderResponseInfo
+            Public Property IsValid As System.Boolean
+            Public Property LoadedNames As New System.Collections.Generic.List(Of System.String)()
+            Public Property AlreadyLoadedNames As New System.Collections.Generic.List(Of System.String)()
+            Public Property NotAvailableNames As New System.Collections.Generic.List(Of System.String)()
+
+            Public ReadOnly Property HasNewTools As System.Boolean
+                Get
+                    Return IsValid AndAlso LoadedNames IsNot Nothing AndAlso LoadedNames.Count > 0
+                End Get
+            End Property
+
+            Public ReadOnly Property AllResolvedToolsWereAlreadyLoaded As System.Boolean
+                Get
+                    Return IsValid AndAlso
+                           (LoadedNames Is Nothing OrElse LoadedNames.Count = 0) AndAlso
+                           AlreadyLoadedNames IsNot Nothing AndAlso AlreadyLoadedNames.Count > 0 AndAlso
+                           (NotAvailableNames Is Nothing OrElse NotAvailableNames.Count = 0)
+                End Get
+            End Property
+        End Class
+
+        ''' <summary>
+        ''' Parses only the loader's own structured availability result. Hosts use this shared
+        ''' interpretation so an empty loaded array is never treated as proof that a requested
+        ''' unavailable tool was already exposed.
+        ''' </summary>
+        Public Shared Function ParseResponse(payload As System.String) As ToolLoaderResponseInfo
+            Dim info As New ToolLoaderResponseInfo()
+            If System.String.IsNullOrWhiteSpace(payload) Then Return info
+
+            Try
+                Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(payload)
+                Dim loadedToken As Newtonsoft.Json.Linq.JToken = obj("loaded")
+                Dim alreadyLoadedToken As Newtonsoft.Json.Linq.JToken = obj("already_loaded")
+                Dim notAvailableToken As Newtonsoft.Json.Linq.JToken = obj("not_available")
+
+                If loadedToken Is Nothing OrElse loadedToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array OrElse
+                   alreadyLoadedToken Is Nothing OrElse alreadyLoadedToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array OrElse
+                   notAvailableToken Is Nothing OrElse notAvailableToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+                    Return info
+                End If
+
+                Dim loadedNames As System.Collections.Generic.List(Of System.String) = Nothing
+                Dim alreadyLoadedNames As System.Collections.Generic.List(Of System.String) = Nothing
+                Dim notAvailableNames As System.Collections.Generic.List(Of System.String) = Nothing
+
+                If Not TryReadResponseNameArray(loadedToken, loadedNames) OrElse
+                   Not TryReadResponseNameArray(alreadyLoadedToken, alreadyLoadedNames) OrElse
+                   Not TryReadResponseNameArray(notAvailableToken, notAvailableNames) Then
+                    Return info
+                End If
+
+                info.LoadedNames = loadedNames
+                info.AlreadyLoadedNames = alreadyLoadedNames
+                info.NotAvailableNames = notAvailableNames
+                info.IsValid = True
+            Catch ex As System.Exception
+                info.IsValid = False
+            End Try
+
+            Return info
+        End Function
+
+        Private Shared Function TryReadResponseNameArray(
+            token As Newtonsoft.Json.Linq.JToken,
+            ByRef result As System.Collections.Generic.List(Of System.String)) As System.Boolean
+
+            result = New System.Collections.Generic.List(Of System.String)()
+            Dim arr As Newtonsoft.Json.Linq.JArray = TryCast(token, Newtonsoft.Json.Linq.JArray)
+            If arr Is Nothing Then Return False
+
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item As Newtonsoft.Json.Linq.JToken In arr
+                If item Is Nothing OrElse item.Type <> Newtonsoft.Json.Linq.JTokenType.String Then Return False
+
+                Dim name As System.String = If(item.Value(Of System.String)(), System.String.Empty).Trim()
+                If name = System.String.Empty Then Return False
+                If seen.Add(name) Then result.Add(name)
+            Next
+
+            Return True
+        End Function
+
         Public Shared Function ExtractRequestedToolNames(arguments As Dictionary(Of String, Object)) As List(Of String)
             Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 

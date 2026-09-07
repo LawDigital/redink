@@ -721,6 +721,11 @@ Partial Public Class ThisAddIn
         Dim savedUiWindow As Word.Window = Nothing
         Dim savedUiSelection As Word.Range = Nothing
 
+        Dim writebackRestoreWindow As Word.Window = Nothing
+        Dim writebackRestoreSelection As Word.Range = Nothing
+        Dim writebackOriginalScreenUpdating As Boolean = True
+        Dim writebackFocusLeaseActive As Boolean = False
+
         Try
             savedUiWindow = application.ActiveWindow
             If application.Selection IsNot Nothing AndAlso application.Selection.Range IsNot Nothing Then
@@ -1277,9 +1282,19 @@ Partial Public Class ThisAddIn
                 Dim MarkdownInstruction As String = ""
                 If MarkupMethod = 2 Then MarkdownInstruction = " " & SP_Add_NoMarkdown
 
-                ' Restore the user's original UI context before the long-running model call.
-                ' The processing target is kept separately in rng / bookmarks.
-                RestoreUiContext(application, savedUiWindow, savedUiSelection)
+                ' Give Word UI control back before every long-running model call. If a previous
+                ' writeback temporarily leased focus, restore the user's most recently active
+                ' window; otherwise this is the first pass and the original UI context applies.
+                If writebackFocusLeaseActive Then
+                    EndProcessingFocusLease(
+                        application,
+                        writebackRestoreWindow,
+                        writebackRestoreSelection,
+                        writebackOriginalScreenUpdating,
+                        writebackFocusLeaseActive)
+                Else
+                    RestoreUiContext(application, savedUiWindow, savedUiSelection)
+                End If
 
                 ' If tools are selected and the model supports tooling, enter the tool execution loop
                 If SelectedTools IsNot Nothing AndAlso SelectedTools.Count > 0 AndAlso UseSecondAPI Then
@@ -1322,7 +1337,11 @@ Partial Public Class ThisAddIn
                                                   End If
                                               Catch
                                               End Try
-                                          End Sub)
+                                          End Sub,
+                            pinnedWordDocumentName:=If(currentdoc Is Nothing, "", currentdoc.Name),
+                            pinnedWordDocumentFullName:=GetSafeWordDocumentFullName(currentdoc),
+                            pinnedWordSelectionStart:=If(rng Is Nothing, -1, rng.Start),
+                            pinnedWordSelectionEnd:=If(rng Is Nothing, -1, rng.End))
                     Finally
                         If infoBoxShown Then
                             Try
@@ -1400,8 +1419,17 @@ Partial Public Class ThisAddIn
                 Debug.WriteLine($"Range End = {rng.End} Selection End = {selection.End}")
                 Debug.WriteLine(vbCrLf & Left(rng.Text, 400) & vbCrLf)
 
-                ' Re-bind Word's live Selection to the processing target before any writeback.
-                ActivateProcessingContext(rng)
+                ' Re-bind Word's live Selection to the processing target before any writeback,
+                ' but preserve whatever Word window the user selected while the model was working.
+                If Not BeginProcessingFocusLease(
+                    application,
+                    rng,
+                    writebackRestoreWindow,
+                    writebackRestoreSelection,
+                    writebackOriginalScreenUpdating,
+                    writebackFocusLeaseActive) Then
+                    Throw New System.InvalidOperationException("The Word document pinned for this Freestyle operation is no longer available for writeback.")
+                End If
                 selection = application.Selection
                 rng = selection.Range
 
@@ -1448,16 +1476,24 @@ Partial Public Class ThisAddIn
                     If DoPushback Then
 
                         Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                        Dim callbackDocumentName As String = If(rng Is Nothing OrElse rng.Document Is Nothing, "", rng.Document.Name)
+                        Dim callbackDocumentFullName As String = If(rng Is Nothing, "", GetSafeWordDocumentFullName(rng.Document))
+                        Dim callbackStart As Integer = If(rng Is Nothing, -1, rng.Start)
+                        Dim callbackEnd As Integer = If(rng Is Nothing, -1, rng.End)
+                        Dim replyAction As System.Action =
+                            Sub()
+                                RunPinnedProcessingSelectionAction(
+                                    app,
+                                    callbackDocumentName,
+                                    callbackDocumentFullName,
+                                    callbackStart,
+                                    callbackEnd,
+                                    Sub(uiSel) ReplyBubbles(LLMResult, uiSel, DoSilent))
+                            End Sub
                         If _uiContext IsNot Nothing Then
-                            _uiContext.Post(
-                                Sub(s)
-                                    Dim uiSel As Microsoft.Office.Interop.Word.Selection = app.Selection
-                                    ReplyBubbles(LLMResult, uiSel, DoSilent)
-                                End Sub, Nothing)
+                            _uiContext.Post(Sub(s) replyAction(), Nothing)
                         Else
-                            ' Fallback – assume we are already on UI thread
-                            Dim uiSel As Microsoft.Office.Interop.Word.Selection = app.Selection
-                            ReplyBubbles(LLMResult, uiSel, DoSilent)
+                            replyAction()
                         End If
 
                     ElseIf CreatePodcast AndAlso Not DoSilent Then
@@ -1564,6 +1600,10 @@ Partial Public Class ThisAddIn
                         If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
                         Dim dialogResult As String = ""
+                        Dim clipboardTargetDocumentName As String = If(rng Is Nothing OrElse rng.Document Is Nothing, "", rng.Document.Name)
+                        Dim clipboardTargetDocumentFullName As String = If(rng Is Nothing, "", GetSafeWordDocumentFullName(rng.Document))
+                        Dim clipboardTargetStart As Integer = If(rng Is Nothing, -1, rng.Start)
+                        Dim clipboardTargetEnd As Integer = If(rng Is Nothing, -1, rng.End)
 
                         If _uiContext IsNot Nothing Then
                             Dim doneEvent As New ManualResetEventSlim(False)            ' Make sure we run in the UI Thread
@@ -1600,16 +1640,28 @@ Partial Public Class ThisAddIn
                                                                     rng.Document.Fields.Update()
                                                                 End If
                                                             ElseIf NewDocChoice = 2 Then
-                                                                Globals.ThisAddIn.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
-                                                                Globals.ThisAddIn.Application.Selection.TypeParagraph()
-                                                                Globals.ThisAddIn.Application.Selection.TypeParagraph()
-                                                                InsertTextWithMarkdown(Globals.ThisAddIn.Application.Selection, vbCrLf & LLMResult, False)
-                                                                Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
-                                                                If Regex.IsMatch(LLMResult, pattern) Then
-                                                                    rng = wordApp.Selection.Range
-                                                                    RestoreSpecialTextElements(rng)
-                                                                    rng.Document.Fields.Update()
-                                                                End If
+                                                                RunPinnedProcessingSelectionAction(
+                                                                    Globals.ThisAddIn.Application,
+                                                                    clipboardTargetDocumentName,
+                                                                    clipboardTargetDocumentFullName,
+                                                                    clipboardTargetStart,
+                                                                    clipboardTargetEnd,
+                                                                    Sub(targetSelection)
+                                                                        targetSelection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                                                                        targetSelection.TypeParagraph()
+                                                                        targetSelection.TypeParagraph()
+                                                                        InsertTextWithMarkdown(targetSelection, vbCrLf & LLMResult, False)
+                                                                        Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
+                                                                        If Regex.IsMatch(LLMResult, pattern) Then
+                                                                            Dim insertedRange As Word.Range = targetSelection.Range
+                                                                            Try
+                                                                                RestoreSpecialTextElements(insertedRange)
+                                                                                insertedRange.Document.Fields.Update()
+                                                                            Finally
+                                                                                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(insertedRange) : Catch : End Try
+                                                                            End Try
+                                                                        End If
+                                                                    End Sub)
                                                             Else
                                                                 ShowCustomMessageBox("No text was inserted (but included in the clipboard as RTF).")
                                                                 SLib.PutInClipboard(MarkdownToRtfConverter.Convert((LLMResult)))
@@ -1663,16 +1715,28 @@ Partial Public Class ThisAddIn
                                             rng.Document.Fields.Update()
                                         End If
                                     ElseIf NewDocChoice = 2 Then
-                                        Globals.ThisAddIn.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
-                                        Globals.ThisAddIn.Application.Selection.TypeParagraph()
-                                        Globals.ThisAddIn.Application.Selection.TypeParagraph()
-                                        InsertTextWithMarkdown(Globals.ThisAddIn.Application.Selection, LLMResult, False)
-                                        Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
-                                        If Regex.IsMatch(LLMResult, pattern) Then
-                                            rng = wordApp.Selection.Range
-                                            RestoreSpecialTextElements(rng)
-                                            rng.Document.Fields.Update()
-                                        End If
+                                        RunPinnedProcessingSelectionAction(
+                                            Globals.ThisAddIn.Application,
+                                            clipboardTargetDocumentName,
+                                            clipboardTargetDocumentFullName,
+                                            clipboardTargetStart,
+                                            clipboardTargetEnd,
+                                            Sub(targetSelection)
+                                                targetSelection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                                                targetSelection.TypeParagraph()
+                                                targetSelection.TypeParagraph()
+                                                InsertTextWithMarkdown(targetSelection, LLMResult, False)
+                                                Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
+                                                If Regex.IsMatch(LLMResult, pattern) Then
+                                                    Dim insertedRange As Word.Range = targetSelection.Range
+                                                    Try
+                                                        RestoreSpecialTextElements(insertedRange)
+                                                        insertedRange.Document.Fields.Update()
+                                                    Finally
+                                                        Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(insertedRange) : Catch : End Try
+                                                    End Try
+                                                End If
+                                            End Sub)
                                     Else
                                         ShowCustomMessageBox("No text was inserted (but included in the clipboard as RTF).")
                                         SLib.PutInClipboard(MarkdownToRtfConverter.Convert((LLMResult)))
@@ -1696,25 +1760,51 @@ Partial Public Class ThisAddIn
 
                     ElseIf PutInBubbles Then
 
-                        'SetBubbles(LLMResult, selection, DoSilent)
                         Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                        Dim callbackDocumentName As String = If(rng Is Nothing OrElse rng.Document Is Nothing, "", rng.Document.Name)
+                        Dim callbackDocumentFullName As String = If(rng Is Nothing, "", GetSafeWordDocumentFullName(rng.Document))
+                        Dim callbackStart As Integer = If(rng Is Nothing, -1, rng.Start)
+                        Dim callbackEnd As Integer = If(rng Is Nothing, -1, rng.End)
+                        Dim bubbleAction As System.Action =
+                            Sub()
+                                RunPinnedProcessingSelectionAction(
+                                    app,
+                                    callbackDocumentName,
+                                    callbackDocumentFullName,
+                                    callbackStart,
+                                    callbackEnd,
+                                    Sub(uiSel) SetBubbles(LLMResult, uiSel, DoSilent))
+                            End Sub
                         If _uiContext IsNot Nothing Then
-                            _uiContext.Post(
-                                Sub(s)
-                                    Dim uiSel As Microsoft.Office.Interop.Word.Selection = app.Selection
-                                    SetBubbles(LLMResult, uiSel, DoSilent)
-                                End Sub, Nothing)
+                            _uiContext.Post(Sub(s) bubbleAction(), Nothing)
                         Else
-                            ' Fallback – assume we are already on UI thread
-                            Dim uiSel As Microsoft.Office.Interop.Word.Selection = app.Selection
-                            SetBubbles(LLMResult, uiSel, DoSilent)
+                            bubbleAction()
                         End If
 
                     ElseIf MarkupMethod = 4 Then
 
                         If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
+                        EndProcessingFocusLease(
+                            application,
+                            writebackRestoreWindow,
+                            writebackRestoreSelection,
+                            writebackOriginalScreenUpdating,
+                            writebackFocusLeaseActive)
+
                         Dim RegexResult = Await LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False)
+
+                        If Not BeginProcessingFocusLease(
+                            application,
+                            rng,
+                            writebackRestoreWindow,
+                            writebackRestoreSelection,
+                            writebackOriginalScreenUpdating,
+                            writebackFocusLeaseActive) Then
+                            Throw New System.InvalidOperationException("The Word document pinned for this Freestyle operation is no longer available for writeback.")
+                        End If
+                        selection = application.Selection
+                        rng = selection.Range
 
                         MarkupSelectedTextWithRegex(RegexResult)
 
@@ -2029,6 +2119,13 @@ Partial Public Class ThisAddIn
             INIloaded = False
 
         Finally
+
+            EndProcessingFocusLease(
+                application,
+                writebackRestoreWindow,
+                writebackRestoreSelection,
+                writebackOriginalScreenUpdating,
+                writebackFocusLeaseActive)
 
             Try
                 ' Aufräumen aller temporären Bookmarks
@@ -4773,6 +4870,194 @@ Partial Public Class ThisAddIn
 
         Return String.Empty
     End Function
+
+    Private Shared Function IsSameProcessingDocument(ByVal first As Word.Document,
+                                                     ByVal second As Word.Document) As Boolean
+        If first Is Nothing OrElse second Is Nothing Then Return False
+        Try
+            Dim firstFullName As String = If(first.FullName, "")
+            Dim secondFullName As String = If(second.FullName, "")
+            If firstFullName <> "" AndAlso secondFullName <> "" Then
+                Return String.Equals(firstFullName, secondFullName, StringComparison.OrdinalIgnoreCase)
+            End If
+        Catch
+        End Try
+        Try
+            Return String.Equals(first.Name, second.Name, StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function GetSafeWordDocumentFullName(ByVal doc As Word.Document) As String
+        If doc Is Nothing Then Return ""
+        Try
+            Return If(doc.FullName, "")
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Function ResolvePinnedProcessingDocument(ByVal app As Word.Application,
+                                                     ByVal targetDocumentName As String,
+                                                     ByVal targetDocumentFullName As String) As Word.Document
+        If app Is Nothing Then Return Nothing
+
+        Dim normalizedFullName As String = If(targetDocumentFullName, "").Trim()
+        Dim normalizedName As String = If(targetDocumentName, "").Trim()
+
+        Try
+            For Each candidate As Word.Document In app.Documents
+                If normalizedFullName <> "" Then
+                    Dim candidateFullName As String = GetSafeWordDocumentFullName(candidate)
+                    If candidateFullName <> "" AndAlso
+                       String.Equals(candidateFullName, normalizedFullName, StringComparison.OrdinalIgnoreCase) Then
+                        Return candidate
+                    End If
+                ElseIf normalizedName <> "" Then
+                    If String.Equals(candidate.Name, normalizedName, StringComparison.OrdinalIgnoreCase) Then
+                        Return candidate
+                    End If
+                End If
+            Next
+        Catch ex As System.Exception
+            Debug.WriteLine($"ResolvePinnedProcessingDocument failed: {ex.Message}")
+        End Try
+
+        If normalizedFullName <> "" OrElse normalizedName <> "" Then Return Nothing
+
+        Try
+            Return app.ActiveDocument
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Sub RunPinnedProcessingSelectionAction(ByVal app As Word.Application,
+                                                   ByVal targetDocumentName As String,
+                                                   ByVal targetDocumentFullName As String,
+                                                   ByVal targetStart As Integer,
+                                                   ByVal targetEnd As Integer,
+                                                   ByVal action As System.Action(Of Word.Selection))
+        If app Is Nothing OrElse action Is Nothing Then Return
+
+        Dim targetDocument As Word.Document = ResolvePinnedProcessingDocument(app, targetDocumentName, targetDocumentFullName)
+        If targetDocument Is Nothing Then
+            Debug.WriteLine("Pinned Word document is no longer open; selection-based writeback skipped.")
+            Return
+        End If
+
+        Dim targetRange As Word.Range = Nothing
+        Dim restoreWindow As Word.Window = Nothing
+        Dim restoreSelection As Word.Range = Nothing
+        Dim originalScreenUpdating As Boolean = True
+        Dim leaseActive As Boolean = False
+
+        Try
+            Dim contentStart As Integer = targetDocument.Content.Start
+            Dim contentEnd As Integer = targetDocument.Content.End
+            Dim safeStart As Integer = If(targetStart >= 0, System.Math.Max(contentStart, System.Math.Min(targetStart, contentEnd)), contentStart)
+            Dim safeEnd As Integer = If(targetEnd >= 0, System.Math.Max(contentStart, System.Math.Min(targetEnd, contentEnd)), safeStart)
+            If safeEnd < safeStart Then safeEnd = safeStart
+            targetRange = targetDocument.Range(safeStart, safeEnd)
+
+            If Not BeginProcessingFocusLease(
+                app,
+                targetRange,
+                restoreWindow,
+                restoreSelection,
+                originalScreenUpdating,
+                leaseActive) Then
+                Debug.WriteLine("Pinned Word document could not be established as the selection writeback target.")
+                Return
+            End If
+
+            Dim activeDocument As Word.Document = Nothing
+            Try : activeDocument = app.ActiveDocument : Catch : End Try
+            If Not IsSameProcessingDocument(activeDocument, targetDocument) Then
+                Debug.WriteLine("Pinned Word document could not be established as the selection writeback target.")
+                Return
+            End If
+
+            action(app.Selection)
+        Catch ex As System.Exception
+            Debug.WriteLine($"RunPinnedProcessingSelectionAction failed: {ex.Message}")
+        Finally
+            EndProcessingFocusLease(
+                app,
+                restoreWindow,
+                restoreSelection,
+                originalScreenUpdating,
+                leaseActive)
+            If targetRange IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(targetRange) : Catch : End Try
+            End If
+        End Try
+    End Sub
+
+    Private Function BeginProcessingFocusLease(ByVal app As Word.Application,
+                                               ByVal targetRange As Word.Range,
+                                               ByRef restoreWindow As Word.Window,
+                                               ByRef restoreSelection As Word.Range,
+                                               ByRef originalScreenUpdating As Boolean,
+                                               ByRef leaseActive As Boolean) As Boolean
+        EndProcessingFocusLease(app, restoreWindow, restoreSelection, originalScreenUpdating, leaseActive)
+
+        If app Is Nothing OrElse targetRange Is Nothing Then Return False
+
+        Try
+            Dim targetDocument As Word.Document = targetRange.Document
+            Dim activeDoc As Word.Document = app.ActiveDocument
+            If IsSameProcessingDocument(activeDoc, targetDocument) Then
+                ActivateProcessingContext(targetRange)
+                Dim activeTargetDocumentAfterActivation As Word.Document = Nothing
+                Try : activeTargetDocumentAfterActivation = app.ActiveDocument : Catch : End Try
+                Return IsSameProcessingDocument(activeTargetDocumentAfterActivation, targetDocument)
+            End If
+
+            restoreWindow = app.ActiveWindow
+            If app.Selection IsNot Nothing AndAlso app.Selection.Range IsNot Nothing Then
+                restoreSelection = app.Selection.Range.Duplicate
+            End If
+            originalScreenUpdating = app.ScreenUpdating
+            app.ScreenUpdating = False
+            leaseActive = True
+            ActivateProcessingContext(targetRange)
+
+            Dim activeTargetDocumentAfterLease As Word.Document = Nothing
+            Try : activeTargetDocumentAfterLease = app.ActiveDocument : Catch : End Try
+            Return IsSameProcessingDocument(activeTargetDocumentAfterLease, targetDocument)
+        Catch ex As System.Exception
+            Debug.WriteLine($"BeginProcessingFocusLease failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    Private Sub EndProcessingFocusLease(ByVal app As Word.Application,
+                                        ByRef restoreWindow As Word.Window,
+                                        ByRef restoreSelection As Word.Range,
+                                        ByRef originalScreenUpdating As Boolean,
+                                        ByRef leaseActive As Boolean)
+        If Not leaseActive Then Return
+
+        Try
+            If restoreWindow IsNot Nothing Then restoreWindow.Activate()
+            If restoreSelection IsNot Nothing Then restoreSelection.Select()
+        Catch ex As System.Exception
+            Debug.WriteLine($"EndProcessingFocusLease restore failed: {ex.Message}")
+        Finally
+            Try
+                If app IsNot Nothing Then app.ScreenUpdating = originalScreenUpdating
+            Catch
+            End Try
+            If restoreSelection IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(restoreSelection) : Catch : End Try
+            End If
+            restoreSelection = Nothing
+            restoreWindow = Nothing
+            leaseActive = False
+        End Try
+    End Sub
 
     ''' <summary>
     ''' Restores the user's previous UI window and selection after processing temporarily moved
