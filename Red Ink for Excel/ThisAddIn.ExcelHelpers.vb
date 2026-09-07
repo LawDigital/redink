@@ -450,7 +450,7 @@ Partial Public Class ThisAddIn
             Next
 
         Catch ex As System.Exception
-            MessageBox.Show($"Error in AdjustHeight: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in AdjustHeight: {ex.Message}", "Error")
         Finally
             splash.Close()
         End Try
@@ -541,7 +541,7 @@ Partial Public Class ThisAddIn
             Next
 
         Catch ex As System.Exception
-            MessageBox.Show($"Error in AdjustLegacyNotes: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in AdjustLegacyNotes: {ex.Message}", "Error")
         Finally
             splash.Close()
         End Try
@@ -891,7 +891,7 @@ Partial Public Class ThisAddIn
                 ex.Message,
                 "Regex Search & Replace")
         Catch ex As System.Exception
-            MessageBox.Show("Error in RegexSearchReplace: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in RegexSearchReplace: " & ex.Message, "Error")
         Finally
             splash.Close()
         End Try

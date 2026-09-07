@@ -440,7 +440,7 @@ Namespace SharedLibrary
                 ShowCustomMessageBox($"Written value '{regValue}' to the registry at '{regPath}.'")
 
             Catch ex As Exception
-                MessageBox.Show($"Error: Unable to write to the registry at '{regPath}'. {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error: Unable to write to the registry at '{regPath}'. {ex.Message}", "Error")
             End Try
         End Sub
 
@@ -473,7 +473,7 @@ Namespace SharedLibrary
                         hive = Registry.CurrentConfig
                     Case Else
                         If Not suppressErrors Then
-                            MessageBox.Show("Error in GetFromRegistry - invalid registry hive: " & hiveName, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetFromRegistry - invalid registry hive: " & hiveName, "Error")
                         End If
                         Return ""
                 End Select
@@ -484,7 +484,7 @@ Namespace SharedLibrary
                         Return RemoveCR(subKey.GetValue(valueName, Nothing)?.ToString())
                     Else
                         If Not suppressErrors Then
-                            MessageBox.Show("Error in GetFromRegistry - Registry key not found: " & subKeyPath, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetFromRegistry - Registry key not found: " & subKeyPath, "Error")
                         End If
                         Return ""
                     End If
@@ -492,7 +492,7 @@ Namespace SharedLibrary
 
             Catch ex As System.Exception
                 If Not suppressErrors Then
-                    MessageBox.Show("An error occurred: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("An error occurred: " & ex.Message, "Error")
                 End If
                 Return ""
             End Try
@@ -1448,13 +1448,13 @@ Namespace SharedLibrary
 
                 ' If the domain is not retrieved, return an appropriate message
                 If String.IsNullOrEmpty(strDomain) Then
-                    MessageBox.Show($"Error in GetDomain - unable to determine the domain name or workgroup.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in GetDomain - unable to determine the domain name or workgroup.", "Error")
                     strDomain = ""
                 End If
 
                 Return strDomain
             Catch ex As System.Exception
-                MessageBox.Show($"Error in GetDomain - Error retrieving domain or workgroup: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in GetDomain - Error retrieving domain or workgroup: {ex.Message}", "Error")
                 Return String.Empty
             End Try
         End Function

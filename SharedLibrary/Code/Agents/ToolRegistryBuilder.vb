@@ -188,12 +188,71 @@ Namespace Agents
             End If
             instr.Append(" (Skill, ").Append(originLabel).Append(".)")
 
-            Dim def As String =
-                "{""name"":""" & JsonEscape(toolName) & """," &
-                """description"":""" & JsonEscape(If(sk.Description, "Invokes the skill.")) & """," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """input"":{""type"":""string"",""description"":""Task or input for the skill.""}}," &
-                """required"":[""input""]}}"
+            Dim declaredDeliverableCount As System.Int32 =
+                SkillInvokeTool.GetDeclaredDeliverableCount(sk)
+
+            If declaredDeliverableCount > 0 Then
+                instr.Append(" This skill declares exactly ")
+                instr.Append(declaredDeliverableCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                instr.Append(" expected final artifact slot(s); expected_artifacts is mandatory before the skill runs.")
+            End If
+
+            Dim properties As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty(
+                    "input",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                        New Newtonsoft.Json.Linq.JProperty("description", "Task or input for the skill."))))
+
+            Dim required As New Newtonsoft.Json.Linq.JArray("input")
+
+            If declaredDeliverableCount > 0 Then
+                properties("expected_artifacts") =
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "array"),
+                        New Newtonsoft.Json.Linq.JProperty(
+                            "description",
+                            "REQUIRED exact expected-final-artifact contract declared by this skill. Use opaque logical_deliverable_id/output_slot_id pairs."),
+                        New Newtonsoft.Json.Linq.JProperty("minItems", declaredDeliverableCount),
+                        New Newtonsoft.Json.Linq.JProperty("maxItems", declaredDeliverableCount),
+                        New Newtonsoft.Json.Linq.JProperty(
+                            "items",
+                            New Newtonsoft.Json.Linq.JObject(
+                                New Newtonsoft.Json.Linq.JProperty("type", "object"),
+                                New Newtonsoft.Json.Linq.JProperty(
+                                    "properties",
+                                    New Newtonsoft.Json.Linq.JObject(
+                                        New Newtonsoft.Json.Linq.JProperty(
+                                            "logical_deliverable_id",
+                                            New Newtonsoft.Json.Linq.JObject(
+                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))),
+                                        New Newtonsoft.Json.Linq.JProperty(
+                                            "output_slot_id",
+                                            New Newtonsoft.Json.Linq.JObject(
+                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))))),
+                                New Newtonsoft.Json.Linq.JProperty(
+                                    "required",
+                                    New Newtonsoft.Json.Linq.JArray(
+                                        "logical_deliverable_id",
+                                        "output_slot_id")))))
+
+                required.Add("expected_artifacts")
+            End If
+
+            Dim definition As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("name", toolName),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "description",
+                    If(sk.Description, "Invokes the skill.")),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "parameters",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "object"),
+                        New Newtonsoft.Json.Linq.JProperty("properties", properties),
+                        New Newtonsoft.Json.Linq.JProperty("required", required))))
+
+            Dim def As System.String =
+                definition.ToString(Newtonsoft.Json.Formatting.None)
 
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = toolName,
@@ -226,6 +285,7 @@ Namespace Agents
             instr.Append("Reuse exactly the same subagent_task_id for the same logical delegated task; use a new id only for a genuinely new independent task. ")
             instr.Append("Do not derive task identity from task wording, filenames, paths, anchors, or semantic similarity. ")
             instr.Append("Every invocation MUST include expected_artifacts. Use [] when the delegated task is explicitly non-file-producing. For a file-producing task, expected_artifacts MUST declare the complete set of opaque logical_deliverable_id/output_slot_id pairs before the agent runs. ")
+            instr.Append("If the parent already has canonical large-result handles for source artifacts, pass them in canonical_source_result_refs. In that mode the host may suppress physical source-reader tools and the sub-agent must reuse those handles with context_expand. ")
             instr.Append("(Agent, ").Append(originLabel).Append(
                 If(String.IsNullOrWhiteSpace(ag.Model), ".)", ", model='" & ag.Model & "'.)"))
 
@@ -235,6 +295,7 @@ Namespace Agents
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """task"":{""type"":""string"",""description"":""Self-contained task description for the sub-agent.""}," &
                 """context"":{""type"":""string"",""description"":""Optional context blob (text) the parent wants to pass through. Defaults to none.""}," &
+                """canonical_source_result_refs"":{""type"":""array"",""description"":""Optional canonical result_ref handles for source artifacts that the parent has already read/extracted. When supplied, the isolated sub-agent must reuse these handles with context_expand instead of physically re-reading or OCRing the same source."",""items"":{""type"":""string""}}," &
                 """subagent_task_id"":{""type"":""string"",""description"":""REQUIRED opaque stable caller-assigned identity for this logical delegated task. Reuse exactly for the same task; use a new id only for a genuinely new independent task. Do not derive identity from task wording, filenames, paths, anchors, or semantic similarity.""}," &
                 """expected_artifacts"":{""type"":""array"",""description"":""REQUIRED exact expected-final-artifact contract. Use [] for an explicitly non-file-producing delegated task; otherwise provide the complete opaque logical_deliverable_id/output_slot_id set."",""items"":{""type"":""object"",""properties"":{" &
                 """logical_deliverable_id"":{""type"":""string""}," &

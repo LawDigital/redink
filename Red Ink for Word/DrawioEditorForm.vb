@@ -135,12 +135,8 @@ Public Class DrawioEditorForm
             webView.CoreWebView2.Navigate(hostUri.AbsoluteUri)
 
         Catch ex As Exception
-            MessageBox.Show(
-                $"Could not initialize the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
-                $"Your diagram has been saved to:{vbCrLf}{_saveFilePath}",
-                $"{AN} - Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Could not initialize the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
+                $"Your diagram has been saved to:{vbCrLf}{_saveFilePath}", $"{AN} - Error")
             Me.Close()
         End Try
     End Sub
@@ -209,11 +205,7 @@ Public Class DrawioEditorForm
             End If
 
             If _offlineModeEnabled Then
-                MessageBox.Show(
-                    "Export requires internet access. You opened draw.io in offline-after-load mode.",
-                    $"{AN} - Export",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Export requires internet access. You opened draw.io in offline-after-load mode.", $"{AN} - Export")
                 Return
             End If
 
@@ -231,11 +223,7 @@ Public Class DrawioEditorForm
             webView.CoreWebView2.ExecuteScriptAsync(script)
 
         Catch ex As Exception
-            MessageBox.Show(
-                $"Export failed: {ex.Message}",
-                $"{AN} - Export",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Export failed: {ex.Message}", $"{AN} - Export")
         End Try
     End Sub
 
@@ -260,11 +248,7 @@ Public Class DrawioEditorForm
             If message.ContainsKey("data") Then dataB64 = TryCast(message("data"), String)
 
             If String.IsNullOrWhiteSpace(dataB64) Then
-                MessageBox.Show(
-                    "Export did not return file data.",
-                    $"{AN} - Export",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Export did not return file data.", $"{AN} - Export")
                 Return
             End If
 
@@ -276,11 +260,7 @@ Public Class DrawioEditorForm
             Try
                 bytes = Convert.FromBase64String(dataB64)
             Catch
-                MessageBox.Show(
-                    "Export returned invalid base64 data.",
-                    $"{AN} - Export",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Export returned invalid base64 data.", $"{AN} - Export")
                 Return
             End Try
 
@@ -300,11 +280,7 @@ Public Class DrawioEditorForm
                       End Sub)
 
         Catch ex As Exception
-            MessageBox.Show(
-                $"Export failed: {ex.Message}",
-                $"{AN} - Export",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Export failed: {ex.Message}", $"{AN} - Export")
         End Try
     End Sub
 
@@ -511,11 +487,7 @@ Public Class DrawioEditorForm
                 End Sub)
 
         Catch ex As Exception
-            MessageBox.Show(
-                $"Could not save the diagram: {ex.Message}",
-                $"{AN} - Save Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Could not save the diagram: {ex.Message}", $"{AN} - Save Error")
         End Try
     End Sub
 

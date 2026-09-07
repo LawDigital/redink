@@ -82,7 +82,7 @@ Namespace Agents
             If Not IsAvailable(ignoredErrorCode) Then
                 Throw New RedInkPythonAgentConfigurationException("The python_execute tool is unavailable: " & ignoredErrorCode)
             End If
-            Return New ModelConfig() With {
+            Dim tool As New ModelConfig() With {
                 .ToolName = ToolName,
                 .ToolInstructionsPrompt = Agents.PythonExecuteToolCore.ToolInstructionsPrompt,
                 .ToolDefinition = Agents.PythonExecuteToolCore.ToolDefinitionJson,
@@ -94,6 +94,10 @@ Namespace Agents
                 .IsFallbackStrategy = True,
                 .CapabilityTags = "docx_edit,artifact_generation"
             }
+
+            ' IsFallbackStrategy is a ranking/efficiency hint only. The tool remains fully callable and
+            ' repairable whenever exposed, including when a specialized tool also exists.
+            Return ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
         End Function
 
         Public Shared Function TryBuild(
@@ -142,15 +146,32 @@ Namespace Agents
             Optional logWarn As System.Action(Of System.String) = Nothing,
             Optional logDiag As System.Action(Of System.String) = Nothing,
             Optional hostServiceHandler As IRedInkPythonAgentHostServiceHandler = Nothing,
-            Optional allowedOperations As System.Collections.Generic.IEnumerable(Of System.String) = Nothing
+            Optional allowedOperations As System.Collections.Generic.IEnumerable(Of System.String) = Nothing,
+            Optional publishOutputFile As System.Action(Of RedInkPythonAgentOutput) = Nothing,
+            Optional maximumOutputFiles As System.Int32 = 0
         ) As System.Threading.Tasks.Task(Of PythonExecuteToolCoreResult)
             Dim options As PythonExecuteToolCoreOptions = GetConfiguredOptions()
-            If hostServiceHandler IsNot Nothing OrElse allowedOperations IsNot Nothing Then
+            If hostServiceHandler IsNot Nothing OrElse
+               allowedOperations IsNot Nothing OrElse
+               publishOutputFile IsNot Nothing OrElse
+               maximumOutputFiles > 0 Then
+
                 options = options.Clone()
-                options.HostServiceHandler = hostServiceHandler
-                options.AllowedOperations = If(allowedOperations Is Nothing,
-                                               New System.Collections.Generic.List(Of System.String)(),
-                                               New System.Collections.Generic.List(Of System.String)(allowedOperations))
+
+                If hostServiceHandler IsNot Nothing OrElse allowedOperations IsNot Nothing Then
+                    options.HostServiceHandler = hostServiceHandler
+                    options.AllowedOperations = If(allowedOperations Is Nothing,
+                                                   New System.Collections.Generic.List(Of System.String)(),
+                                                   New System.Collections.Generic.List(Of System.String)(allowedOperations))
+                End If
+
+                If publishOutputFile IsNot Nothing Then
+                    options.PublishOutputFile = publishOutputFile
+                End If
+
+                If maximumOutputFiles > 0 Then
+                    options.MaximumOutputFiles = maximumOutputFiles
+                End If
             End If
             Return Await PythonExecuteToolCore.ExecuteAsync(options, arguments, cancellationToken, logStep, logInfo, logWarn, logDiag).ConfigureAwait(False)
         End Function

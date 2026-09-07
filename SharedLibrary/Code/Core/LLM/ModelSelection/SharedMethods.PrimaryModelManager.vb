@@ -242,10 +242,7 @@ Namespace SharedLibrary
             If config Is Nothing OrElse config.Count = 0 Then
                 Dim emptyMessage = BuildMissingKeyMessage(modelLabel, Nothing, True, config)
                 Debug.WriteLine($"[ModelConfigManager] {emptyMessage}")
-                MessageBox.Show(emptyMessage,
-                                "Model configuration invalid",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Warning)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(emptyMessage, "Model configuration invalid")
                 Return False
             End If
 
@@ -260,10 +257,7 @@ Namespace SharedLibrary
             If missing.Count > 0 Then
                 Dim detailedMsg = BuildMissingKeyMessage(modelLabel, missing, False, config)
                 Debug.WriteLine($"[ModelConfigManager] {detailedMsg}")
-                MessageBox.Show(detailedMsg,
-                                "Model configuration invalid",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Warning)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(detailedMsg, "Model configuration invalid")
                 Return False
             End If
 

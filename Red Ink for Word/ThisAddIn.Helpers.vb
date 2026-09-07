@@ -409,7 +409,7 @@ Partial Public Class ThisAddIn
     ''' <returns>The interpolated string with placeholders replaced by actual values.</returns>
     Public Function InterpolateAtRuntime(ByVal template As String) As String
         If template Is Nothing Then
-            MessageBox.Show("Error InterpolateAtRuntime: Template is Nothing.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error InterpolateAtRuntime: Template is Nothing.", "Error")
             Return ""
         End If
 

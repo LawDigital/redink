@@ -374,6 +374,7 @@ Partial Public Class ThisAddIn
                     fullPromptOverride:=request.UserMessage,
                     hideSplash:=True,
                     hideLogWindow:=True,
+                    cancellationToken:=ct,
                     subAgentMode:=True,
                     subAgentAllowedToolNames:=effectiveAllowedToolNames,
                     subAgentSpecialModelKey:=request.SpecialModelKey,
@@ -385,7 +386,8 @@ Partial Public Class ThisAddIn
                     subAgentName:=request.AgentName,
                     workflowId:=request.WorkflowId,
                     finalResponseContract:=SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText,
-                    subAgentExpectedArtifactsJson:=request.ExpectedArtifactsJson).ConfigureAwait(False)
+                    subAgentExpectedArtifactsJson:=request.ExpectedArtifactsJson,
+                    subAgentRequiredSuccessfulToolNames:=request.RequiredSuccessfulToolNames).ConfigureAwait(False)
 
             If subAgentTaskId <> "" AndAlso
                _activeToolingContext IsNot Nothing AndAlso

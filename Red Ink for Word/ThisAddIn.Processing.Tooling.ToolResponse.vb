@@ -92,11 +92,18 @@ Partial Public Class ThisAddIn
         Public Property RepairLoopTerminalReason As String
 
         ''' <summary>
+        ''' Host-internal verified effects produced by this concrete successful execution.
+        ''' These values are never accepted from model-supplied artifact metadata.
+        ''' </summary>
+        Public Property VerifiedArtifactEffects As System.Collections.Generic.List(Of System.String)
+
+        ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>
         Public Sub New()
             Timestamp = DateTime.Now
             Success = True
+            VerifiedArtifactEffects = New System.Collections.Generic.List(Of System.String)()
         End Sub
     End Class
 

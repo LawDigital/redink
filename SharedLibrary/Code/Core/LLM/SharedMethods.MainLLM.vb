@@ -2619,7 +2619,7 @@ PostProcess:
                 ' Handle exceptions explicitly with System.Exception
                 If context.INI_APIDebug Then WriteDebugError("[OAuth2 Debug] Exception in GetFreshAccessToken.", "", "", "", ex)
                 If Not silent Then
-                    MessageBox.Show("Error while fetching an access token: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error while fetching an access token: " & ex.Message, "Error")
                 End If
                 If SecondAPI Then
                     context.DecodedAPI_2 = String.Empty

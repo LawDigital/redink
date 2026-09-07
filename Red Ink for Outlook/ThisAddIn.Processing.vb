@@ -68,8 +68,7 @@ Partial Public Class ThisAddIn
 
             ' Ensure the current item is a MailItem and in compose mode (COM-safe)
             If inspector Is Nothing Then
-                System.Windows.Forms.MessageBox.Show("Error in CompareAndInsertTextCompareDocs: No active inspector.",
-                                         "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in CompareAndInsertTextCompareDocs: No active inspector.", "Error")
                 Return
             End If
 
@@ -81,8 +80,7 @@ Partial Public Class ThisAddIn
             End Try
 
             If curr Is Nothing OrElse Not TypeOf curr Is Microsoft.Office.Interop.Outlook.MailItem Then
-                System.Windows.Forms.MessageBox.Show("Error in CompareAndInsertTextCompareDocs: No active email item.",
-                                         "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in CompareAndInsertTextCompareDocs: No active email item.", "Error")
                 Return
             End If
 
@@ -143,7 +141,7 @@ Partial Public Class ThisAddIn
             If inspector IsNot Nothing Then Marshal.ReleaseComObject(inspector) : inspector = Nothing
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in CompareAndInsertTextCompareDocs: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in CompareAndInsertTextCompareDocs: " & ex.Message, "Error")
 
         Finally
             splash.Close()
@@ -698,11 +696,7 @@ Partial Public Class ThisAddIn
                 Microsoft.Office.Interop.Outlook.Inspector))
 
         If inspector Is Nothing Then
-            System.Windows.Forms.MessageBox.Show(
-            "No open mail item found.",
-            "InsertFormattedTextFast",
-            System.Windows.Forms.MessageBoxButtons.OK,
-            System.Windows.Forms.MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("No open mail item found.", "InsertFormattedTextFast")
             Exit Sub
         End If
 
@@ -711,11 +705,7 @@ Partial Public Class ThisAddIn
                 Microsoft.Office.Interop.Word.Document))
 
         If wordDoc Is Nothing Then
-            System.Windows.Forms.MessageBox.Show(
-            "Unable to access the Word editor.",
-            "InsertFormattedTextFast",
-            System.Windows.Forms.MessageBoxButtons.OK,
-            System.Windows.Forms.MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Unable to access the Word editor.", "InsertFormattedTextFast")
             Exit Sub
         End If
 
@@ -737,11 +727,7 @@ Partial Public Class ThisAddIn
 
 
         Catch ex As System.Exception
-            System.Windows.Forms.MessageBox.Show(
-            ex.Message,
-            "InsertFormattedTextFast",
-            System.Windows.Forms.MessageBoxButtons.OK,
-            System.Windows.Forms.MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(ex.Message, "InsertFormattedTextFast")
 
         Finally
             ' Restore Word UI state
@@ -786,14 +772,14 @@ Partial Public Class ThisAddIn
         ' Check if there is an active inspector (open email)
         objInspector = ComRetry(Function() TryCast(Globals.ThisAddIn.Application.ActiveInspector, Microsoft.Office.Interop.Outlook.Inspector))
         If objInspector Is Nothing Then
-            MessageBox.Show("Error in InsertFormattedText: No open mail item found.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in InsertFormattedText: No open mail item found.", "Error")
             Exit Sub
         End If
 
         ' Get the Word editor and the current selection
         objWordDoc = ComRetry(Function() TryCast(objInspector.WordEditor, Microsoft.Office.Interop.Word.Document))
         If objWordDoc Is Nothing Then
-            MessageBox.Show("Error in InsertFormattedText: Unable to access the necessary mail editor for this mail.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in InsertFormattedText: Unable to access the necessary mail editor for this mail.", "Error")
             Exit Sub
         End If
         objSelection = objWordDoc.Application.Selection
@@ -914,7 +900,7 @@ Partial Public Class ThisAddIn
                 tagType = 1 ' Insert formatting
                 Dim rawIndex As Integer = inputText.IndexOf("[INS_END]", pos - 1)
                 If rawIndex = -1 Then
-                    MessageBox.Show("Error in ParseText: Missing [INS_END] tag.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ParseText: Missing [INS_END] tag.", "Error")
                     Exit Sub
                 End If
                 tagEndPos = rawIndex + 1
@@ -925,7 +911,7 @@ Partial Public Class ThisAddIn
                 tagType = 2 ' Delete formatting
                 Dim rawIndex As Integer = inputText.IndexOf("[DEL_END]", pos - 1)
                 If rawIndex = -1 Then
-                    MessageBox.Show("Error in ParseText: Missing [DEL_END] tag.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ParseText: Missing [DEL_END] tag.", "Error")
                     Exit Sub
                 End If
                 tagEndPos = rawIndex + 1
@@ -1085,8 +1071,7 @@ Partial Public Class ThisAddIn
             End Try
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in ReviewChangesAndInsertAtEnd: " & ex.Message,
-                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ReviewChangesAndInsertAtEnd: " & ex.Message, "Error")
         Finally
             If wordDoc IsNot Nothing Then
                 Marshal.ReleaseComObject(wordDoc)

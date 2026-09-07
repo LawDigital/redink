@@ -90,7 +90,7 @@ Partial Public Class ThisAddIn
 
         Catch ex As System.Exception
             Debug.WriteLine("Bodytext=" & bodyText)
-            MessageBox.Show("Error in ShowPaneAsync: " & ex.Message)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ShowPaneAsync: " & ex.Message)
         End Try
     End Sub
 
@@ -260,9 +260,7 @@ Partial Public Class ThisAddIn
                 INI_KeepFormatCap)
 
         Catch ex As System.Exception
-            MessageBox.Show(
-                $"Error in BalloonMerge:{Environment.NewLine}{ex.Message}",
-                "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in BalloonMerge:{Environment.NewLine}{ex.Message}", "Error")
         End Try
     End Function
 

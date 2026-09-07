@@ -57,9 +57,11 @@ Partial Public Class ThisAddIn
 
     Private Structure APExcelApplyUpdatesResult
         Public AppliedCount As Integer
+        Public ContentMutationCount As Integer
         Public FailedCount As Integer
         Public SkippedProtectedCount As Integer
         Public Issues As JArray
+        Public MutatedWorksheets As System.Collections.Generic.HashSet(Of String)
     End Structure
 
     Private Async Function ExecuteExcelListLiveWorksheetsTool(
@@ -506,6 +508,8 @@ Partial Public Class ThisAddIn
             payload("attachment_name") = att.OriginalFileName
             payload("worksheet_name_default") = If(defaultWorksheetName, "")
             payload("applied_update_count") = updateResult.AppliedCount
+            payload("content_mutation_update_count") = updateResult.ContentMutationCount
+            payload("mutated_worksheets") = New JArray(If(updateResult.MutatedWorksheets, New System.Collections.Generic.HashSet(Of String)()).OrderBy(Function(name) name))
             payload("failed_update_count") = updateResult.FailedCount
             payload("skipped_non_writable_count") = updateResult.SkippedProtectedCount
             payload("partial_success") =
@@ -543,6 +547,15 @@ Partial Public Class ThisAddIn
                        $"{updateResult.FailedCount} failed, {updateResult.SkippedProtectedCount} skipped as non-writable.")
 
                 response.Success = True
+                If updateResult.ContentMutationCount > 0 Then
+                    response.VerifiedArtifactEffects.Add("content_mutated")
+                    If updateResult.MutatedWorksheets IsNot Nothing Then
+                        For Each worksheetName As String In updateResult.MutatedWorksheets
+                            Dim worksheetEffect As String = APExcelBuildWorksheetMutationEffect(worksheetName)
+                            If worksheetEffect <> String.Empty Then response.VerifiedArtifactEffects.Add(worksheetEffect)
+                        Next
+                    End If
+                End If
                 response.Response = payload.ToString(Formatting.None)
             Else
                 payload("output_file") = JValue.CreateNull()
@@ -705,6 +718,25 @@ Partial Public Class ThisAddIn
         Return Nothing
     End Function
 
+    Private Sub APExcelRecordContentMutation(ByRef result As APExcelApplyUpdatesResult, worksheetName As String)
+        result.ContentMutationCount += 1
+        If result.MutatedWorksheets Is Nothing Then
+            result.MutatedWorksheets = New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+        End If
+        If Not String.IsNullOrWhiteSpace(worksheetName) Then result.MutatedWorksheets.Add(worksheetName.Trim())
+    End Sub
+
+    Private Function APExcelBuildWorksheetMutationEffect(worksheetName As String) As String
+        Dim normalized As String = If(worksheetName, String.Empty).Trim().ToLowerInvariant()
+        If normalized = String.Empty Then Return String.Empty
+
+        normalized = normalized.Replace("ä", "ae").Replace("ö", "oe").Replace("ü", "ue").Replace("ß", "ss")
+        normalized = System.Text.RegularExpressions.Regex.Replace(normalized, "[^a-z0-9]+", "_").Trim("_"c)
+        If normalized = String.Empty Then Return String.Empty
+        If normalized.Length > 44 Then normalized = normalized.Substring(0, 44).TrimEnd("_"c)
+        Return "worksheet_mutated." & normalized
+    End Function
+
     Private Function APExcelApplyUpdates(
             wb As Microsoft.Office.Interop.Excel.Workbook,
             excelApp As Microsoft.Office.Interop.Excel.Application,
@@ -713,9 +745,11 @@ Partial Public Class ThisAddIn
 
         Dim result As New APExcelApplyUpdatesResult With {
             .AppliedCount = 0,
+            .ContentMutationCount = 0,
             .FailedCount = 0,
             .SkippedProtectedCount = 0,
-            .Issues = New JArray()
+            .Issues = New JArray(),
+            .MutatedWorksheets = New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
         }
 
         For Each token As JToken In updates
@@ -828,9 +862,10 @@ Partial Public Class ThisAddIn
 
                 Try
                     If Not String.IsNullOrWhiteSpace(formulaText) Then
-                        anchorRange.Value = ""
-                        anchorRange.NumberFormat = "General"
-
+                        ' A value/formula update must not implicitly mutate formatting. On a
+                        ' protected worksheet, an unlocked cell is writable while formatting
+                        ' may still be prohibited. Preserve the existing number format unless
+                        ' the caller explicitly supplied number_format.
                         Dim formulaError As String = Nothing
                         If Not APExcelSetFormulaSafe(anchorRange, formulaText, excelApp, formulaError) Then
                             Throw New System.InvalidOperationException(
@@ -852,8 +887,10 @@ Partial Public Class ThisAddIn
                                 Case JTokenType.Date
                                     anchorRange.Value = valueToken.Value(Of DateTime)()
                                 Case Else
-                                    anchorRange.NumberFormat = "@"
-                                    anchorRange.Value = valueToken.ToString()
+                                    ' Preserve the existing cell format. Forcing NumberFormat="@"
+                                    ' turns a value-only write into a formatting operation and can
+                                    ' fail on otherwise writable unlocked cells of protected sheets.
+                                    anchorRange.Value2 = valueToken.ToString()
                             End Select
                         End If
 
@@ -870,6 +907,7 @@ Partial Public Class ThisAddIn
                             issue("message") =
                 $"Cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}' was updated, but the comment could not be added: {commentError}"
                             result.AppliedCount += 1
+                            If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                             result.FailedCount += 1
                             result.Issues.Add(issue)
                             Continue For
@@ -889,6 +927,7 @@ Partial Public Class ThisAddIn
                             issue("message") =
                 $"Cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}' was updated, but the font properties could not be applied: {fontError}"
                             result.AppliedCount += 1
+                            If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                             result.FailedCount += 1
                             result.Issues.Add(issue)
                             Continue For
@@ -908,6 +947,7 @@ Partial Public Class ThisAddIn
                             issue("message") =
                 $"Cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}' was updated, but the fill properties could not be applied: {fillError}"
                             result.AppliedCount += 1
+                            If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                             result.FailedCount += 1
                             result.Issues.Add(issue)
                             Continue For
@@ -927,6 +967,7 @@ Partial Public Class ThisAddIn
                             issue("message") =
                 $"Cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}' was updated, but the common formatting could not be applied: {formattingError}"
                             result.AppliedCount += 1
+                            If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                             result.FailedCount += 1
                             result.Issues.Add(issue)
                             Continue For
@@ -950,6 +991,7 @@ Partial Public Class ThisAddIn
                             issue("message") =
                 $"Cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}' was updated, but the border properties could not be applied: {bordersError}"
                             result.AppliedCount += 1
+                            If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                             result.FailedCount += 1
                             result.Issues.Add(issue)
                             Continue For
@@ -974,6 +1016,7 @@ Partial Public Class ThisAddIn
                             issue("message") =
                 $"Cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}' was updated, but the structure properties could not be applied: {structureError}"
                             result.AppliedCount += 1
+                            If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                             result.FailedCount += 1
                             result.Issues.Add(issue)
                             Continue For
@@ -999,6 +1042,7 @@ Partial Public Class ThisAddIn
                             issue("message") =
                 $"Cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}' was updated, but the protection properties could not be applied: {protectionError}"
                             result.AppliedCount += 1
+                            If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                             result.FailedCount += 1
                             result.Issues.Add(issue)
                             Continue For
@@ -1032,6 +1076,7 @@ Partial Public Class ThisAddIn
                     issue("message") =
                         $"Applied update to cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}'."
                     result.AppliedCount += 1
+                    If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
                     result.Issues.Add(issue)
                 Else
                     issue("status") = "failed"

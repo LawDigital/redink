@@ -130,7 +130,7 @@ Namespace SharedLibrary
 
             ' Load ONNX model
             If Not File.Exists(modelPath) Then
-                MessageBox.Show($"Error in EmbeddingStore: Embedding model not found: {modelPath}")
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in EmbeddingStore: Embedding model not found: {modelPath}")
                 Me.store = Nothing
                 Return
             End If
@@ -138,7 +138,7 @@ Namespace SharedLibrary
 
             ' Load vocabulary and initialize tokenizer
             If Not File.Exists(vocabPath) Then
-                MessageBox.Show($"Error in EmbeddingStore: Embedding vocabulary not found: {vocabPath}")
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in EmbeddingStore: Embedding vocabulary not found: {vocabPath}")
                 Me.store = Nothing
                 Return
             End If
@@ -150,12 +150,12 @@ Namespace SharedLibrary
 
             ' Additional safeguards: ensure critical components initialized
             If Me.tokenizer Is Nothing Then
-                MessageBox.Show("Error in EmbeddingStore: Failed to initialize tokenizer")
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in EmbeddingStore: Failed to initialize tokenizer")
                 Me.store = Nothing
                 Return
             End If
             If Me.session Is Nothing Then
-                MessageBox.Show("Error in EmbeddingStore: Failed to initialize ONNX session")
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in EmbeddingStore: Failed to initialize ONNX session")
                 Me.store = Nothing
                 Return
             End If

@@ -34,7 +34,8 @@ Partial Public Class ThisAddIn
     ''' Applies previously captured paragraph formatting metadata to the supplied range.
     ''' </summary>
     ''' <param name="rng">Target range whose paragraphs are updated.</param>
-    Public Sub ApplyParagraphFormat(ByRef rng As Word.Range)
+    Public Sub ApplyParagraphFormat(ByRef rng As Word.Range,
+                                    Optional PreserveRenderedFormatting As System.Boolean = False)
         Dim maxParaStylesCount As Integer = paragraphFormat.Length
         Dim paraCount As Integer = rng.Paragraphs.Count
 
@@ -46,8 +47,27 @@ Partial Public Class ThisAddIn
             Dim pf As ParagraphFormatStructure = paragraphFormat(i - 1)
             Dim pRange As Word.Range = rng.Paragraphs(i).Range
 
+            Dim targetHasNativeList As System.Boolean = False
+            Dim targetIsHeading As System.Boolean = False
+            If PreserveRenderedFormatting Then
+                Try
+                    targetHasNativeList =
+                        pRange.ListFormat.ListType <> Word.WdListType.wdListNoNumbering
+                    targetIsHeading =
+                        pRange.ParagraphFormat.OutlineLevel <> Word.WdOutlineLevel.wdOutlineLevelBodyText
+                Catch exStructureProbe As System.Exception
+                    System.Diagnostics.Debug.WriteLine(
+                        "Could not probe rendered Word paragraph structure: " & exStructureProbe.Message)
+                End Try
+            End If
+
+            Dim preserveTargetStyle As System.Boolean =
+                PreserveRenderedFormatting AndAlso (targetHasNativeList OrElse targetIsHeading)
+
             '--- 1. paragraph style ------------------------------------------------
-            If pf.Style IsNot Nothing Then
+            ' Markdown-generated headings/lists own their structural style. Plain paragraphs keep
+            ' the historical source-style restore behavior.
+            If Not preserveTargetStyle AndAlso pf.Style IsNot Nothing Then
                 Try
                     pRange.Style = pf.Style
                 Catch ex As System.Exception
@@ -55,15 +75,45 @@ Partial Public Class ThisAddIn
                 End Try
             End If
 
-            '--- 2. character-level attributes – use them *only when supplied* -----
-            With pRange.Font
-                If Not String.IsNullOrEmpty(pf.FontName) Then .Name = pf.FontName
-                If pf.FontSize.HasValue Then .Size = pf.FontSize.Value
-                If pf.FontBold.HasValue Then .Bold = pf.FontBold.Value
-                If pf.FontItalic.HasValue Then .Italic = pf.FontItalic.Value
-                If pf.FontUnderline.HasValue Then .Underline = pf.FontUnderline.Value
-                If pf.FontColor.HasValue Then .Color = pf.FontColor.Value
-            End With
+            '--- 2. character-level attributes --------------------------------------
+            If PreserveRenderedFormatting Then
+                ' Do not restore the complete paragraph font after Markdown rendering: assigning
+                ' Bold/Italic/Underline/Color paragraph-wide would flatten semantic inline runs.
+                ' Native headings keep their own style-defined font/size. For body/list text, only
+                ' the text characters (not the paragraph mark) inherit the source typeface/size.
+                If Not targetIsHeading Then
+                    Dim textRange As Word.Range = pRange.Duplicate
+                    If textRange.End > textRange.Start Then
+                        Try
+                            Dim lastCharacter As System.String =
+                                textRange.Document.Range(textRange.End - 1, textRange.End).Text
+                            If lastCharacter = vbCr OrElse lastCharacter = vbLf OrElse
+                               (lastCharacter IsNot Nothing AndAlso lastCharacter.Length > 0 AndAlso Microsoft.VisualBasic.Strings.AscW(lastCharacter.Chars(0)) = 7) Then
+                                textRange.End -= 1
+                            End If
+                        Catch exRange As System.Exception
+                            System.Diagnostics.Debug.WriteLine(
+                                "Could not trim paragraph mark before baseline font restore: " & exRange.Message)
+                        End Try
+                    End If
+
+                    If textRange.End > textRange.Start Then
+                        With textRange.Font
+                            If Not System.String.IsNullOrEmpty(pf.FontName) Then .Name = pf.FontName
+                            If pf.FontSize.HasValue Then .Size = pf.FontSize.Value
+                        End With
+                    End If
+                End If
+            Else
+                With pRange.Font
+                    If Not String.IsNullOrEmpty(pf.FontName) Then .Name = pf.FontName
+                    If pf.FontSize.HasValue Then .Size = pf.FontSize.Value
+                    If pf.FontBold.HasValue Then .Bold = pf.FontBold.Value
+                    If pf.FontItalic.HasValue Then .Italic = pf.FontItalic.Value
+                    If pf.FontUnderline.HasValue Then .Underline = pf.FontUnderline.Value
+                    If pf.FontColor.HasValue Then .Color = pf.FontColor.Value
+                End With
+            End If
 
             '--- 3. list formatting -----------------------------------------------
             If pf.HasListFormat AndAlso pf.ListTemplate IsNot Nothing Then
@@ -72,12 +122,13 @@ Partial Public Class ThisAddIn
                         pRange.ListFormat.RemoveNumbers()
                     End If
 
+                    Dim applyLevel As System.Object = System.Math.Max(1, pf.ListLevel)
                     pRange.ListFormat.ApplyListTemplateWithLevel(
                         ListTemplate:=pf.ListTemplate,
                         ContinuePreviousList:=pf.ListLevel > 0,
-                        ApplyTo:=Word.WdListApplyTo.wdListApplyToWholeList,
-                        DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior)
-                    pRange.ListFormat.ListLevelNumber = pf.ListLevel
+                        ApplyTo:=Word.WdListApplyTo.wdListApplyToSelection,
+                        DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior,
+                        ApplyLevel:=applyLevel)
                 Catch ex As System.Exception
                     ' handle / log if necessary
                 End Try
@@ -178,13 +229,13 @@ Partial Public Class ThisAddIn
                         (snapshot.ListValue > 0 AndAlso snapshot.ListValue > System.Math.Max(0, snapshot.ListStartAt))
                 End If
 
+                Dim applyLevel As System.Object = System.Math.Max(1, snapshot.ListLevel)
                 paragraphRange.ListFormat.ApplyListTemplateWithLevel(
                     ListTemplate:=snapshot.ListTemplate,
                     ContinuePreviousList:=continuePrevious,
                     ApplyTo:=Microsoft.Office.Interop.Word.WdListApplyTo.wdListApplyToSelection,
-                    DefaultListBehavior:=Microsoft.Office.Interop.Word.WdDefaultListBehavior.wdWord10ListBehavior)
-
-                If snapshot.ListLevel > 0 Then paragraphRange.ListFormat.ListLevelNumber = snapshot.ListLevel
+                    DefaultListBehavior:=Microsoft.Office.Interop.Word.WdDefaultListBehavior.wdWord10ListBehavior,
+                    ApplyLevel:=applyLevel)
             Catch ex As System.Exception
                 System.Diagnostics.Debug.WriteLine("List-only restore failed: " & ex.Message)
             End Try
@@ -2287,7 +2338,7 @@ ContinueLoop:
             If EndOfDocument Then workingrange.End = doc.Content.End
 
         Catch ex As System.Exception
-            'MsgBox("An error occurred: " & ex.Message, MsgBoxStyle.Critical)
+            ' Error is handled by the caller's custom-dialog path.
         End Try
 
     End Sub
@@ -2464,12 +2515,13 @@ ContinueLoop:
 
                     If format.HasListFormat AndAlso format.ListTemplate IsNot Nothing Then
                         Try
+                            Dim applyLevel As System.Object = System.Math.Max(1, format.ListLevel)
                             .ListFormat.ApplyListTemplateWithLevel(
                             ListTemplate:=format.ListTemplate,
                             ContinuePreviousList:=If(format.ListNumber > 0, True, False),
-                            ApplyTo:=Word.WdListApplyTo.wdListApplyToWholeList,
-                            DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior)
-                            .ListFormat.ListLevelNumber = format.ListLevel
+                            ApplyTo:=Word.WdListApplyTo.wdListApplyToSelection,
+                            DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior,
+                            ApplyLevel:=applyLevel)
                         Catch ex As System.Exception
                         End Try
                     End If

@@ -248,6 +248,22 @@ Namespace Agents
     End Class
 
     Public NotInheritable Class ArtifactDelivery
+
+        ''' <summary>
+        ''' Returns True when a caller supplied any explicit artifact-identity field.
+        ''' This is intentionally broader than a complete identity check: a partial identity
+        ''' still crosses the explicit-contract boundary and must be normalized or validated.
+        ''' </summary>
+        Public Shared Function HasExplicitArtifactIdentityArguments(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+            If arguments Is Nothing Then Return False
+
+            Return arguments.ContainsKey("artifact_id") OrElse
+                   arguments.ContainsKey("logical_deliverable_id") OrElse
+                   arguments.ContainsKey("output_slot_id") OrElse
+                   arguments.ContainsKey("supersedes_artifact_id")
+        End Function
         Private Sub New()
         End Sub
 
@@ -316,16 +332,22 @@ Namespace Agents
                             New Newtonsoft.Json.Linq.JProperty("type", "object"),
                             New Newtonsoft.Json.Linq.JProperty("properties", New Newtonsoft.Json.Linq.JObject(
                                 New Newtonsoft.Json.Linq.JProperty("logical_deliverable_id", New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))),
-                                New Newtonsoft.Json.Linq.JProperty("output_slot_id", New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))))),
+                                New Newtonsoft.Json.Linq.JProperty("output_slot_id", New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))),
+                                New Newtonsoft.Json.Linq.JProperty("required_effects", New Newtonsoft.Json.Linq.JObject(
+                                    New Newtonsoft.Json.Linq.JProperty("type", "array"),
+                                    New Newtonsoft.Json.Linq.JProperty("items", New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))),
+                                    New Newtonsoft.Json.Linq.JProperty("description", "Optional opaque host-verified completion effects required for this slot. materialized is always implicit."))))),
                             New Newtonsoft.Json.Linq.JProperty("required", New Newtonsoft.Json.Linq.JArray("logical_deliverable_id", "output_slot_id")))))
                 End If
 
                 tool.ToolDefinition = root.ToString(Newtonsoft.Json.Formatting.None)
 
                 Dim artifactProtocolGuidance As String =
-                    " EXPLICIT ARTIFACT RULES: If you supply artifact metadata, artifact_id, logical_deliverable_id, and output_slot_id must be opaque stable IDs and must be supplied together. " &
+                    " EXPLICIT ARTIFACT RULES: Artifact metadata is for calls that actually create or mutate a physical output. Result-only inspection/calculation calls must omit artifact identity/finality metadata and do not need an output file. " &
+                    "When no locked expected-output slot exists and you opt into explicit artifact identity, artifact_id, logical_deliverable_id, and output_slot_id must be opaque stable IDs and must be supplied together. " &
+                    "When the host already locked exactly one expected-output slot, keep that logical slot stable and do not invent physical artifact_id/supersedes revisions; the host owns those revisions and may bind a genuine producer call automatically. " &
                     "Use artifact_delivery_intent='deliver_to_user' or 'deliver_and_persist' ONLY with artifact_state='final'. " &
-                    "A user-facing Final requires expected_artifacts containing the COMPLETE expected output-slot set for the current run/delegation. " &
+                    "A user-facing Final requires expected_artifacts containing the COMPLETE expected output-slot set for the current run/delegation; each slot may also declare required_effects. " &
                     "For mutation tools that can return status='partial' or status='none', do not treat that physical file as complete: retry only the unresolved operations. " &
                     "The runtime defensively downgrades an incomplete mutation result to an intermediate, non-user-deliverable artifact even if the call requested Final."
 
@@ -758,8 +780,26 @@ Namespace Agents
                 End If
             End If
 
+            Dim inheritedVerifiedEffects As System.Collections.Generic.HashSet(Of System.String) = Nothing
             If supersededArtifact IsNot Nothing AndAlso
-               registration.LifecycleState = ArtifactLifecycleState.Final Then
+               registration.LifecycleState = ArtifactLifecycleState.Final AndAlso
+               Not System.String.IsNullOrWhiteSpace(supersededArtifact.SessionPath) Then
+
+                Try
+                    If System.String.Equals(
+                        System.IO.Path.GetFullPath(supersededArtifact.SessionPath),
+                        fullPath,
+                        System.StringComparison.OrdinalIgnoreCase) Then
+
+                        inheritedVerifiedEffects =
+                            New System.Collections.Generic.HashSet(Of System.String)(
+                                If(supersededArtifact.VerifiedEffects,
+                                   New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)),
+                                System.StringComparer.OrdinalIgnoreCase)
+                    End If
+                Catch ex As System.Exception
+                    inheritedVerifiedEffects = Nothing
+                End Try
 
                 supersededArtifact.LifecycleState = ArtifactLifecycleState.Superseded
                 supersededArtifact.IsFinalDeliverable = False
@@ -815,6 +855,13 @@ Namespace Agents
             End If
 
             existing.IsFinalDeliverable = isUserFacingFinal
+            If existing.VerifiedEffects Is Nothing Then
+                existing.VerifiedEffects = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            End If
+            existing.VerifiedEffects.Add("materialized")
+            If inheritedVerifiedEffects IsNot Nothing Then
+                existing.VerifiedEffects.UnionWith(inheritedVerifiedEffects)
+            End If
 
             Return existing
         End Function
@@ -1168,6 +1215,13 @@ Namespace Agents
                        If(artifact.LogicalDeliverableId, "").Trim(),
                        If(artifact.OutputSlotId, "").Trim()) Then
 
+                    Continue For
+                End If
+
+                ' A physical placeholder is not a completed deliverable when the expected
+                ' slot requires stronger host-verified effects. This applies equally to
+                ' normal completion and blocked/partial delivery paths.
+                If hasExpectedContract AndAlso Not runState.IsQualifiedFinalArtifactForDelivery(artifact) Then
                     Continue For
                 End If
 
@@ -1527,6 +1581,421 @@ Namespace Agents
             End Try
         End Function
 
+        ''' <summary>
+        ''' Deterministically verifies that a produced artifact contains a real content mutation
+        ''' relative to every comparable source input. The comparison is format-aware where a
+        ''' stable semantic representation is available. For Open XML spreadsheets, ZIP/package
+        ''' metadata and style-only changes are ignored: visible cell values and formulas are
+        ''' compared instead, so re-saving an unchanged template cannot satisfy content_mutated.
+        ''' </summary>
+        Public Shared Function TryVerifyContentMutation(
+            outputPath As System.String,
+            inputPaths As System.Collections.Generic.IEnumerable(Of System.String),
+            ByRef verificationReason As System.String) As System.Boolean
+
+            verificationReason = System.String.Empty
+            If System.String.IsNullOrWhiteSpace(outputPath) Then
+                verificationReason = "output_path_missing"
+                Return False
+            End If
+
+            Dim normalizedOutput As System.String
+            Try
+                normalizedOutput = System.IO.Path.GetFullPath(outputPath)
+            Catch ex As System.Exception
+                verificationReason = "output_path_invalid"
+                Return False
+            End Try
+
+            If Not System.IO.File.Exists(normalizedOutput) Then
+                verificationReason = "output_file_missing"
+                Return False
+            End If
+
+            Dim comparisonFamily As System.String = GetContentMutationComparisonFamily(normalizedOutput)
+            Dim comparableInputs As New System.Collections.Generic.List(Of System.String)()
+
+            If inputPaths IsNot Nothing Then
+                For Each rawInput As System.String In inputPaths
+                    If System.String.IsNullOrWhiteSpace(rawInput) Then Continue For
+
+                    Dim normalizedInput As System.String
+                    Try
+                        normalizedInput = System.IO.Path.GetFullPath(rawInput)
+                    Catch ex As System.Exception
+                        Continue For
+                    End Try
+
+                    If Not System.IO.File.Exists(normalizedInput) Then Continue For
+                    If Not System.String.Equals(
+                        GetContentMutationComparisonFamily(normalizedInput),
+                        comparisonFamily,
+                        System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    If Not comparableInputs.Contains(normalizedInput, System.StringComparer.OrdinalIgnoreCase) Then
+                        comparableInputs.Add(normalizedInput)
+                    End If
+                Next
+            End If
+
+            If comparableInputs.Count = 0 Then
+                verificationReason = "no_comparable_source_input"
+                Return False
+            End If
+
+            Dim outputSignature As System.String = ComputeArtifactContentSignature(normalizedOutput, comparisonFamily)
+            If System.String.IsNullOrWhiteSpace(outputSignature) Then
+                verificationReason = "output_content_signature_unavailable"
+                Return False
+            End If
+
+            For Each inputPath As System.String In comparableInputs
+                Dim inputSignature As System.String = ComputeArtifactContentSignature(inputPath, comparisonFamily)
+                If System.String.IsNullOrWhiteSpace(inputSignature) Then
+                    verificationReason = "source_content_signature_unavailable"
+                    Return False
+                End If
+
+                If System.String.Equals(outputSignature, inputSignature, System.StringComparison.Ordinal) Then
+                    verificationReason = "output_content_equals_source"
+                    Return False
+                End If
+            Next
+
+            verificationReason =
+                "content_mutated_against_" &
+                comparableInputs.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "_comparable_source(s)"
+            Return True
+        End Function
+
+        Public Shared Function GetVerifiedWorksheetMutationEffects(
+            outputPath As System.String,
+            inputPaths As System.Collections.Generic.IEnumerable(Of System.String)) As System.Collections.Generic.HashSet(Of System.String)
+
+            Dim effects As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            If System.String.IsNullOrWhiteSpace(outputPath) OrElse Not System.IO.File.Exists(outputPath) Then Return effects
+            If Not System.String.Equals(GetContentMutationComparisonFamily(outputPath), "openxml-spreadsheet", System.StringComparison.OrdinalIgnoreCase) Then Return effects
+
+            Dim outputSheets As System.Collections.Generic.Dictionary(Of System.String, System.String) =
+                ComputeSpreadsheetWorksheetContentSignatures(outputPath)
+            If outputSheets.Count = 0 OrElse inputPaths Is Nothing Then Return effects
+
+            For Each rawInput As System.String In inputPaths
+                If System.String.IsNullOrWhiteSpace(rawInput) OrElse Not System.IO.File.Exists(rawInput) Then Continue For
+                If Not System.String.Equals(GetContentMutationComparisonFamily(rawInput), "openxml-spreadsheet", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                Dim inputSheets As System.Collections.Generic.Dictionary(Of System.String, System.String) =
+                    ComputeSpreadsheetWorksheetContentSignatures(rawInput)
+
+                For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In outputSheets
+                    Dim sourceSignature As System.String = Nothing
+                    If Not inputSheets.TryGetValue(pair.Key, sourceSignature) Then Continue For
+                    If System.String.Equals(pair.Value, sourceSignature, System.StringComparison.Ordinal) Then Continue For
+
+                    Dim effect As System.String = BuildWorksheetMutationEffect(pair.Key)
+                    If effect <> System.String.Empty Then effects.Add(effect)
+                Next
+            Next
+
+            Return effects
+        End Function
+
+        Public Shared Function BuildWorksheetMutationEffect(worksheetName As System.String) As System.String
+            Dim normalized As System.String = If(worksheetName, System.String.Empty).Trim().ToLowerInvariant()
+            If normalized = System.String.Empty Then Return System.String.Empty
+
+            normalized = normalized.Replace("ä", "ae").Replace("ö", "oe").Replace("ü", "ue").Replace("ß", "ss")
+            normalized = System.Text.RegularExpressions.Regex.Replace(normalized, "[^a-z0-9]+", "_").Trim("_"c)
+            If normalized = System.String.Empty Then Return System.String.Empty
+            If normalized.Length > 44 Then normalized = normalized.Substring(0, 44).TrimEnd("_"c)
+            Return "worksheet_mutated." & normalized
+        End Function
+
+        Private Shared Function ComputeSpreadsheetWorksheetContentSignatures(
+            path As System.String) As System.Collections.Generic.Dictionary(Of System.String, System.String)
+
+            Dim result As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+            Using input As New System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
+                Using archive As New System.IO.Compression.ZipArchive(input, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                    Dim sharedStrings As System.Collections.Generic.List(Of System.String) = ReadSpreadsheetSharedStrings(archive)
+                    Dim workbookEntry As System.IO.Compression.ZipArchiveEntry = archive.GetEntry("xl/workbook.xml")
+                    Dim relationshipsEntry As System.IO.Compression.ZipArchiveEntry = archive.GetEntry("xl/_rels/workbook.xml.rels")
+                    If workbookEntry Is Nothing OrElse relationshipsEntry Is Nothing Then Return result
+
+                    Dim workbookDocument As System.Xml.Linq.XDocument
+                    Using stream As System.IO.Stream = workbookEntry.Open()
+                        workbookDocument = System.Xml.Linq.XDocument.Load(stream)
+                    End Using
+
+                    Dim relationshipsDocument As System.Xml.Linq.XDocument
+                    Using stream As System.IO.Stream = relationshipsEntry.Open()
+                        relationshipsDocument = System.Xml.Linq.XDocument.Load(stream)
+                    End Using
+
+                    Dim targets As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+                    For Each relationship As System.Xml.Linq.XElement In relationshipsDocument.Descendants().Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "Relationship")
+                        Dim idAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Id")
+                        Dim targetAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Target")
+                        If idAttribute Is Nothing OrElse targetAttribute Is Nothing Then Continue For
+                        targets(idAttribute.Value) = targetAttribute.Value
+                    Next
+
+                    For Each sheet As System.Xml.Linq.XElement In workbookDocument.Descendants().Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "sheet")
+                        Dim nameAttribute As System.Xml.Linq.XAttribute = sheet.Attribute("name")
+                        Dim relationshipAttribute As System.Xml.Linq.XAttribute = sheet.Attributes().FirstOrDefault(Function(attribute As System.Xml.Linq.XAttribute) attribute.Name.LocalName = "id")
+                        If nameAttribute Is Nothing OrElse relationshipAttribute Is Nothing Then Continue For
+
+                        Dim target As System.String = Nothing
+                        If Not targets.TryGetValue(relationshipAttribute.Value, target) Then Continue For
+                        target = target.Replace("\", "/")
+                        If target.StartsWith("/", System.StringComparison.Ordinal) Then target = target.TrimStart("/"c)
+                        If Not target.StartsWith("xl/", System.StringComparison.OrdinalIgnoreCase) Then target = "xl/" & target.TrimStart("/"c)
+
+                        Dim worksheetEntry As System.IO.Compression.ZipArchiveEntry = archive.GetEntry(target)
+                        If worksheetEntry Is Nothing Then Continue For
+
+                        Dim components As New System.Collections.Generic.List(Of System.String)()
+                        Using entryStream As System.IO.Stream = worksheetEntry.Open()
+                            Dim document As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Load(entryStream)
+                            Dim cells As System.Collections.Generic.List(Of System.Xml.Linq.XElement) =
+                                document.Descendants().Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "c").OrderBy(
+                                    Function(element As System.Xml.Linq.XElement)
+                                        Dim referenceAttribute As System.Xml.Linq.XAttribute = element.Attribute("r")
+                                        Return If(referenceAttribute Is Nothing, System.String.Empty, referenceAttribute.Value)
+                                    End Function,
+                                    System.StringComparer.OrdinalIgnoreCase).ToList()
+
+                            For Each cell As System.Xml.Linq.XElement In cells
+                                Dim referenceAttribute As System.Xml.Linq.XAttribute = cell.Attribute("r")
+                                Dim typeAttribute As System.Xml.Linq.XAttribute = cell.Attribute("t")
+                                Dim cellReference As System.String = If(referenceAttribute Is Nothing, System.String.Empty, referenceAttribute.Value)
+                                Dim cellType As System.String = If(typeAttribute Is Nothing, System.String.Empty, typeAttribute.Value)
+                                Dim formulaElement As System.Xml.Linq.XElement = cell.Elements().FirstOrDefault(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "f")
+                                Dim semanticValue As System.String = If(formulaElement IsNot Nothing, "formula", ResolveSpreadsheetCellValue(cell, cellType, sharedStrings))
+                                If semanticValue <> System.String.Empty Then components.Add(cellReference & System.Char.ConvertFromUtf32(&H1F) & semanticValue)
+                            Next
+                        End Using
+
+                        result(nameAttribute.Value) = ComputeSha256Text(System.String.Join(System.Char.ConvertFromUtf32(&H1E), components))
+                    Next
+                End Using
+            End Using
+
+            Return result
+        End Function
+
+        Private Shared Function GetContentMutationComparisonFamily(path As System.String) As System.String
+            Dim extension As System.String = System.IO.Path.GetExtension(If(path, System.String.Empty)).ToLowerInvariant()
+            Select Case extension
+                Case ".xlsx", ".xlsm", ".xltx", ".xltm"
+                    Return "openxml-spreadsheet"
+                Case Else
+                    Return extension
+            End Select
+        End Function
+
+        Private Shared Function ComputeArtifactContentSignature(
+            path As System.String,
+            comparisonFamily As System.String) As System.String
+
+            Try
+                If System.String.Equals(
+                    comparisonFamily,
+                    "openxml-spreadsheet",
+                    System.StringComparison.OrdinalIgnoreCase) Then
+
+                    Return ComputeSpreadsheetCellContentSignature(path)
+                End If
+
+                Return ComputeFileSha256(path)
+            Catch ex As System.Exception
+                Return System.String.Empty
+            End Try
+        End Function
+
+        Private Shared Function ComputeSpreadsheetCellContentSignature(path As System.String) As System.String
+            Dim components As New System.Collections.Generic.List(Of System.String)()
+
+            Using input As New System.IO.FileStream(
+                path,
+                System.IO.FileMode.Open,
+                System.IO.FileAccess.Read,
+                System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
+
+                Using archive As New System.IO.Compression.ZipArchive(
+                    input,
+                    System.IO.Compression.ZipArchiveMode.Read,
+                    leaveOpen:=False)
+
+                    Dim sharedStrings As System.Collections.Generic.List(Of System.String) =
+                        ReadSpreadsheetSharedStrings(archive)
+
+                    Dim worksheetEntries As System.Collections.Generic.List(Of System.IO.Compression.ZipArchiveEntry) =
+                        archive.Entries.
+                            Where(
+                                Function(entry As System.IO.Compression.ZipArchiveEntry)
+                                    Return entry IsNot Nothing AndAlso
+                                           entry.FullName.StartsWith("xl/worksheets/", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                                           entry.FullName.EndsWith(".xml", System.StringComparison.OrdinalIgnoreCase)
+                                End Function).
+                            OrderBy(
+                                Function(entry As System.IO.Compression.ZipArchiveEntry) entry.FullName,
+                                System.StringComparer.OrdinalIgnoreCase).
+                            ToList()
+
+                    For Each entry As System.IO.Compression.ZipArchiveEntry In worksheetEntries
+                        components.Add("sheet=" & entry.FullName)
+
+                        Using entryStream As System.IO.Stream = entry.Open()
+                            Dim document As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Load(entryStream)
+                            Dim cells As System.Collections.Generic.List(Of System.Xml.Linq.XElement) =
+                                document.Descendants().
+                                    Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "c").
+                                    OrderBy(
+                                        Function(element As System.Xml.Linq.XElement)
+                                            Dim referenceAttribute As System.Xml.Linq.XAttribute = element.Attribute("r")
+                                            Return If(referenceAttribute Is Nothing, System.String.Empty, referenceAttribute.Value)
+                                        End Function,
+                                        System.StringComparer.OrdinalIgnoreCase).
+                                    ToList()
+
+                            For Each cell As System.Xml.Linq.XElement In cells
+                                Dim referenceAttribute As System.Xml.Linq.XAttribute = cell.Attribute("r")
+                                Dim typeAttribute As System.Xml.Linq.XAttribute = cell.Attribute("t")
+                                Dim cellReference As System.String = If(referenceAttribute Is Nothing, System.String.Empty, referenceAttribute.Value)
+                                Dim cellType As System.String = If(typeAttribute Is Nothing, System.String.Empty, typeAttribute.Value)
+                                Dim formulaElement As System.Xml.Linq.XElement =
+                                    cell.Elements().FirstOrDefault(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "f")
+
+                                Dim semanticValue As System.String
+                                If formulaElement IsNot Nothing Then
+                                    ' Some OpenXML writers expand shared-formula followers from an empty
+                                    ' <f t="shared"/> node into the full formula text on a no-op re-save.
+                                    ' content_mutated is therefore a value/content guard, not a formula-text
+                                    ' diff: preserve only formula presence here. A formula removed/replaced by
+                                    ' a literal value still changes the signature; formula-authoring workflows
+                                    ' should use a stronger dedicated effect if exact formula diffs are required.
+                                    semanticValue = "formula"
+                                Else
+                                    semanticValue = ResolveSpreadsheetCellValue(cell, cellType, sharedStrings)
+                                End If
+
+                                If semanticValue <> System.String.Empty Then
+                                    components.Add(cellReference & System.Char.ConvertFromUtf32(&H1F) & semanticValue)
+                                End If
+                            Next
+                        End Using
+                    Next
+                End Using
+            End Using
+
+            Return ComputeSha256Text(System.String.Join(System.Char.ConvertFromUtf32(&H1E), components))
+        End Function
+
+        Private Shared Function ReadSpreadsheetSharedStrings(
+            archive As System.IO.Compression.ZipArchive) As System.Collections.Generic.List(Of System.String)
+
+            Dim result As New System.Collections.Generic.List(Of System.String)()
+            If archive Is Nothing Then Return result
+
+            Dim entry As System.IO.Compression.ZipArchiveEntry = archive.GetEntry("xl/sharedStrings.xml")
+            If entry Is Nothing Then Return result
+
+            Using entryStream As System.IO.Stream = entry.Open()
+                Dim document As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Load(entryStream)
+                For Each item As System.Xml.Linq.XElement In document.Descendants().Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "si")
+
+                    Dim text As System.String = System.String.Concat(
+                        item.Descendants().
+                            Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "t").
+                            Select(Function(element As System.Xml.Linq.XElement) element.Value))
+                    result.Add(text)
+                Next
+            End Using
+
+            Return result
+        End Function
+
+        Private Shared Function ResolveSpreadsheetCellValue(
+            cell As System.Xml.Linq.XElement,
+            cellType As System.String,
+            sharedStrings As System.Collections.Generic.IList(Of System.String)) As System.String
+
+            If cell Is Nothing Then Return System.String.Empty
+
+            If System.String.Equals(cellType, "inlineStr", System.StringComparison.OrdinalIgnoreCase) Then
+                Return "value:" & System.String.Concat(
+                    cell.Descendants().
+                        Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "t").
+                        Select(Function(element As System.Xml.Linq.XElement) element.Value))
+            End If
+
+            Dim valueElement As System.Xml.Linq.XElement =
+                cell.Elements().FirstOrDefault(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "v")
+            If valueElement Is Nothing Then Return System.String.Empty
+
+            Dim rawValue As System.String = If(valueElement.Value, System.String.Empty)
+            If System.String.Equals(cellType, "s", System.StringComparison.OrdinalIgnoreCase) Then
+                Dim sharedStringIndex As System.Int32
+                If System.Int32.TryParse(
+                    rawValue,
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    sharedStringIndex) AndAlso
+                   sharedStrings IsNot Nothing AndAlso
+                   sharedStringIndex >= 0 AndAlso
+                   sharedStringIndex < sharedStrings.Count Then
+
+                    Return "value:" & sharedStrings(sharedStringIndex)
+                End If
+            End If
+
+            ' Excel/OpenXML writers may serialize the same numeric double with slightly
+            ' different low-order decimal digits and may add/remove the explicit t="n"
+            ' marker. Canonicalize both forms to 14 significant digits. This keeps an
+            ' untouched openpyxl re-save semantically equal to its source while still
+            ' detecting user-visible numeric changes.
+            If System.String.IsNullOrWhiteSpace(cellType) OrElse
+               System.String.Equals(cellType, "n", System.StringComparison.OrdinalIgnoreCase) Then
+
+                Dim numericValue As System.Double
+                If System.Double.TryParse(
+                    rawValue,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    numericValue) Then
+
+                    Return "value:number:" & numericValue.ToString("G14", System.Globalization.CultureInfo.InvariantCulture)
+                End If
+
+                Return "value:number:" & rawValue
+            End If
+
+            Return "value:" & cellType & ":" & rawValue
+        End Function
+
+        Private Shared Function ComputeSha256Text(value As System.String) As System.String
+            Dim bytes As System.Byte() = System.Text.Encoding.UTF8.GetBytes(If(value, System.String.Empty))
+            Using sha256 As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Return System.BitConverter.ToString(sha256.ComputeHash(bytes)).Replace("-", System.String.Empty)
+            End Using
+        End Function
+
+        Private Shared Function ComputeFileSha256(path As System.String) As System.String
+            Using sha256 As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Using stream As New System.IO.FileStream(
+                    path,
+                    System.IO.FileMode.Open,
+                    System.IO.FileAccess.Read,
+                    System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
+
+                    Return System.BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", System.String.Empty)
+                End Using
+            End Using
+        End Function
+
         Public Shared Function HasValidatedFinalDeliverable(runState As ToolCallSequencing.ToolingRunState) As Boolean
             If runState Is Nothing OrElse runState.RegisteredDeliverableArtifacts Is Nothing Then Return False
 
@@ -1540,6 +2009,8 @@ Namespace Agents
                 If String.IsNullOrWhiteSpace(artifact.OutputSlotId) Then Continue For
                 If artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverToUser AndAlso
                    artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverAndPersist Then Continue For
+                If runState.HasExpectedDeliverableContract AndAlso
+                   Not runState.IsQualifiedFinalArtifactForDelivery(artifact) Then Continue For
                 Try
                     If Not String.IsNullOrWhiteSpace(artifact.SessionPath) AndAlso File.Exists(artifact.SessionPath) Then Return True
                 Catch
@@ -1568,7 +2039,10 @@ Namespace Agents
                 .StorageKind = source.StorageKind,
                 .SupersedesArtifactId = If(source.SupersedesArtifactId, ""),
                 .IsExplicitContract = source.IsExplicitContract,
-                .RegisteredUtc = source.RegisteredUtc
+                .RegisteredUtc = source.RegisteredUtc,
+                .VerifiedEffects = New System.Collections.Generic.HashSet(Of System.String)(
+                    If(source.VerifiedEffects, New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)),
+                    System.StringComparer.OrdinalIgnoreCase)
             }
         End Function
 

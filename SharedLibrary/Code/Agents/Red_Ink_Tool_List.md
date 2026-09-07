@@ -15,7 +15,7 @@ Notes:
 
 ## Skill/agent resource dependency semantics
 
-- A skill may list the helper tools it is permitted to use in `allowed-tools`; the runtime still exposes only tools available for the current Word/Outlook surface.
+- A skill lists the helper tools it is permitted to use in `allowed-tools`. After the skill is entered, Word/Outlook Local Chat and AutoPilot restrict substantive tool execution to that declared helper surface (plus host-owned control/safety tools such as progress, tool loading, and inability reporting).
 - For an **agent**, `allowed-tools` are hard dependencies. If an exact required tool cannot be resolved from the parent host's authoritative registry snapshot, the isolated run may be blocked before model execution.
 - Agents may additionally declare `optional-tools`. The host includes only optional names that are actually present in the authoritative registry snapshot; missing optional tools are ignored. Use this for host-specific source access (`m365_*`, attachment-only tools, `agent_workspace_*`) and configuration-dependent helpers such as `js_run` when they are useful but not fundamental to the agent's bounded job.
 - `ask_user` belongs to interactive parent Word/Outlook workflows. Sub-agents must not ask the end user; they return missing information to the parent.
@@ -47,6 +47,7 @@ Notes:
 | `text_write` | Writes, replaces, or appends a UTF-8 text file. | Yes | Yes | Yes |
 | `text_search` | Searches text files for substring or regex matches. | Yes | Yes | Yes |
 | `text_export_to_text` | Silently extracts readable text from a supported file or from supported files in a directory and writes UTF-8 `.txt` outputs without host UI prompts. | Yes | Yes | Yes |
+| `text_analyze_file` | Reads one existing plain-text file completely inside the tool, sends the full text plus caller instructions to one isolated LLM call, and returns only the model response; no chunking or retrieval. Very good and memory efficient for analyzing text for certain criteria. For documents, have them first converted to a text file using `text_export_to_text`. | Yes | Yes | Yes |
 | `semantic_index_create_from_file` | Creates a self-indexed semantic-search text file from an existing text file. | Yes | Yes | Yes |
 | `semantic_index_create_from_text` | Creates a self-indexed semantic-search text file from supplied in-memory text. | Yes | Yes | Yes |
 | `semantic_index_validate` | Validates whether a file is a readable semantic-search index and returns basic counts. | Yes | Yes | Yes |

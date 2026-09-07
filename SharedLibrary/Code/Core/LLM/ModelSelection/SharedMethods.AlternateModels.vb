@@ -209,7 +209,7 @@ Namespace SharedLibrary
                 mc.ToolCallExtractionMap = context.INI_ToolCallExtractionMap_2
 
             Catch ex As System.Exception
-                MessageBox.Show("Error in GetCurrentConfig: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetCurrentConfig: " & ex.Message, "Error")
             End Try
             Return mc
         End Function
@@ -268,7 +268,7 @@ Namespace SharedLibrary
 
             Catch ex As System.Exception
                 If Not ErrorFlag Then
-                    MessageBox.Show("Error in ApplyModelConfig: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ApplyModelConfig: " & ex.Message, "Error")
                 End If
                 ErrorFlag = True
             End Try
@@ -708,7 +708,7 @@ Namespace SharedLibrary
                     Return False
                 End If
             Catch ex As System.Exception
-                MessageBox.Show("Error in ShowModelSelection: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ShowModelSelection: " & ex.Message, "Error")
                 Return False
             End Try
         End Function
@@ -724,13 +724,13 @@ Namespace SharedLibrary
             Try
                 Dim iniPath As String = ExpandEnvironmentVariables(modelPath)
                 If String.IsNullOrWhiteSpace(iniPath) OrElse Not System.IO.File.Exists(iniPath) Then
-                    System.Windows.Forms.MessageBox.Show("The configured alternate model path does not exist.", AN, System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The configured alternate model path does not exist.", AN)
                     Return False
                 End If
 
                 Dim alternativeModels As System.Collections.Generic.List(Of ModelConfig) = LoadAlternativeModels(iniPath, context)
                 If alternativeModels Is Nothing OrElse alternativeModels.Count = 0 Then
-                    System.Windows.Forms.MessageBox.Show("No alternate model configurations found in the specified file.", AN, System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("No alternate model configurations found in the specified file.", AN)
                     Return False
                 End If
 
@@ -748,7 +748,7 @@ Namespace SharedLibrary
                     Return True
                 End Using
             Catch ex As System.Exception
-                System.Windows.Forms.MessageBox.Show("Error during multi-model selection: " & ex.Message, AN, System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error during multi-model selection: " & ex.Message, AN)
                 Return False
             End Try
         End Function
@@ -855,7 +855,7 @@ Namespace SharedLibrary
                 Return False
 
             Catch ex As Exception
-                MessageBox.Show("Error in GetSpecialTaskModel: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetSpecialTaskModel: " & ex.Message, "Error")
                 Return False
             End Try
         End Function

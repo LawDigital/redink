@@ -129,11 +129,7 @@ Namespace SharedLibrary
                 _webView.CoreWebView2.Navigate(_authUrl)
 
             Catch ex As Exception
-                MessageBox.Show(
-                    $"Could not initialize the OAuth sign-in window: {ex.Message}",
-                    $"{AN} – OAuth",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Could not initialize the OAuth sign-in window: {ex.Message}", $"{AN} – OAuth")
                 Me.DialogResult = DialogResult.Cancel
                 Me.Close()
             End Try

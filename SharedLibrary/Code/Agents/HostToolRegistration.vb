@@ -33,6 +33,7 @@ Namespace Agents
             TextTools.ToolWrite,
             TextTools.ToolSearch,
             TextTools.ToolExportToText,
+            TextTools.ToolAnalyzeFile,
             TextTools.ToolSemanticIndexCreateFromFile,
             TextTools.ToolSemanticIndexCreateFromText,
             TextTools.ToolSemanticIndexValidate,
