@@ -1718,7 +1718,11 @@ Namespace Agents
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
-                    If Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    Dim sameTool As System.Boolean =
+                        System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase)
+                    Dim sameExplicitSubAgentTask As System.Boolean =
+                        IsSameExplicitSubAgentTaskRecovery(candidate, normalizedToolName, normalizedRecoveryScopeKey)
+                    If Not sameTool AndAlso Not sameExplicitSubAgentTask Then Continue For
                     If Not SuccessfulCallMatchesFailureScope(candidate, normalizedRecoveryScopeKey) Then Continue For
 
                     If candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly OrElse
@@ -1997,6 +2001,17 @@ Namespace Agents
                 End If
 
                 Return RecoveryScopeKeysMatch(failureScopeKey, successScopeKey)
+            End Function
+
+            Private Shared Function IsSameExplicitSubAgentTaskRecovery(failure As ToolFailureRecord,
+                                                                          successfulToolName As System.String,
+                                                                          successfulRecoveryScopeKey As System.String) As System.Boolean
+                If failure Is Nothing Then Return False
+                Dim failureScope As System.String = If(failure.RecoveryScopeKey, System.String.Empty).Trim()
+                If Not failureScope.StartsWith("subagent:", System.StringComparison.Ordinal) Then Return False
+                If Not RecoveryScopeKeysMatch(failureScope, successfulRecoveryScopeKey) Then Return False
+                Return Not System.String.IsNullOrWhiteSpace(successfulToolName) AndAlso
+                       successfulToolName.StartsWith(AgentToolRouter.AgentToolPrefix, System.StringComparison.OrdinalIgnoreCase)
             End Function
 
             Private Shared Function RecoveryScopeKeysMatch(left As String,
@@ -4888,6 +4903,24 @@ Namespace Agents
                 If(runState.LastErrorCode, "").Trim(),
                 ToolNotExposedInCurrentTurnCode,
                 StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Public Shared Function HasDeclaredTerminalOutcomeFailure(runState As ToolingRunState) As System.Boolean
+            If runState Is Nothing OrElse Not runState.HasUnresolvedToolFailure Then Return False
+
+            If runState.UnresolvedToolFailures IsNot Nothing AndAlso runState.UnresolvedToolFailures.Count > 0 Then
+                For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
+                    If failure Is Nothing OrElse Not failure.Terminal Then Continue For
+                    If failure.RecoveryEvidenceObserved Then Continue For
+                    If SubAgentRuntimeHardening.IsDeclaredTerminalOutcomeErrorCode(failure.ErrorCode) Then
+                        Return True
+                    End If
+                Next
+                Return False
+            End If
+
+            Return runState.LastFailureTerminal AndAlso
+                   SubAgentRuntimeHardening.IsDeclaredTerminalOutcomeErrorCode(runState.LastErrorCode)
         End Function
 
         Private Shared Function IsArtifactScopedFailureSupersededByValidatedDeliverable(

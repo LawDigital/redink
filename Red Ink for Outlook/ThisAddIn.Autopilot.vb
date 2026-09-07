@@ -2495,9 +2495,16 @@ Partial Public Class ThisAddIn
         Dim tempDirForAbort As String = Nothing
         Dim attachmentPathsForAbort As List(Of AutoPilotAttachmentInfo) = Nothing
         Dim runIsolationOwned As Boolean = False
+        Dim mailInfo As AutoPilotMailInfo = Nothing
+        Dim mailSentUtc As System.DateTime = System.DateTime.MinValue
+        Dim failureReplyAllowed As System.Boolean = False
+        Dim primaryReplySubmitted As System.Boolean = False
+        Dim outcomeHandoffEstablished As System.Boolean = False
+        Dim processingException As System.Exception = Nothing
 
         Try
-            ' Hold the global agent owner scope for the entire mail run because current
+            Try
+                ' Hold the global agent owner scope for the entire mail run because current
             ' attachment/workspace/tool-delivery fields are shared by the Outlook host.
             Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
             runIsolationOwned = True
@@ -2542,7 +2549,7 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            Dim mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
+            mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
             If mailInfo Is Nothing Then
                 ApDashboardLog("SKIP (ExtractMailInfo returned Nothing — COM error or unexpected mail format)", "warn")
                 Return
@@ -2596,7 +2603,7 @@ Partial Public Class ThisAddIn
             ' Convert SentOn to UTC for cooldown comparison.
             ' SentOn is the time the sender pressed Send — the only independent timestamp
             ' that correctly represents whether mails were sent in quick succession.
-            Dim mailSentUtc As DateTime = mailInfo.SentOn.ToUniversalTime()
+            mailSentUtc = mailInfo.SentOn.ToUniversalTime()
 
             If IsSenderOnCooldown(mailInfo.SenderEmail, mailSentUtc) Then
                 ' Bypass cooldown if:
@@ -2645,6 +2652,11 @@ Partial Public Class ThisAddIn
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
             Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation)
 
+            ' From this point onward the sender has passed the configured trust/policy gates.
+            ' Any unexpected processing/delivery failure must produce a sender-visible failure
+            ' notice unless a primary reply or an explicit handoff has already been submitted.
+            failureReplyAllowed = True
+
             ' ── Pre-processing approval gate ──
             ' If this mail was previously held and the operator has since approved it, consume the
             ' approval flag and process it normally (auto-send). This must be evaluated BEFORE any
@@ -2675,7 +2687,8 @@ Partial Public Class ThisAddIn
                         .ReceivedTime = mailInfo.ReceivedTime,
                         .BodyPreview = BuildApprovalBodyPreview(mailInfo.Body)}) Then
                     Dim approvalNotice As String = BuildManualApprovalNotice()
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, approvalNotice, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, approvalNotice, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    outcomeHandoffEstablished = True
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
                     UpdateApprovalsDashboardButton()
                     ApDashboardLog($"⏸ Held for manual approval (see Approvals in dashboard): {mailInfo.SenderEmail} — {mailInfo.Subject}", "step")
@@ -2739,7 +2752,8 @@ Partial Public Class ThisAddIn
                     oversizedSb.Append($"— {AN6}")
 
                     Dim oversizedMessage = oversizedSb.ToString()
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, oversizedMessage, Nothing, tagAsAutoReply:=True))
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, oversizedMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    outcomeHandoffEstablished = True
                     Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
@@ -3015,7 +3029,8 @@ Partial Public Class ThisAddIn
                             $"— {AN6}"
 
                         Dim attachmentsToSend = If(hasPartialOutput, resultAttachmentsAbort, Nothing)
-                        Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True))
+                        Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                        outcomeHandoffEstablished = True
                         deliverableHandoffCompletedOrDiscarded = True
                         Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
                         ' Do NOT tag the original mail as processed — allow catch-up to pick it up again.
@@ -3036,7 +3051,8 @@ Partial Public Class ThisAddIn
                     ApDashboardLog("WARNING: LLM returned empty response for: " & mailInfo.Subject, "warn")
                     Dim errorMessage = Await GenerateHelpfulFailureResponseAsync(
                         mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True))
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    outcomeHandoffEstablished = True
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                     ApDashboardLog("Sent helpful error response to: " & mailInfo.SenderEmail, "warn")
@@ -3110,7 +3126,8 @@ Partial Public Class ThisAddIn
                         End If
                     End If
 
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    outcomeHandoffEstablished = True
                     Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
 
@@ -3142,7 +3159,8 @@ Partial Public Class ThisAddIn
                     If requiresApproval AndAlso _apConfig.IsUnattended Then
                         ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
                     End If
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    outcomeHandoffEstablished = True
                     deliverableHandoffCompletedOrDiscarded = True
                     Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
 
@@ -3191,12 +3209,50 @@ Partial Public Class ThisAddIn
                 _apKnowledgeSourceCopies.Clear()
             End Try
 
-        Catch ex As OperationCanceledException
-            Throw
-        Catch ex As System.Exception
-            RecordAutoPilotError("Processing error: " & ex.Message)
-            ApDashboardLog("ERROR: " & ex.Message, "error")
-            Debug.WriteLine("AutoPilot ProcessIncomingMailAsync error: " & ex.ToString())
+            Catch ex As OperationCanceledException
+                Throw
+            Catch ex As System.Exception
+                processingException = ex
+                RecordAutoPilotError("Processing error: " & ex.Message)
+                ApDashboardLog("ERROR: " & ex.Message, "error")
+                Debug.WriteLine("AutoPilot ProcessIncomingMailAsync error: " & ex.ToString())
+            End Try
+
+            ' Delivery fail-safe: once a sender has passed all trust/policy gates, an
+            ' unexpected processing error must not disappear into logs merely because
+            ' result materialization/validation failed. Never attach potentially partial
+            ' or unvalidated outputs here. Suppress the fallback only after the normal
+            ' reply/handoff path has returned successfully. This block intentionally sits
+            ' outside Catch because VB.NET does not permit Await inside Catch/Finally.
+            If processingException IsNot Nothing AndAlso
+               failureReplyAllowed AndAlso
+               Not outcomeHandoffEstablished AndAlso
+               mi IsNot Nothing AndAlso
+               mailInfo IsNot Nothing Then
+
+                Try
+                    Dim failureNotice As System.String =
+                        If(primaryReplySubmitted,
+                           BuildAutoPilotPostSendFailureNotice(),
+                           BuildAutoPilotProcessingFailureNotice())
+                    Await SwitchToUi(
+                        Sub() SendReplyToSender(
+                            mi,
+                            failureNotice,
+                            Nothing,
+                            tagAsAutoReply:=True))
+                    outcomeHandoffEstablished = True
+                    System.Threading.Interlocked.Increment(_apSessionReplyCount)
+                    If mailSentUtc <> System.DateTime.MinValue Then
+                        RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                    End If
+                    ApDashboardLog("✉ Sent processing-failure notice to: " & mailInfo.SenderEmail, "warn")
+                Catch fallbackEx As System.Exception
+                    RecordAutoPilotError("Fallback failure notice could not be sent: " & fallbackEx.Message)
+                    ApDashboardLog("ERROR sending processing-failure notice: " & fallbackEx.Message, "error")
+                    Debug.WriteLine("AutoPilot processing-failure notice error: " & fallbackEx.ToString())
+                End Try
+            End If
         Finally
             If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
 
@@ -5508,7 +5564,8 @@ Partial Public Class ThisAddIn
                               resultAttachments As List(Of String),
                               Optional tagAsAutoReply As Boolean = True,
                               Optional sourcesHtml As String = "",
-                              Optional isHoldingOnly As Boolean = False)
+                              Optional isHoldingOnly As Boolean = False,
+                              Optional onPrimarySubmitted As System.Action = Nothing)
 
         Dim reply As MailItem = Nothing
         Dim sendAccount As Microsoft.Office.Interop.Outlook.Account = Nothing
@@ -5764,6 +5821,13 @@ Partial Public Class ThisAddIn
             Dim sentPrimaryTo As String = reply.To
             reply.Send()
 
+            If onPrimarySubmitted IsNot Nothing Then
+                Try
+                    onPrimarySubmitted.Invoke()
+                Catch callbackEx As System.Exception
+                    Debug.WriteLine("[AutoPilot] Primary-send callback error: " & callbackEx.Message)
+                End Try
+            End If
 
             ' Keep existing Sent Items / Inky Replies handling.
             Try
@@ -6911,6 +6975,26 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
     '  HELPFUL FAILURE RESPONSE
     ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Function BuildAutoPilotProcessingFailureNotice() As System.String
+        Dim sb As New System.Text.StringBuilder()
+        sb.AppendLine("I'm sorry, but an internal error prevented me from completing your request safely.")
+        sb.AppendLine()
+        sb.AppendLine("No incomplete or unvalidated result files have been sent. Please resend your request or contact the operator if the problem persists.")
+        sb.AppendLine()
+        sb.Append("— " & AN6)
+        Return sb.ToString()
+    End Function
+
+    Private Function BuildAutoPilotPostSendFailureNotice() As System.String
+        Dim sb As New System.Text.StringBuilder()
+        sb.AppendLine("A reply to your request was submitted, but an internal error occurred while completing the remaining delivery steps.")
+        sb.AppendLine()
+        sb.AppendLine("One or more requested result files may therefore be missing. Please resend your request or contact the operator if you need the complete result set.")
+        sb.AppendLine()
+        sb.Append("— " & AN6)
+        Return sb.ToString()
+    End Function
 
     ''' <summary>
     ''' Generates a meaningful failure response when AutoPilot cannot fulfill a request.

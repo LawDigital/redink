@@ -2459,11 +2459,24 @@ Partial Public Class ThisAddIn
                             }
 
                             context.AllToolResponses.Add(syntheticExplicitArtifactIdentity)
+
+                            ' An incomplete explicit artifact identity is not a valid opaque
+                            ' operation identity and therefore must not poison a corrected retry
+                            ' with a scope that the successful call cannot legitimately reproduce.
+                            ' Keep valid explicit scopes strict for every other identity failure.
+                            Dim artifactIdentityFailureRecoveryScopeKey As String =
+                                If(System.String.Equals(
+                                       explicitArtifactErrorCode,
+                                       "explicit_artifact_identity_incomplete",
+                                       System.StringComparison.Ordinal),
+                                   System.String.Empty,
+                                   recoveryScopeKey)
+
                             context.SequencingState.NoteToolFailure(
                                 tc.ToolName,
                                 explicitArtifactErrorCode,
                                 syntheticExplicitArtifactIdentity.ErrorMessage,
-                                recoveryScopeKey:=recoveryScopeKey)
+                                recoveryScopeKey:=artifactIdentityFailureRecoveryScopeKey)
 
                             context.PendingContinuationGuardPrompt =
                                 "HOST EXPLICIT ARTIFACT IDENTITY: The previous output-producing tool call was rejected before execution because its opaque artifact identity conflicts with registered state or is already terminal. Reuse an existing Final by finalizing the task; use a new artifact_id only for a genuinely new physical revision. Never rename/rebind an existing artifact_id."
@@ -2731,12 +2744,16 @@ Partial Public Class ThisAddIn
 
                             If Not toolResponse.Success Then
                                 If context.SequencingState IsNot Nothing Then
+                                    Dim recoverableSubAgentTaskFailure As Boolean =
+                                        IsRecoverableSubAgentTaskFailure(tc, toolResponse, context)
                                     context.SequencingState.NoteToolFailure(tc.ToolName,
                                                     If(toolResponse.ErrorCode, ""),
                                                     If(toolResponse.ErrorMessage, "Tool failed."),
-                                                    skippedByPolicy:=skippedStructuredAgentFailure,
-                                                    returnedToParent:=skippedStructuredAgentFailure,
-                                                    toolErrorHandling:=If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling),
+                                                    skippedByPolicy:=If(recoverableSubAgentTaskFailure, False, skippedStructuredAgentFailure),
+                                                    returnedToParent:=If(recoverableSubAgentTaskFailure, False, skippedStructuredAgentFailure),
+                                                    toolErrorHandling:=If(recoverableSubAgentTaskFailure,
+                                                                          "retry",
+                                                                          If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling)),
                                                     terminal:=toolResponse.RepairLoopTerminal,
                                                     recoveryScopeKey:=recoveryScopeKey)
                                 End If
@@ -2841,39 +2858,68 @@ Partial Public Class ThisAddIn
                         If toolResponse.Success AndAlso
                            tc.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
 
-                            If LoaderResponseExposedNewTools(toolResponse.Response) Then
+                            Dim loaderInfo As Global.SharedLibrary.Agents.ToolLoaderTool.ToolLoaderResponseInfo =
+                                SharedLibrary.Agents.ToolLoaderTool.ParseResponse(toolResponse.Response)
+
+                            If Not loaderInfo.IsValid OrElse loaderInfo.HasNewTools Then
+                                ' Preserve the historical conservative barrier for malformed loader output,
+                                ' and for valid responses that actually exposed new tool schemas.
                                 restartAfterToolLoader = True
                                 context.PendingContinuationGuardPrompt = BuildToolLoaderBarrierGuardPrompt()
                                 context.PendingGuardTitle = "HOST TOOL LOADER BARRIER"
                                 context.PendingRejectedTurnExplanation =
-                                    "The previous turn successfully loaded tools. Newly loaded tool schemas are available only from the next turn onward."
+                                    If(loaderInfo.IsValid,
+                                       "The previous turn successfully loaded tools. Newly loaded tool schemas are available only from the next turn onward.",
+                                       "The previous tool_loader response could not be parsed reliably. The host is conservatively starting a fresh turn before further tool use.")
                                 context.PendingRejectedAssistantTurn = If(currentResponse, "")
                                 context.PrematureTextRetryCount = 0
+                                context.ToolLoaderConfirmedAvailableToolsPendingUse = False
+                                context.ToolLoaderConfirmedAvailableTools = System.String.Empty
                                 stopCurrentBatchAfterTool = True
 
                                 context.LogWarn(
-                                    "Stopping current tool-call batch after successful tool_loader call.",
+                                    If(loaderInfo.IsValid,
+                                       "Stopping current tool-call batch after successful tool_loader call.",
+                                       "Stopping current tool-call batch after malformed tool_loader response."),
                                     details:=$"host={context.HostKind}; tool={tc.ToolName}", visibleToUser:=False)
 
                                 Exit For
                             End If
 
-                            ' No new tool schemas were exposed (all requested tools were already
-                            ' loaded). Do not consume an extra iteration or stop the batch; instead
-                            ' steer the model back toward an already-exposed tool. Capability-driven:
-                            ' relies solely on the loader's own "loaded" array, no tool-name heuristics.
-                            context.PendingContinuationGuardPrompt = BuildToolLoaderNoOpGuardPrompt(toolResponse.Response)
-                            context.PendingGuardTitle = "HOST TOOL LOADER NO-OP"
-                            context.PendingRejectedTurnExplanation =
-                                "The requested tools were already loaded. Their schemas are already available; call one of the exposed tools instead of loading again."
-                            context.PendingRejectedAssistantTurn = ""
-                            context.PrematureTextRetryCount = 0
-                            context.ToolLoaderConfirmedAvailableToolsPendingUse = True
-                            context.ToolLoaderConfirmedAvailableTools = ExtractToolLoaderAlreadyLoadedNames(toolResponse.Response)
+                            If loaderInfo.AllResolvedToolsWereAlreadyLoaded Then
+                                ' Strong availability evidence exists only when the loader explicitly says
+                                ' every resolved requested tool was already loaded and none was unavailable.
+                                context.PendingContinuationGuardPrompt = BuildToolLoaderNoOpGuardPrompt(loaderInfo)
+                                context.PendingGuardTitle = "HOST TOOL LOADER NO-OP"
+                                context.PendingRejectedTurnExplanation =
+                                    "The requested tools were already loaded. Their schemas are already available; call one of the exposed tools instead of loading again."
+                                context.PendingRejectedAssistantTurn = ""
+                                context.PrematureTextRetryCount = 0
+                                context.ToolLoaderConfirmedAvailableToolsPendingUse = True
+                                context.ToolLoaderConfirmedAvailableTools =
+                                    System.String.Join(", ", loaderInfo.AlreadyLoadedNames)
 
-                            context.LogWarn(
-                                "Ignoring no-op tool_loader call; all requested tools were already loaded.",
-                                details:=$"host={context.HostKind}; tool={tc.ToolName}", visibleToUser:=False)
+                                context.LogWarn(
+                                    "Ignoring no-op tool_loader call; all requested tools were already loaded.",
+                                    details:=$"host={context.HostKind}; tool={tc.ToolName}", visibleToUser:=False)
+                            Else
+                                ' A syntactically valid loader response can also mean that one or more
+                                ' requested tools are unavailable. That is NOT evidence of availability and
+                                ' must never arm the final-blocked rejection guard.
+                                context.PendingContinuationGuardPrompt = BuildToolLoaderAvailabilityResultGuardPrompt(loaderInfo)
+                                context.PendingGuardTitle = "HOST TOOL LOADER AVAILABILITY RESULT"
+                                context.PendingRejectedTurnExplanation =
+                                    "tool_loader completed without exposing new schemas. Use its explicit availability result when deciding whether to continue or finalize."
+                                context.PendingRejectedAssistantTurn = ""
+                                context.PrematureTextRetryCount = 0
+                                context.ToolLoaderConfirmedAvailableToolsPendingUse = False
+                                context.ToolLoaderConfirmedAvailableTools = System.String.Empty
+
+                                context.LogWarn(
+                                    "tool_loader returned a valid availability result without loading new tools; no availability-confirmed guard was armed.",
+                                    details:=$"host={context.HostKind}; tool={tc.ToolName}; notAvailable={System.String.Join(",", loaderInfo.NotAvailableNames)}",
+                                    visibleToUser:=False)
+                            End If
                         End If
 
                         If RegisterToolFailureLoopState(tc, toolResponse, context) Then
@@ -2977,11 +3023,31 @@ Partial Public Class ThisAddIn
                                     If(System.String.IsNullOrWhiteSpace(toolResponse.RepairLoopTerminalReason),
                                        "The tool repair loop was stopped because its bounded automatic recovery was exhausted.",
                                        toolResponse.RepairLoopTerminalReason)
+                                Dim declaredTerminalOutcome As System.Boolean =
+                                    SharedLibrary.Agents.SubAgentRuntimeHardening.IsDeclaredTerminalOutcomeErrorCode(toolResponse.ErrorCode)
 
                                 context.LogWarn($"Stopping after terminal repair-loop outcome for '{tc.ToolName}'.",
                                                 details:=repairAbortReason)
 
-                                If context.TerminalToolRecoveryRestartCount < ToolExecutionContext.MaxTerminalToolRecoveryRestarts Then
+                                If declaredTerminalOutcome Then
+                                    ' A delegated task explicitly declared itself blocked. This is a semantic
+                                    ' task outcome, not evidence that the host should invent a recovery path. Stop
+                                    ' this tool batch and return control to the active workflow contract. A parent
+                                    ' may still choose an explicitly permitted different path; otherwise it can
+                                    ' finalize blocked without the generic host forcing substitute tools.
+                                    context.ForceNoToolFinalizationRequested = False
+                                    context.ForceNoToolFinalizationReason = System.String.Empty
+                                    context.PendingContinuationGuardPrompt =
+                                        "HOST DECLARED TERMINAL OUTCOME: The delegated tool '" & If(tc.ToolName, System.String.Empty) &
+                                        "' explicitly returned '" & If(toolResponse.ErrorCode, "blocked") & "'. " &
+                                        "Do not automatically retry that delegated task or invent a substitute path. Follow the active workflow/skill contract for this blocked outcome. " &
+                                        "If that contract defines an explicit independent alternative, you may take it; otherwise finalize truthfully as blocked."
+                                    context.PendingGuardTitle = "HOST DECLARED TERMINAL OUTCOME"
+                                    context.PendingRejectedTurnExplanation =
+                                        "The previous delegated task returned an explicit blocked outcome; generic host recovery has been suppressed so the active workflow contract remains authoritative."
+                                    context.PendingRejectedAssistantTurn = System.String.Empty
+                                    context.PrematureTextRetryCount = 0
+                                ElseIf context.TerminalToolRecoveryRestartCount < ToolExecutionContext.MaxTerminalToolRecoveryRestarts Then
                                     context.TerminalToolRecoveryRestartCount += 1
                                     context.ForceNoToolFinalizationRequested = False
                                     context.ForceNoToolFinalizationReason = System.String.Empty
@@ -3018,6 +3084,24 @@ Partial Public Class ThisAddIn
                                     context.PrematureTextRetryCount = 0
                                 End If
 
+                                stopCurrentBatchAfterTool = True
+                                Exit For
+                            End If
+
+                            If IsRecoverableSubAgentTaskFailure(tc, toolResponse, context) Then
+                                Dim retryTaskId As System.String = GetSubAgentTaskId(tc)
+                                Dim remainingAttempts As System.Int32 =
+                                    GetSubAgentTaskRemainingAttempts(tc, context)
+                                context.PendingContinuationGuardPrompt =
+                                    BuildSubAgentSameTaskRetryGuardPrompt(
+                                        tc.ToolName,
+                                        retryTaskId,
+                                        remainingAttempts)
+                                context.PendingGuardTitle = "HOST SUB-AGENT SAME-TASK RECOVERY"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous delegated task attempt failed. Retry the same logical task under the same subagent_task_id, or finalize truthfully if recovery is not appropriate."
+                                context.PendingRejectedAssistantTurn = System.String.Empty
+                                context.PrematureTextRetryCount = 0
                                 stopCurrentBatchAfterTool = True
                                 Exit For
                             End If
@@ -3519,11 +3603,19 @@ Partial Public Class ThisAddIn
                                 Continue While
                             End If
 
+                            Dim hasDeclaredTerminalOutcomeFailure As System.Boolean =
+                                SharedLibrary.Agents.ToolCallSequencing.HasDeclaredTerminalOutcomeFailure(context.SequencingState)
+
                             ' === Final-turn gate (P3a + P3b) — applies to 'blocked' branch.
                             ' 'blocked' must not pair with prose announcing a fallback (rule 8), and must
                             ' only be declared after authorized fallback tools have been attempted (rule 9).
-                            Dim _ftGateUntried_B As IReadOnlyList(Of String) = CollectUntriedDeliverableFallbackToolNames(context)
+                            Dim _ftGateUntried_B As IReadOnlyList(Of String) =
+                                    If(
+                                        hasDeclaredTerminalOutcomeFailure,
+                                        CType(System.Array.Empty(Of System.String)(), IReadOnlyList(Of String)),
+                                        CollectUntriedDeliverableFallbackToolNames(context))
                             Dim _ftGateNeedsDeliverable_B As Boolean =
+                                    Not hasDeclaredTerminalOutcomeFailure AndAlso
                                     context.SequencingState IsNot Nothing AndAlso
                                     context.SequencingState.RequestRequiresCreatedDeliverable
                             Dim _ftGateHasDeliverable_B As Boolean =
@@ -3536,6 +3628,12 @@ Partial Public Class ThisAddIn
                                         _ftGateNeedsDeliverable_B,
                                         _ftGateHasDeliverable_B,
                                         _ftGateUntried_B)
+
+                            If hasDeclaredTerminalOutcomeFailure Then
+                                context.Log(
+                                    "Declared terminal delegated outcome detected; generic deliverable-fallback forcing is suppressed while the normal final-turn safety checks remain active.",
+                                    "diag")
+                            End If
 
                             If _ftGateEval_B.Decision <> Agents.FinalTurnDecision.Accept Then
                                 If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
@@ -4731,24 +4829,113 @@ Partial Public Class ThisAddIn
                "In this turn, either call one of the now-exposed tools or continue with another already-exposed step."
     End Function
 
-    Private Function BuildToolLoaderNoOpGuardPrompt(loaderResponse As String) As String
-        Dim confirmedNames As String = ExtractToolLoaderAlreadyLoadedNames(loaderResponse)
+    Private Function BuildToolLoaderNoOpGuardPrompt(info As Global.SharedLibrary.Agents.ToolLoaderTool.ToolLoaderResponseInfo) As String
+        Dim confirmedNames As System.String =
+            If(info Is Nothing OrElse Not info.IsValid,
+               System.String.Empty,
+               System.String.Join(", ", info.AlreadyLoadedNames))
+
         Return "HOST TOOL LOADER NO-OP: tool_loader confirmed that the requested tool(s) are already loaded and exposed" &
                If(String.IsNullOrWhiteSpace(confirmedNames), ". ", " (" & confirmedNames & "). ") &
                "Do NOT claim that these tools are unavailable or not authorized. Do NOT call tool_loader again for them. " &
                "If the task requires one of them, call that already-exposed tool now."
     End Function
 
-    Private Function ExtractToolLoaderAlreadyLoadedNames(loaderResponse As String) As String
-        If String.IsNullOrWhiteSpace(loaderResponse) Then Return ""
-        Try
-            Dim obj As JObject = JObject.Parse(loaderResponse)
-            Dim arr As JArray = TryCast(obj("already_loaded"), JArray)
-            If arr Is Nothing OrElse arr.Count = 0 Then Return ""
-            Return String.Join(", ", arr.Values(Of String)().Where(Function(name) Not String.IsNullOrWhiteSpace(name)))
-        Catch ex As System.Exception
-            Return ""
-        End Try
+    Private Function BuildToolLoaderAvailabilityResultGuardPrompt(info As Global.SharedLibrary.Agents.ToolLoaderTool.ToolLoaderResponseInfo) As System.String
+        If info Is Nothing OrElse Not info.IsValid Then
+            Return BuildToolLoaderBarrierGuardPrompt()
+        End If
+
+        Dim unavailable As System.String = System.String.Join(", ", info.NotAvailableNames)
+        Dim alreadyLoaded As System.String = System.String.Join(", ", info.AlreadyLoadedNames)
+
+        Return "HOST TOOL LOADER AVAILABILITY RESULT: tool_loader did not expose any new tool schema. " &
+               If(System.String.IsNullOrWhiteSpace(unavailable),
+                  System.String.Empty,
+                  "It explicitly reported these requested tools as unavailable in the current authorized registry: " & unavailable & ". ") &
+               If(System.String.IsNullOrWhiteSpace(alreadyLoaded),
+                  System.String.Empty,
+                  "It reported these tools as already loaded: " & alreadyLoaded & ". ") &
+               "Do not infer availability for tools reported unavailable. Continue only with actually exposed/authorized tools, or finalize truthfully when the required capability is unavailable."
+    End Function
+
+
+    Private Function GetSubAgentTaskId(toolCall As ToolCall) As System.String
+        If toolCall Is Nothing OrElse toolCall.Arguments Is Nothing Then Return System.String.Empty
+        Dim raw As Object = Nothing
+        If Not toolCall.Arguments.TryGetValue("subagent_task_id", raw) OrElse raw Is Nothing Then
+            Return System.String.Empty
+        End If
+        Return If(System.Convert.ToString(raw), System.String.Empty).Trim()
+    End Function
+
+    Private Function IsRecoverableSubAgentTaskFailure(toolCall As ToolCall,
+                                                       response As ToolResponse,
+                                                       context As ToolExecutionContext) As System.Boolean
+        If toolCall Is Nothing OrElse response Is Nothing OrElse response.Success OrElse
+           Not response.RepairLoopRecoverable OrElse response.RepairLoopTerminal Then Return False
+        If toolCall.ToolName Is Nothing OrElse
+           Not toolCall.ToolName.StartsWith(
+               Global.SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix,
+               System.StringComparison.OrdinalIgnoreCase) Then Return False
+        If context Is Nothing OrElse context.SequencingState Is Nothing OrElse
+           context.SequencingState.SubAgentTaskRegistry Is Nothing Then Return False
+
+        Dim taskId As System.String = GetSubAgentTaskId(toolCall)
+        If taskId = System.String.Empty Then Return False
+        Dim agentName As System.String =
+            toolCall.ToolName.Substring(Global.SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix.Length)
+        Return context.SequencingState.SubAgentTaskRegistry.IsRetryable(agentName, taskId)
+    End Function
+
+    Private Function GetSubAgentTaskRemainingAttempts(toolCall As ToolCall,
+                                                       context As ToolExecutionContext) As System.Int32
+        If toolCall Is Nothing OrElse context Is Nothing OrElse context.SequencingState Is Nothing OrElse
+           context.SequencingState.SubAgentTaskRegistry Is Nothing OrElse toolCall.ToolName Is Nothing Then Return 0
+        Dim taskId As System.String = GetSubAgentTaskId(toolCall)
+        If taskId = System.String.Empty Then Return 0
+        Dim agentName As System.String =
+            toolCall.ToolName.Substring(Global.SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix.Length)
+        Return context.SequencingState.SubAgentTaskRegistry.GetRemainingAttempts(agentName, taskId)
+    End Function
+
+    Private Sub ApplySubAgentTaskLifecyclePolicy(response As ToolResponse,
+                                                  toolCall As ToolCall,
+                                                  context As ToolExecutionContext)
+        If response Is Nothing OrElse response.Success OrElse toolCall Is Nothing OrElse toolCall.ToolName Is Nothing Then Return
+        If Not toolCall.ToolName.StartsWith(
+            Global.SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix,
+            System.StringComparison.OrdinalIgnoreCase) Then Return
+        If context Is Nothing OrElse context.SequencingState Is Nothing OrElse
+           context.SequencingState.SubAgentTaskRegistry Is Nothing Then Return
+
+        Dim taskId As System.String = GetSubAgentTaskId(toolCall)
+        If taskId = System.String.Empty Then Return
+        Dim agentName As System.String =
+            toolCall.ToolName.Substring(Global.SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix.Length)
+
+        If context.SequencingState.SubAgentTaskRegistry.IsRetryable(agentName, taskId) Then
+            response.RepairLoopRecoverable = True
+            response.RepairLoopTerminal = False
+            response.RepairLoopTerminalReason = System.String.Empty
+        ElseIf context.SequencingState.SubAgentTaskRegistry.IsTerminal(agentName, taskId) Then
+            response.RepairLoopRecoverable = False
+            response.RepairLoopTerminal = True
+            If System.String.IsNullOrWhiteSpace(response.RepairLoopTerminalReason) Then
+                response.RepairLoopTerminalReason =
+                    "The bounded retry budget for sub-agent task '" & taskId & "' is exhausted or the task declared itself non-retryable."
+            End If
+        End If
+    End Sub
+
+    Private Function BuildSubAgentSameTaskRetryGuardPrompt(toolName As System.String,
+                                                           taskId As System.String,
+                                                           remainingAttempts As System.Int32) As System.String
+        Return "HOST SUB-AGENT RECOVERY: The previous attempt of delegated task '" & taskId &
+               "' via '" & If(toolName, System.String.Empty) & "' failed, but the logical task still has a bounded retry budget (remaining attempts: " &
+               remainingAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) & "). Retry the SAME logical task using exactly the SAME subagent_task_id. " &
+               "The retry may use identical or corrected inputs; do not invent a new task id merely to retry this task. Do not continue work that depends on this task until it succeeds. " &
+               "If retrying is not appropriate, finalize truthfully as blocked."
     End Function
 
     Private Function BuildInvalidToolArgumentsGuardPrompt(toolName As String,
@@ -4790,6 +4977,17 @@ Partial Public Class ThisAddIn
                 response.RepairLoopTerminalReason =
                     "Tool '" & If(response.ToolName, "") & "' returned an explicitly non-retryable structured error" &
                     If(String.IsNullOrWhiteSpace(errorCode), ".", " ('" & errorCode & "').")
+            End If
+
+            ' A declared sub-agent failure is an attempt outcome, not automatically the
+            ' terminal state of the logical task. The explicit task registry owns the bounded
+            ' same-task retry budget. An explicit retryable=false remains terminal.
+            If response.ToolName IsNot Nothing AndAlso
+               response.ToolName.StartsWith(
+                   Global.SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix,
+                   System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not response.RepairLoopTerminal Then
+                response.RepairLoopRecoverable = True
             End If
 
             If context IsNot Nothing Then
@@ -5422,29 +5620,6 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
-    ''' <summary>
-    ''' Returns True when a tool_loader response actually exposed at least one new tool
-    ''' (its "loaded" array is non-empty). Used to avoid consuming an extra orchestration
-    ''' iteration on no-op loader calls where every requested tool was already loaded.
-    ''' Capability-driven: inspects only the loader's own structured output.
-    ''' </summary>
-    Private Function LoaderResponseExposedNewTools(loaderResponse As String) As Boolean
-        If String.IsNullOrWhiteSpace(loaderResponse) Then
-            Return False
-        End If
-
-        Try
-            Dim obj As JObject = JObject.Parse(loaderResponse)
-            Dim loadedToken As JToken = obj("loaded")
-            Return loadedToken IsNot Nothing AndAlso
-                   loadedToken.Type = JTokenType.Array AndAlso
-                   DirectCast(loadedToken, JArray).Count > 0
-        Catch
-            ' On parse failure, fall back to the conservative (barrier) behavior by
-            ' treating it as a real load so the caller preserves existing semantics.
-            Return True
-        End Try
-    End Function
 
 #End Region
 
@@ -6652,6 +6827,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 ApplyStructuredAgentResult(response, context)
+                ApplySubAgentTaskLifecyclePolicy(response, toolCall, context)
 
                 If Not response.Success AndAlso String.IsNullOrWhiteSpace(response.ErrorMessage) Then
                     response.ErrorMessage = "Agent-layer tool returned no usable result."

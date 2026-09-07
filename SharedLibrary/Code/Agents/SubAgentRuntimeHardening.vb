@@ -471,8 +471,24 @@ Namespace Agents
                 Dim summary As String = If(obj.Value(Of String)("summary"), "")
                 Dim resultToken As JToken = obj("result")
 
+                ' A sub-agent model call can complete successfully at the transport layer while
+                ' its declared task outcome is a failure. Preserve that distinction here, at the
+                ' normalization boundary, so every host sees the same contract semantics. This
+                ' interpretation is deliberately restricted to the documented {summary,result}
+                ' agent envelope; a direct JSON object remains arbitrary domain data.
+                Dim envelopeFailureCode As System.String = GetDeclaredOutcomeFailureCode(obj)
+                If Not System.String.IsNullOrWhiteSpace(envelopeFailureCode) Then
+                    Return NormalizeDeclaredFailureObject(obj, resultToken, envelopeFailureCode, rawLength)
+                End If
+
                 If Not IsUsableToken(resultToken) Then
                     Return BuildEmptyResultEnvelope(rawLength)
+                End If
+
+                Dim resultObject As JObject = TryCast(resultToken, JObject)
+                Dim nestedFailureCode As System.String = GetDeclaredOutcomeFailureCode(resultObject)
+                If Not System.String.IsNullOrWhiteSpace(nestedFailureCode) Then
+                    Return NormalizeDeclaredFailureObject(obj, resultToken, nestedFailureCode, rawLength)
                 End If
 
                 If String.IsNullOrWhiteSpace(summary) Then
@@ -526,6 +542,97 @@ Namespace Agents
                 .RawLength = rawLength,
                 .Error = errObj
             }
+        End Function
+
+        Private Shared Function NormalizeDeclaredFailureObject(container As JObject,
+                                                               resultToken As JToken,
+                                                               errorCode As System.String,
+                                                               rawLength As System.Int32) As NormalizedEnvelope
+            Dim normalizedCode As System.String = If(errorCode, System.String.Empty).Trim()
+            If System.String.IsNullOrWhiteSpace(normalizedCode) Then normalizedCode = "agent_declared_failure"
+
+            Dim resultObject As JObject = TryCast(resultToken, JObject)
+            Dim errObj As JObject = Nothing
+
+            If resultObject IsNot Nothing Then
+                errObj = TryCast(resultObject("error"), JObject)
+            End If
+            If errObj Is Nothing AndAlso container IsNot Nothing Then
+                errObj = TryCast(container("error"), JObject)
+            End If
+
+            If errObj Is Nothing Then
+                errObj = New JObject()
+            Else
+                errObj = CType(errObj.DeepClone(), JObject)
+            End If
+
+            If System.String.IsNullOrWhiteSpace(errObj.Value(Of System.String)("code")) Then
+                errObj("code") = normalizedCode
+            End If
+            If System.String.IsNullOrWhiteSpace(errObj.Value(Of System.String)("phase")) Then
+                errObj("phase") = "declared_result_status"
+            End If
+
+            Dim summary As System.String = System.String.Empty
+            If container IsNot Nothing Then
+                summary = If(container.Value(Of System.String)("summary"), System.String.Empty).Trim()
+            End If
+            If System.String.IsNullOrWhiteSpace(summary) AndAlso resultObject IsNot Nothing Then
+                summary = If(resultObject.Value(Of System.String)("message"), System.String.Empty).Trim()
+                If System.String.IsNullOrWhiteSpace(summary) Then
+                    summary = If(resultObject.Value(Of System.String)("reason"), System.String.Empty).Trim()
+                End If
+            End If
+            If System.String.IsNullOrWhiteSpace(summary) Then
+                summary = "Sub-agent returned declared failure outcome '" & normalizedCode & "'."
+            End If
+
+            If System.String.IsNullOrWhiteSpace(errObj.Value(Of System.String)("message")) Then
+                errObj("message") = summary
+            End If
+
+            Return New NormalizedEnvelope With {
+                .Summary = summary,
+                .Result = If(resultToken Is Nothing, Nothing, resultToken.DeepClone()),
+                .ResultKind = "error",
+                .RawLength = rawLength,
+                .Error = errObj
+            }
+        End Function
+
+        Private Shared Function GetDeclaredOutcomeFailureCode(obj As JObject) As System.String
+            If obj Is Nothing Then Return System.String.Empty
+
+            ' Keep this intentionally narrow. The object itself is an agent outcome object,
+            ' but its arbitrary domain fields are still data. Only explicit generic outcome
+            ' flags and the reserved failure-status vocabulary are promoted to orchestration
+            ' failure. Existing top-level structured error-envelope handling remains unchanged.
+            If TokenIsExplicitlyFalse(obj("success")) Then Return "success_false"
+            If TokenIsExplicitlyFalse(obj("ok")) Then Return "ok_false"
+
+            Dim statusValue As System.String = If(obj.Value(Of System.String)("status"), System.String.Empty).Trim().ToLowerInvariant()
+            If statusValue = "error" OrElse
+               statusValue = "failed" OrElse
+               statusValue = "failure" OrElse
+               statusValue = "blocked" OrElse
+               statusValue.StartsWith("blocked_", System.StringComparison.Ordinal) Then
+
+                Return statusValue
+            End If
+
+            Return System.String.Empty
+        End Function
+
+        ''' <summary>
+        ''' Returns True for declared outcome codes whose semantics explicitly mean that the
+        ''' delegated task cannot continue without an external prerequisite/change. Ordinary
+        ''' error/failed outcomes remain subject to the configured generic recovery policy.
+        ''' </summary>
+        Public Shared Function IsDeclaredTerminalOutcomeErrorCode(errorCode As System.String) As System.Boolean
+            Dim normalized As System.String = If(errorCode, System.String.Empty).Trim().ToLowerInvariant()
+            If normalized = "blocked" Then Return True
+            Return normalized.StartsWith("blocked_", System.StringComparison.Ordinal)
         End Function
 
         Private Shared Function IsExplicitErrorObject(obj As JObject) As Boolean
