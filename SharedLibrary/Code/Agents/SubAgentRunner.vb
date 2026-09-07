@@ -259,14 +259,21 @@ Namespace Agents
                         finalText = Await host.RunIsolatedToolingLoopAsync(req, cancellationToken).ConfigureAwait(False)
                     Catch oce As OperationCanceledException
                         Throw
-                    Catch ex As Exception
+                    Catch ex As System.Exception
                         Return BuildInfrastructureErrorPayload(ag.Name, "agent_failed", "invoke", ex.Message)
                     End Try
 
                     Dim normalized = SubAgentRuntimeHardening.NormalizeFinalOutput(finalText, jsonRequired:=True)
+                    Dim declaredErrorCode As String = ""
+                    Dim declaredResultKind As String = ""
+                    Dim hasDeclaredContractFailure As Boolean =
+                        SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(
+                            normalized.ToJson(),
+                            declaredErrorCode,
+                            declaredResultKind)
                     LogFinalOutputDiagnostics(ag.Name, req.AllowedToolNames, normalized, retryCount)
 
-                    If Not normalized.IsError Then
+                    If Not normalized.IsError AndAlso Not hasDeclaredContractFailure Then
                         Dim resp As JObject = normalized.ToJObject()
                         resp("agent") = ag.Name
 
@@ -321,8 +328,12 @@ Namespace Agents
                 SubAgentRuntimeHardening.EmptyResultCode,
                 SubAgentRuntimeHardening.ModelEmptyResponseCode
             }
+                    Dim effectiveErrorCode As String = normalized.GetErrorCode()
+                    If String.IsNullOrWhiteSpace(effectiveErrorCode) AndAlso hasDeclaredContractFailure Then
+                        effectiveErrorCode = declaredErrorCode
+                    End If
 
-                    If retryCount = 0 AndAlso retryableErrorCodes.Contains(normalized.GetErrorCode()) Then
+                    If retryCount = 0 AndAlso retryableErrorCodes.Contains(effectiveErrorCode) Then
                         retryCount += 1
                         userMessageForRun = BuildRetryUserMessage(baseUserMessage.ToString(), normalized, allowedTools)
                         Continue Do

@@ -36,7 +36,7 @@ Partial Public Class ThisAddIn
         Dim list As New List(Of OpenDocInfo)
         Try
             Dim app = Globals.ThisAddIn.Application
-            Dim active = TryGetActive(app)
+            Dim active = ResolveLogicalActiveDoc()
             For Each d As Word.Document In app.Documents
                 list.Add(New OpenDocInfo With {
                     .Name = d.Name,
@@ -53,7 +53,7 @@ Partial Public Class ThisAddIn
 
     Public Function GetActiveDocument() As OpenDocInfo Implements IWordDocumentHost.GetActiveDocument
         Dim app = Globals.ThisAddIn.Application
-        Dim d = TryGetActive(app)
+        Dim d = ResolveLogicalActiveDoc()
         If d Is Nothing Then Return Nothing
         Return New OpenDocInfo With {
             .Name = d.Name, .Path = TryGetFullName(d), .IsActive = True,
@@ -94,7 +94,7 @@ Partial Public Class ThisAddIn
                 If f < 0 Then Exit While
                 hits.Add(BuildHit(text, f, query.Length, text.Substring(f, query.Length)))
                 If hits.Count >= maxHits Then Exit While
-                idx = f + Math.Max(1, query.Length)
+                idx = f + System.Math.Max(1, query.Length)
             End While
         End If
         Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .total = hits.Count, Key .hits = hits})
@@ -128,8 +128,11 @@ Partial Public Class ThisAddIn
         Select Case If(location, "end").ToLowerInvariant()
             Case "start" : rng = d.Range(0, 0)
             Case "cursor"
-                Try : rng = Globals.ThisAddIn.Application.Selection.Range : Catch : rng = d.Content : rng.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
-                End Try
+                rng = ResolvePinnedCursorRange(d)
+                If rng Is Nothing Then
+                    rng = d.Content
+                    rng.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                End If
             Case Else
                 rng = d.Content : rng.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
         End Select
@@ -244,20 +247,29 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function LocateRange(d As Word.Document, find As String, matchScope As String) As Word.Range
         If d Is Nothing OrElse String.IsNullOrEmpty(find) Then Return Nothing
-        Try : d.Activate() : Catch : End Try
-        Dim sel As Word.Selection = Globals.ThisAddIn.Application.Selection
+
+        Dim searchRange As Word.Range = Nothing
+        Dim foundRange As Word.Range = Nothing
+
         Try
-            sel.SetRange(d.Content.Start, d.Content.End)
-        Catch
-            Return Nothing
+            searchRange = d.Content.Duplicate
+            If Not WordSearchHelper.FindLongTextAnchoredFastRange(searchRange, find, foundRange) Then Return Nothing
+            If foundRange Is Nothing Then Return Nothing
+
+            Dim rng As Word.Range = foundRange.Duplicate
+            Select Case If(matchScope, "").Trim().ToLowerInvariant()
+                Case "sentence" : Try : rng = rng.Sentences(1) : Catch : End Try
+                Case "paragraph" : Try : rng = rng.Paragraphs(1).Range : Catch : End Try
+            End Select
+            Return rng
+        Finally
+            If foundRange IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(foundRange) : Catch : End Try
+            End If
+            If searchRange IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(searchRange) : Catch : End Try
+            End If
         End Try
-        If Not FindLongTextInChunks(find, sel) Then Return Nothing
-        Dim rng As Word.Range = sel.Range.Duplicate
-        Select Case If(matchScope, "").Trim().ToLowerInvariant()
-            Case "sentence" : Try : rng = rng.Sentences(1) : Catch : End Try
-            Case "paragraph" : Try : rng = rng.Paragraphs(1).Range : Catch : End Try
-        End Select
-        Return rng
     End Function
 
     ''' <summary>
@@ -292,7 +304,7 @@ Partial Public Class ThisAddIn
     Private Function ResolveDoc(target As String) As Word.Document
         Try
             Dim app = Globals.ThisAddIn.Application
-            If String.IsNullOrWhiteSpace(target) Then Return TryGetActive(app)
+            If String.IsNullOrWhiteSpace(target) Then Return ResolveLogicalActiveDoc()
             For Each d As Word.Document In app.Documents
                 If String.Equals(d.Name, target, StringComparison.OrdinalIgnoreCase) Then Return d
                 Dim full = TryGetFullName(d)
@@ -301,6 +313,66 @@ Partial Public Class ThisAddIn
         Catch
         End Try
         Return Nothing
+    End Function
+
+    Private Function ResolveLogicalActiveDoc() As Word.Document
+        Try
+            Dim app As Word.Application = Globals.ThisAddIn.Application
+            Dim context As ToolExecutionContext = _activeToolingContext
+
+            While context IsNot Nothing AndAlso context.ParentToolingContext IsNot Nothing
+                context = context.ParentToolingContext
+            End While
+
+            If context IsNot Nothing Then
+                Dim pinnedFullName As String = If(context.PinnedWordDocumentFullName, "").Trim()
+                Dim pinnedName As String = If(context.PinnedWordDocumentName, "").Trim()
+
+                If pinnedFullName <> "" Then
+                    For Each d As Word.Document In app.Documents
+                        Dim fullName As String = TryGetFullName(d)
+                        If fullName <> "" AndAlso String.Equals(fullName, pinnedFullName, StringComparison.OrdinalIgnoreCase) Then Return d
+                    Next
+                    Return Nothing
+                End If
+
+                If pinnedName <> "" Then
+                    For Each d As Word.Document In app.Documents
+                        If String.Equals(d.Name, pinnedName, StringComparison.OrdinalIgnoreCase) Then Return d
+                    Next
+                    Return Nothing
+                End If
+            End If
+
+            Return TryGetActive(app)
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Function ResolvePinnedCursorRange(d As Word.Document) As Word.Range
+        If d Is Nothing Then Return Nothing
+        Try
+            Dim context As ToolExecutionContext = _activeToolingContext
+            While context IsNot Nothing AndAlso context.ParentToolingContext IsNot Nothing
+                context = context.ParentToolingContext
+            End While
+            If context Is Nothing OrElse context.PinnedWordSelectionStart < 0 Then Return Nothing
+
+            Dim pinnedFullName As String = If(context.PinnedWordDocumentFullName, "").Trim()
+            Dim pinnedName As String = If(context.PinnedWordDocumentName, "").Trim()
+            If pinnedFullName <> "" Then
+                Dim documentFullName As String = TryGetFullName(d)
+                If documentFullName = "" OrElse Not String.Equals(documentFullName, pinnedFullName, StringComparison.OrdinalIgnoreCase) Then Return Nothing
+            ElseIf pinnedName <> "" AndAlso Not String.Equals(d.Name, pinnedName, StringComparison.OrdinalIgnoreCase) Then
+                Return Nothing
+            End If
+
+            Dim pos As Integer = System.Math.Max(d.Content.Start, System.Math.Min(context.PinnedWordSelectionStart, d.Content.End))
+            Return d.Range(pos, pos)
+        Catch
+            Return Nothing
+        End Try
     End Function
 
     Private Shared Function TryGetActive(app As Word.Application) As Word.Document
@@ -312,8 +384,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Shared Function BuildHit(text As String, index As Integer, length As Integer, match As String) As Object
-        Dim winStart = Math.Max(0, index - 40)
-        Dim winEnd = Math.Min(text.Length, index + length + 40)
+        Dim winStart = System.Math.Max(0, index - 40)
+        Dim winEnd = System.Math.Min(text.Length, index + length + 40)
         Dim ctx = text.Substring(winStart, winEnd - winStart).Replace(vbCr, " ").Replace(vbLf, " ")
         Return New With {Key .index = index, Key .length = length, Key .match = match, Key .context = ctx}
     End Function

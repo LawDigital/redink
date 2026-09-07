@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 6.9.2026
+' 7.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -75,7 +75,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.060926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.070926" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -317,39 +317,8 @@ Partial Public Class ThisAddIn
             activeChatId = 1
         End Try
 
-#If DEBUG Then
-        RunPythonExecuteRepairAdvisorSelfTestsAtStartup()
-#End If
 
     End Sub
-
-
-#If DEBUG Then
-    Private Shared _pythonExecuteRepairAdvisorSelfTestsRan As Boolean = False
-
-    ''' <summary>
-    ''' DEBUG-only: runs the PythonExecuteRepairAdvisor self-tests once per process on a background
-    ''' thread and writes the outcome to the Visual Studio Output window (Debug pane). No UI is shown;
-    ''' this never runs in Release builds.
-    ''' </summary>
-    Private Sub RunPythonExecuteRepairAdvisorSelfTestsAtStartup()
-        If _pythonExecuteRepairAdvisorSelfTestsRan Then Return
-        _pythonExecuteRepairAdvisorSelfTestsRan = True
-
-        Debug.WriteLine("[Startup] Queueing PythonExecuteRepairAdvisor self-tests...")
-
-        System.Threading.Tasks.Task.Run(
-            Sub()
-                Try
-                    Debug.WriteLine("[Startup] Running PythonExecuteRepairAdvisor self-tests...")
-                    Dim status = SharedLibrary.AgentsXX.PythonExecuteRepairAdvisorSelfTests.RunAllAndReturnStatus()
-                    Debug.WriteLine("[Startup] " & status)
-                Catch ex As System.Exception
-                    Debug.WriteLine("[Startup] PythonExecuteRepairAdvisor self-tests failed: " & ex.ToString())
-                End Try
-            End Sub)
-    End Sub
-#End If
 
     ''' <summary>
     ''' Handles creation of a new Explorer window. Attaches Activate, marks initialized, runs delayed startup, and cleans handlers.
