@@ -92,6 +92,12 @@ Partial Public Class ThisAddIn
         ''' <summary>Parent tooling context for an isolated sub-agent run.</summary>
         Public Property ParentToolingContext As ToolExecutionContext
 
+        ''' <summary>Word document pinned as the logical target when this tooling run starts.</summary>
+        Public Property PinnedWordDocumentName As String = ""
+        Public Property PinnedWordDocumentFullName As String = ""
+        Public Property PinnedWordSelectionStart As Integer = -1
+        Public Property PinnedWordSelectionEnd As Integer = -1
+
         ''' <summary>Requests cooperative cancellation through both the legacy flag and the live run token.</summary>
         Public Sub RequestCancellation()
             IsCancelled = True

@@ -827,7 +827,8 @@ Partial Public Class ThisAddIn
 
         Dim context As New ToolExecutionContext() With {
             .MaxIterations = INI_ToolingMaximumIterations,
-            .IsSubAgentRun = subAgentMode
+            .IsSubAgentRun = subAgentMode,
+            .ParentToolingContext = If(subAgentMode, parentToolingContext, Nothing)
         }
 
         If subAgentMode AndAlso

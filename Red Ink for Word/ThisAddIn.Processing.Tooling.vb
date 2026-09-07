@@ -256,7 +256,11 @@ Partial Public Class ThisAddIn
         Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus,
         Optional progressSink As Action(Of String) = Nothing,
         Optional subAgentExpectedArtifactsJson As String = Nothing,
-        Optional subAgentRequiredSuccessfulToolNames As IReadOnlyList(Of String) = Nothing) As Task(Of String)
+        Optional subAgentRequiredSuccessfulToolNames As IReadOnlyList(Of String) = Nothing,
+        Optional pinnedWordDocumentName As String = "",
+        Optional pinnedWordDocumentFullName As String = "",
+        Optional pinnedWordSelectionStart As Integer = -1,
+        Optional pinnedWordSelectionEnd As Integer = -1) As Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -319,8 +323,44 @@ Partial Public Class ThisAddIn
 
         Dim context As New ToolExecutionContext() With {
             .MaxIterations = INI_ToolingMaximumIterations,
-            .IsSubAgentRun = subAgentMode
+            .IsSubAgentRun = subAgentMode,
+            .ParentToolingContext = If(subAgentMode, parentToolingContext, Nothing)
         }
+
+        ' Pin the logical Word target at run start. User focus may move to another Word
+        ' window while the asynchronous tooling loop is running; that must not retarget
+        ' document-scoped tools. Nested agents inherit the same logical target.
+        If subAgentMode AndAlso parentToolingContext IsNot Nothing Then
+            context.PinnedWordDocumentName = parentToolingContext.PinnedWordDocumentName
+            context.PinnedWordDocumentFullName = parentToolingContext.PinnedWordDocumentFullName
+            context.PinnedWordSelectionStart = parentToolingContext.PinnedWordSelectionStart
+            context.PinnedWordSelectionEnd = parentToolingContext.PinnedWordSelectionEnd
+        Else
+            context.PinnedWordDocumentName = If(pinnedWordDocumentName, "").Trim()
+            context.PinnedWordDocumentFullName = If(pinnedWordDocumentFullName, "").Trim()
+            context.PinnedWordSelectionStart = pinnedWordSelectionStart
+            context.PinnedWordSelectionEnd = pinnedWordSelectionEnd
+
+            If context.PinnedWordDocumentName = "" AndAlso context.PinnedWordDocumentFullName = "" Then
+                Try
+                    Dim pinnedDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
+                    If pinnedDoc IsNot Nothing Then
+                        context.PinnedWordDocumentName = pinnedDoc.Name
+                        Try : context.PinnedWordDocumentFullName = pinnedDoc.FullName : Catch : context.PinnedWordDocumentFullName = "" : End Try
+
+                        Try
+                            Dim pinnedSelection As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
+                            If pinnedSelection IsNot Nothing Then
+                                context.PinnedWordSelectionStart = pinnedSelection.Start
+                                context.PinnedWordSelectionEnd = pinnedSelection.End
+                            End If
+                        Catch
+                        End Try
+                    End If
+                Catch
+                End Try
+            End If
+        End If
 
         If subAgentMode AndAlso
            (parentToolingContext Is Nothing OrElse
