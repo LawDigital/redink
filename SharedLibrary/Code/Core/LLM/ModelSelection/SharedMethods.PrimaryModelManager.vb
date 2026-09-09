@@ -147,11 +147,15 @@ Namespace SharedLibrary
 
                 _currentModelNumber = modelNumber
 
-                ' Persist selection to settings; ignore failures
+                ' Persist only an actual selection change. During startup the saved model
+                ' is restored on every launch; rewriting the identical LocalFileSettingsProvider
+                ' file can block Office for seconds on slow/redirected/AV-scanned profiles.
                 Try
-                    My.Settings.SelectedModelNumber = modelNumber
-                    My.Settings.Save()
-                Catch
+                    If My.Settings.SelectedModelNumber <> modelNumber Then
+                        My.Settings.SelectedModelNumber = modelNumber
+                        My.Settings.Save()
+                    End If
+                Catch ex As System.Exception
                 End Try
 
                 Return True

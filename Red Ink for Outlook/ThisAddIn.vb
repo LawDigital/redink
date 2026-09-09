@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 7.9.2026
+' 9.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -75,7 +75,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.070926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.090926" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -414,37 +414,58 @@ Partial Public Class ThisAddIn
         ' Run once even if scheduled twice (e.g., event + BeginInvoke)
         If System.Threading.Interlocked.CompareExchange(delayedStartupOnce, 1, 0) <> 0 Then Return
 
+        Dim startupTimings As New System.Collections.Generic.List(Of String)()
+        Dim totalStartupStopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+
         Try
-            InitializeConfig(True, True)
-            QueueModelAndAgentResourceWarmup()
+            MeasureOutlookStartupStep("InitializeConfig", Sub() InitializeConfig(True, True), startupTimings)
+            MeasureOutlookStartupStep("ModelAndAgentWarmup.schedule", Sub() QueueModelAndAgentResourceWarmup(), startupTimings)
 
             ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
             ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
-            Try
-                If My.Settings.CrashLog <> INI_Crashlog Then
-                    My.Settings.CrashLog = INI_Crashlog
-                    My.Settings.Save()
-                End If
-            Catch
-            End Try
+            MeasureOutlookStartupStep(
+                "CrashLogSetting.reconcile",
+                Sub()
+                    Try
+                        If My.Settings.CrashLog <> INI_Crashlog Then
+                            My.Settings.CrashLog = INI_Crashlog
+                            My.Settings.Save()
+                        End If
+                    Catch ex As System.Exception
+                    End Try
+                End Sub,
+                startupTimings)
 
-            UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context)
+            MeasureOutlookStartupStep(
+                "UpdateCheck.schedule",
+                Sub() UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context),
+                startupTimings)
 
             If _context IsNot Nothing AndAlso _context.INIloaded Then
-                SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "OL")
-                StartLicenseCounterTimer()
+                MeasureOutlookStartupStep(
+                    "LicenseCounter.schedule",
+                    Sub()
+                        SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "OL")
+                        StartLicenseCounterTimer()
+                    End Sub,
+                    startupTimings)
             End If
 
-            Dim result = Globals.Ribbons.Ribbon1.UpdateRibbon()
-            Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
-            result = Globals.Ribbons.Ribbon2.UpdateRibbon()
-            Globals.Ribbons.Ribbon2.ApplyRibbonVisibilityConfiguration()
-            mainThreadControl.CreateControl()
-            StartListenerWatchdog()
-            StartupHttpListener(INI_WebServerBlock)
+            MeasureOutlookStartupStep(
+                "Ribbon.initialize",
+                Sub()
+                    Dim result = Globals.Ribbons.Ribbon1.UpdateRibbon()
+                    Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+                    result = Globals.Ribbons.Ribbon2.UpdateRibbon()
+                    Globals.Ribbons.Ribbon2.ApplyRibbonVisibilityConfiguration()
+                End Sub,
+                startupTimings)
+            MeasureOutlookStartupStep("MainThreadControl.CreateControl", Sub() mainThreadControl.CreateControl(), startupTimings)
+            MeasureOutlookStartupStep("ListenerWatchdog.start", Sub() StartListenerWatchdog(), startupTimings)
+            MeasureOutlookStartupStep("StartupHttpListener.schedule", Sub() StartupHttpListener(INI_WebServerBlock), startupTimings)
 
             ' Initialize Knowledge Store background indexing service
-            InitializeKnowledgeStoreService()
+            MeasureOutlookStartupStep("KnowledgeStore.schedule", Sub() InitializeKnowledgeStoreService(), startupTimings)
 
             Try
                 If System.Threading.SynchronizationContext.Current Is Nothing Then
@@ -455,9 +476,22 @@ Partial Public Class ThisAddIn
                 Using anchor As New System.Windows.Forms.Control()
                     Dim h = anchor.Handle
                 End Using
-                SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2Profiles()
+                SharedLibrary.SharedLibrary.SharedMethods.CleanupReusableLegacyWebView2Folders()
                 SharedLibrary.Agents.WebView2JsSandbox.Initialize(
                     System.Threading.SynchronizationContext.Current)
+
+                Dim orphanedWebView2Profiles =
+                    SharedLibrary.SharedLibrary.SharedMethods.CaptureOrphanedWebView2ProfileCleanupCandidates()
+                System.Threading.Tasks.Task.Run(
+                    Sub()
+                        Try
+                            SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2ProfileCandidates(
+                                orphanedWebView2Profiles)
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine(
+                                "[PERF] Outlook background WebView2 profile cleanup failed: " & ex.Message)
+                        End Try
+                    End Sub)
             Catch
                 ' js_run will report "sandbox_uninitialized" if this failed.
             End Try
@@ -468,7 +502,15 @@ Partial Public Class ThisAddIn
             PrimePythonAgentVersionCache()
 
         Catch ex As System.Exception
-            ' Handling errors gracefully
+            startupTimings.Add("DelayedStartupTasks.ERROR=" & ex.GetType().FullName & ": " & ex.Message)
+        Finally
+            totalStartupStopwatch.Stop()
+            startupTimings.Add(
+                "DelayedStartupTasks.total=" &
+                totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; uiThread=" &
+                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString())
+            QueueOutlookStartupTimingSnapshot(startupTimings)
         End Try
 
         ' AutoPilot auto-start: attempt after all other startup tasks have completed
@@ -484,6 +526,57 @@ Partial Public Class ThisAddIn
     ''' Fire-and-forget warm-up of the Python Agent version cache. Runs off the UI thread and never
     ''' throws; on failure the on-demand tool-registration path re-probes.
     ''' </summary>
+    Private Sub MeasureOutlookStartupStep(
+            label As String,
+            action As System.Action,
+            timings As System.Collections.Generic.List(Of String))
+
+        Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        Try
+            action.Invoke()
+        Finally
+            stopwatch.Stop()
+            Dim entry As String =
+                label & "=" &
+                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; uiThread=" &
+                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString()
+
+            System.Diagnostics.Debug.WriteLine("[PERF] Outlook startup " & entry)
+            If timings IsNot Nothing Then timings.Add(entry)
+        End Try
+    End Sub
+
+    Private Sub QueueOutlookStartupTimingSnapshot(timings As System.Collections.Generic.List(Of String))
+        If timings Is Nothing OrElse timings.Count = 0 Then Return
+
+        Dim snapshot As String() = timings.ToArray()
+        Dim versionSnapshot As String = Version
+        Dim uiThreadIdSnapshot As Integer = UiThreadId
+
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Dim basePath As String =
+                        System.IO.Path.Combine(
+                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                            "redink")
+                    System.IO.Directory.CreateDirectory(basePath)
+
+                    Dim outputPath As String = System.IO.Path.Combine(basePath, "RI_Outlook_Startup_Perf.txt")
+                    Dim lines As New System.Collections.Generic.List(Of String)()
+                    lines.Add("Red Ink Outlook Startup Performance")
+                    lines.Add("Created=" & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                    lines.Add("Version=" & If(versionSnapshot, ""))
+                    lines.Add("UIThreadId=" & uiThreadIdSnapshot.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    lines.AddRange(snapshot)
+                    System.IO.File.WriteAllLines(outputPath, lines, System.Text.Encoding.UTF8)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[PERF] Outlook startup timing snapshot failed: " & ex.Message)
+                End Try
+            End Sub)
+    End Sub
+
     Private Sub PrimePythonAgentVersionCache()
         System.Threading.Tasks.Task.Run(
             Sub()
