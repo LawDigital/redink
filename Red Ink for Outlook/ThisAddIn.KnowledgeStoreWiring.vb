@@ -33,6 +33,8 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     Private _ksTimer As System.Windows.Forms.Timer
+    Private _ksInitializationState As Integer = 0 ' 0=not started, 1=running, 2=initialized
+    Private _ksShutdownRequested As Integer = 0
     Private Const KS_IDLE_INTERVAL_MS As Integer = 60000
 
     Public Sub InitializeKnowledgeStoreService()
@@ -40,19 +42,56 @@ Partial Public Class ThisAddIn
             KnowledgeStoreHostGate.RegisterHostIdleProvider("Outlook", Function() IsOutlookIdle())
 
             If Not KnowledgeStoreCatalog.IsConfigured(_context) Then Return
+            If System.Threading.Interlocked.CompareExchange(_ksInitializationState, 1, 0) <> 0 Then Return
 
-            KnowledgeStoreIdleService.Initialize(_context)
+            System.Threading.Interlocked.Exchange(_ksShutdownRequested, 0)
+            Dim capturedContext = _context
 
-            _ksTimer = New System.Windows.Forms.Timer()
-            _ksTimer.Interval = KS_IDLE_INTERVAL_MS
-            AddHandler _ksTimer.Tick, AddressOf KsTimer_Tick
-            _ksTimer.Start()
-        Catch ex As Exception
-            Debug.WriteLine($"KS Wiring: Init error: {ex.Message}")
+            ' KnowledgeStoreIdleService.Initialize can synchronously enumerate configured stores.
+            ' It has no Outlook COM/WinForms dependency, so keep that I/O off Outlook's UI thread.
+            System.Threading.Tasks.Task.Run(
+                Sub()
+                    Try
+                        KnowledgeStoreIdleService.Initialize(capturedContext)
+                        System.Threading.Interlocked.Exchange(_ksInitializationState, 2)
+
+                        If System.Threading.Volatile.Read(_ksShutdownRequested) <> 0 Then
+                            KnowledgeStoreIdleService.Shutdown()
+                            Return
+                        End If
+
+                        Dim uiControl = mainThreadControl
+                        If uiControl Is Nothing OrElse uiControl.IsDisposed Then Return
+
+                        uiControl.BeginInvoke(
+                            New System.Windows.Forms.MethodInvoker(
+                                Sub()
+                                    If System.Threading.Volatile.Read(_ksShutdownRequested) <> 0 Then Return
+                                    EnsureKnowledgeStoreTimerStarted()
+                                End Sub))
+                    Catch ex As System.Exception
+                        System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
+                        Debug.WriteLine($"KS Wiring: Background init error: {ex.Message}")
+                    End Try
+                End Sub)
+        Catch ex As System.Exception
+            System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
+            Debug.WriteLine($"KS Wiring: Init scheduling error: {ex.Message}")
         End Try
     End Sub
 
+    Private Sub EnsureKnowledgeStoreTimerStarted()
+        If System.Threading.Volatile.Read(_ksShutdownRequested) <> 0 OrElse _ksTimer IsNot Nothing Then Return
+
+        _ksTimer = New System.Windows.Forms.Timer()
+        _ksTimer.Interval = KS_IDLE_INTERVAL_MS
+        AddHandler _ksTimer.Tick, AddressOf KsTimer_Tick
+        _ksTimer.Start()
+    End Sub
+
     Public Sub ShutdownKnowledgeStoreService()
+        System.Threading.Interlocked.Exchange(_ksShutdownRequested, 1)
+
         Try
             If _ksTimer IsNot Nothing Then
                 _ksTimer.Stop()
@@ -62,6 +101,7 @@ Partial Public Class ThisAddIn
             End If
 
             KnowledgeStoreIdleService.Shutdown()
+            System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
         Catch
         Finally
             KnowledgeStoreHostGate.ClearHostIdleProvider()

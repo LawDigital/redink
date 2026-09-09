@@ -808,11 +808,28 @@ Partial Public Class ThisAddIn
                 effectiveRange = rng
             End If
 
-            ' Collect comments fully within effectiveRange
+            ' Collect comments and the metadata needed for the filter dialog. Reading many Word
+            ' comment COM properties can trigger repeated document repainting, so suppress
+            ' ScreenUpdating only for this non-interactive phase. Always restore the exact previous
+            ' state before any user prompt.
             Dim allInRange As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) =
-            New System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment)()
+                New System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment)()
+            Dim authors As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim dateSet As New System.Collections.Generic.HashSet(Of System.DateTime)()
+            Dim collectPreviousScreenUpdating As System.Boolean = True
+            Dim collectScreenUpdatingChanged As System.Boolean = False
 
             Try
+                Try
+                    collectPreviousScreenUpdating = app.ScreenUpdating
+                    If collectPreviousScreenUpdating Then
+                        app.ScreenUpdating = False
+                        collectScreenUpdatingChanged = True
+                    End If
+                Catch
+                    collectScreenUpdatingChanged = False
+                End Try
+
                 For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
                     Dim cStart As System.Int32
                     Dim cEnd As System.Int32
@@ -831,32 +848,42 @@ Partial Public Class ThisAddIn
                         allInRange.Add(c)
                     End If
                 Next
+
+                For Each c As Microsoft.Office.Interop.Word.Comment In allInRange
+                    Try
+                        Dim a As System.String = If(c.Author, System.String.Empty)
+                        If Not System.String.IsNullOrWhiteSpace(a) Then authors.Add(a)
+                    Catch
+                    End Try
+                    Try
+                        Dim d As System.DateTime = c.Date.Date
+                        If d <> System.DateTime.MinValue Then dateSet.Add(d)
+                    Catch
+                    End Try
+                Next
             Catch ex As System.Exception
+                If collectScreenUpdatingChanged Then
+                    Try
+                        app.ScreenUpdating = collectPreviousScreenUpdating
+                    Catch
+                    End Try
+                    collectScreenUpdatingChanged = False
+                End If
                 If Not Silent Then ShowCustomMessageBox("Failed to collect comments from the document.")
                 Return ""
+            Finally
+                If collectScreenUpdatingChanged Then
+                    Try
+                        app.ScreenUpdating = collectPreviousScreenUpdating
+                    Catch
+                    End Try
+                End If
             End Try
 
             If allInRange.Count = 0 Then
                 'If Not Silent Then ShowCustomMessageBox("No comments found in the selected range (or document).")
                 Return ""
             End If
-
-            ' Build author and date sets (date grouped by day)
-            Dim authors As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
-            Dim dateSet As New System.Collections.Generic.HashSet(Of System.DateTime)()
-
-            For Each c In allInRange
-                Try
-                    Dim a As System.String = If(c.Author, System.String.Empty)
-                    If Not System.String.IsNullOrWhiteSpace(a) Then authors.Add(a)
-                Catch
-                End Try
-                Try
-                    Dim d As System.DateTime = c.Date.Date
-                    If d <> System.DateTime.MinValue Then dateSet.Add(d)
-                Catch
-                End Try
-            Next
 
             ' Only prompt when not silent
             Dim needPrompt As System.Boolean = (Not Silent AndAlso (authors.Count > 1 OrElse dateSet.Count > 1))
@@ -975,10 +1002,23 @@ Partial Public Class ThisAddIn
             End If
 
             Dim finalList As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment)
+            Dim exportPreviousScreenUpdating As System.Boolean = True
+            Dim exportScreenUpdatingChanged As System.Boolean = False
 
-            If SortByDate Then
+            Try
+                Try
+                    exportPreviousScreenUpdating = app.ScreenUpdating
+                    If exportPreviousScreenUpdating Then
+                        app.ScreenUpdating = False
+                        exportScreenUpdatingChanged = True
+                    End If
+                Catch
+                    exportScreenUpdatingChanged = False
+                End Try
 
-                finalList =
+                If SortByDate Then
+
+                    finalList =
             filtered.OrderBy(Function(c)
                                  Dim d As System.DateTime = System.DateTime.MinValue
                                  Try : d = c.Date : Catch : End Try
@@ -1000,10 +1040,17 @@ Partial Public Class ThisAddIn
             End If
 
 
-            If finalList.Count = 0 Then
-                If Not Silent Then ShowCustomMessageBox("No comments matched the selected filters.")
-                Return ""
-            End If
+                If finalList.Count = 0 Then
+                    If exportScreenUpdatingChanged Then
+                        Try
+                            app.ScreenUpdating = exportPreviousScreenUpdating
+                        Catch
+                        End Try
+                        exportScreenUpdatingChanged = False
+                    End If
+                    If Not Silent Then ShowCustomMessageBox("No comments matched the selected filters.")
+                    Return ""
+                End If
 
             ' Build XML
             Dim sb As New System.Text.StringBuilder()
@@ -1047,8 +1094,16 @@ Partial Public Class ThisAddIn
                 sb.AppendLine("  </Comment>")
             Next
 
-            sb.AppendLine("</WORDBUBBLES>")
-            Return sb.ToString()
+                sb.AppendLine("</WORDBUBBLES>")
+                Return sb.ToString()
+            Finally
+                If exportScreenUpdatingChanged Then
+                    Try
+                        app.ScreenUpdating = exportPreviousScreenUpdating
+                    Catch
+                    End Try
+                End If
+            End Try
 
         Catch ex As System.Exception
             If Not Silent Then ShowCustomMessageBox($"Unexpected error: {ex.Message}")

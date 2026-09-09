@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 7.9.2026
+' 9.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -69,7 +69,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.070926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.090926" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -221,14 +221,39 @@ Partial Public Class ThisAddIn
                 Dim h = anchor.Handle
             End Using
 
-            SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2Profiles()
+            SharedLibrary.SharedLibrary.SharedMethods.CleanupReusableLegacyWebView2Folders()
             SharedLibrary.Agents.WebView2JsSandbox.Initialize(
                 System.Threading.SynchronizationContext.Current)
+
+            Dim orphanedWebView2Profiles =
+                SharedLibrary.SharedLibrary.SharedMethods.CaptureOrphanedWebView2ProfileCleanupCandidates()
+            System.Threading.Tasks.Task.Run(
+                Sub()
+                    Try
+                        SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2ProfileCandidates(
+                            orphanedWebView2Profiles)
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine(
+                            "[PERF] Excel background WebView2 profile cleanup failed: " & ex.Message)
+                    End Try
+                End Sub)
         Catch
             ' URL import will report "sandbox_uninitialized" if this failed.
         End Try
 
-        InitializeAddInFeatures()
+        Dim startupTimings As New System.Collections.Generic.List(Of String)()
+        Dim totalStartupStopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        Try
+            InitializeAddInFeatures(startupTimings)
+        Finally
+            totalStartupStopwatch.Stop()
+            startupTimings.Add(
+                "ThisAddIn_Startup.total=" &
+                totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; uiThread=" &
+                (System.Threading.SynchronizationContext.Current Is _uiContext).ToString())
+            QueueExcelStartupTimingSnapshot(startupTimings)
+        End Try
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
@@ -239,52 +264,120 @@ Partial Public Class ThisAddIn
         RemoveOldContextMenu()
     End Sub
 
-    Public Sub InitializeAddInFeatures()
-        InitializeConfig(True, True)
+    Public Sub InitializeAddInFeatures(Optional startupTimings As System.Collections.Generic.List(Of String) = Nothing)
+        MeasureExcelStartupStep("InitializeConfig", Sub() InitializeConfig(True, True), startupTimings)
 
         ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
         ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
-        Try
-            If My.Settings.CrashLog <> INI_Crashlog Then
-                My.Settings.CrashLog = INI_Crashlog
-                My.Settings.Save()
-            End If
-        Catch
-        End Try
+        MeasureExcelStartupStep(
+            "CrashLogSetting.reconcile",
+            Sub()
+                Try
+                    If My.Settings.CrashLog <> INI_Crashlog Then
+                        My.Settings.CrashLog = INI_Crashlog
+                        My.Settings.Save()
+                    End If
+                Catch ex As System.Exception
+                End Try
+            End Sub,
+            startupTimings)
 
         ' Restore the previously selected primary model (if multi-model is configured)
-        If _context.INIloaded Then
-            Try
-                Dim saved = PrimaryModelManager.LoadSavedModelNumber()
-                If PrimaryModelManager.GetAvailableModels().Count > 0 Then
-                    ' Try saved selection first; fall back to model 1 if it no longer exists
-                    If Not PrimaryModelManager.SelectModel(_context, saved) Then
-                        PrimaryModelManager.SelectModel(_context, PrimaryModelManager.GetAvailableModels()(0))
-                    End If
+        MeasureExcelStartupStep(
+            "PrimaryModel.restore",
+            Sub()
+                If _context.INIloaded Then
+                    Try
+                        Dim saved = PrimaryModelManager.LoadSavedModelNumber()
+                        If PrimaryModelManager.GetAvailableModels().Count > 0 Then
+                            ' Try saved selection first; fall back to model 1 if it no longer exists
+                            If Not PrimaryModelManager.SelectModel(_context, saved) Then
+                                PrimaryModelManager.SelectModel(_context, PrimaryModelManager.GetAvailableModels()(0))
+                            End If
+                        End If
+                    Catch ex As System.Exception
+                        ' non-critical
+                    End Try
                 End If
-            Catch
-                ' non-critical
-            End Try
-        End If
+            End Sub,
+            startupTimings)
 
-        AddContextMenu()
+        MeasureExcelStartupStep("ContextMenu", Sub() AddContextMenu(), startupTimings)
 
         If _context IsNot Nothing AndAlso _context.INIloaded Then
-            SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "EX")
+            MeasureExcelStartupStep(
+                "LicenseCounter",
+                Sub() SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "EX"),
+                startupTimings)
         End If
 
-        UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
+        MeasureExcelStartupStep(
+            "UpdateCheck.schedule",
+            Sub() UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context),
+            startupTimings)
 
         ' Initialize model menu buttons on the ribbon
-        Try
-            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
-                Globals.Ribbons.Ribbon1.UpdateModelsMenu()
-                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
-            End If
-        Catch
-            ' non-critical
-        End Try
+        MeasureExcelStartupStep(
+            "Ribbon.initialize",
+            Sub()
+                Try
+                    If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                        Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+                        Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+                    End If
+                Catch ex As System.Exception
+                    ' non-critical
+                End Try
+            End Sub,
+            startupTimings)
 
+    End Sub
+
+    Private Sub MeasureExcelStartupStep(
+            label As String,
+            action As System.Action,
+            timings As System.Collections.Generic.List(Of String))
+
+        Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        Try
+            action.Invoke()
+        Finally
+            stopwatch.Stop()
+            Dim entry As String =
+                label & "=" &
+                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; uiThread=" &
+                (System.Threading.SynchronizationContext.Current Is _uiContext).ToString()
+            System.Diagnostics.Debug.WriteLine("[PERF] Excel startup " & entry)
+            If timings IsNot Nothing Then timings.Add(entry)
+        End Try
+    End Sub
+
+    Private Sub QueueExcelStartupTimingSnapshot(timings As System.Collections.Generic.List(Of String))
+        If timings Is Nothing OrElse timings.Count = 0 Then Return
+
+        Dim snapshot As String() = timings.ToArray()
+        Dim versionSnapshot As String = Version
+
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Dim basePath As String =
+                        System.IO.Path.Combine(
+                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                            "redink")
+                    System.IO.Directory.CreateDirectory(basePath)
+                    Dim outputPath As String = System.IO.Path.Combine(basePath, "RI_Excel_Startup_Perf.txt")
+                    Dim lines As New System.Collections.Generic.List(Of String)()
+                    lines.Add("Red Ink Excel Startup Performance")
+                    lines.Add("Created=" & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                    lines.Add("Version=" & If(versionSnapshot, ""))
+                    lines.AddRange(snapshot)
+                    System.IO.File.WriteAllLines(outputPath, lines, System.Text.Encoding.UTF8)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[PERF] Excel startup timing snapshot failed: " & ex.Message)
+                End Try
+            End Sub)
     End Sub
 
     ' Bridge to SharedLibrary

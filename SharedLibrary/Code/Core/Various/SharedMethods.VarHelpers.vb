@@ -1705,6 +1705,85 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Removes the two reusable fixed-name WebView2 legacy folders before current-session
+        ''' features can claim them. Keep this synchronous and call it before WebView2 startup;
+        ''' unlike unique profile folders these paths must never be deleted by a background pass.
+        ''' </summary>
+        Public Shared Sub CleanupReusableLegacyWebView2Folders()
+            Try
+                Dim tempRoot As String = System.IO.Path.GetTempPath()
+                Dim reusableLegacyNames() As String = {"RedInk_JsSandbox", "RedInk_DrawioHost"}
+                For Each folderName As String In reusableLegacyNames
+                    Dim dir As String = System.IO.Path.Combine(tempRoot, folderName)
+                    Try
+                        If System.IO.Directory.Exists(dir) Then
+                            System.IO.Directory.Delete(dir, True)
+                        End If
+                    Catch
+                        ' Locked or in use; leave it for a later pass.
+                    End Try
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"[WebView2] Reusable legacy cleanup failed: {ex.Message}")
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Captures the exact unique WebView2 profile directories that already exist at the
+        ''' moment startup cleanup is scheduled. Later-created session profiles are therefore
+        ''' never eligible for that asynchronous cleanup pass. Reusable fixed legacy folders
+        ''' (for example the Draw.io host directory) are deliberately excluded because they can
+        ''' be claimed by a feature later in the same Office session.
+        ''' </summary>
+        Public Shared Function CaptureOrphanedWebView2ProfileCleanupCandidates() As System.Collections.Generic.List(Of String)
+            Dim candidates As New System.Collections.Generic.List(Of String)()
+
+            Try
+                Dim transientRoot As String = System.IO.Path.Combine(GetRedInkLocalRoot(), "WebView2", "transient")
+                If System.IO.Directory.Exists(transientRoot) Then
+                    candidates.AddRange(System.IO.Directory.GetDirectories(transientRoot))
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"[WebView2] Transient cleanup snapshot failed: {ex.Message}")
+            End Try
+
+            Try
+                Dim tempRoot As String = System.IO.Path.GetTempPath()
+                Dim uniqueLegacyPatterns() As String = {"RedInkWebView2_*", "RedInk_WebView2_*"}
+                For Each pattern As String In uniqueLegacyPatterns
+                    candidates.AddRange(System.IO.Directory.GetDirectories(tempRoot, pattern))
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"[WebView2] Legacy cleanup snapshot failed: {ex.Message}")
+            End Try
+
+            Return candidates
+        End Function
+
+        ''' <summary>
+        ''' Deletes only the exact WebView2 profile directories captured by
+        ''' <see cref="CaptureOrphanedWebView2ProfileCleanupCandidates"/>. The method performs no
+        ''' directory discovery of its own, so a background pass cannot accidentally include a
+        ''' profile created after startup cleanup was scheduled.
+        ''' </summary>
+        Public Shared Sub CleanupOrphanedWebView2ProfileCandidates(
+                candidates As System.Collections.Generic.IEnumerable(Of String))
+
+            If candidates Is Nothing Then Return
+
+            For Each dir As String In candidates
+                If System.String.IsNullOrWhiteSpace(dir) Then Continue For
+                Try
+                    If System.IO.Directory.Exists(dir) Then
+                        System.IO.Directory.Delete(dir, True)
+                    End If
+                Catch
+                    ' Locked or in use; leave it for a later pass.
+                End Try
+            Next
+        End Sub
+
+        ''' <summary>
         ''' Deletes orphaned per-call WebView2 profile folders (from short-lived instances) as
         ''' well as legacy WebView2 folders left in TEMP by earlier versions. Folders still
         ''' locked by a running process are skipped. Safe to call at startup and shutdown.

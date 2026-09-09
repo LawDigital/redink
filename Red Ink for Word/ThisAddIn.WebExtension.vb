@@ -98,7 +98,13 @@ Partial Public Class ThisAddIn
     '───────────────────────────────────────────────────────────────────────────
     Private Sub StartupHttpListener(WebServerBlock As Integer)
         If WebServerBlock = 1 OrElse WebServerBlock = 3 Then Return
-        listenerTask = StartHttpListener()
+
+        ' StartHttpListener() performs HttpListener.Start() before its first Await. That work is
+        ' entirely UI/COM independent and can occasionally stall while Windows configures the
+        ' listener. Start the complete listener lifecycle on a worker so Word's STA/UI thread is
+        ' never part of socket/listener startup. Task.Run(Func(Of Task)) is automatically unwrapped.
+        listenerTask = System.Threading.Tasks.Task.Run(
+            Function() StartHttpListener())
     End Sub
 
     '───────────────────────────────────────────────────────────────────────────
