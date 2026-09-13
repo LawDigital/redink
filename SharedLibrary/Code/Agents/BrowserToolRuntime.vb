@@ -511,6 +511,7 @@ Namespace Agents
         Public Shared Sub Shutdown()
             Gate.Wait()
             Try
+                PersistCurrentStorageStateBestEffortAsync(LoadedAuthProfileKey).ConfigureAwait(False).GetAwaiter().GetResult()
                 DisposeRuntimeAsync().ConfigureAwait(False).GetAwaiter().GetResult()
             Catch ex As System.Exception
                 System.Diagnostics.Trace.WriteLine(ex.ToString())
@@ -659,7 +660,7 @@ Namespace Agents
                     options,
                     cancellationToken,
                     storageState,
-                    If(storageState Is Nothing, System.String.Empty, authProfileKey),
+                    If(authenticationMode = "none", System.String.Empty, authProfileKey),
                     runtimePreference).ConfigureAwait(False)
 
                 If CurrentPage Is Nothing OrElse CurrentPage.IsClosed Then
@@ -680,6 +681,10 @@ Namespace Agents
                 SelectNewestOpenPage()
                 Dim consentDismissedAfterOpen As System.Boolean =
                     Await TryDismissCommonCookieConsentAsync(CurrentPage, cancellationToken).ConfigureAwait(False)
+
+                If authenticationMode <> "none" Then
+                    Await PersistCurrentStorageStateBestEffortAsync(authProfileKey).ConfigureAwait(False)
+                End If
 
                 Dim title As System.String = Await CurrentPage.TitleAsync().ConfigureAwait(False)
                 Return New Newtonsoft.Json.Linq.JObject(
@@ -931,6 +936,8 @@ Namespace Agents
                 If Not retainSnapshot Then
                     InvalidateSnapshot()
                 End If
+
+                Await PersistCurrentStorageStateBestEffortAsync(LoadedAuthProfileKey).ConfigureAwait(False)
 
                 Global.SharedLibrary.SharedLibrary.UpdateHandler.WriteUpdateLog(
                     "[BrowserRuntime] interaction completed; action=" & action &
@@ -1303,6 +1310,7 @@ Namespace Agents
             Browser = Nothing
             CurrentPage = Nothing
             PlaywrightInstance = Nothing
+            LoadedAuthProfileKey = System.String.Empty
             InvalidateSnapshot()
 
             If contextToClose IsNot Nothing Then
@@ -2057,13 +2065,36 @@ Namespace Agents
             Throw New System.InvalidOperationException(BuildBrowserLaunchFailureMessage(channelFailure, Nothing), channelFailure)
         End Function
 
+        Private Shared Async Function PersistCurrentStorageStateBestEffortAsync(
+            authProfileKey As System.String
+        ) As System.Threading.Tasks.Task
+            If System.String.IsNullOrWhiteSpace(authProfileKey) OrElse BrowserContext Is Nothing Then
+                Return
+            End If
+
+            Try
+                Dim storageState As System.String = Await BrowserContext.StorageStateAsync(
+                    New Microsoft.Playwright.BrowserContextStorageStateOptions() With {
+                        .IndexedDB = True
+                    }).ConfigureAwait(False)
+
+                If Not System.String.IsNullOrWhiteSpace(storageState) Then
+                    SaveProtectedStorageState(authProfileKey, storageState)
+                End If
+            Catch ex As System.Exception
+                ' Session persistence is best effort. A storage-state write failure must never
+                ' turn an otherwise successful browser operation into a tool failure.
+                System.Diagnostics.Trace.WriteLine("Browser session state could not be persisted: " & ex.Message)
+            End Try
+        End Function
+
         Private Shared Function GetAuthStateDirectory() As System.String
-            ' Keep browser authentication state beside the existing M365 MSAL cache,
-            ' but in separate browser-specific files. This intentionally mirrors the
-            ' shared RedInk roaming cache location without coupling BrowserTools to M365.
+            ' Keep all protected browser session-state files directly in the shared
+            ' Red Ink roaming application-data directory. Individual origins/profiles
+            ' remain separated by the hashed file name, not by subdirectories.
             Return System.IO.Path.Combine(
                 System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
-                "RedInk")
+                "Red Ink")
         End Function
 
         Private Shared Function GetAuthStatePath(authProfileKey As System.String) As System.String

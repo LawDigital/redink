@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 9.9.2026
+' 13.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -69,7 +69,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.090926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.130926" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -331,6 +331,43 @@ Partial Public Class ThisAddIn
             End Sub,
             startupTimings)
 
+        ' Pre-warm the model INI parse and decrypted-API-key caches off the UI thread so the
+        ' first model-list build (e.g. opening the local chat) is not blocked by decryption.
+        MeasureExcelStartupStep("ModelWarmup.schedule", Sub() QueueModelDecryptWarmup(), startupTimings)
+
+    End Sub
+
+    ''' <summary>
+    ''' Primes context-independent model/tool INI parsing and the decrypted-API-key cache off the
+    ''' Excel UI thread. The on-demand paths remain authoritative and retry on failure. No Office
+    ''' COM or WinForms objects are touched by the background task.
+    ''' </summary>
+    Private Sub QueueModelDecryptWarmup()
+        Try
+            Dim alternateModelPath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AlternateModelPath, ""))
+            Dim specialServicePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_SpecialServicePath, ""))
+
+            System.Threading.Tasks.Task.Run(
+                Sub()
+                    Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    Try
+                        SharedMethods.WarmAlternativeModelsCache(alternateModelPath)
+                        SharedMethods.WarmAlternativeModelsCache(specialServicePath)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(alternateModelPath, _context)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(specialServicePath, _context)
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("[PERF] Excel startup warm-up failed: " & ex.Message)
+                    Finally
+                        stopwatch.Stop()
+                        System.Diagnostics.Debug.WriteLine(
+                            "[PERF] Excel model warm-up: " &
+                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " ms")
+                    End Try
+                End Sub)
+        Catch ex As System.Exception
+            ' Non-fatal. Each on-demand path performs the same work if the cache is cold.
+        End Try
     End Sub
 
     Private Sub MeasureExcelStartupStep(

@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 9.9.2026
+' 13.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -75,7 +75,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.090926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.130926" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -223,6 +223,15 @@ Partial Public Class ThisAddIn
     Private startupFallbackTimer As System.Windows.Forms.Timer
 
     ''' <summary>
+    ''' Pump-independent fallback that guarantees deferred startup (and the CrashLog
+    ''' reconcile inside it) runs even when no Explorer activates and the WinForms
+    ''' message pump is idle (e.g. background/COM/headless starts). Fires on a thread-pool
+    ''' thread and marshals DelayedStartupTasks back onto the captured UI context, so it
+    ''' adds no synchronous cost to ThisAddIn_Startup.
+    ''' </summary>
+    Private startupReconcileFallbackTimer As System.Threading.Timer
+
+    ''' <summary>
     ''' Periodic offline license-counter timer for long-running Outlook sessions.
     ''' </summary>
     Private licenseCounterTimer As System.Threading.Timer
@@ -311,6 +320,10 @@ Partial Public Class ThisAddIn
             StartStartupFallbackTimer()
         End If
 
+        ' Additional pump-independent fallback: ensures deferred startup (and the CrashLog
+        ' reconcile) still runs when no Explorer activates and the WinForms timer never ticks.
+        StartStartupReconcileFallback()
+
         Try
             activeChatId = If(My.Settings.Inky_LastChat = 2, 2, 1)
         Catch
@@ -382,6 +395,43 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Arms a thread-pool timer that runs DelayedStartupTasks even if the WinForms
+    ''' fallback never ticks (idle UI message pump). The timer callback fires off the UI
+    ''' thread and marshals the work onto the captured UI context for COM safety. Deferred,
+    ''' so it does not delay startup.
+    ''' </summary>
+    ''' <param name="ms">Delay before the fallback fires, in milliseconds. Default is 5000.</param>
+    Private Sub StartStartupReconcileFallback(Optional ms As Integer = 5000)
+        If startupReconcileFallbackTimer IsNot Nothing Then Return
+        Try
+            startupReconcileFallbackTimer = New System.Threading.Timer(
+                Sub()
+                    Try
+                        Dim ctx As System.Threading.SynchronizationContext = _uiContext
+                        If ctx Is Nothing Then Return
+                        ctx.Post(
+                            Sub()
+                                Try
+                                    If Not StartupInitialized Then
+                                        StartupInitialized = True
+                                        DelayedStartupTasks()
+                                        CleanupStartupHandlers()
+                                    End If
+                                Catch
+                                End Try
+                            End Sub,
+                            Nothing)
+                    Catch
+                    End Try
+                End Sub,
+                Nothing,
+                ms,
+                System.Threading.Timeout.Infinite)
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Removes activation and NewExplorer handlers and disposes the fallback timer.
     ''' </summary>
     Private Sub CleanupStartupHandlers()
@@ -402,6 +452,13 @@ Partial Public Class ThisAddIn
                 startupFallbackTimer.Stop()
                 startupFallbackTimer.Dispose()
                 startupFallbackTimer = Nothing
+            End If
+        Catch
+        End Try
+        Try
+            If startupReconcileFallbackTimer IsNot Nothing Then
+                startupReconcileFallbackTimer.Dispose()
+                startupReconcileFallbackTimer = Nothing
             End If
         Catch
         End Try
@@ -911,6 +968,8 @@ Partial Public Class ThisAddIn
                     Try
                         SharedMethods.WarmAlternativeModelsCache(alternateModelPath)
                         SharedMethods.WarmAlternativeModelsCache(specialServicePath)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(alternateModelPath, _context)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(specialServicePath, _context)
                         SharedLibrary.Agents.AgentResources.EnsureFresh()
                     Catch ex As System.Exception
                         System.Diagnostics.Debug.WriteLine("[PERF] Outlook startup warm-up failed: " & ex.Message)

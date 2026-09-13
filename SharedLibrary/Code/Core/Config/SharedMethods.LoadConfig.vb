@@ -273,7 +273,7 @@ Namespace SharedLibrary
                 context.INI_InkyMemoryCap = If(configDict.ContainsKey("InkyMemoryCap"), CInt(configDict("InkyMemoryCap")), DEFAULT_INKY_MEMORY_CAP)
                 context.INI_SimpleMenuHide = If(configDict.ContainsKey("SimpleMenuHide"), configDict("SimpleMenuHide"), DEFAULT_SIMPLEMENUHIDE)
                 context.INI_MenuBlock = If(configDict.ContainsKey("MenuBlock"), configDict("MenuBlock"), "")
-                context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), 0)
+                context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), DEFAULT_WEB_SERVER_BLOCK)
 
                 ' Restore shared user settings from the registry backup if My.Settings was lost.
                 TryRestoreSharedUserSettingsFromRegistry()
@@ -342,10 +342,10 @@ Namespace SharedLibrary
                 context.INI_ToolingLogWindow = ParseBoolean(configDict, "ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW)
                 context.INI_ToolingDryRun = ParseBoolean(configDict, "ToolingDryRun")
                 context.INI_ToolingMaximumIterations = If(configDict.ContainsKey("ToolingMaximumIterations"), CInt(configDict("ToolingMaximumIterations")), DEFAULT_TOOLING_MAXIMUMITERATIONS)
-                context.INI_ToolResponsePayloadBudgetChars = If(configDict.ContainsKey("ToolResponsePayloadBudgetChars"), CInt(configDict("ToolResponsePayloadBudgetChars")), Agents.ToolingConstants.ToolResponsePayloadBudgetChars)
-                context.INI_BudgetMediumCompactionThresholdChars = If(configDict.ContainsKey("BudgetMediumCompactionThresholdChars"), CInt(configDict("BudgetMediumCompactionThresholdChars")), Agents.ToolingConstants.BudgetMediumCompactionThresholdChars)
-                context.INI_BudgetAggressiveCompactionThresholdChars = If(configDict.ContainsKey("BudgetAggressiveCompactionThresholdChars"), CInt(configDict("BudgetAggressiveCompactionThresholdChars")), Agents.ToolingConstants.BudgetAggressiveCompactionThresholdChars)
-                context.INI_BudgetCompactionPreviewChars = If(configDict.ContainsKey("BudgetCompactionPreviewChars"), CInt(configDict("BudgetCompactionPreviewChars")), Agents.ToolingConstants.BudgetCompactionPreviewChars)
+                context.INI_ToolResponsePayloadBudgetChars = If(configDict.ContainsKey("ToolResponsePayloadBudgetChars"), CInt(configDict("ToolResponsePayloadBudgetChars")), DEFAULT_TOOL_RESPONSE_PAYLOAD_BUDGET_CHARS)
+                context.INI_BudgetMediumCompactionThresholdChars = If(configDict.ContainsKey("BudgetMediumCompactionThresholdChars"), CInt(configDict("BudgetMediumCompactionThresholdChars")), DEFAULT_BUDGET_MEDIUM_COMPACTION_THRESHOLD_CHARS)
+                context.INI_BudgetAggressiveCompactionThresholdChars = If(configDict.ContainsKey("BudgetAggressiveCompactionThresholdChars"), CInt(configDict("BudgetAggressiveCompactionThresholdChars")), DEFAULT_BUDGET_AGGRESSIVE_COMPACTION_THRESHOLD_CHARS)
+                context.INI_BudgetCompactionPreviewChars = If(configDict.ContainsKey("BudgetCompactionPreviewChars"), CInt(configDict("BudgetCompactionPreviewChars")), DEFAULT_BUDGET_COMPACTION_PREVIEW_CHARS)
 
                 ' M365 settings
 
