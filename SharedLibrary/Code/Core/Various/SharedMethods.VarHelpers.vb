@@ -1219,10 +1219,23 @@ Namespace SharedLibrary
             encodedText = encodedText.Replace(vbCr, "").Replace(vbLf, "")
             encodedText = encodedText.Replace(" ", "")
 
+            ' Serve previously decrypted values from cache to avoid re-running the expensive
+            ' PBKDF2 key derivation for identical (ciphertext, CodeBasis) pairs.
+            Dim cacheKey As String = encodedText & vbNullChar & pTerm
+            Dim cachedResult As String = Nothing
+            If _decodeStringCache.TryGetValue(cacheKey, cachedResult) Then
+                Return cachedResult
+            End If
+
             ' Auto-detect a strong (AES-256) value by its marker prefix and decrypt accordingly.
             ' Legacy XOR values are pure Base64 and can never start with this marker.
             If encodedText.StartsWith(StrongApiKeyMarker, StringComparison.Ordinal) Then
-                Return DecodeStringStrong(encodedText.Substring(StrongApiKeyMarker.Length), pTerm)
+                Dim strongResult As String = DecodeStringStrong(encodedText.Substring(StrongApiKeyMarker.Length), pTerm)
+                ' Only cache successful results so a transient error does not get pinned.
+                If Not strongResult.StartsWith("Error:", StringComparison.Ordinal) Then
+                    _decodeStringCache(cacheKey) = strongResult
+                End If
+                Return strongResult
             End If
 
             Dim encryptedBytes As Byte() = DecodeBase64(encodedText)
@@ -1241,11 +1254,15 @@ Namespace SharedLibrary
                 decryptedBytes(i) = encryptedBytes(i) Xor pTermBytes(i Mod pTermBytes.Length)
             Next
 
+            Dim xorResult As String
             Try
-                Return System.Text.Encoding.UTF8.GetString(decryptedBytes)
+                xorResult = System.Text.Encoding.UTF8.GetString(decryptedBytes)
             Catch
-                Return System.Text.Encoding.ASCII.GetString(decryptedBytes)
+                xorResult = System.Text.Encoding.ASCII.GetString(decryptedBytes)
             End Try
+
+            _decodeStringCache(cacheKey) = xorResult
+            Return xorResult
         End Function
 
 
@@ -1255,6 +1272,14 @@ Namespace SharedLibrary
         ''' Base64 and can never begin with this marker, so it enables transparent auto-detection on decode.
         ''' </summary>
         Private Shared ReadOnly StrongApiKeyMarker As String = "$RIK1$"
+
+        ''' <summary>
+        ''' Memoization cache for decrypted values. Keyed by encoded input + key term so the
+        ''' expensive PBKDF2 (100k iterations) in <see cref="DecodeStringStrong"/> runs only once
+        ''' per distinct (ciphertext, CodeBasis) pair. This dramatically speeds up building the
+        ''' model list (e.g. when opening the local chat) where many encrypted keys are decoded.
+        ''' </summary>
+        Private Shared ReadOnly _decodeStringCache As New System.Collections.Concurrent.ConcurrentDictionary(Of String, String)(StringComparer.Ordinal)
 
         ''' <summary>
         ''' Encodes <paramref name="inputText"/> using <paramref name="pTerm"/>. By default uses the legacy XOR scheme

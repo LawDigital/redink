@@ -2177,14 +2177,14 @@ Public NotInheritable Class IniImportManager
 
     ''' <summary>
     ''' Prompts the user for values for each [[...]] placeholder found in the input text and
-    ''' substitutes non-empty entries directly into the text.
+    ''' substitutes the entered values directly into the text. An intentionally empty entry clears the placeholder.
     ''' </summary>
     ''' <param name="ownerForm">Owner window used for modal UI prompts.</param>
     ''' <param name="text">
     ''' Input/output text containing placeholders; updated in-place with resolved values.
     ''' </param>
     ''' <param name="warnings">
-    ''' Collector for warnings about placeholders that were left unresolved and remain in the text.
+    ''' Collector for placeholder warnings. Intentionally empty values are treated as resolved empty values.
     ''' </param>
     ''' <param name="resolved">
     ''' Collector for placeholders that were successfully resolved, including the placeholder
@@ -2248,7 +2248,7 @@ Public NotInheritable Class IniImportManager
         End If
 
         Try
-            If ShowCustomVariableInputForm("The settings require your to enter individual values. Please enter them (leave empty to keep a placeholder and edit later): ",
+            If ShowCustomVariableInputForm("The settings require your to enter individual values. Please enter them (leave empty to write an empty value): ",
                                        TITLE_IMPORT,
                                        params) = False Then
                 Return False
@@ -2268,19 +2268,13 @@ Public NotInheritable Class IniImportManager
 
             If System.String.IsNullOrWhiteSpace(name) Then Continue For
 
-            If Not System.String.IsNullOrWhiteSpace(value) Then
-                Dim keyRx As New System.Text.RegularExpressions.Regex("\[\[" & System.Text.RegularExpressions.Regex.Escape(name) & "\]\]",
-                                                                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-                text = keyRx.Replace(text, value)
-                resolved.Add(New ResolvedPlaceholder With {
-                    .Name = name,
-                    .Value = value
-                })
-
-            Else
-                warnings.Add("Warning: Placeholder '[[ " & name & " ]]' was left empty and remains in the configuration." & System.Environment.NewLine &
-                         "You can later fill it using the 'Edit .ini Files' feature or directly access the file.")
-            End If
+            Dim keyRx As New System.Text.RegularExpressions.Regex("\[\[" & System.Text.RegularExpressions.Regex.Escape(name) & "\]\]",
+                                                             System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            text = keyRx.Replace(text, value)
+            resolved.Add(New ResolvedPlaceholder With {
+                .Name = name,
+                .Value = value
+            })
         Next
 
         Return True

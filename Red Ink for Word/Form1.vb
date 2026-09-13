@@ -1021,11 +1021,19 @@ Public Class frmAIChat
             Dim selectionText As String = ""
 
             Dim sel As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
-            If chkIncludeselection.Checked Or chkIncludeDocText.Checked Then
+            If chkIncludeDocText.Checked Then
+                ' "Include document": the full document is always included (handled via docText above).
+                ' In addition, include the selection and the current cursor position (if available).
                 selectionText = GetCurrentSelectionText()
 
                 If sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     selectionText = GetCursorContext(CursorPositionCount)
+                End If
+            ElseIf chkIncludeselection.Checked Then
+                ' "Include selection": include only the selection, nothing more.
+                ' If there is no actual selection (collapsed cursor), include nothing.
+                If sel IsNot Nothing AndAlso sel.Start <> sel.End Then
+                    selectionText = GetCurrentSelectionText()
                 End If
             End If
 
@@ -2454,46 +2462,70 @@ Public Class frmAIChat
     ''' All exceptions caught and return empty string.
     ''' </remarks>
     Private Function GetActiveDocumentText() As String
+        Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
         Try
-            Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
-            Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            doc = Globals.ThisAddIn.Application.ActiveDocument
+        Catch
+            doc = Nothing
+        End Try
 
-            ' Capture the specific window we modify so the Finally restore targets the SAME
-            ' window even if the active window changes meanwhile (e.g., a document-management
-            ' add-in switches documents during the operation).
-            Dim targetWindow As Word.Window = wordApp.ActiveWindow
+        If doc Is Nothing Then Return ""
 
-            ' Save current view settings for restoration
-            Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
-            Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
+        ' Try to temporarily switch the active window to "Final" view so tracked
+        ' deletions are excluded. This is best-effort only: if the view switch
+        ' fails (protected view, incompatible view mode, active window changed,
+        ' etc.) we MUST still return the document text rather than silently
+        ' dropping the entire document, otherwise "Include document" would send
+        ' no content and the model would see only the cursor context.
+        Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+        Dim targetWindow As Word.Window = Nothing
+        Dim viewSwitched As Boolean = False
+        Dim originalRevisionsView As Word.WdRevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
+        Dim originalShowRevisions As Boolean = False
 
+        Try
+            targetWindow = wordApp.ActiveWindow
+            originalRevisionsView = targetWindow.View.RevisionsView
+            originalShowRevisions = targetWindow.View.ShowRevisionsAndComments
+
+            With targetWindow.View
+                .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
+                .ShowRevisionsAndComments = False
+            End With
+            viewSwitched = True
+        Catch
+            ' Best-effort only; continue and read the text regardless.
+            viewSwitched = False
+        End Try
+
+        Try
+            ' Extract document text (with view switched this excludes deleted content;
+            ' without the switch it still returns the full document content).
+            Dim baseText As String = ""
             Try
-                ' Temporarily show only final text (no tracked deletions)
-                With targetWindow.View
-                    .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
-                    .ShowRevisionsAndComments = False
-                End With
+                baseText = doc.Content.Text
+            Catch
+                baseText = ""
+            End Try
 
-                ' Extract document text (excludes deleted content)
-                Dim baseText As String = doc.Content.Text
+            ' Attempt to extract comments/bubbles
+            Dim bubbles As String = ""
+            Try
+                bubbles = ThisAddIn.BubblesExtract(doc.Content, True) ' Silent=True
+            Catch
+                ' Silently ignore errors; keep baseText only
+            End Try
 
-                ' Attempt to extract comments/bubbles
-                Dim bubbles As String = ""
-                Try
-                    bubbles = ThisAddIn.BubblesExtract(doc.Content, True) ' Silent=True
-                Catch
-                    ' Silently ignore errors; keep baseText only
-                End Try
+            ' Append bubbles if available
+            If Not String.IsNullOrEmpty(bubbles) Then
+                Return baseText & vbCr & vbCr & bubbles
+            End If
 
-                ' Append bubbles if available
-                If Not String.IsNullOrEmpty(bubbles) Then
-                    Return baseText & vbCr & vbCr & bubbles
-                End If
+            Return baseText
 
-                Return baseText
-
-            Finally
-                ' Restore original view settings on the SAME window we changed
+        Finally
+            ' Restore original view settings on the SAME window we changed, only if we changed it.
+            If viewSwitched AndAlso targetWindow IsNot Nothing Then
                 Try
                     With targetWindow.View
                         .RevisionsView = originalRevisionsView
@@ -2502,11 +2534,7 @@ Public Class frmAIChat
                 Catch
                     ' Best-effort restore; the window may no longer be valid
                 End Try
-            End Try
-
-        Catch ex As Exception
-            ' Silently handle all errors
-            Return ""
+            End If
         End Try
     End Function
 

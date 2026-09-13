@@ -429,6 +429,52 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Warms the decrypted-API-key cache for all encrypted models in the given INI file.
+        ''' This pre-runs the expensive PBKDF2 key derivation (see DecodeStringStrong) so the first
+        ''' model-list build (e.g. opening the local chat) is not blocked by decryption.
+        ''' Only pure crypto/registry work is performed - no Office COM, no WinForms, and no
+        ''' ModelConfig materialization (which could show message boxes) occurs. Safe for a
+        ''' background startup task. On any failure the on-demand path decrypts normally.
+        ''' </summary>
+        ''' <param name="iniFilePath">Path to the alternative-models INI file.</param>
+        ''' <param name="context">Shared context providing the CodeBasis used for decryption.</param>
+        Public Shared Sub WarmAlternativeModelsDecryptCache(ByVal iniFilePath As String, ByVal context As ISharedContext)
+            Try
+                Dim normalizedPath As String = NormalizeAlternativeModelIniPath(iniFilePath)
+                If String.IsNullOrWhiteSpace(normalizedPath) OrElse Not File.Exists(normalizedPath) Then Return
+
+                Dim codebasis As String = ResolveRestrictedAccessCodebasis(context)
+                If String.IsNullOrWhiteSpace(codebasis) Then Return
+
+                Dim cacheHit As Boolean = False
+                Dim sections As List(Of AlternativeModelIniSection) =
+                    GetAlternativeModelIniSections(normalizedPath, cacheHit)
+
+                For Each section As AlternativeModelIniSection In sections
+                    If section Is Nothing OrElse section.Values Is Nothing Then Continue For
+
+                    ' Only non-OAuth2 encrypted keys go through DecodeString. OAuth2 resolution
+                    ' is intentionally left to the on-demand path (it may involve network calls).
+                    If ParseBoolean(section.Values, "OAuth2") Then Continue For
+                    If Not ParseBoolean(section.Values, "APIKeyEncrypted") Then Continue For
+
+                    Dim apiKey As String = GetConfigString(section.Values, "APIKey")
+                    If String.IsNullOrWhiteSpace(apiKey) Then Continue For
+
+                    Dim prefix As String = GetConfigString(section.Values, "APIKeyPrefix")
+                    If Not String.IsNullOrEmpty(prefix) AndAlso apiKey.StartsWith(prefix) Then
+                        apiKey = apiKey.Substring(prefix.Length)
+                    End If
+
+                    ' Populates _decodeStringCache as a side effect; result is discarded here.
+                    Dim ignored As String = DecodeString(apiKey, codebasis)
+                Next
+            Catch
+                ' Non-fatal. The on-demand decrypt path runs normally if the cache is cold.
+            End Try
+        End Sub
+
         Public Shared Function LoadAlternativeModels(ByVal iniFilePath As String,
                                                       context As ISharedContext,
                                                       Optional Title As String = "",
