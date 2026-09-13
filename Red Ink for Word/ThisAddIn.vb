@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 9.9.2026
+' 13.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -67,7 +67,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.090926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.130926" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -735,6 +735,8 @@ Partial Public Class ThisAddIn
                     Try
                         SharedMethods.WarmAlternativeModelsCache(alternateModelPath)
                         SharedMethods.WarmAlternativeModelsCache(specialServicePath)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(alternateModelPath, _context)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(specialServicePath, _context)
                         SharedLibrary.Agents.AgentResources.EnsureFresh()
                     Catch ex As System.Exception
                         System.Diagnostics.Debug.WriteLine("[PERF] Word startup warm-up failed: " & ex.Message)

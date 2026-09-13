@@ -3158,8 +3158,13 @@ Partial Public Class ThisAddIn
                                 context.LastInvalidTurnRepeatCount = 1
                             End If
 
+                            Dim toolEnabledRepairRequired As Boolean =
+                                SharedLibrary.Agents.ToolCallSequencing.RequiresToolEnabledRepair(
+                                    turnValidation.InvalidReason)
+
                             Dim repeatedInvalidTurnAfterSuccessfulTool As Boolean =
                                 Not memoryGroundingRepairRequired AndAlso
+                                Not toolEnabledRepairRequired AndAlso
                                 HasSuccessfulToolResponses(context) AndAlso
                                 context.LastInvalidTurnRepeatCount >= 2
 

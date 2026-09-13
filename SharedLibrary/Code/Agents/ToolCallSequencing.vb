@@ -3359,6 +3359,79 @@ Namespace Agents
             End Select
         End Function
 
+        Public Shared Function RequiresToolEnabledRepair(invalidReason As String) As Boolean
+            Return System.String.Equals(
+                If(invalidReason, System.String.Empty).Trim(),
+                "complete_with_unresolved_tool_failure",
+                System.StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function GetLatestUnresolvedToolFailure(runState As ToolingRunState) As ToolFailureRecord
+            If runState Is Nothing OrElse
+               Not runState.HasUnresolvedToolFailure OrElse
+               runState.UnresolvedToolFailures Is Nothing OrElse
+               runState.UnresolvedToolFailures.Count = 0 Then
+
+                Return Nothing
+            End If
+
+            Dim latest As ToolFailureRecord = Nothing
+            For Each candidate As ToolFailureRecord In runState.UnresolvedToolFailures
+                If candidate Is Nothing Then Continue For
+                If latest Is Nothing OrElse candidate.Sequence > latest.Sequence Then
+                    latest = candidate
+                End If
+            Next
+
+            Return latest
+        End Function
+
+        Private Shared Function FormatRepairDiagnosticValue(value As String, Optional maxLength As Integer = 160) As String
+            Dim normalized As String = If(value, System.String.Empty).Replace(ChrW(13), " ").Replace(ChrW(10), " ").Trim()
+            If maxLength > 0 AndAlso normalized.Length > maxLength Then
+                normalized = normalized.Substring(0, maxLength) & "..."
+            End If
+            Return normalized
+        End Function
+
+        Private Shared Function BuildUnresolvedToolFailureRepairPrompt(runState As ToolingRunState) As String
+            Dim failure As ToolFailureRecord = GetLatestUnresolvedToolFailure(runState)
+
+            Dim prompt As String =
+                "REPAIR: Completion is currently not permitted because a prior tool failure remains unresolved. " &
+                "Do not return status complete until the unresolved failure has actually been resolved by successful tool work. " &
+                "A tool call may be retried, including with the same arguments, when another attempt may succeed. " &
+                "If no permitted recovery path can succeed, return a truthful blocked explanation ending with exactly one valid " &
+                "<TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>."
+
+            If failure Is Nothing Then
+                Return prompt
+            End If
+
+            prompt &= " Current unresolved failure: tool=" & FormatRepairDiagnosticValue(failure.ToolName) &
+                      "; errorCode=" & FormatRepairDiagnosticValue(failure.ErrorCode) &
+                      "; recoveryPolicy=" & failure.RecoveryPolicy.ToString() &
+                      "; terminal=" & failure.Terminal.ToString().ToLowerInvariant() & "."
+
+            Dim recoveryScopeKey As String = FormatRepairDiagnosticValue(failure.RecoveryScopeKey)
+            If recoveryScopeKey <> System.String.Empty Then
+                prompt &= " recoveryScope=" & recoveryScopeKey & "."
+            End If
+
+            Select Case failure.RecoveryPolicy
+                Case ToolFailureRecoveryPolicy.SameToolSuccessOnly
+                    prompt &= " This failure is resolved automatically only by a later successful execution of the same tool with a matching recovery scope. Do not switch tools merely to clear this failure."
+                Case ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed
+                    prompt &= " A later successful execution of the same tool or a host-recognized compatible alternative with matching recovery scope may resolve this failure."
+                Case ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
+                    prompt &= " The failed tool itself is not the permitted automatic recovery path; use only a materially different host-recognized compatible alternative if one is available."
+                Case ToolFailureRecoveryPolicy.NoAutomaticRecovery
+                    prompt &= " This failure has no automatic successful-tool recovery path. Do not claim completion while it remains unresolved; use a host-authorized recovery mechanism if one exists, otherwise return blocked."
+            End Select
+
+            Return prompt
+        End Function
+
         Public Shared Function BuildActiveToolingRepairPrompt(Optional runState As ToolingRunState = Nothing,
                                                       Optional invalidReason As String = "") As String
             Dim normalizedInvalidReason As String = If(invalidReason, "").Trim().ToLowerInvariant()
@@ -3370,6 +3443,8 @@ Namespace Agents
             End If
 
             Select Case normalizedInvalidReason
+                Case "complete_with_unresolved_tool_failure"
+                    Return BuildUnresolvedToolFailureRepairPrompt(runState)
                 Case "task_status_reason_too_long",
              "task_status_missing_reason",
              "malformed_task_status"
