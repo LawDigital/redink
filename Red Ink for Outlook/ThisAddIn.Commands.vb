@@ -1638,8 +1638,16 @@ Partial Public Class ThisAddIn
                 ' Move cursor to the very beginning of the document
                 editorSel.HomeKey(Microsoft.Office.Interop.Word.WdUnits.wdStory)
 
+                ' The reply is a new block inserted at the very top of the document. Its formatting
+                ' authority is the actual insertion point, not the text one line below. Capture the
+                ' collapsed insertion point and pass it as the formatting source so Outlook does not
+                ' inherit the font/size from the following paragraph.
+                Dim replyFormattingSource As Microsoft.Office.Interop.Word.Range = editorSel.Range.Duplicate()
+                replyFormattingSource.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+
                 ' Insert the raw LLM result (Markdown), not the pre-converted HTML
-                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True, INI_UseHostColorOutlook)
+                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True, INI_UseHostColorOutlook,
+                                            FormattingSourceRange:=replyFormattingSource)
             Else
                 ' Convert HTML to plain text for non-HTML formats (optional)
                 Dim doc As New HtmlAgilityPack.HtmlDocument()
