@@ -484,6 +484,7 @@ Partial Public Class ThisAddIn
     ''' Whether to use formatting-aware marker mode for the current processing run.
     ''' </summary>
     Private _useFormattingMarkers As Boolean = False
+    Private _documentTranslationDictionarySegments As System.Collections.Generic.HashSet(Of System.String) = Nothing
 
     ''' <summary>
     ''' Entry point for correction (default prompt/suffix).
@@ -659,6 +660,11 @@ Partial Public Class ThisAddIn
 
             If String.IsNullOrWhiteSpace(targetLanguage) Then Exit Function
             targetLanguage = targetLanguage.Trim()
+
+            Dim dictionarySelectionCancelled As System.Boolean = False
+            _documentTranslationDictionarySegments = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveInteractiveTranslationDictionarySegments(
+                _context, AN & " Translate Files", targetLanguage, dictionarySelectionCancelled)
+            If dictionarySelectionCancelled Then Exit Function
 
             ' Normalize for file matching (also used for output filenames)
             targetLanguageToken = NormalizeLanguageTokenForFilename(targetLanguage)
@@ -1780,7 +1786,8 @@ Partial Public Class ThisAddIn
         Dim systemPrompt As String
         If mode = DocumentProcessMode.Translate Then
             TranslateLanguage = targetLanguage
-            systemPrompt = InterpolateAtRuntime(SP_Translate_Document)
+            systemPrompt = Global.SharedLibrary.SharedLibrary.SharedMethods.InterpolateTranslationTemplateAtRuntime(
+                _context, SP_Translate_Document, targetLanguage, _documentTranslationDictionarySegments, AddressOf InterpolateAtRuntime)
         Else
             Dim effectivePrompt As String = If(String.IsNullOrWhiteSpace(_correctPromptOverride), SP_Correct_Document, _correctPromptOverride)
             systemPrompt = InterpolateAtRuntime(effectivePrompt)

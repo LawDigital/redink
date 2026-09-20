@@ -576,9 +576,17 @@ Partial Public Class ThisAddIn
                 Async Function(text, lang, sourcelang, token)
                     TranslateLanguage = lang
                     SourceLanguage = sourcelang
-                    Dim SysPrompt As String = SP_Translate_Multi
-                    If Not String.IsNullOrWhiteSpace(SourceLanguage) Then SysPrompt = SP_Translate_Multi_Source
-                    Return Await LLM(InterpolateAtRuntime(SysPrompt),
+                    Dim SysPrompt As System.String = SP_Translate_Multi
+                    If Not System.String.IsNullOrWhiteSpace(SourceLanguage) Then SysPrompt = SP_Translate_Multi_Source
+
+                    Dim dictionarySelectionCancelled As System.Boolean = False
+                    Dim resolvedPrompt As System.String =
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(
+                            _context, SysPrompt, $"{AN} Quick Translate", TranslateLanguage,
+                            AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    If dictionarySelectionCancelled Then Return System.String.Empty
+
+                    Return Await LLM(resolvedPrompt,
                                     "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>",
                                     "", "", 0,
                                     UseSecondAPI:=False,

@@ -3269,18 +3269,18 @@ SkipPromptInput:
                         Dim selectedVoices As List(Of String) = frm.SelectedVoices
                         Dim outputPath As String = frm.SelectedOutputPath
                         If selectedVoices.Count > 0 Then
-                            MessageBox.Show("Selected Voice(s): " & String.Join(", ", selectedVoices))
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Selected Voice(s): " & String.Join(", ", selectedVoices))
                         Else
-                            MessageBox.Show("No voices selected.")
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("No voices selected.")
                         End If
 
                         If outputPath = "" Then
-                            MessageBox.Show("Temporary output selected.")
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Temporary output selected.")
                         Else
-                            MessageBox.Show("Output path: " & outputPath)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Output path: " & outputPath)
                         End If
                     Else
-                        MessageBox.Show("Voice selection was cancelled.")
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Voice selection was cancelled.")
                     End If
                 End Using
 
@@ -3295,18 +3295,18 @@ SkipPromptInput:
                         Dim selectedVoices As List(Of String) = frm.SelectedVoices
                         Dim outputPath As String = frm.SelectedOutputPath
                         If selectedVoices.Count > 0 Then
-                            MessageBox.Show("Selected Voice(s): " & String.Join(", ", selectedVoices))
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Selected Voice(s): " & String.Join(", ", selectedVoices))
                         Else
-                            MessageBox.Show("No voices selected.")
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("No voices selected.")
                         End If
 
                         If outputPath = "" Then
-                            MessageBox.Show("Temporary output selected.")
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Temporary output selected.")
                         Else
-                            MessageBox.Show("Output path: " & outputPath)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Output path: " & outputPath)
                         End If
                     Else
-                        MessageBox.Show("Voice selection was cancelled.")
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Voice selection was cancelled.")
                     End If
                 End Using
 

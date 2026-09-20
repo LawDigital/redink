@@ -147,11 +147,15 @@ Namespace SharedLibrary
 
                 _currentModelNumber = modelNumber
 
-                ' Persist selection to settings; ignore failures
+                ' Persist only an actual selection change. During startup the saved model
+                ' is restored on every launch; rewriting the identical LocalFileSettingsProvider
+                ' file can block Office for seconds on slow/redirected/AV-scanned profiles.
                 Try
-                    My.Settings.SelectedModelNumber = modelNumber
-                    My.Settings.Save()
-                Catch
+                    If My.Settings.SelectedModelNumber <> modelNumber Then
+                        My.Settings.SelectedModelNumber = modelNumber
+                        My.Settings.Save()
+                    End If
+                Catch ex As System.Exception
                 End Try
 
                 Return True
@@ -242,10 +246,7 @@ Namespace SharedLibrary
             If config Is Nothing OrElse config.Count = 0 Then
                 Dim emptyMessage = BuildMissingKeyMessage(modelLabel, Nothing, True, config)
                 Debug.WriteLine($"[ModelConfigManager] {emptyMessage}")
-                MessageBox.Show(emptyMessage,
-                                "Model configuration invalid",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Warning)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(emptyMessage, "Model configuration invalid")
                 Return False
             End If
 
@@ -260,10 +261,7 @@ Namespace SharedLibrary
             If missing.Count > 0 Then
                 Dim detailedMsg = BuildMissingKeyMessage(modelLabel, missing, False, config)
                 Debug.WriteLine($"[ModelConfigManager] {detailedMsg}")
-                MessageBox.Show(detailedMsg,
-                                "Model configuration invalid",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Warning)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(detailedMsg, "Model configuration invalid")
                 Return False
             End If
 

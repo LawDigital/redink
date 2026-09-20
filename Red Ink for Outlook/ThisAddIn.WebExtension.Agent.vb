@@ -2238,11 +2238,13 @@ Partial Public Class ThisAddIn
     ''' Mirrors Word's GetFileContentEx pipeline using existing SharedMethods readers.
     ''' Does NOT stage the file into the chat-agent session/temp store.
     ''' </summary>
-    Private Async Function ChatAgentExtractFileText(filePath As String) As Task(Of String)
+    Private Async Function ChatAgentExtractFileText(filePath As String, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of String)
+        cancellationToken.ThrowIfCancellationRequested()
         If String.IsNullOrWhiteSpace(filePath) OrElse Not IO.File.Exists(filePath) Then Return ""
         Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
 
         Try
+            cancellationToken.ThrowIfCancellationRequested()
             Select Case ext
                 Case ".txt", ".ini", ".csv", ".tsv", ".log", ".json", ".xml", ".html", ".htm",
                      ".md", ".yaml", ".yml", ".ics", ".vcf",
@@ -2267,7 +2269,7 @@ Partial Public Class ThisAddIn
                     Return ReadMsgAttachmentText(filePath)
 
                 Case ".pdf"
-                    Dim r = Await SharedMethods.ReadPdfAsTextEx(filePath, True, DoOCR:=True, AskUser:=False, context:=_context).ConfigureAwait(False)
+                    Dim r = Await SharedMethods.ReadPdfAsTextEx(filePath, True, DoOCR:=True, AskUser:=False, context:=_context, CancellationToken:=cancellationToken).ConfigureAwait(False)
                     Return If(r?.Content, "")
 
                 Case Else
@@ -2279,7 +2281,9 @@ Partial Public Class ThisAddIn
                     End If
                     Return ""
             End Select
-        Catch ex As Exception
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception
             Debug.WriteLine("ChatAgentExtractFileText failed for '" & filePath & "': " & ex.Message)
             Return ""
         End Try

@@ -44,6 +44,15 @@ Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ''' <summary>
+    ''' Opens or activates the existing Translator widget.
+    ''' This is the same widget used by the Freestyle command "translator".
+    ''' </summary>
+    Public Sub ShowTranslatorWidget()
+        ShowQuickTranslate()
+    End Sub
+
+
+    ''' <summary>
     ''' Checks if INI configuration loading has failed and attempts initialization if needed.
     ''' Returns True if INI loading ultimately failed, False if successful.
     ''' </summary>
@@ -400,7 +409,7 @@ Partial Public Class ThisAddIn
     ''' <returns>The interpolated string with placeholders replaced by actual values.</returns>
     Public Function InterpolateAtRuntime(ByVal template As String) As String
         If template Is Nothing Then
-            MessageBox.Show("Error InterpolateAtRuntime: Template is Nothing.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error InterpolateAtRuntime: Template is Nothing.", "Error")
             Return ""
         End If
 
@@ -416,7 +425,7 @@ Partial Public Class ThisAddIn
         Dim result As String = template
 
         If Regex.IsMatch(template, "{Dictionary}", RegexOptions.IgnoreCase) Then
-            Dictionary = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context)
+            Dictionary = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context, TranslateLanguage)
         End If
 
         Dim placeholderPattern As String = "\{([^}]+)\}"

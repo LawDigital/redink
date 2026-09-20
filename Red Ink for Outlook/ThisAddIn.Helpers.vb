@@ -103,7 +103,7 @@ Partial Public Class ThisAddIn
     ''' <returns>Interpolated string or empty string on error.</returns>
     Public Function InterpolateAtRuntime(ByVal template As String) As String
         If template Is Nothing Then
-            MessageBox.Show("Error InterpolateAtRuntime: Template is Nothing.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error InterpolateAtRuntime: Template is Nothing.", "Error")
             Return ""
         End If
 
@@ -118,7 +118,7 @@ Partial Public Class ThisAddIn
         Dim result As String = template
 
         If Regex.IsMatch(template, "{Dictionary}", RegexOptions.IgnoreCase) Then
-            Dictionary = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context)
+            Dictionary = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context, TranslateLanguage)
         End If
 
         Dim placeholderPattern As String = "\{([^}]+)\}"

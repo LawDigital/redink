@@ -216,9 +216,9 @@ Partial Public Class ThisAddIn
         Try
             splash = New SLib.SplashScreen("Applying markup... press 'Esc' to abort")
 
-            Dim splashOwnerHwnd As IntPtr = GetWordMainWindowHandle()
-            If splashOwnerHwnd <> IntPtr.Zero Then
-                splash.Show(New SharedLibrary.SharedLibrary.WindowWrapper(splashOwnerHwnd))
+            Dim splashOwner As System.Windows.Forms.IWin32Window = SLib.ResolveSameThreadDialogOwner()
+            If splashOwner IsNot Nothing Then
+                splash.Show(splashOwner)
             Else
                 splash.Show()
             End If

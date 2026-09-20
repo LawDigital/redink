@@ -370,11 +370,36 @@ Partial Public Class ThisAddIn
         System.Diagnostics.Debug.WriteLine(startMessage)
 
         lastListenerProgressUtc = System.DateTime.UtcNow
-        listenerTask = StartHttpListener(cts.Token, gen)
+        ' StartHttpListener performs HttpListener.Start() before its first Await. That work is
+        ' UI/COM independent and may stall on some Windows/network configurations, so run the
+        ' listener lifecycle on a worker instead of Outlook's STA/UI thread.
+        listenerTask = System.Threading.Tasks.Task.Run(
+            Function() StartHttpListener(cts.Token, gen))
+    End Sub
 
-        If Not _apActive Then
-            EnsureLocalSchedulerTimerStarted()
-        End If
+    ''' <summary>
+    ''' Starts the Local Agent scheduler only after the HTTP listener has actually reached the
+    ''' listening state. This preserves the original readiness contract even though listener
+    ''' startup itself runs off Outlook's UI thread.
+    ''' </summary>
+    Private Sub QueueLocalSchedulerStartAfterListenerReady()
+        If _apActive Then Return
+
+        Try
+            Dim uiControl = mainThreadControl
+            If uiControl Is Nothing OrElse uiControl.IsDisposed Then Return
+
+            uiControl.BeginInvoke(
+                New System.Windows.Forms.MethodInvoker(
+                    Sub()
+                        If Not _apActive Then
+                            EnsureLocalSchedulerTimerStarted()
+                        End If
+                    End Sub))
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine(
+                "Local scheduler ready callback failed: " & ex.Message)
+        End Try
     End Sub
 
     ''' <summary>
@@ -520,6 +545,8 @@ Partial Public Class ThisAddIn
                         For Each prefix As System.String In httpListener.Prefixes
                             AppendInkyServerLog("HttpListener prefix (post-start): " & prefix)
                         Next
+
+                        QueueLocalSchedulerStartAfterListenerReady()
                     Catch exStart As System.Exception
                         AppendInkyServerLog("HttpListener.Start failed.", exStart)
                         Throw

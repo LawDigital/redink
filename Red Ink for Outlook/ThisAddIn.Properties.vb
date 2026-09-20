@@ -1986,6 +1986,24 @@ Partial Public Class ThisAddIn
             _context.INI_BrowserToolsDisable = value
         End Set
     End Property
+
+    Public Shared Property INI_PlayWrightPath As String
+        Get
+            Return _context.INI_PlayWrightPath
+        End Get
+        Set(value As String)
+            _context.INI_PlayWrightPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_PlayWrightUseLocalCache As Boolean
+        Get
+            Return _context.INI_PlayWrightUseLocalCache
+        End Get
+        Set(value As Boolean)
+            _context.INI_PlayWrightUseLocalCache = value
+        End Set
+    End Property
     Public Shared Property INI_UpdateCheckInterval As Integer
         Get
             Return _context.INI_UpdateCheckInterval
@@ -2048,6 +2066,16 @@ Partial Public Class ThisAddIn
             _context.INI_DictionaryPathLocal = value
         End Set
     End Property
+
+    Public Shared Property INI_DictionarySegmentPrompt As System.Boolean
+        Get
+            Return _context.INI_DictionarySegmentPrompt
+        End Get
+        Set(value As System.Boolean)
+            _context.INI_DictionarySegmentPrompt = value
+        End Set
+    End Property
+
 
     Public Shared Property INI_RedactionInstructionsPath As String
         Get
@@ -2636,6 +2664,15 @@ Partial Public Class ThisAddIn
 
         If _context IsNot Nothing Then
             _context.INI_ToolingLogWindow = value
+        End If
+
+        ' Enabling the dashboard is also a live-run action, not only a next-run setting.
+        If value Then
+            Try
+                EnsureActiveToolingLogWindowVisible()
+            Catch ex As System.Exception
+                ToolingFileLogger.LogWarn("Failed to activate tooling dashboard during an active run.", ex:=ex)
+            End Try
         End If
     End Sub
 

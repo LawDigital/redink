@@ -425,11 +425,13 @@ Namespace SharedLibrary
                                                      Optional ByVal context As ISharedContext = Nothing,
                                                      Optional ByVal ocrAdditionalInstruction As String = Nothing,
                                                      Optional ByVal ShowOcrProgressWindow As Boolean = False,
-                                                     Optional ByVal ReturnMarkdown As Boolean = False) As Task(Of PdfReadResult)
+                                                     Optional ByVal ReturnMarkdown As Boolean = False,
+                                                     Optional ByVal CancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of PdfReadResult)
 
             Dim result As New PdfReadResult()
 
             Try
+                CancellationToken.ThrowIfCancellationRequested()
                 If String.IsNullOrWhiteSpace(pdfPath) OrElse Not IO.File.Exists(pdfPath) Then
                     result.Content = If(ReturnErrorInsteadOfEmpty, "Error: File not found or path is empty.", "")
                     Return result
@@ -449,6 +451,7 @@ Namespace SharedLibrary
                     pageCount = document.NumberOfPages
 
                     For Each page As UglyToad.PdfPig.Content.Page In document.GetPages()
+                        CancellationToken.ThrowIfCancellationRequested()
                         Dim pageText As String = page.Text
                         sb.AppendLine(pageText)
                         Dim pageCharCount As Integer = If(pageText IsNot Nothing, pageText.Length, 0)
@@ -580,7 +583,9 @@ Namespace SharedLibrary
 
                 If shouldSuggestOcr Then
                     ' Check if OCR is actually available
-                    If Not IsOcrAvailable(context) Then
+                    cancellationToken.ThrowIfCancellationRequested()
+
+            If Not IsOcrAvailable(context) Then
                         ' OCR would be suggested but is not available - warn user if allowed
                         Debug.WriteLine("OCR suggested by heuristics but not available - skipping OCR prompt.")
                         result.OcrWasSkippedDueToHeuristics = True
@@ -620,8 +625,10 @@ Namespace SharedLibrary
                         End If
                     End If
 
+                    CancellationToken.ThrowIfCancellationRequested()
                     Dim ocrText As String =
-                        Await PerformOCR(pdfPath, context, AskUser, ocrAdditionalInstruction, ShowOcrProgressWindow)
+                        Await PerformOCR(pdfPath, context, AskUser, ocrAdditionalInstruction, ShowOcrProgressWindow, CancellationToken)
+                    CancellationToken.ThrowIfCancellationRequested()
                     If Not String.IsNullOrWhiteSpace(ocrText) Then
                         result.Content = ocrText
                         Return result
@@ -638,6 +645,8 @@ Namespace SharedLibrary
                 End If
                 Return result
 
+            Catch ex As System.OperationCanceledException
+                Throw
             Catch ex As System.Exception
                 result.Content = If(ReturnErrorInsteadOfEmpty, $"Error reading PDF: {ex.Message}", "")
                 Return result
@@ -654,7 +663,8 @@ Namespace SharedLibrary
                                                    Optional ByVal context As ISharedContext = Nothing,
                                                    Optional ByVal ocrAdditionalInstruction As String = Nothing,
                                                    Optional ByVal ShowOcrProgressWindow As Boolean = False,
-                                                   Optional ByVal ReturnMarkdown As Boolean = False) As Task(Of String)
+                                                   Optional ByVal ReturnMarkdown As Boolean = False,
+                                                   Optional ByVal CancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of String)
             Dim result = Await ReadPdfAsTextEx(pdfPath,
                                                ReturnErrorInsteadOfEmpty,
                                                DoOCR,
@@ -662,7 +672,8 @@ Namespace SharedLibrary
                                                context,
                                                ocrAdditionalInstruction,
                                                ShowOcrProgressWindow,
-                                               ReturnMarkdown)
+                                               ReturnMarkdown,
+                                               CancellationToken)
             Return result.Content
         End Function
 
@@ -758,7 +769,10 @@ Namespace SharedLibrary
                                                  context As ISharedContext,
                                                  Optional askUser As Boolean = True,
                                                  Optional additionalInstruction As String = Nothing,
-                                                 Optional showProgressWindow As Boolean = False) As Task(Of String)
+                                                 Optional showProgressWindow As Boolean = False,
+                                                 Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of String)
+
+            cancellationToken.ThrowIfCancellationRequested()
 
             If Not IsOcrAvailable(context) Then
                 If askUser Then
@@ -801,9 +815,10 @@ Namespace SharedLibrary
                 Dim showStatusWindow As Boolean = askUser OrElse showProgressWindow
 
                 If pageCount <= 0 OrElse context.INI_ChunkOCR <= 0 OrElse pageCount <= context.INI_ChunkOCR Then
+                    cancellationToken.ThrowIfCancellationRequested()
                     Dim result As String =
                         Await PerformSinglePdfOcrRequest(pdfPath, context, systemPrompt, timeOut, useSecondAPI, Not askUser)
-
+                    cancellationToken.ThrowIfCancellationRequested()
                     Return If(result, "")
                 End If
 
@@ -818,6 +833,7 @@ Namespace SharedLibrary
                             "Chunks done: 0")
                     End If
 
+                    cancellationToken.ThrowIfCancellationRequested()
                     Dim chunkedResult As String =
                         Await PerformAdaptiveChunkedOcr(pdfPath,
                                                         context,
@@ -828,6 +844,7 @@ Namespace SharedLibrary
                                                         context.INI_ChunkOCR,
                                                         ChunkOcrMaxRounds,
                                                         statusDialog)
+                    cancellationToken.ThrowIfCancellationRequested()
 
                     If String.IsNullOrWhiteSpace(chunkedResult) Then
                         Return ""

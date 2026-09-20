@@ -50,12 +50,14 @@ Partial Public Class ThisAddIn
                                            Optional AskWorksheetSelection As Boolean = False,
                                            Optional OcrAdditionalInstruction As String = Nothing,
                                            Optional ShowOCRProgress As Boolean = False,
-                                           Optional ReturnMarkdown As Boolean = False) As Task(Of FileReadResult)
+                                           Optional ReturnMarkdown As Boolean = False,
+                                           Optional CancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of FileReadResult)
 
         Dim result As New FileReadResult()
         Dim filePath As String = ""
 
         Try
+            CancellationToken.ThrowIfCancellationRequested()
             If optionalFilePath IsNot Nothing Then
                 filePath = ExpandEnvironmentVariables(optionalFilePath)
             End If
@@ -80,6 +82,7 @@ Partial Public Class ThisAddIn
             End If
 
             If Not String.IsNullOrWhiteSpace(filePath) AndAlso IO.File.Exists(filePath) Then
+                CancellationToken.ThrowIfCancellationRequested()
                 Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
                 Dim FromFile As String = ""
 
@@ -116,7 +119,8 @@ Partial Public Class ThisAddIn
                             _context,
                             OcrAdditionalInstruction,
                             ShowOCRProgress,
-                            ReturnMarkdown)
+                            ReturnMarkdown,
+                            CancellationToken)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".eml"
@@ -153,6 +157,8 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+        Catch ex As System.OperationCanceledException
+            Throw
         Catch ex As System.Exception
             If Not Silent Then ShowCustomMessageBox($"An error occurred reading the file '{filePath}': {ex.Message}")
             result.Content = ""
@@ -173,9 +179,10 @@ Partial Public Class ThisAddIn
                                          Optional AskWorksheetSelection As Boolean = False,
                                          Optional OcrAdditionalInstruction As String = Nothing,
                                          Optional ShowOCRProgress As Boolean = False,
-                                         Optional ReturnMarkdown As Boolean = False) As Task(Of String)
+                                         Optional ReturnMarkdown As Boolean = False,
+                                         Optional CancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of String)
 
-        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction, ShowOCRProgress, ReturnMarkdown)
+        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction, ShowOCRProgress, ReturnMarkdown, CancellationToken)
         Return result.Content
     End Function
 

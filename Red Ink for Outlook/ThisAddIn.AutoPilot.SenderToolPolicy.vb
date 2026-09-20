@@ -25,6 +25,10 @@
 '     <pattern> = <selector>, <selector>, ...
 '                              -> combined include/exclude selector list
 '     DEFAULT = <rule>        -> fallback for senders that match no pattern
+'     <pattern> = <rule>, designs=block, design_sets=block
+'                              -> optional resource capabilities for internal designs
+'     <pattern> = <rule>, disclaimer="plain text"
+'                              -> host-appended disclaimer for AutoPilot mail to that address
 '
 '  - A selector is matched purely against the NAME of a tool, skill, agent, or online
 '    resource. Selectors may be:
@@ -33,6 +37,13 @@
 '      - the universal placeholder * (or ALL) matching every name
 '  - Prefix any selector with ! or - to EXCLUDE the matching names.
 '  - If a selector list contains only exclusions, it behaves like * except those exclusions.
+'
+'  - Resource directives are optional and independent of tool selectors:
+'      designs=allow|block       controls all internal named designs
+'      design_sets=allow|block   controls only design_sets/active.json routing
+'    designs=block dominates design_sets and prevents names/lookups from being exposed.
+'  - disclaimer=... is plain text appended by the host. Quote values containing semicolons;
+'    use \n for a line break and \" for a literal quote.
 '
 '  - Any rule may append a hard, in-code system-prompt instruction for the sender:
 '         <pattern> = <rule> || <system prompt instruction>
@@ -77,12 +88,20 @@ Partial Public Class ThisAddIn
         Public Property AllowedToolSelectors As New List(Of String)()
         Public Property DeniedToolSelectors As New List(Of String)()
         Public Property SkillToolName As String = ""
+        Public Property AllowDesigns As System.Nullable(Of System.Boolean) = Nothing
+        Public Property AllowDesignSets As System.Nullable(Of System.Boolean) = Nothing
+        Public Property DisclaimerText As System.String = System.String.Empty
 
         ''' <summary>
         ''' Optional hard system-prompt instruction injected for this sender (in code, not
         ''' under LLM control). Specified in the policy file after a "||" separator.
         ''' </summary>
         Public Property SystemPromptAddition As String = ""
+    End Class
+
+    Friend NotInheritable Class AutoPilotSenderDesignAccess
+        Public Property AllowDesigns As System.Boolean = True
+        Public Property AllowDesignSets As System.Boolean = True
     End Class
 
     ''' <summary>Parsed sender policy rules for the active session (Nothing = no policy in effect).</summary>
@@ -94,12 +113,16 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="policyPath">Full path to the policy text file (may be empty).</param>
     Friend Sub LoadSenderToolPolicy(policyPath As String)
-        _apSenderPolicyRules = Nothing
-
         Try
-            If String.IsNullOrWhiteSpace(policyPath) Then Return
+            If String.IsNullOrWhiteSpace(policyPath) Then
+                _apSenderPolicyRules = Nothing
+                Return
+            End If
             If Not File.Exists(policyPath) Then
-                Debug.WriteLine($"[AutoPilot] Sender tool policy file not found: {policyPath}")
+                ' Keep the last successfully loaded rules on a transient path/read failure.
+                ' A configured security policy must not silently become unrestricted merely
+                ' because the backing file is temporarily unavailable.
+                Debug.WriteLine($"[AutoPilot] Sender tool policy file not found; keeping last known policy: {policyPath}")
                 Return
             End If
 
@@ -118,7 +141,7 @@ Partial Public Class ThisAddIn
                 ' Optional per-sender system-prompt instruction after a "||" separator:
                 '     <pattern> = <rule> || <system prompt instruction>
                 Dim promptPart As String = ""
-                Dim promptSepIndex = rulePart.IndexOf("||", StringComparison.Ordinal)
+                Dim promptSepIndex As System.Int32 = IndexOfUnquotedSenderRuleToken(rulePart, "||")
                 If promptSepIndex >= 0 Then
                     promptPart = rulePart.Substring(promptSepIndex + 2).Trim()
                     rulePart = rulePart.Substring(0, promptSepIndex).Trim()
@@ -129,6 +152,21 @@ Partial Public Class ThisAddIn
                 rule.IsDefault = patternPart.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
                 rule.Pattern = patternPart
                 rule.SystemPromptAddition = promptPart
+
+                ' Preserve historical comma-separated tool selectors while allowing resource/output
+                ' directives after either commas or semicolons. Only known key=value directives are
+                ' removed from the tool rule; everything else remains a selector.
+                Dim ruleTokens As System.String() = SplitSenderRuleComponents(rulePart)
+                Dim toolRuleTokens As New System.Collections.Generic.List(Of System.String)()
+                For Each ruleToken As System.String In ruleTokens
+                    If IsKnownSenderResourceDirective(ruleToken) Then
+                        ApplySenderResourceDirective(rule, ruleToken)
+                    ElseIf Not System.String.IsNullOrWhiteSpace(ruleToken) Then
+                        toolRuleTokens.Add(ruleToken.Trim())
+                    End If
+                Next
+                rulePart = System.String.Join(", ", toolRuleTokens).Trim()
+                If rulePart.Length = 0 Then Continue For
 
                 If rulePart.Equals("ALL", StringComparison.OrdinalIgnoreCase) Then
                     rule.Kind = AutoPilotSenderPolicyRuleKind.AllowAll
@@ -165,23 +203,182 @@ Partial Public Class ThisAddIn
                 rules.Add(rule)
             Next
 
-            If rules.Count > 0 Then
-                _apSenderPolicyRules = rules
-                Debug.WriteLine($"[AutoPilot] Sender tool policy loaded: {rules.Count} rule(s).")
-            End If
-        Catch ex As Exception
-            _apSenderPolicyRules = Nothing
-            Debug.WriteLine($"[AutoPilot] Failed to load sender tool policy: {ex.Message}")
+            ' Publish the newly parsed set atomically only after the file was read successfully.
+            ' A valid empty/comment-only file intentionally disables per-sender rules.
+            _apSenderPolicyRules = If(rules.Count > 0, rules, Nothing)
+            Debug.WriteLine($"[AutoPilot] Sender tool policy loaded: {rules.Count} rule(s).")
+        Catch ex As System.Exception
+            ' Preserve the last known good policy on transient read/parse failures.
+            Debug.WriteLine($"[AutoPilot] Failed to reload sender tool policy; keeping last known policy: {ex.Message}")
         End Try
     End Sub
 
+    Private Shared Function IndexOfUnquotedSenderRuleToken(ByVal value As System.String, ByVal token As System.String) As System.Int32
+        If System.String.IsNullOrEmpty(value) OrElse System.String.IsNullOrEmpty(token) Then Return -1
+
+        Dim inQuotes As System.Boolean = False
+        Dim escaped As System.Boolean = False
+
+        For index As System.Int32 = 0 To value.Length - token.Length
+            Dim current As System.Char = value(index)
+            If escaped Then
+                escaped = False
+                Continue For
+            End If
+            If current = "\"c AndAlso inQuotes Then
+                escaped = True
+                Continue For
+            End If
+            If current = """"c Then
+                inQuotes = Not inQuotes
+                Continue For
+            End If
+            If Not inQuotes AndAlso value.Substring(index, token.Length).Equals(token, System.StringComparison.Ordinal) Then Return index
+        Next
+
+        Return -1
+    End Function
+
+    Private Shared Function SplitSenderRuleComponents(ByVal value As System.String) As System.String()
+        Dim result As New System.Collections.Generic.List(Of System.String)()
+        Dim current As New System.Text.StringBuilder()
+        Dim inQuotes As System.Boolean = False
+        Dim escaped As System.Boolean = False
+
+        For Each character As System.Char In If(value, System.String.Empty)
+            If escaped Then
+                current.Append(character)
+                escaped = False
+                Continue For
+            End If
+            If character = "\"c AndAlso inQuotes Then
+                current.Append(character)
+                escaped = True
+                Continue For
+            End If
+            If character = """"c Then
+                current.Append(character)
+                inQuotes = Not inQuotes
+                Continue For
+            End If
+            If (character = ";"c OrElse character = ","c) AndAlso Not inQuotes Then
+                result.Add(current.ToString().Trim())
+                current.Clear()
+            Else
+                current.Append(character)
+            End If
+        Next
+
+        result.Add(current.ToString().Trim())
+        Return result.ToArray()
+    End Function
+
+    Private Shared Function ParseSenderDisclaimerValue(ByVal rawValue As System.String) As System.String
+        Dim value As System.String = If(rawValue, System.String.Empty).Trim()
+        If value.Length >= 2 AndAlso value(0) = """"c AndAlso value(value.Length - 1) = """"c Then
+            value = value.Substring(1, value.Length - 2)
+        End If
+
+        Dim result As New System.Text.StringBuilder()
+        Dim escaped As System.Boolean = False
+        For Each character As System.Char In value
+            If escaped Then
+                Select Case character
+                    Case "n"c : result.Append(System.Environment.NewLine)
+                    Case "r"c : result.Append(ControlChars.Cr)
+                    Case "t"c : result.Append(ControlChars.Tab)
+                    Case """"c : result.Append(""""c)
+                    Case "\"c : result.Append("\"c)
+                    Case Else
+                        result.Append("\"c)
+                        result.Append(character)
+                End Select
+                escaped = False
+            ElseIf character = "\"c Then
+                escaped = True
+            Else
+                result.Append(character)
+            End If
+        Next
+        If escaped Then result.Append("\"c)
+        Return result.ToString().Trim()
+    End Function
+
     ''' <summary>
-    ''' Applies the per-sender tool policy to a session tool list and returns the
-    ''' (possibly narrowed) list. Returns the original list unchanged when no policy
-    ''' is in effect, so existing behaviour is fully preserved.
+    ''' Applies one optional resource-capability directive from a sender rule.
+    ''' Unknown keys are ignored for forward compatibility; malformed known design directives fail closed.
     ''' </summary>
-    ''' <param name="senderEmail">SMTP address of the current sender.</param>
-    ''' <param name="sessionTools">The tools selected for the session.</param>
+    Private Shared Function IsKnownSenderResourceDirective(ByVal rawToken As System.String) As System.Boolean
+        If System.String.IsNullOrWhiteSpace(rawToken) Then Return False
+        Dim token As System.String = rawToken.Trim()
+        Dim separatorIndex As System.Int32 = token.IndexOf("="c)
+        If separatorIndex <= 0 Then Return False
+        Dim key As System.String = token.Substring(0, separatorIndex).Trim()
+        Return key.Equals("designs", System.StringComparison.OrdinalIgnoreCase) OrElse
+               key.Equals("design_sets", System.StringComparison.OrdinalIgnoreCase) OrElse
+               key.Equals("designsets", System.StringComparison.OrdinalIgnoreCase) OrElse
+               key.Equals("disclaimer", System.StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Shared Sub ApplySenderResourceDirective(ByVal rule As AutoPilotSenderPolicyRule,
+                                                     ByVal rawDirective As System.String)
+        If rule Is Nothing OrElse System.String.IsNullOrWhiteSpace(rawDirective) Then Return
+
+        Dim directive As System.String = rawDirective.Trim()
+        Dim separatorIndex As System.Int32 = directive.IndexOf("="c)
+        Dim key As System.String = If(separatorIndex > 0,
+                                      directive.Substring(0, separatorIndex),
+                                      directive).Trim().ToLowerInvariant()
+
+        Dim isDesignsDirective As System.Boolean = key.Equals("designs", System.StringComparison.OrdinalIgnoreCase)
+        Dim isDesignSetsDirective As System.Boolean =
+            key.Equals("design_sets", System.StringComparison.OrdinalIgnoreCase) OrElse
+            key.Equals("designsets", System.StringComparison.OrdinalIgnoreCase)
+        Dim isDisclaimerDirective As System.Boolean = key.Equals("disclaimer", System.StringComparison.OrdinalIgnoreCase)
+
+        ' Unknown directives remain forward-compatible and do not affect legacy tool selection.
+        If Not isDesignsDirective AndAlso Not isDesignSetsDirective AndAlso Not isDisclaimerDirective Then Return
+
+        If isDisclaimerDirective Then
+            rule.DisclaimerText = If(separatorIndex > 0, ParseSenderDisclaimerValue(directive.Substring(separatorIndex + 1)), System.String.Empty)
+            Return
+        End If
+
+        ' A malformed KNOWN resource directive must fail closed. Otherwise a typo such as
+        ' "designs=blok" would silently expose the very repository the rule was intended to hide.
+        Dim parsedValue As System.Nullable(Of System.Boolean) = Nothing
+        If separatorIndex > 0 AndAlso separatorIndex < directive.Length - 1 Then
+            Dim value As System.String = directive.Substring(separatorIndex + 1).Trim()
+            parsedValue = ParseSenderCapabilityValue(value)
+        End If
+
+        Dim effectiveValue As System.Boolean
+        If parsedValue.HasValue Then
+            effectiveValue = parsedValue.Value
+        Else
+            effectiveValue = False
+            System.Diagnostics.Debug.WriteLine(
+                $"[AutoPilot] Invalid sender resource directive '{directive}' was applied fail-closed (blocked).")
+        End If
+
+        If isDesignsDirective Then
+            rule.AllowDesigns = effectiveValue
+        Else
+            rule.AllowDesignSets = effectiveValue
+        End If
+    End Sub
+
+    Private Shared Function ParseSenderCapabilityValue(ByVal rawValue As System.String) As System.Nullable(Of System.Boolean)
+        Select Case If(rawValue, System.String.Empty).Trim().ToLowerInvariant()
+            Case "allow", "allowed", "true", "yes", "on", "1"
+                Return True
+            Case "block", "blocked", "deny", "denied", "false", "no", "off", "0"
+                Return False
+            Case Else
+                Return Nothing
+        End Select
+    End Function
+
     ''' <summary>
     ''' Returns the policy rule that applies to a sender (first pattern match wins;
     ''' DEFAULT is used only when no specific pattern matched). Nothing = no policy.
@@ -231,6 +428,37 @@ Partial Public Class ThisAddIn
         Return addition
     End Function
 
+    Friend Function ResolveDesignAccessForSender(ByVal senderEmail As System.String) As AutoPilotSenderDesignAccess
+        Dim result As New AutoPilotSenderDesignAccess()
+        Dim matched As AutoPilotSenderPolicyRule = MatchSenderPolicyRule(senderEmail)
+        If matched Is Nothing Then Return result
+
+        If matched.AllowDesigns.HasValue Then result.AllowDesigns = matched.AllowDesigns.Value
+        If matched.AllowDesignSets.HasValue Then result.AllowDesignSets = matched.AllowDesignSets.Value
+        If Not result.AllowDesigns Then result.AllowDesignSets = False
+        Return result
+    End Function
+
+    Friend Function ResolveDisclaimerForSender(ByVal senderEmail As System.String) As System.String
+        Dim matched As AutoPilotSenderPolicyRule = MatchSenderPolicyRule(senderEmail)
+        If matched Is Nothing Then Return System.String.Empty
+        Return If(matched.DisclaimerText, System.String.Empty).Trim()
+    End Function
+
+    Private Shared Function BuildAutoPilotDisclaimerHtml(ByVal disclaimerText As System.String) As System.String
+        Dim text As System.String = If(disclaimerText, System.String.Empty).Trim()
+        If text.Length = 0 Then Return System.String.Empty
+
+        Dim encoded As System.String = System.Net.WebUtility.HtmlEncode(text)
+        encoded = encoded.Replace(ControlChars.CrLf, "<br/>").Replace(ControlChars.Cr, "<br/>").Replace(ControlChars.Lf, "<br/>")
+        Return "<div data-redink-autopilot-disclaimer='true' style='margin-top:16px;padding-top:10px;border-top:1px solid #d0d0d0;font-family:Arial,sans-serif;font-size:9pt;color:#666666;'>" & encoded & "</div>"
+    End Function
+
+    ''' <summary>
+    ''' Applies the per-sender tool policy to a session tool list and returns the
+    ''' possibly narrowed list. Existing behaviour is preserved when no matching
+    ''' policy is configured.
+    ''' </summary>
     Friend Function ResolveToolsForSender(senderEmail As String, sessionTools As List(Of ModelConfig)) As List(Of ModelConfig)
         ' No policy in effect -> unchanged behaviour.
         If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return sessionTools
@@ -392,24 +620,7 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function BuildDynamicSkillToolName(skillName As String) As String
-        If System.String.IsNullOrWhiteSpace(skillName) Then Return ""
-
-        Dim suffixBuilder As New System.Text.StringBuilder()
-        Dim lastWasUnderscore As Boolean = False
-
-        For Each ch As Char In skillName.Trim()
-            If System.Char.IsLetterOrDigit(ch) Then
-                suffixBuilder.Append(System.Char.ToLowerInvariant(ch))
-                lastWasUnderscore = False
-            ElseIf Not lastWasUnderscore Then
-                suffixBuilder.Append("_"c)
-                lastWasUnderscore = True
-            End If
-        Next
-
-        Dim suffix As String = suffixBuilder.ToString().Trim("_"c)
-        If suffix = "" Then Return ""
-        Return "skill_" & suffix
+        Return SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName)
     End Function
 
     ''' <summary>Determines whether a tool must never be filtered out (safety fallback).</summary>

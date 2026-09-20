@@ -46,9 +46,30 @@ Namespace SharedLibrary
         Private Shared AddInAssembly As System.Reflection.Assembly
         Private Shared SnapshotTimer As System.Threading.Timer
 
+        Private Shared SessionSentinelPathValue As System.String
+        Private Shared SnapshotStateFilePathValue As System.String
+        Private Shared PreviousSessionSentinelContent As System.String
+        Private Shared LastExtendedSnapshotHash As System.String
+
+        Private Const BreadcrumbCapacity As System.Int32 = 32
+
+        Private Shared ReadOnly BreadcrumbLock As New System.Object()
+        Private Shared ReadOnly Breadcrumbs(BreadcrumbCapacity - 1) As System.String
+        Private Shared BreadcrumbNextIndex As System.Int32
+
         Public Shared ReadOnly Property LogFilePath As System.String
             Get
                 Return LogFilePathValue
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Cheap, allocation-free check that callers can use to skip building
+        ''' breadcrumb strings entirely when diagnostics are switched off.
+        ''' </summary>
+        Public Shared ReadOnly Property IsEnabled As System.Boolean
+            Get
+                Return DiagnosticsEnabled
             End Get
         End Property
 
@@ -98,12 +119,25 @@ Namespace SharedLibrary
                         redInkDirectory,
                         "RI-CrashLog.txt")
 
+                SessionSentinelPathValue =
+                    System.IO.Path.Combine(
+                        redInkDirectory,
+                        "RI-CrashLog.session")
+
+                SnapshotStateFilePathValue =
+                    System.IO.Path.Combine(
+                        redInkDirectory,
+                        "RI-CrashLog.snapshot-hash.txt")
+
                 Try
                     System.IO.Directory.CreateDirectory(redInkDirectory)
                 Catch ex As System.Exception
                     DiagnosticsEnabled = False
                     Return
                 End Try
+
+                PreviousSessionSentinelContent =
+                    ReadPreviousSessionSentinel()
 
                 WriteCollectorReadme(redInkDirectory)
 
@@ -114,6 +148,10 @@ Namespace SharedLibrary
             AppendRecord(
                 "SESSION_START",
                 BuildStartupInformation())
+
+            ReportPreviousSessionOutcome()
+
+            WriteSessionSentinel()
 
             Try
                 OfficeWindowWatchdog.StartWatchdog()
@@ -149,7 +187,9 @@ Namespace SharedLibrary
 
             AppendRecord(
                 "SESSION_END",
-                reason)
+                AppendBreadcrumbBlock(reason))
+
+            DeleteSessionSentinel()
 
             Try
                 OfficeWindowWatchdog.StopWatchdog()
@@ -186,7 +226,7 @@ Namespace SharedLibrary
 
             AppendRecord(
                 eventName,
-                details)
+                AppendBreadcrumbBlock(details))
 
         End Sub
 
@@ -219,6 +259,9 @@ Namespace SharedLibrary
 
             AddHandler System.Threading.Tasks.TaskScheduler.UnobservedTaskException,
                 AddressOf TaskScheduler_UnobservedTaskException
+
+            AddHandler System.AppDomain.CurrentDomain.FirstChanceException,
+                AddressOf CurrentDomain_FirstChanceException
 
         End Sub
 
@@ -260,6 +303,12 @@ Namespace SharedLibrary
             Catch ex As System.Exception
             End Try
 
+            Try
+                RemoveHandler System.AppDomain.CurrentDomain.FirstChanceException,
+                    AddressOf CurrentDomain_FirstChanceException
+            Catch ex As System.Exception
+            End Try
+
         End Sub
 
         Private Shared Sub CurrentDomain_UnhandledException(
@@ -288,7 +337,7 @@ Namespace SharedLibrary
 
             AppendRecord(
                 "APPDOMAIN_UNHANDLED_EXCEPTION",
-                details.ToString())
+                AppendBreadcrumbBlock(details.ToString()))
 
         End Sub
 
@@ -298,7 +347,7 @@ Namespace SharedLibrary
 
             AppendRecord(
                 "WINDOWS_FORMS_THREAD_EXCEPTION",
-                FormatException(e.Exception))
+                AppendBreadcrumbBlock(FormatException(e.Exception)))
 
         End Sub
 
@@ -318,7 +367,7 @@ Namespace SharedLibrary
 
             AppendRecord(
                 "UNOBSERVED_TASK_EXCEPTION",
-                details.ToString())
+                AppendBreadcrumbBlock(details.ToString()))
 
             'Do not call e.SetObserved() here.
             'The logger should not change application behaviour.
@@ -362,7 +411,12 @@ Namespace SharedLibrary
 
             AppendRecord(
                 "PROCESS_EXIT",
-                "The Office process is exiting normally.")
+                AppendBreadcrumbBlock(
+                    "The Office process is exiting." &
+                    System.Environment.NewLine &
+                    BuildProcessMetrics()))
+
+            DeleteSessionSentinel()
 
         End Sub
 
@@ -372,9 +426,167 @@ Namespace SharedLibrary
 
             AppendRecord(
                 "APPDOMAIN_UNLOAD",
-                "The add-in AppDomain is being unloaded.")
+                AppendBreadcrumbBlock(
+                    "The add-in AppDomain is being unloaded."))
 
         End Sub
+
+        Private Shared Sub CurrentDomain_FirstChanceException(
+            ByVal sender As System.Object,
+            ByVal e As System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs)
+
+            If Not DiagnosticsEnabled Then
+                Return
+            End If
+
+            Try
+
+                If e Is Nothing OrElse e.Exception Is Nothing Then
+                    Return
+                End If
+
+                'First-chance exceptions are recorded ONLY as in-memory breadcrumbs so
+                'the on-disk log is never flooded. They surface in the log solely if a
+                'crash record is subsequently written and flushes the breadcrumb ring.
+                If Not IsAddInRelatedException(e.Exception) Then
+                    Return
+                End If
+
+                Breadcrumb(
+                    "FirstChance",
+                    e.Exception.GetType().Name & ": " & e.Exception.Message)
+
+            Catch ex As System.Exception
+            End Try
+
+        End Sub
+
+        Private Shared Function IsAddInRelatedException(
+            ByVal ex As System.Exception) As System.Boolean
+
+            Try
+
+                If AddInAssembly Is Nothing Then
+                    'Without a reference assembly we cannot filter cheaply, so we keep
+                    'the breadcrumb ring lean by ignoring first-chance noise entirely.
+                    Return False
+                End If
+
+                Dim addInSimpleName As System.String =
+                    AddInAssembly.GetName().Name
+
+                If System.String.IsNullOrWhiteSpace(addInSimpleName) Then
+                    Return False
+                End If
+
+                Return Not System.String.IsNullOrWhiteSpace(ex.Source) AndAlso
+                    System.String.Equals(
+                        ex.Source,
+                        addInSimpleName,
+                        System.StringComparison.OrdinalIgnoreCase)
+
+            Catch comparisonException As System.Exception
+                Return False
+            End Try
+
+        End Function
+
+        Public Shared Sub Breadcrumb(
+            ByVal area As System.String,
+            ByVal detail As System.String)
+
+            If Not DiagnosticsEnabled Then
+                Return
+            End If
+
+            Try
+
+                Dim entry As System.String =
+                    System.DateTime.UtcNow.ToString(
+                        "HH:mm:ss.fff",
+                        System.Globalization.CultureInfo.InvariantCulture) &
+                    " [" &
+                    If(area, System.String.Empty) &
+                    "] " &
+                    SafeSingleLine(If(detail, System.String.Empty))
+
+                SyncLock BreadcrumbLock
+
+                    Breadcrumbs(BreadcrumbNextIndex) = entry
+                    BreadcrumbNextIndex =
+                        (BreadcrumbNextIndex + 1) Mod BreadcrumbCapacity
+
+                End SyncLock
+
+            Catch ex As System.Exception
+            End Try
+
+        End Sub
+
+        Private Shared Function AppendBreadcrumbBlock(
+            ByVal details As System.String) As System.String
+
+            Dim breadcrumbBlock As System.String =
+                BuildBreadcrumbBlock()
+
+            If System.String.IsNullOrEmpty(breadcrumbBlock) Then
+                Return details
+            End If
+
+            If System.String.IsNullOrEmpty(details) Then
+                Return breadcrumbBlock
+            End If
+
+            Return details &
+                System.Environment.NewLine &
+                breadcrumbBlock
+
+        End Function
+
+        Private Shared Function BuildBreadcrumbBlock() As System.String
+
+            Try
+
+                Dim ordered As New System.Collections.Generic.List(
+                    Of System.String)()
+
+                SyncLock BreadcrumbLock
+
+                    For offset As System.Int32 = 0 To BreadcrumbCapacity - 1
+
+                        Dim index As System.Int32 =
+                            (BreadcrumbNextIndex + offset) Mod BreadcrumbCapacity
+
+                        Dim entry As System.String = Breadcrumbs(index)
+
+                        If Not System.String.IsNullOrEmpty(entry) Then
+                            ordered.Add(entry)
+                        End If
+
+                    Next
+
+                End SyncLock
+
+                If ordered.Count = 0 Then
+                    Return System.String.Empty
+                End If
+
+                Dim result As New System.Text.StringBuilder()
+
+                result.AppendLine(
+                    "----- RECENT ADD-IN ACTIVITY (BREADCRUMBS) -----")
+
+                For Each entry As System.String In ordered
+                    result.AppendLine(entry)
+                Next
+
+                Return result.ToString()
+
+            Catch ex As System.Exception
+                Return System.String.Empty
+            End Try
+
+        End Function
 
         Private Shared Sub DeferredSnapshotTimerCallback(
             ByVal state As System.Object)
@@ -383,9 +595,37 @@ Namespace SharedLibrary
 
                 If DiagnosticsEnabled Then
 
-                    AppendRecord(
-                        "EXTENDED_SNAPSHOT",
-                        BuildExtendedSnapshot())
+                    Dim snapshot As System.String =
+                        BuildExtendedSnapshot()
+
+                    Dim snapshotHash As System.String =
+                        ComputeStringHash(snapshot)
+
+                    Dim previousHash As System.String =
+                        ReadStoredSnapshotHash()
+
+                    If Not System.String.IsNullOrEmpty(snapshotHash) AndAlso
+                       System.String.Equals(
+                           snapshotHash,
+                           previousHash,
+                           System.StringComparison.Ordinal) Then
+
+                        'Environment unchanged since the last recorded snapshot:
+                        'write a single compact line instead of the full listing to
+                        'keep the crash log small across many short sessions.
+                        AppendRecord(
+                            "EXTENDED_SNAPSHOT_UNCHANGED",
+                            "SnapshotHash=" & snapshotHash)
+
+                    Else
+
+                        AppendRecord(
+                            "EXTENDED_SNAPSHOT",
+                            snapshot)
+
+                        StoreSnapshotHash(snapshotHash)
+
+                    End If
 
                 End If
 
@@ -1666,6 +1906,282 @@ Namespace SharedLibrary
                 System.IO.File.Move(
                     LogFilePathValue,
                     previousLogPath)
+
+            Catch ex As System.Exception
+            End Try
+
+        End Sub
+
+        Private Shared Function ReadPreviousSessionSentinel() As System.String
+
+            Try
+
+                If System.String.IsNullOrWhiteSpace(
+                    SessionSentinelPathValue) Then
+
+                    Return Nothing
+
+                End If
+
+                If Not System.IO.File.Exists(
+                    SessionSentinelPathValue) Then
+
+                    Return Nothing
+
+                End If
+
+                Return System.IO.File.ReadAllText(
+                    SessionSentinelPathValue,
+                    New System.Text.UTF8Encoding(False))
+
+            Catch ex As System.Exception
+                Return Nothing
+            End Try
+
+        End Function
+
+        Private Shared Sub ReportPreviousSessionOutcome()
+
+            Try
+
+                If System.String.IsNullOrWhiteSpace(
+                    PreviousSessionSentinelContent) Then
+
+                    'No leftover sentinel: the previous session either never ran or
+                    'ended cleanly (the sentinel is deleted on clean shutdown/exit).
+                    Return
+
+                End If
+
+                AppendRecord(
+                    "PREVIOUS_SESSION_TERMINATED_ABNORMALLY",
+                    "The previous diagnostics session left an active sentinel, which " &
+                    "means the host was not shut down cleanly (crash, forced " &
+                    "termination or power loss)." &
+                    System.Environment.NewLine &
+                    System.Environment.NewLine &
+                    PreviousSessionSentinelContent)
+
+            Catch ex As System.Exception
+            Finally
+                PreviousSessionSentinelContent = Nothing
+            End Try
+
+        End Sub
+
+        Private Shared Sub WriteSessionSentinel()
+
+            Try
+
+                If System.String.IsNullOrWhiteSpace(
+                    SessionSentinelPathValue) Then
+
+                    Return
+
+                End If
+
+                Dim content As New System.Text.StringBuilder()
+
+                content.AppendLine(
+                    "SessionId=" &
+                    If(SessionId, System.String.Empty))
+
+                content.AppendLine(
+                    "AddIn=" &
+                    If(AddInName, System.String.Empty))
+
+                content.AppendLine(
+                    "StartedUtc=" &
+                    System.DateTime.UtcNow.ToString(
+                        "o",
+                        System.Globalization.CultureInfo.InvariantCulture))
+
+                Try
+
+                    Using currentProcess As System.Diagnostics.Process =
+                        System.Diagnostics.Process.GetCurrentProcess()
+
+                        content.AppendLine(
+                            "Host=" &
+                            currentProcess.ProcessName &
+                            " (PID " &
+                            currentProcess.Id.ToString(
+                                System.Globalization.CultureInfo.InvariantCulture) &
+                            ")")
+
+                    End Using
+
+                Catch ex As System.Exception
+                End Try
+
+                System.IO.File.WriteAllText(
+                    SessionSentinelPathValue,
+                    content.ToString(),
+                    New System.Text.UTF8Encoding(False))
+
+            Catch ex As System.Exception
+            End Try
+
+        End Sub
+
+        Private Shared Sub DeleteSessionSentinel()
+
+            Try
+
+                If System.String.IsNullOrWhiteSpace(
+                    SessionSentinelPathValue) Then
+
+                    Return
+
+                End If
+
+                If System.IO.File.Exists(
+                    SessionSentinelPathValue) Then
+
+                    System.IO.File.Delete(
+                        SessionSentinelPathValue)
+
+                End If
+
+            Catch ex As System.Exception
+            End Try
+
+        End Sub
+
+        Private Shared Function BuildProcessMetrics() As System.String
+
+            Dim result As New System.Text.StringBuilder()
+
+            Try
+
+                Using currentProcess As System.Diagnostics.Process =
+                    System.Diagnostics.Process.GetCurrentProcess()
+
+                    result.AppendLine(
+                        "UptimeSeconds=" &
+                        (System.DateTime.Now - currentProcess.StartTime).
+                            TotalSeconds.ToString(
+                                "F0",
+                                System.Globalization.CultureInfo.InvariantCulture))
+
+                    result.AppendLine(
+                        "PeakWorkingSetBytes=" &
+                        currentProcess.PeakWorkingSet64.ToString(
+                            System.Globalization.CultureInfo.InvariantCulture))
+
+                    result.AppendLine(
+                        "WorkingSetBytes=" &
+                        currentProcess.WorkingSet64.ToString(
+                            System.Globalization.CultureInfo.InvariantCulture))
+
+                End Using
+
+            Catch ex As System.Exception
+
+                result.AppendLine(
+                    "ProcessMetricsError=" &
+                    ex.Message)
+
+            End Try
+
+            Return result.ToString()
+
+        End Function
+
+        Private Shared Function ComputeStringHash(
+            ByVal value As System.String) As System.String
+
+            If value Is Nothing Then
+                Return System.String.Empty
+            End If
+
+            Try
+
+                Using sha256 As System.Security.Cryptography.SHA256 =
+                    System.Security.Cryptography.SHA256.Create()
+
+                    Dim hashBytes() As System.Byte =
+                        sha256.ComputeHash(
+                            New System.Text.UTF8Encoding(False).GetBytes(value))
+
+                    Dim result As New System.Text.StringBuilder(
+                        hashBytes.Length * 2)
+
+                    For Each hashByte As System.Byte In hashBytes
+
+                        result.Append(
+                            hashByte.ToString(
+                                "x2",
+                                System.Globalization.CultureInfo.InvariantCulture))
+
+                    Next
+
+                    Return result.ToString()
+
+                End Using
+
+            Catch ex As System.Exception
+                Return System.String.Empty
+            End Try
+
+        End Function
+
+        Private Shared Function ReadStoredSnapshotHash() As System.String
+
+            Try
+
+                If Not System.String.IsNullOrEmpty(
+                    LastExtendedSnapshotHash) Then
+
+                    Return LastExtendedSnapshotHash
+
+                End If
+
+                If System.String.IsNullOrWhiteSpace(
+                    SnapshotStateFilePathValue) Then
+
+                    Return System.String.Empty
+
+                End If
+
+                If Not System.IO.File.Exists(
+                    SnapshotStateFilePathValue) Then
+
+                    Return System.String.Empty
+
+                End If
+
+                LastExtendedSnapshotHash =
+                    System.IO.File.ReadAllText(
+                        SnapshotStateFilePathValue,
+                        New System.Text.UTF8Encoding(False)).Trim()
+
+                Return LastExtendedSnapshotHash
+
+            Catch ex As System.Exception
+                Return System.String.Empty
+            End Try
+
+        End Function
+
+        Private Shared Sub StoreSnapshotHash(
+            ByVal snapshotHash As System.String)
+
+            Try
+
+                LastExtendedSnapshotHash = snapshotHash
+
+                If System.String.IsNullOrWhiteSpace(
+                    SnapshotStateFilePathValue) Then
+
+                    Return
+
+                End If
+
+                System.IO.File.WriteAllText(
+                    SnapshotStateFilePathValue,
+                    If(snapshotHash, System.String.Empty),
+                    New System.Text.UTF8Encoding(False))
 
             Catch ex As System.Exception
             End Try

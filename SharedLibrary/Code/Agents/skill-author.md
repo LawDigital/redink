@@ -1,4 +1,4 @@
----
+﻿---
 name: skill-author
 description: Runs in Word or Outlook Local Chat to draft, review, revise, convert, diagnose, and explain how to author Red Ink skills, agents, and recipe-backed resource packages (including reference/design resources) for Word, Outlook Local Chat, and Outlook AutoPilot using host-verified tools and disciplined resource handling.
 allowed-tools:
@@ -45,6 +45,10 @@ When this skill authors or revises a resource for this foundation, preserve thes
 - **Interaction ownership:** `ask_user` belongs to an interactive parent skill/orchestrator, never to a sub-agent. Author parent skills to call it only when advertised; AutoPilot and other non-interactive runs must surface the minimum clarification requirement without calling it.
 - **Sub-agent call contract:** every authored parent workflow that invokes an `agent_<name>` must supply stable `subagent_task_id` and `expected_artifacts` on every invocation. Use `expected_artifacts: []` for non-file-producing workers.
 - **Context safety:** keep the parent context compact. Large-document reduction, bounded research, comparison, requirement checking, row extraction, and other source-heavy work should be delegated to the appropriate isolated agent when available rather than dumping raw source material into the parent.
+- **File-backed full-text analysis:** when a workflow needs one LLM to reason over an entire source and the source fits the configured full-text limit, prefer a file-backed path such as `text_export_to_text` -> `text_analyze_file`. This keeps the raw source out of the parent tool-response context while still giving the inner LLM the whole document. Use semantic retrieval only when the source is too large or the task is genuinely retrieval-oriented.
+- **Large-result discipline:** never add `context_expand` merely to re-read a complete structured tool result that the current turn already received. Use it only when a stored-by-reference result is actually truncated/omitted and the workflow truly needs a missing window. Prefer tools that return compact structured results.
+- **Runtime-schema verification:** never invent frontmatter keys or sequencing contracts from memory. Before authoring a non-basic key, verify that the current parser and runtime consume it in code or documented schema. Unsupported metadata is a defect even if it looks plausible.
+- **Code-backed tool verification:** when a task depends on a newly added or changed host tool, do not infer registration from one implementation file. Verify the full path from tool implementation -> shared dispatcher/registry -> host registration -> Word/Outlook Local Chat -> Outlook AutoPilot, plus the authoritative `.inky/Red_Ink_Tool_List.md` and its source-tree mirror when present. If the user supplies the code tree, inspect it before drafting the skill.
 - **Bounded research:** research one concrete unresolved question at a time, prefer authoritative/primary sources, reassess after each round, and stop when additional retrieval is unlikely to change the answer materially.
 - **Bounded mutation recovery:** exact-anchor document edits get one initial attempt plus at most two recovery attempts per logical operation. Once unresolved, do not reopen the same logical edit in the parent. Host-side circuit breakers may enforce stricter limits.
 - **Real file finalization:** when the requested outcome requires a file, the workflow must invoke an actual create/save/export/finalizing tool and use the path/reference returned by that successful tool. A path mentioned in prose, planned JSON, a read/extract result, or an in-place mutation is not proof of a final deliverable.
@@ -122,7 +126,7 @@ For **agents**, distinguish required and optional capabilities explicitly:
 - `allowed-tools`: every listed tool is a hard dependency; the host may block the isolated run if any required exact tool is absent.
 - `optional-tools`: the host includes only names that exist in the authoritative registry snapshot; missing optional tools are ignored.
 - Put host-specific source access (`m365_*`, attachment-only tools, `agent_workspace_*`) and configuration-dependent helpers such as `js_run` under `optional-tools` unless the agent genuinely cannot perform its defined job without them.
-- Do not use `python_execute` as a generic fallback.
+- Prefer specialized/native deterministic tools for document and artifact workflows. Do not add `python_execute` or `js_run` as a spontaneous recovery path merely because they are advertised. Use them only when the workflow explicitly requires deterministic computation/transformation that the selected native tool cannot provide, and keep installation-dependent helpers optional unless the core workflow genuinely depends on them.
 
 
 If a skill uses a tool that exists on only some hosts, it MUST check availability and block cleanly
@@ -274,6 +278,9 @@ When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a 
 - `network` (optional, default false): opt-in for tools that touch the network (`js_run` with navigation, web tools).
 - `timeout` (optional): seconds; 0 = default.
 - `enabled` (optional, default true): set `false` ONLY when the user explicitly asks for the resource to be created or kept inactive. A disabled resource remains on disk and editable but is not offered to the model.
+- `deliverable-count` (skills only, optional, default 0): exact number of user-facing final file artifacts the skill requires. Use this when file cardinality is part of the task contract. A positive value makes `expected_artifacts` mandatory at skill invocation and turns that exact slot set into a hard completion/delivery contract; it is not a filename or extension heuristic.
+- `required-successful-tools` (skills only, optional): comma-separated or YAML-list exact tool names whose successful execution is a hard prerequisite for `complete`. Use this only for workflow steps whose execution itself is an invariant (for example an independent evidence-verification pass), not as a general preference or routing hint. If a required tool cannot succeed, the workflow must remain blocked rather than silently bypassing the declared check.
+  For workflows with a mandatory post-mutation QA read, include that QA tool here so `complete` cannot be accepted after the writer alone. This field proves at least one successful execution of each named tool; it does not distinguish multiple calls to the same tool or establish ordering. Do not emulate missing ordering semantics with invented frontmatter keys.
 
 Never add `enabled: false` on your own initiative. A disabled resource stays on disk and editable in
 "Manage Skills & Agents" but is not offered to the model until re-enabled.
@@ -293,6 +300,16 @@ Binding rules:
 - If the skill creates or finalizes a user-facing file, include the actual create/save/export/finalizer tool
   that proves the file exists (for example `word_apply_template`, `word_save_as`, or the relevant
   create/export tool). Do not rely on prose or a helper agent to create the final file.
+- If the number of user-facing final files is fixed by the workflow, declare it with `deliverable-count`.
+  For example, a workflow whose only deliverable is one completed workbook uses `deliverable-count: 1`.
+  Do not use this field when the legitimate file count is variable; the runtime treats a positive count as
+  an exact cardinality contract and disables Legacy output promotion once the skill invocation registers its
+  opaque `expected_artifacts` slots.
+  Once a positive `deliverable-count` has locked the logical `expected_artifacts` slots, author the
+  skill around those stable logical slot ids; do **not** require the model to manufacture or rotate physical
+  `artifact_id` / `supersedes_artifact_id` revisions merely to call an optional file producer. The host owns
+  missing physical revision identity for a single locked slot and binds successive producer revisions
+  deterministically. A skill may still require exact logical slot reuse and must reject extra/mismatched slots.
 - If the skill reads attachments, active Word content, workspace files, or performs deterministic
   computation, include the exact corresponding tools it actually uses.
 - Dynamic `agent_*` helpers may be declared when useful, but a user-facing skill must remain capable of
@@ -336,6 +353,14 @@ flags from the `skill_use` `resource_index` BEFORE any write and act determinist
   everything under the local root. Prefer local unless the user explicitly asks to change the shared set.
 - `new_resource_root` — authoritative target for NEW resources; already accounts for central
   permission. Never override it toward `central_root` when central writes are disallowed.
+
+**Write-target precedence for this authoring skill:** the rules in this section and Section 12 are
+authoritative for resource writes. If a generic `resource_index` hint says to edit an existing
+resource at its discovered `file` path or says not to copy a central resource locally, interpret that
+hint as applying only when the discovered path is writable. When `origin=central` and
+`central_writes_allowed=false`, the discovered central `file` path is a READ source only and MUST NOT
+be used as the write target. The corresponding path under `local_root` is the mandatory writable
+override. This is normal local shadowing, not an optional fork, and requires no additional user request.
 
 ### Resource layout
 
@@ -469,8 +494,16 @@ call `tool_loader` again later in the same run.
 
 1. Look up the resource by name in `resource_index`.
 2. Read its exact `file` path with `text_read`. Never guess a path; base every edit on actual content.
-3. Write changes back to the SAME `file` path with `text_write`. Do not create a new folder for an
-   existing resource, and do not fork a central resource into local unless the user asks.
+3. If its `origin` is `local`, write changes back to that SAME `file` path with `text_write`.
+4. If its `origin` is `central` and `central_writes_allowed` is `true`, write changes back to that exact
+   central `file` path only when the user actually wants the shared resource changed; otherwise prefer a
+   local override.
+5. If its `origin` is `central` and `central_writes_allowed` is `false`, NEVER attempt the central write.
+   Treat the central resource as the read-only source and create/update the corresponding local override
+   under `local_root`, preserving the resource-relative path below `skills/` or `agents/`. Copy any bundled
+   `scripts/` / `references/` assets that the revised local resource still depends on. This local shadowing
+   is the normal edit behavior when only the local skillset is writable; it does not require a separate
+   user request to "fork" the resource.
 
 ## 13. Authoring workflow
 
@@ -484,9 +517,10 @@ call `tool_loader` again later in the same run.
    limitations/safe-failure. Build the Section 7a dependency table and make `allowed-tools` the smallest
    complete set that lets the skill execute its own core workflow on every claimed host.
 5. Validate deterministically with `js_run` where useful.
-6. Write NEW resources to an absolute path under `new_resource_root`; edit EXISTING resources at their
-   exact `file` path. Ensure required `references/`/`scripts/` assets exist (binaries via `file_*`).
-   State every exact absolute path touched.
+6. Write NEW resources to an absolute path under `new_resource_root`. For EXISTING resources, follow
+   Section 12: edit the exact local/authorized-central `file` path, but shadow a read-only central resource
+   into `local_root` instead of attempting a forbidden central write. Ensure required `references/`/`scripts/`
+   assets exist (binaries via `file_*`). State every exact absolute path touched.
 7. Do not accumulate accidental duplicates. Remove a stale/superseded resource only when that status is clear and deletion is authorized; otherwise report the overlap instead of deleting it.
 
 ## 14. Review checklist
@@ -500,20 +534,22 @@ call `tool_loader` again later in the same run.
 7. Attachment vs. path vs. workspace-item vs. open-document representations handled correctly;
    handoffs verified.
 8. Single-final-output discipline applied; intermediates cleaned or the one final file named.
-9. Author-mode/write-permission flags respected; NEW under `new_resource_root`, edits at exact path;
-   no relative `.inky` paths.
+9. Author-mode/write-permission flags respected; NEW under `new_resource_root`; existing local or
+   authorized-central resources edited at their exact path; read-only central resources shadowed under
+   `local_root`; no relative `.inky` paths.
 10. Required `references/`/`scripts/` assets exist; binaries via `file_*`, not `text_write`.
-11. Frontmatter valid; `name` unique/kebab-case; `description` one sentence; `enabled:false` only on
-    explicit request. `allowed-tools` satisfies the Section 7a dependency contract: references have their
+11. Frontmatter is physically present at byte/character start (allowing only UTF-8 BOM before `---`), parses under the Red Ink runtime schema, and contains at least non-empty `name`, `description`, and `allowed-tools`; `name` is unique/kebab-case; `description` one sentence; `enabled:false` only on
+    explicit request. After every SKILL.md/AGENT.md write, re-read the written file and validate this frontmatter before reporting success. `allowed-tools` satisfies the Section 7a dependency contract: references have their
     reader, interactive clarification has `ask_user`, real outputs have a finalizer, and optional agents are
     not the sole implementation of the core workflow.
 12. Task-status footer contract and safe-failure behavior included; completion reflects the user task.
 13. File-producing workflows create/finalize a real output; Word-return flows finalize after the last mutation; no model-visible host registry/delivery state is invented.
-14. Context-heavy work is delegated/compacted appropriately; research and edit retries are bounded.
-15. New review metadata defaults to author/reviewer `Inky` unless the user overrides it.
-16. Applicable resource-specific authoring recipe resolved and followed; resource-specific logic remains in references rather than being hard-coded into this generic skill.
-17. For how-to questions, provide copy/paste-ready natural-language prompts and required inputs without changing files unless requested.
-18. For consequential architecture changes, consider an isolated `agent_advisor` second pass when available; never use it as a substitute for host/tool verification.
+14. Context-heavy work uses the smallest reliable representation: file-backed full-text analysis when whole-document reasoning fits, semantic retrieval when it does not, and `context_expand` only for genuinely omitted result windows.
+15. Every non-basic frontmatter/sequencing key was verified against the current parser/runtime; no plausible-but-unsupported metadata was authored. Mandatory post-write QA tools are declared in `required-successful-tools` when completion must depend on them.
+16. New review metadata defaults to author/reviewer `Inky` unless the user overrides it.
+17. Applicable resource-specific authoring recipe resolved and followed; resource-specific logic remains in references rather than being hard-coded into this generic skill.
+18. For how-to questions, provide copy/paste-ready natural-language prompts and required inputs without changing files unless requested.
+19. For consequential architecture changes, consider an isolated `agent_advisor` second pass when available; never use it as a substitute for host/tool verification.
 
 ## 15. Output format
 
@@ -531,3 +567,8 @@ final response with a one-line confirmation, e.g.
 - The parent skill owns end-user interaction. Sub-agents must receive a bounded task and must not be expected to ask the user.
 - Every `agent_<name>` call must include a stable opaque `subagent_task_id` for that logical delegated task and `expected_artifacts`. Use `expected_artifacts: []` for analysis-only workers. If a delegated file-producing task is expected, pass the complete opaque artifact contract required by the host before the run; do not invent or broaden artifact identities later.
 - Treat an agent's missing optional host capability as a reason to adapt the bounded task or return a limitation, not as permission to bypass the selected workflow.
+
+### Transformations-Postcondition für Datei-Deliverables
+
+Wenn ein Skill für seine finalen Deliverables einen host-verifizierten Effekt verlangt, deklariere ihn generisch mit `deliverable-required-effects`, z. B. `deliverable-required-effects: content_mutated`. Effekt-IDs sind opak und werden vom Host nicht fachlich interpretiert. Ein Final-Artefakt erfüllt den Slot nur, wenn der erfolgreiche Produzent den verlangten Effekt deterministisch nachweist. Für `content_mutated` genügt daher eine reine `file_copy`-/`file_move`-/`file_rename`-Operation nicht. Verwende Required Effects nur, wenn die Aufgabe diese Wirkung wirklich verlangt; unveränderte Kopien/Weitergaben dürfen keinen Mutations-Effekt fordern.
+Für Excel-Transformationsskills kann der Host zusätzlich pro tatsächlich inhaltlich geändertem Arbeitsblatt den generischen Effekt `worksheet_mutated.<normalisierter_blattname>` nachweisen (Kleinbuchstaben, Umlaute als `ae/oe/ue`, sonstige Trennzeichen als `_`). Ein Skill darf solche Effekte deklarieren, wenn Completion zwingend Mutationen auf bestimmten Arbeitsblättern voraussetzt. Dadurch genügt eine Teilbearbeitung eines anderen Blatts nicht als vollständiger Erfolg.

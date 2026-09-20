@@ -189,6 +189,12 @@ Partial Public Class ThisAddIn
         tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
         tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
 
+        Dim translationDictionarySegmentCatalog As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionarySegmentCatalog(_context)
+        Dim translationDictionaryToolHint As System.String = System.String.Empty
+        If Not System.String.IsNullOrWhiteSpace(translationDictionarySegmentCatalog) Then
+            translationDictionaryToolHint = " Translation dictionary optional segments available by target language (names only): " & translationDictionarySegmentCatalog & "."
+        End If
+
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
@@ -218,7 +224,7 @@ Partial Public Class ThisAddIn
             "(2) Call process_word_document with task_type='translate', instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
             "NEVER combine two distinct operations into a single instruction string. " &
             "However, a single coherent task counts as one operation (e.g., 'Translate to German' is one operation even though it involves reading and rewriting). " &
-            "Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
+            "TRANSLATION DICTIONARY: for task_type='translate', ALWAYS set target_language. The host supplies only GLOBAL + [TargetLanguage]. Optional [TargetLanguage:Segment] content is included only when you explicitly name it in dictionary_segments. Do not choose optional segments speculatively; select them only when the request/context warrants that variant, client, or domain." & translationDictionaryToolHint & " Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
         .ToolDefinition =
             "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
             """description"":""Preferred for transforming an EXISTING Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachment while preserving its native structure, styles, layout/master, and formatting. Applies exactly ONE processing instruction per call. " &
@@ -244,6 +250,8 @@ Partial Public Class ThisAddIn
             """task_type"":{""type"":""string"",""enum"":[""translate"",""correct"",""other""]," &
             """description"":""Classifies the operation: 'translate' for language translation, 'correct' for spelling/grammar/style correction or proofreading, " &
             "'other' for everything else (anonymization, data transformation, restructuring, summarization, etc.). Default: 'other'""}," &
+            """target_language"":{""type"":""string"",""description"":""For task_type='translate', the requested target language. Required by the host so only the matching [Language] dictionary block is used.""}," &
+            """dictionary_segments"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional segment names for target_language, e.g. [Schweizer Hochdeutsch]. Omit unless a specific [Language:Segment] variant/client/domain is warranted. GLOBAL + [target_language] is always included.""}," &
             """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. " &
             "Can include output files from previous tool calls (e.g. 'Contract_processed.docx'). " &
             "If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &

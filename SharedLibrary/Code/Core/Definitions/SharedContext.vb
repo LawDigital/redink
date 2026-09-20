@@ -106,6 +106,8 @@ Namespace SharedLibrary
             Property INI_AllowLegacyDocFiles As Boolean
             Property INI_JsRunDisable As Boolean
             Property INI_BrowserToolsDisable As Boolean
+            Property INI_PlayWrightPath As String
+            Property INI_PlayWrightUseLocalCache As Boolean
 
             Property INI_AutoPilotAutoStart As Boolean
             Property INI_AutoPilotSchedulerLocalChat As Boolean
@@ -164,6 +166,7 @@ Namespace SharedLibrary
             Property INI_LocalModelPath As String
             Property INI_DictionaryPath As String
             Property INI_DictionaryPathLocal As String
+            Property INI_DictionarySegmentPrompt As Boolean
             Property INI_TTSEndpoint As String
 
             Property INI_STT_Google As String
@@ -489,6 +492,8 @@ Namespace SharedLibrary
         Public Property INI_AllowLegacyDocFiles As Boolean Implements ISharedContext.INI_AllowLegacyDocFiles
         Public Property INI_JsRunDisable As Boolean Implements ISharedContext.INI_JsRunDisable
         Public Property INI_BrowserToolsDisable As Boolean Implements ISharedContext.INI_BrowserToolsDisable
+        Public Property INI_PlayWrightPath As String Implements ISharedContext.INI_PlayWrightPath
+        Public Property INI_PlayWrightUseLocalCache As Boolean Implements ISharedContext.INI_PlayWrightUseLocalCache
         Public Property INI_Language1 As String Implements ISharedContext.INI_Language1
         Public Property INI_Language2 As String Implements ISharedContext.INI_Language2
         Public Property INI_MarkdownConvert As Boolean Implements ISharedContext.INI_MarkdownConvert
@@ -541,6 +546,7 @@ Namespace SharedLibrary
         Public Property INI_LocalModelPath As String Implements ISharedContext.INI_LocalModelPath
         Public Property INI_DictionaryPath As String Implements ISharedContext.INI_DictionaryPath
         Public Property INI_DictionaryPathLocal As String Implements ISharedContext.INI_DictionaryPathLocal
+        Public Property INI_DictionarySegmentPrompt As Boolean Implements ISharedContext.INI_DictionarySegmentPrompt
         Public Property INI_TTSEndpoint As String Implements ISharedContext.INI_TTSEndpoint
 
         Public Property INI_STT_Google As String Implements ISharedContext.INI_STT_Google

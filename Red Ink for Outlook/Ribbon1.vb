@@ -483,7 +483,18 @@ Public Class Ribbon1
 
     Private Sub RI_ResetSpacing_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_ResetSpacing.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "ResetSpacing_Outlook invoked")
-        SharedMethods.ResetSelectedTextParagraphSpacing()
+
+        Try
+            Dim inspector As Microsoft.Office.Interop.Outlook.Inspector = Globals.ThisAddIn.Application.ActiveInspector()
+            If inspector Is Nothing Then Return
+
+            Dim wordEditor As Microsoft.Office.Interop.Word.Document = TryCast(inspector.WordEditor, Microsoft.Office.Interop.Word.Document)
+            If wordEditor Is Nothing OrElse wordEditor.Application Is Nothing Then Return
+
+            SharedMethods.ResetSelectedTextParagraphSpacing(wordEditor.Application.Selection)
+        Catch ex As System.Exception
+            SharedMethods.ShowCustomMessageBox("ResetSelectedTextParagraphSpacing Error: " & ex.Message, "Error")
+        End Try
     End Sub
 
 End Class

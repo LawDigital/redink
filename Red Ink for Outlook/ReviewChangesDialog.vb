@@ -429,47 +429,74 @@ Public Class ReviewChangesDialog
         ConsolidateEquivalentLineBreakChanges()
     End Sub
 
-    Private Shared Function TokenizePreservingWhitespace(s As String) As List(Of String)
-        Dim tokens As New List(Of String)()
+    Private Shared Function TokenizePreservingWhitespace(s As System.String) As System.Collections.Generic.List(Of System.String)
+        Dim tokens As New System.Collections.Generic.List(Of System.String)()
         If s Is Nothing Then Return tokens
 
-        s = s.Replace(vbCrLf, vbLf) _
-         .Replace(vbCr, vbLf)
+        Dim normalized As System.String =
+            s.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
 
-        Dim i As Integer = 0
+        Dim lines As System.String() = normalized.Split(ControlChars.Lf)
 
-        While i < s.Length
-            Dim ch As Char = s(i)
+        For lineIndex As System.Int32 = 0 To lines.Length - 1
+            TokenizeLinePreservingWhitespace(lines(lineIndex), tokens)
+            If lineIndex < lines.Length - 1 Then tokens.Add("{br}")
+        Next
 
-            If ch = ControlChars.Lf Then
-                tokens.Add("{br}")
-                i += 1
+        Return tokens
+    End Function
 
-            ElseIf ch = ControlChars.Tab Then
+    Private Shared Sub TokenizeLinePreservingWhitespace(
+        line As System.String,
+        tokens As System.Collections.Generic.List(Of System.String))
+
+        If tokens Is Nothing Then Return
+        If line Is Nothing Then line = System.String.Empty
+
+        Dim offset As System.Int32 = 0
+
+        ' Treat the complete Markdown list prefix as one structural token. This prevents
+        ' ReviewChangesDialog from allowing indentation and marker changes to be accepted
+        ' independently, which can turn a valid nested list into a code block or flatten it.
+        Dim listPrefixMatch As System.Text.RegularExpressions.Match =
+            System.Text.RegularExpressions.Regex.Match(
+                line,
+                "^([ \t]*)(?:[-+*]|\d+[\.)])([ \t]+)",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        If listPrefixMatch.Success AndAlso listPrefixMatch.Length > 0 Then
+            tokens.Add(listPrefixMatch.Value)
+            offset = listPrefixMatch.Length
+        End If
+
+        Dim i As System.Int32 = offset
+
+        While i < line.Length
+            Dim ch As System.Char = line(i)
+
+            If ch = ControlChars.Tab Then
                 tokens.Add(ControlChars.Tab)
                 i += 1
 
             ElseIf ch = " "c Then
-                Dim start As Integer = i
-                While i < s.Length AndAlso s(i) = " "c
+                Dim start As System.Int32 = i
+                While i < line.Length AndAlso line(i) = " "c
                     i += 1
                 End While
-                tokens.Add(s.Substring(start, i - start))
+                tokens.Add(line.Substring(start, i - start))
 
             Else
-                Dim start As Integer = i
-                While i < s.Length AndAlso
-                      s(i) <> " "c AndAlso
-                      s(i) <> ControlChars.Tab AndAlso
-                      s(i) <> ControlChars.Lf
+                Dim start As System.Int32 = i
+                While i < line.Length AndAlso
+                      line(i) <> " "c AndAlso
+                      line(i) <> ControlChars.Tab
                     i += 1
                 End While
-                tokens.Add(s.Substring(start, i - start))
+                tokens.Add(line.Substring(start, i - start))
             End If
         End While
+    End Sub
 
-        Return tokens
-    End Function
 
     Private Sub ConsolidateEquivalentLineBreakChanges()
         If _segments.Count < 2 Then Return

@@ -148,12 +148,32 @@ Namespace Agents
     End Class
 
     Public NotInheritable Class PythonExecuteToolCore
+        Private Const PackageRelationshipsNamespace As System.String = "http://schemas.openxmlformats.org/package/2006/relationships"
+        Private Const OfficeRelationshipsNamespace As System.String = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+        Private NotInheritable Class TrustedXlsxExternalRelationshipBaselineEntry
+            Public Property RelationshipPart As System.String = System.String.Empty
+            Public Property OwnerPart As System.String = System.String.Empty
+            Public Property RelationshipId As System.String = System.String.Empty
+            Public Property RelationshipType As System.String = System.String.Empty
+            Public Property Target As System.String = System.String.Empty
+            Public Property TargetMode As System.String = System.String.Empty
+            Public Property RelationshipXml As System.String = System.String.Empty
+            Public Property HyperlinkRef As System.String = System.String.Empty
+        End Class
+
+        Private NotInheritable Class TrustedXlsxExternalRelationshipBaseline
+            Public Property OriginalSourcePath As System.String = System.String.Empty
+            Public Property SanitizedSourcePath As System.String = System.String.Empty
+            Public ReadOnly Property Entries As New System.Collections.Generic.List(Of TrustedXlsxExternalRelationshipBaselineEntry)()
+        End Class
+
         Public Const ToolName As System.String = "python_execute"
         Private Const ReservedStdinRelativePath As System.String = "__redink_tool/stdin.txt"
 
         Public Shared ReadOnly Property ToolInstructionsPrompt As System.String
             Get
-                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. For Word document modifications (.docx), prefer the native Word tools (for example word_write, word_markup, word_comment_add) over python_execute; select python_execute only when those native tools are unsuitable, have already failed, or cannot perform the required operation. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. When you do use python_execute, put the COMPLETE task into one self-contained program that inspects the document as needed, identifies the target, performs the modification, saves the final output, validates the result, and publishes the result/output, all in the same execution. Do not split a simple task into separate python_execute calls for discovery, editing, re-reading, verification, or publication; only make a second call when information from the first execution is genuinely required before the next program can be constructed, or to repair a genuinely failed execution. After the requested output has been produced and validated in a successful run, do not issue further python_execute calls to re-read or re-verify the result; finalize instead. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Never shorten, rename, or invent aliases for input_files to work around host path lengths; input_files must remain real attachment/workspace references and the host handles any required physical staging aliases transparently. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Do not use python_execute to inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; the sandbox can access only staged `input_files` and files created through `agent_api.output_path(...)`. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model. Each call executes a complete, standalone Python program from scratch; nothing persists between calls. Do not stall the process: do not sleep, poll, retry in a loop, or wait for a file, resource, or state to appear; if an expected input or condition is missing, publish that fact and return immediately instead of waiting. Host-mediated capabilities (such as language-model assistance or web retrieval/search) are comparatively slow and optional; only call them when the task requires them, and never rely on them completing quickly. A deterministic Python error (for example SyntaxError, NameError, AttributeError, TypeError, ValueError, ImportError, or ModuleNotFoundError) will fail identically if resubmitted unchanged, so fix the code instead of retrying the same script. After an AttributeError or an API mismatch, do not guess a similarly named attribute or method; first inspect the real object with type(value), type(value).__module__, type(value).__qualname__, and hasattr(value, 'name') (a filtered dir() is acceptable), then call the API that actually exists. Do not reuse an approach that already failed. agent_api.output_path(name) requires a non-empty relative path inside the output directory; an empty string, '.', absolute paths, and paths escaping the output directory are rejected. Never mask a failure with a broad try/except or by writing placeholder/dummy output; a repair must preserve the required behavior and produce the real result. Published results must be JSON-compatible: allowed values are dictionaries with string keys, lists, strings, integers, finite floating-point values, booleans, and null; convert tuples and sets to lists, convert pathlib.Path values with str(path), convert datetime values to ISO 8601 strings, and reduce library objects or custom classes to dictionaries or primitive values before calling agent_api.publish_result(...). agent_api.output_path(name) returns a pathlib.Path; most modern APIs accept path-like objects, but if a third-party library rejects pathlib.Path or WindowsPath (for example reportlab.platypus.SimpleDocTemplate), convert it with str(path) only at that API boundary. python-docx header objects do not provide a universal .text property: read header text from section.header.paragraphs (joining each paragraph.text) and, when required, from section.header.tables. Do not pass a returned internal results path (for example results/<session-id>/file.docx) to input_files: published-result paths are informational only and are not reusable as inputs. Only use attachment references, workspace-relative paths, or explicitly reusable published-file handles as input_files."
+                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. For Word document modifications (.docx), native Word tools are usually more efficient and should normally be tried first, but their presence never disables python_execute: use Python whenever its libraries/file model are better suited, whenever a native tool is unsuitable, or after a native-tool limitation/failure. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. When you do use python_execute, put the COMPLETE task into one self-contained program that inspects the document as needed, identifies the target, performs the modification, saves the final output, validates the result, and publishes the result/output, all in the same execution. Do not split a simple task into separate python_execute calls for discovery, editing, re-reading, verification, or publication; only make a second call when information from the first execution is genuinely required before the next program can be constructed, or to repair a genuinely failed execution. After the requested output has been produced and validated in a successful run, do not issue further python_execute calls to re-read or re-verify the result; finalize instead. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Never shorten, rename, or invent aliases for input_files to work around host path lengths; input_files must remain real attachment/workspace references and the host handles any required physical staging aliases transparently. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Do not use python_execute to inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; the sandbox can access only staged `input_files` and files created through `agent_api.output_path(...)`. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model. Each call executes a complete, standalone Python program from scratch; nothing persists between calls. Do not stall the process: do not sleep, poll, retry in a loop, or wait for a file, resource, or state to appear; if an expected input or condition is missing, publish that fact and return immediately instead of waiting. Host-mediated capabilities (such as language-model assistance or web retrieval/search) are comparatively slow and optional; only call them when the task requires them, and never rely on them completing quickly. A deterministic Python error (for example SyntaxError, NameError, AttributeError, TypeError, ValueError, ImportError, or ModuleNotFoundError) will fail identically if resubmitted unchanged, so fix the code instead of retrying the same script. After an AttributeError or an API mismatch, do not guess a similarly named attribute or method; first inspect the real object with type(value), type(value).__module__, type(value).__qualname__, and hasattr(value, 'name') (a filtered dir() is acceptable), then call the API that actually exists. Do not reuse an approach that already failed. agent_api.output_path(name) requires a non-empty relative path inside the output directory; an empty string, '.', absolute paths, and paths escaping the output directory are rejected. Never mask a failure with a broad try/except or by writing placeholder/dummy output; a repair must preserve the required behavior and produce the real result. Published results must be JSON-compatible: allowed values are dictionaries with string keys, lists, strings, integers, finite floating-point values, booleans, and null. The host defensively normalizes common boundary values such as tuples/sets, pathlib.Path, Decimal and date/time values before publication, but library objects or custom classes must still be reduced explicitly to dictionaries or primitive values. agent_api.output_path(name) returns a pathlib.Path; most modern APIs accept path-like objects, but if a third-party library rejects pathlib.Path or WindowsPath (for example reportlab.platypus.SimpleDocTemplate), convert it with str(path) only at that API boundary. python-docx header objects do not provide a universal .text property: read header text from section.header.paragraphs (joining each paragraph.text) and, when required, from section.header.tables. Do not pass a returned internal results path (for example results/<session-id>/file.docx) to input_files: published-result paths are informational only and are not reusable as inputs. Use only attachment references, workspace-relative paths, uniquely resolvable Skill reference files, or explicitly reusable published-file handles as input_files."
             End Get
         End Property
 
@@ -161,7 +181,7 @@ Namespace Agents
             Get
                 Dim definition As New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("name", ToolName),
-                New Newtonsoft.Json.Linq.JProperty("description", "Executes a self-contained Python script in a sandboxed, network-isolated process. It may return an explicit bounded JSON/text result, create validated output documents, and, depending on host configuration for the task, may additionally have access to optional host-mediated capabilities such as language-model assistance and web retrieval/search. Use for calculations, parsing, transformations, document editing, and file generation. When js_run is available and sufficient for a deterministic task, prefer js_run because it is usually faster. For Word document edits (.docx), prefer the native Word tools (word_write, word_markup, etc.) and use python_execute only when those tools are unsuitable or have failed. Consolidate an entire task into a SINGLE call: put all steps and all input files into one self-contained script that inspects, modifies, saves, validates, and publishes in one execution; do not issue multiple python_execute calls for one logical task, and do not make additional verification calls after a successful run has produced and validated the requested output. The worker has no direct network access and sees only files explicitly passed in. It cannot inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; use python_execute only on explicitly staged inputs and declared outputs. Values passed to agent_api.publish_result(...) must be JSON-compatible: convert tuples/sets to lists, pathlib.Path to str(path), and datetime to ISO 8601 strings. agent_api.output_path(...) returns a pathlib.Path; convert it with str(path) only when a library requires a string filename."),
+                New Newtonsoft.Json.Linq.JProperty("description", "Executes a self-contained Python script in a sandboxed, network-isolated process. It may return an explicit bounded JSON/text result, create validated output documents, and, depending on host configuration for the task, may additionally have access to optional host-mediated capabilities such as language-model assistance and web retrieval/search. Use for calculations, parsing, transformations, document editing, and file generation. When js_run is available and sufficient for a deterministic task, prefer js_run because it is usually faster. For Word document edits (.docx), native Word tools are usually more efficient, but their presence never makes python_execute unavailable; use Python whenever it is better suited or a native path is unsuitable or fails. Consolidate an entire task into a SINGLE call: put all steps and all input files into one self-contained script that inspects, modifies, saves, validates, and publishes in one execution; do not issue multiple python_execute calls for one logical task, and do not make additional verification calls after a successful run has produced and validated the requested output. The worker has no direct network access and sees only files explicitly passed in. It cannot inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; use python_execute only on explicitly staged inputs and declared outputs. Values passed to agent_api.publish_result(...) must be JSON-compatible: convert tuples/sets to lists, pathlib.Path to str(path), and datetime to ISO 8601 strings. agent_api.output_path(...) returns a pathlib.Path; convert it with str(path) only when a library requires a string filename."),
                 New Newtonsoft.Json.Linq.JProperty("parameters", New Newtonsoft.Json.Linq.JObject(
                     New Newtonsoft.Json.Linq.JProperty("type", "object"),
                     New Newtonsoft.Json.Linq.JProperty("properties", New Newtonsoft.Json.Linq.JObject(
@@ -175,7 +195,7 @@ Namespace Agents
                             New Newtonsoft.Json.Linq.JProperty("type", "array"),
                             New Newtonsoft.Json.Linq.JProperty("items", New Newtonsoft.Json.Linq.JObject(
                                 New Newtonsoft.Json.Linq.JProperty("type", "string"))),
-                            New Newtonsoft.Json.Linq.JProperty("description", "Optional relative names made available read-only inside the sandbox. Inside the script, open each one via redink_pythonagent.agent_api.input_path(name) using the same name listed here; do not open it by a bare filename or absolute path, because staged inputs are not in the working directory. Do not pass a returned internal results path (for example results/<session-id>/file.docx); published-result paths are not reusable as inputs. Use only attachment references, workspace-relative paths, or explicitly reusable published-file handles."))),
+                            New Newtonsoft.Json.Linq.JProperty("description", "Optional relative names made available read-only inside the sandbox. Inside the script, open each one via redink_pythonagent.agent_api.input_path(name) using the same name listed here; do not open it by a bare filename or absolute path, because staged inputs are not in the working directory. Do not pass a returned internal results path (for example results/<session-id>/file.docx); published-result paths are not reusable as inputs. Use attachment references, workspace-relative paths, uniquely resolvable Skill reference files, or explicitly reusable published-file handles."))),
                         New Newtonsoft.Json.Linq.JProperty("timeout_seconds", New Newtonsoft.Json.Linq.JObject(
                             New Newtonsoft.Json.Linq.JProperty("type", "integer"),
                             New Newtonsoft.Json.Linq.JProperty("description", "Optional absolute wall-clock limit in seconds, clamped to host policy; default 30. Keep the default unless the task genuinely needs long computation; do not raise it to accommodate waiting, polling, or slow optional host calls."))))),
@@ -507,8 +527,55 @@ Namespace Agents
                 If resolved Is Nothing OrElse System.String.IsNullOrWhiteSpace(resolved.SourcePath) OrElse Not System.IO.File.Exists(System.IO.Path.GetFullPath(resolved.SourcePath)) Then
                     Return CreateLocalFailure("REQUEST_INVALID", "failed", "Workspace input file was not found.")
                 End If
-                resolvedInputFiles.Add(New RedInkPythonAgentInputFile(System.IO.Path.GetFullPath(resolved.SourcePath), relative))
+                Dim resolvedFullPath As System.String = System.IO.Path.GetFullPath(resolved.SourcePath)
+                resolvedInputFiles.Add(New RedInkPythonAgentInputFile(resolvedFullPath, relative))
             Next
+
+            Dim trustedBaselineDirectory As System.String = Nothing
+            Dim trustedBaseline As TrustedXlsxExternalRelationshipBaseline = Nothing
+            Dim trustedXlsxCandidates As System.Collections.Generic.List(Of RedInkPythonAgentInputFile) =
+                resolvedInputFiles.Where(
+                    Function(item As RedInkPythonAgentInputFile)
+                        If item Is Nothing Then Return False
+                        Dim itemExtension As System.String = System.IO.Path.GetExtension(System.IO.Path.GetFullPath(item.SourcePath))
+                        Return System.String.Equals(itemExtension, ".xlsx", System.StringComparison.OrdinalIgnoreCase) OrElse
+                               System.String.Equals(itemExtension, ".docx", System.StringComparison.OrdinalIgnoreCase) OrElse
+                               System.String.Equals(itemExtension, ".pptx", System.StringComparison.OrdinalIgnoreCase)
+                    End Function).ToList()
+
+            If trustedXlsxCandidates.Count = 1 Then
+                trustedBaselineDirectory = CreateTemporaryInputDirectory()
+                Dim sanitizedSourcePath As System.String = System.IO.Path.Combine(
+                    trustedBaselineDirectory,
+                    System.IO.Path.GetFileName(trustedXlsxCandidates(0).SourcePath))
+                Dim candidateBaseline As TrustedXlsxExternalRelationshipBaseline = Nothing
+                If TryCreateTrustedXlsxSanitizedBaseline(
+                    trustedXlsxCandidates(0).SourcePath,
+                    sanitizedSourcePath,
+                    candidateBaseline,
+                    logDiag) Then
+
+                    trustedBaseline = candidateBaseline
+                    For index As System.Int32 = 0 To resolvedInputFiles.Count - 1
+                        If System.String.Equals(
+                            System.IO.Path.GetFullPath(resolvedInputFiles(index).SourcePath),
+                            System.IO.Path.GetFullPath(trustedXlsxCandidates(0).SourcePath),
+                            System.StringComparison.OrdinalIgnoreCase) Then
+
+                            resolvedInputFiles(index) = New RedInkPythonAgentInputFile(
+                                sanitizedSourcePath,
+                                resolvedInputFiles(index).RelativePath)
+                            Exit For
+                        End If
+                    Next
+                    SafeLog(logDiag, "python_execute trusted XLSX baseline sanitized for strict worker validation; external hyperlinks will be restored host-side only after a successful validated output.")
+                Else
+                    DeleteDirectoryBestEffort(trustedBaselineDirectory, logDiag)
+                    trustedBaselineDirectory = Nothing
+                End If
+            ElseIf trustedXlsxCandidates.Count > 1 Then
+                SafeLog(logDiag, "python_execute trusted XLSX baseline sanitization skipped because more than one trusted XLSX input makes output lineage ambiguous.")
+            End If
 
             Dim temporaryInputDirectory As System.String = Nothing
             If stdinText.Length <> 0 Then
@@ -532,6 +599,8 @@ Namespace Agents
                 code = WrapCodeForInputAliases(code, inputAliases)
                 SafeLog(logDiag, "Python input staging uses " & inputAliases.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " compact physical alias(es); logical input names remain unchanged.")
             End If
+
+            code = WrapCodeForJsonSafePublishedResults(code)
 
             Dim retainDiagnostics As System.Boolean = False
             Try
@@ -575,6 +644,7 @@ Namespace Agents
                     unexpected = ex
                 Finally
                     DeleteDirectoryBestEffort(temporaryInputDirectory, logDiag)
+                    DeleteDirectoryBestEffort(trustedBaselineDirectory, logDiag)
                 End Try
 
                 If cancelled OrElse cancellationToken.IsCancellationRequested Then
@@ -602,6 +672,21 @@ Namespace Agents
                 End If
 
                 Dim duration As System.Int64 = System.Convert.ToInt64((System.DateTimeOffset.UtcNow - started).TotalMilliseconds)
+
+                If System.String.Equals(runResult.Status, "success", System.StringComparison.Ordinal) AndAlso
+                   trustedBaseline IsNot Nothing AndAlso
+                   runResult.Outputs IsNot Nothing AndAlso
+                   runResult.Outputs.Count > 0 Then
+
+                    Dim restorationFailure As System.String = System.String.Empty
+                    If Not TryRestoreTrustedXlsxBaselineIntoOutputs(runResult.Outputs, trustedBaseline, restorationFailure, logDiag) Then
+                        retainDiagnostics = True
+                        SafeLog(logWarn, "Python output was validated by the worker but trusted XLSX baseline restoration failed host-side.")
+                        If Not System.String.IsNullOrWhiteSpace(restorationFailure) Then SafeLog(logDiag, restorationFailure)
+                        Return CreateLocalFailure("OUTPUT_VALIDATION_FAILED", "failed", FriendlyMessage("OUTPUT_VALIDATION_FAILED", "failed"))
+                    End If
+                End If
+
                 Dim result As PythonExecuteToolCoreResult = CreateResultFromRun(runResult, duration)
                 If options.PublishOutputFile IsNot Nothing Then
                     Dim expectedResultsRoot As System.String = System.IO.Path.GetFullPath(System.IO.Path.Combine(callRoot, "results", runResult.SessionId.ToString("D")))
@@ -632,6 +717,460 @@ Namespace Agents
                 End If
                 DeleteDirectoryBestEffort(callRoot, logDiag)
             End Try
+        End Function
+
+        Private Shared Function TryCreateTrustedXlsxSanitizedBaseline(
+            sourcePath As System.String,
+            sanitizedPath As System.String,
+            ByRef baseline As TrustedXlsxExternalRelationshipBaseline,
+            logDiag As System.Action(Of System.String)) As System.Boolean
+
+            baseline = Nothing
+            Dim sourceExtension As System.String = System.IO.Path.GetExtension(If(sourcePath, System.String.Empty))
+            If System.String.IsNullOrWhiteSpace(sourcePath) OrElse
+               System.String.IsNullOrWhiteSpace(sanitizedPath) OrElse
+               Not System.IO.File.Exists(sourcePath) OrElse
+               Not (System.String.Equals(sourceExtension, ".xlsx", System.StringComparison.OrdinalIgnoreCase) OrElse
+                    System.String.Equals(sourceExtension, ".docx", System.StringComparison.OrdinalIgnoreCase) OrElse
+                    System.String.Equals(sourceExtension, ".pptx", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Return False
+            End If
+
+            Try
+                Dim relationshipDocuments As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase)
+                Dim ownerDocuments As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase)
+                Dim discovered As New TrustedXlsxExternalRelationshipBaseline() With {
+                    .OriginalSourcePath = System.IO.Path.GetFullPath(sourcePath),
+                    .SanitizedSourcePath = System.IO.Path.GetFullPath(sanitizedPath)
+                }
+
+                Using input As New System.IO.FileStream(sourcePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                    Using archive As New System.IO.Compression.ZipArchive(input, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                        Dim archiveEntries As New System.Collections.Generic.Dictionary(Of System.String, System.IO.Compression.ZipArchiveEntry)(System.StringComparer.OrdinalIgnoreCase)
+                        For Each archiveEntry As System.IO.Compression.ZipArchiveEntry In archive.Entries
+                            archiveEntries(archiveEntry.FullName) = archiveEntry
+                        Next
+
+                        For Each archiveEntry As System.IO.Compression.ZipArchiveEntry In archive.Entries
+                            If Not archiveEntry.FullName.EndsWith(".rels", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                            Dim relationshipDocument As System.Xml.Linq.XDocument
+                            Using entryStream As System.IO.Stream = archiveEntry.Open()
+                                relationshipDocument = System.Xml.Linq.XDocument.Load(entryStream, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                            End Using
+
+                            Dim externalRelationships As System.Collections.Generic.List(Of System.Xml.Linq.XElement) =
+                                relationshipDocument.Descendants().Where(
+                                    Function(element As System.Xml.Linq.XElement)
+                                        If Not System.String.Equals(element.Name.LocalName, "Relationship", System.StringComparison.Ordinal) Then Return False
+                                        Dim modeAttribute As System.Xml.Linq.XAttribute = element.Attribute("TargetMode")
+                                        Return modeAttribute IsNot Nothing AndAlso
+                                               System.String.Equals(modeAttribute.Value, "External", System.StringComparison.OrdinalIgnoreCase)
+                                    End Function).ToList()
+
+                            If externalRelationships.Count = 0 Then Continue For
+
+                            Dim ownerPart As System.String = RelationshipPartToOwnerPart(archiveEntry.FullName)
+                            Dim isWorksheetOwner As System.Boolean =
+                                Not System.String.IsNullOrWhiteSpace(ownerPart) AndAlso
+                                ownerPart.StartsWith("xl/worksheets/", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                                archiveEntries.ContainsKey(ownerPart)
+
+                            Dim relationshipIdName As System.Xml.Linq.XName = System.Xml.Linq.XName.Get("id", OfficeRelationshipsNamespace)
+                            Dim ownerDocument As System.Xml.Linq.XDocument = Nothing
+                            If isWorksheetOwner Then
+                                If Not ownerDocuments.TryGetValue(ownerPart, ownerDocument) Then
+                                    Using ownerStream As System.IO.Stream = archiveEntries(ownerPart).Open()
+                                        ownerDocument = System.Xml.Linq.XDocument.Load(ownerStream, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                                    End Using
+                                    ownerDocuments(ownerPart) = ownerDocument
+                                End If
+                            End If
+
+                            For Each relationship As System.Xml.Linq.XElement In externalRelationships
+                                Dim idAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Id")
+                                Dim typeAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Type")
+                                Dim targetAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Target")
+                                Dim modeAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("TargetMode")
+                                If idAttribute Is Nothing OrElse typeAttribute Is Nothing OrElse targetAttribute Is Nothing OrElse modeAttribute Is Nothing Then
+                                    SafeLog(logDiag, "Trusted OOXML baseline sanitization declined because an external relationship is incomplete in " & archiveEntry.FullName)
+                                    Return False
+                                End If
+                                If Not typeAttribute.Value.EndsWith("/hyperlink", System.StringComparison.OrdinalIgnoreCase) Then
+                                    SafeLog(logDiag, "Trusted OOXML baseline sanitization declined because a non-hyperlink external relationship is present: " & typeAttribute.Value)
+                                    Return False
+                                End If
+
+                                Dim entry As New TrustedXlsxExternalRelationshipBaselineEntry() With {
+                                    .RelationshipPart = archiveEntry.FullName,
+                                    .OwnerPart = System.String.Empty,
+                                    .RelationshipId = idAttribute.Value,
+                                    .RelationshipType = typeAttribute.Value,
+                                    .Target = targetAttribute.Value,
+                                    .TargetMode = modeAttribute.Value,
+                                    .RelationshipXml = relationship.ToString(System.Xml.Linq.SaveOptions.DisableFormatting),
+                                    .HyperlinkRef = System.String.Empty
+                                }
+
+                                If isWorksheetOwner Then
+                                    ' Excel worksheets bind hyperlink relationships eagerly, so the body r:id must be
+                                    ' removed to keep the sanitized workbook loadable; the worksheet cell/range ref is
+                                    ' the stable anchor used to restore the relationship after a validated run.
+                                    Dim matchingHyperlinks As System.Collections.Generic.List(Of System.Xml.Linq.XElement) =
+                                        ownerDocument.Descendants().Where(
+                                            Function(element As System.Xml.Linq.XElement)
+                                                If Not System.String.Equals(element.Name.LocalName, "hyperlink", System.StringComparison.Ordinal) Then Return False
+                                                Dim relationshipAttribute As System.Xml.Linq.XAttribute = element.Attribute(relationshipIdName)
+                                                Return relationshipAttribute IsNot Nothing AndAlso
+                                                       System.String.Equals(relationshipAttribute.Value, idAttribute.Value, System.StringComparison.Ordinal)
+                                            End Function).ToList()
+
+                                    If matchingHyperlinks.Count <> 1 Then
+                                        SafeLog(logDiag, "Trusted OOXML baseline sanitization declined because the external hyperlink relationship does not resolve to exactly one worksheet hyperlink: " & archiveEntry.FullName & "#" & idAttribute.Value)
+                                        Return False
+                                    End If
+
+                                    Dim refAttribute As System.Xml.Linq.XAttribute = matchingHyperlinks(0).Attribute("ref")
+                                    If refAttribute Is Nothing OrElse System.String.IsNullOrWhiteSpace(refAttribute.Value) Then
+                                        SafeLog(logDiag, "Trusted OOXML baseline sanitization declined because an external hyperlink has no stable cell/range ref: " & archiveEntry.FullName & "#" & idAttribute.Value)
+                                        Return False
+                                    End If
+
+                                    entry.OwnerPart = ownerPart
+                                    entry.HyperlinkRef = refAttribute.Value
+                                    matchingHyperlinks(0).Attribute(relationshipIdName).Remove()
+                                End If
+
+                                ' Word/PowerPoint (and any non-worksheet) hyperlinks load lazily, so only the external
+                                ' relationship is removed and the body r:id is intentionally left in place; the strict
+                                ' worker does not enforce body-to-rels referential integrity, so this stays loadable.
+                                discovered.Entries.Add(entry)
+                                relationship.Remove()
+                            Next
+
+                            relationshipDocuments(archiveEntry.FullName) = relationshipDocument
+                        Next
+                    End Using
+                End Using
+
+                If discovered.Entries.Count = 0 Then Return False
+
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(sanitizedPath))
+                System.IO.File.Copy(sourcePath, sanitizedPath, overwrite:=True)
+                Using updateStream As New System.IO.FileStream(sanitizedPath, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                    Using archive As New System.IO.Compression.ZipArchive(updateStream, System.IO.Compression.ZipArchiveMode.Update, leaveOpen:=False)
+                        For Each item As System.Collections.Generic.KeyValuePair(Of System.String, System.Xml.Linq.XDocument) In relationshipDocuments
+                            ReplaceZipXmlEntry(archive, item.Key, item.Value)
+                        Next
+                        For Each item As System.Collections.Generic.KeyValuePair(Of System.String, System.Xml.Linq.XDocument) In ownerDocuments
+                            ReplaceZipXmlEntry(archive, item.Key, item.Value)
+                        Next
+                    End Using
+                End Using
+
+                baseline = discovered
+                SafeLog(logDiag, "Trusted OOXML baseline captured " & discovered.Entries.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " pre-existing external hyperlink relationship(s).")
+                Return True
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+                baseline = Nothing
+                Try
+                    If System.IO.File.Exists(sanitizedPath) Then System.IO.File.Delete(sanitizedPath)
+                Catch cleanupEx As System.Exception
+                    SafeLog(logDiag, cleanupEx.ToString())
+                End Try
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function TryRestoreTrustedXlsxBaselineIntoOutputs(
+            outputs As System.Collections.Generic.IReadOnlyList(Of RedInkPythonAgentOutput),
+            baseline As TrustedXlsxExternalRelationshipBaseline,
+            ByRef failureReason As System.String,
+            logDiag As System.Action(Of System.String)) As System.Boolean
+
+            failureReason = System.String.Empty
+            If baseline Is Nothing OrElse baseline.Entries.Count = 0 OrElse outputs Is Nothing Then Return True
+
+            Dim baselineExtension As System.String = System.IO.Path.GetExtension(If(baseline.OriginalSourcePath, System.String.Empty))
+            Dim matchingOutputs As System.Collections.Generic.List(Of RedInkPythonAgentOutput) =
+                outputs.Where(
+                    Function(output As RedInkPythonAgentOutput)
+                        Return output IsNot Nothing AndAlso
+                               Not System.String.IsNullOrWhiteSpace(output.FullPath) AndAlso
+                               System.String.Equals(System.IO.Path.GetExtension(output.FullPath), baselineExtension, System.StringComparison.OrdinalIgnoreCase)
+                    End Function).ToList()
+
+            If matchingOutputs.Count = 0 Then Return True
+            If matchingOutputs.Count > 1 Then
+                failureReason = "Trusted OOXML baseline restoration is ambiguous because the Python run produced more than one matching Office output."
+                Return False
+            End If
+
+            For Each output As RedInkPythonAgentOutput In matchingOutputs
+                If Not TryRestoreTrustedXlsxBaseline(output.FullPath, baseline, failureReason, logDiag) Then Return False
+                Dim information As New System.IO.FileInfo(output.FullPath)
+                output.Size = information.Length
+                output.Sha256 = ComputeFileSha256Hex(output.FullPath)
+                SafeLog(logDiag, "python_execute restored trusted XLSX baseline hyperlinks after worker validation: " & output.RelativePath)
+            Next
+
+            Return True
+        End Function
+
+        Private Shared Function TryRestoreTrustedXlsxBaseline(
+            outputPath As System.String,
+            baseline As TrustedXlsxExternalRelationshipBaseline,
+            ByRef failureReason As System.String,
+            logDiag As System.Action(Of System.String)) As System.Boolean
+
+            failureReason = System.String.Empty
+            Try
+                Dim relationshipDocuments As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase)
+                Dim ownerDocuments As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase)
+
+                Using input As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                    Using archive As New System.IO.Compression.ZipArchive(input, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                        For Each baselineEntry As TrustedXlsxExternalRelationshipBaselineEntry In baseline.Entries
+                            Dim relationshipDocument As System.Xml.Linq.XDocument = Nothing
+                            If Not relationshipDocuments.TryGetValue(baselineEntry.RelationshipPart, relationshipDocument) Then
+                                Dim relationshipArchiveEntry As System.IO.Compression.ZipArchiveEntry = archive.GetEntry(baselineEntry.RelationshipPart)
+                                If relationshipArchiveEntry Is Nothing Then
+                                    relationshipDocument = New System.Xml.Linq.XDocument(
+                                        New System.Xml.Linq.XElement(System.Xml.Linq.XName.Get("Relationships", PackageRelationshipsNamespace)))
+                                Else
+                                    Using relationshipStream As System.IO.Stream = relationshipArchiveEntry.Open()
+                                        relationshipDocument = System.Xml.Linq.XDocument.Load(relationshipStream, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                                    End Using
+                                End If
+                                relationshipDocuments(baselineEntry.RelationshipPart) = relationshipDocument
+                            End If
+
+                            Dim isWorksheetAnchored As System.Boolean = Not System.String.IsNullOrWhiteSpace(baselineEntry.HyperlinkRef)
+
+                            If isWorksheetAnchored Then
+                                Dim restoredRelationshipId As System.String = AllocateUniqueRelationshipId(
+                                    relationshipDocument,
+                                    baselineEntry.RelationshipId)
+
+                                Dim ownerDocument As System.Xml.Linq.XDocument = Nothing
+                                If Not ownerDocuments.TryGetValue(baselineEntry.OwnerPart, ownerDocument) Then
+                                    Dim ownerArchiveEntry As System.IO.Compression.ZipArchiveEntry = archive.GetEntry(baselineEntry.OwnerPart)
+                                    If ownerArchiveEntry Is Nothing Then
+                                        failureReason = "Trusted OOXML baseline restoration could not find the original worksheet part in the Python output: " & baselineEntry.OwnerPart
+                                        Return False
+                                    End If
+                                    Using ownerStream As System.IO.Stream = ownerArchiveEntry.Open()
+                                        ownerDocument = System.Xml.Linq.XDocument.Load(ownerStream, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                                    End Using
+                                    ownerDocuments(baselineEntry.OwnerPart) = ownerDocument
+                                End If
+
+                                Dim relationshipIdName As System.Xml.Linq.XName = System.Xml.Linq.XName.Get("id", OfficeRelationshipsNamespace)
+                                Dim matchingHyperlinks As System.Collections.Generic.List(Of System.Xml.Linq.XElement) =
+                                    ownerDocument.Descendants().Where(
+                                        Function(element As System.Xml.Linq.XElement)
+                                            If Not System.String.Equals(element.Name.LocalName, "hyperlink", System.StringComparison.Ordinal) Then Return False
+                                            Dim refAttribute As System.Xml.Linq.XAttribute = element.Attribute("ref")
+                                            Return refAttribute IsNot Nothing AndAlso
+                                                   System.String.Equals(refAttribute.Value, baselineEntry.HyperlinkRef, System.StringComparison.Ordinal)
+                                        End Function).ToList()
+                                If matchingHyperlinks.Count <> 1 Then
+                                    failureReason = "Trusted OOXML baseline restoration could not uniquely locate the original hyperlink ref in the Python output: " & baselineEntry.OwnerPart & "!" & baselineEntry.HyperlinkRef
+                                    Return False
+                                End If
+
+                                Dim existingIdAttribute As System.Xml.Linq.XAttribute = matchingHyperlinks(0).Attribute(relationshipIdName)
+                                If existingIdAttribute IsNot Nothing Then
+                                    failureReason = "Trusted OOXML baseline restoration found a Python-created relationship id on an original external hyperlink: " & baselineEntry.OwnerPart & "!" & baselineEntry.HyperlinkRef
+                                    Return False
+                                End If
+
+                                matchingHyperlinks(0).Add(New System.Xml.Linq.XAttribute(relationshipIdName, restoredRelationshipId))
+                                Dim restoredRelationship As System.Xml.Linq.XElement =
+                                    System.Xml.Linq.XElement.Parse(baselineEntry.RelationshipXml, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                                restoredRelationship.SetAttributeValue("Id", restoredRelationshipId)
+                                relationshipDocument.Root.Add(restoredRelationship)
+                            Else
+                                ' Word/PowerPoint keep their original body r:id, so the relationship is restored under
+                                ' its exact original Id. A surviving relationship on that same Id means the Python output
+                                ' introduced its own relationship there, which must fail closed.
+                                Dim existingRelationship As System.Xml.Linq.XElement =
+                                    relationshipDocument.Descendants().FirstOrDefault(
+                                        Function(element As System.Xml.Linq.XElement)
+                                            If Not System.String.Equals(element.Name.LocalName, "Relationship", System.StringComparison.Ordinal) Then Return False
+                                            Dim idAttribute As System.Xml.Linq.XAttribute = element.Attribute("Id")
+                                            Return idAttribute IsNot Nothing AndAlso
+                                                   System.String.Equals(idAttribute.Value, baselineEntry.RelationshipId, System.StringComparison.Ordinal)
+                                        End Function)
+                                If existingRelationship IsNot Nothing Then
+                                    failureReason = "Trusted OOXML baseline restoration found a conflicting relationship id in the Python output: " & baselineEntry.RelationshipPart & "#" & baselineEntry.RelationshipId
+                                    Return False
+                                End If
+
+                                Dim restoredRelationship As System.Xml.Linq.XElement =
+                                    System.Xml.Linq.XElement.Parse(baselineEntry.RelationshipXml, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                                restoredRelationship.SetAttributeValue("Id", baselineEntry.RelationshipId)
+                                relationshipDocument.Root.Add(restoredRelationship)
+                            End If
+                        Next
+                    End Using
+                End Using
+
+                Using updateStream As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                    Using archive As New System.IO.Compression.ZipArchive(updateStream, System.IO.Compression.ZipArchiveMode.Update, leaveOpen:=False)
+                        For Each item As System.Collections.Generic.KeyValuePair(Of System.String, System.Xml.Linq.XDocument) In relationshipDocuments
+                            ReplaceZipXmlEntry(archive, item.Key, item.Value)
+                        Next
+                        For Each item As System.Collections.Generic.KeyValuePair(Of System.String, System.Xml.Linq.XDocument) In ownerDocuments
+                            ReplaceZipXmlEntry(archive, item.Key, item.Value)
+                        Next
+                    End Using
+                End Using
+
+                If Not VerifyTrustedXlsxBaseline(outputPath, baseline, failureReason) Then Return False
+                Return True
+            Catch ex As System.Exception
+                SafeLog(logDiag, ex.ToString())
+                failureReason = "Trusted OOXML baseline restoration raised a host-side exception."
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function VerifyTrustedXlsxBaseline(
+            outputPath As System.String,
+            baseline As TrustedXlsxExternalRelationshipBaseline,
+            ByRef failureReason As System.String) As System.Boolean
+
+            failureReason = System.String.Empty
+            Dim expectedKeys As New System.Collections.Generic.List(Of System.String)()
+            For Each entry As TrustedXlsxExternalRelationshipBaselineEntry In baseline.Entries
+                expectedKeys.Add(TrustedRelationshipSemanticKey(
+                    entry.RelationshipPart,
+                    entry.RelationshipType,
+                    entry.Target,
+                    entry.TargetMode))
+            Next
+
+            Dim actualKeys As New System.Collections.Generic.List(Of System.String)()
+            Using input As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                Using archive As New System.IO.Compression.ZipArchive(input, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                    For Each archiveEntry As System.IO.Compression.ZipArchiveEntry In archive.Entries
+                        If Not archiveEntry.FullName.EndsWith(".rels", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                        Dim relationshipDocument As System.Xml.Linq.XDocument
+                        Using entryStream As System.IO.Stream = archiveEntry.Open()
+                            relationshipDocument = System.Xml.Linq.XDocument.Load(entryStream)
+                        End Using
+
+                        For Each relationship As System.Xml.Linq.XElement In relationshipDocument.Descendants().Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "Relationship")
+                            Dim modeAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("TargetMode")
+                            If modeAttribute Is Nothing OrElse Not System.String.Equals(modeAttribute.Value, "External", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                            Dim typeAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Type")
+                            Dim targetAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Target")
+                            If typeAttribute Is Nothing OrElse targetAttribute Is Nothing Then
+                                failureReason = "Restored OOXML contains an incomplete external relationship."
+                                Return False
+                            End If
+
+                            actualKeys.Add(TrustedRelationshipSemanticKey(
+                                archiveEntry.FullName,
+                                typeAttribute.Value,
+                                targetAttribute.Value,
+                                modeAttribute.Value))
+                        Next
+                    Next
+                End Using
+            End Using
+
+            expectedKeys.Sort(System.StringComparer.Ordinal)
+            actualKeys.Sort(System.StringComparer.Ordinal)
+            If expectedKeys.Count <> actualKeys.Count Then
+                failureReason = "Restored OOXML external hyperlink set differs from the exact trusted input baseline."
+                Return False
+            End If
+            For index As System.Int32 = 0 To expectedKeys.Count - 1
+                If Not System.String.Equals(expectedKeys(index), actualKeys(index), System.StringComparison.Ordinal) Then
+                    failureReason = "Restored OOXML external hyperlink set differs from the exact trusted input baseline."
+                    Return False
+                End If
+            Next
+            Return True
+        End Function
+
+        Private Shared Function TrustedRelationshipSemanticKey(
+            relationshipPart As System.String,
+            relationshipType As System.String,
+            target As System.String,
+            targetMode As System.String) As System.String
+
+            Return relationshipPart & System.Convert.ToChar(0) & relationshipType & System.Convert.ToChar(0) & target & System.Convert.ToChar(0) & targetMode
+        End Function
+
+        Private Shared Function AllocateUniqueRelationshipId(
+            relationshipDocument As System.Xml.Linq.XDocument,
+            preferredId As System.String) As System.String
+
+            Dim usedIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            If relationshipDocument IsNot Nothing Then
+                For Each relationship As System.Xml.Linq.XElement In relationshipDocument.Descendants().Where(Function(element As System.Xml.Linq.XElement) element.Name.LocalName = "Relationship")
+                    Dim idAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Id")
+                    If idAttribute IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(idAttribute.Value) Then usedIds.Add(idAttribute.Value)
+                Next
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(preferredId) AndAlso Not usedIds.Contains(preferredId) Then Return preferredId
+
+            Dim index As System.Int32 = 1
+            Do
+                Dim candidate As System.String = "rId" & index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                If Not usedIds.Contains(candidate) Then Return candidate
+                index += 1
+            Loop
+        End Function
+
+        Private Shared Function RelationshipPartToOwnerPart(relationshipPart As System.String) As System.String
+            If System.String.IsNullOrWhiteSpace(relationshipPart) Then Return System.String.Empty
+            Dim normalized As System.String = relationshipPart.Replace("\"c, "/"c)
+            Dim marker As System.String = "/_rels/"
+            Dim markerIndex As System.Int32 = normalized.LastIndexOf(marker, System.StringComparison.OrdinalIgnoreCase)
+            If markerIndex < 0 OrElse Not normalized.EndsWith(".rels", System.StringComparison.OrdinalIgnoreCase) Then Return System.String.Empty
+            Return normalized.Substring(0, markerIndex + 1) & normalized.Substring(markerIndex + marker.Length, normalized.Length - (markerIndex + marker.Length) - 5)
+        End Function
+
+        Private Shared Sub ReplaceZipXmlEntry(
+            archive As System.IO.Compression.ZipArchive,
+            entryName As System.String,
+            document As System.Xml.Linq.XDocument)
+
+            Dim existing As System.IO.Compression.ZipArchiveEntry = archive.GetEntry(entryName)
+            If existing IsNot Nothing Then existing.Delete()
+            Dim replacement As System.IO.Compression.ZipArchiveEntry = archive.CreateEntry(entryName, System.IO.Compression.CompressionLevel.Optimal)
+            Using output As System.IO.Stream = replacement.Open()
+                Using writer As System.Xml.XmlWriter = System.Xml.XmlWriter.Create(output, New System.Xml.XmlWriterSettings() With {
+                    .Encoding = New System.Text.UTF8Encoding(False),
+                    .Indent = False,
+                    .OmitXmlDeclaration = False,
+                    .CloseOutput = False
+                })
+                    document.Save(writer)
+                End Using
+            End Using
+        End Sub
+
+        Private Shared Function ComputeFileSha256Hex(fullPath As System.String) As System.String
+            Using stream As New System.IO.FileStream(fullPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                    Dim hashBytes As System.Byte() = sha.ComputeHash(stream)
+                    Dim builder As New System.Text.StringBuilder(hashBytes.Length * 2)
+                    For Each value As System.Byte In hashBytes
+                        builder.Append(value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+                    Next
+                    Return builder.ToString()
+                End Using
+            End Using
         End Function
 
         Private Shared Function ValidatePublishedOutput(output As RedInkPythonAgentOutput, expectedResultsRoot As System.String, logDiag As System.Action(Of System.String)) As System.Boolean
@@ -1036,6 +1575,17 @@ Namespace Agents
             End Try
         End Function
 
+        ''' <summary>
+        ''' Returns the logical input_files references for host-side postcondition verification.
+        ''' Parsing is identical to normal python_execute argument parsing; no filesystem access occurs here.
+        ''' </summary>
+        Public Shared Function GetDeclaredInputFilesForHostVerification(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Collections.Generic.List(Of System.String)
+
+            If arguments Is Nothing Then Return New System.Collections.Generic.List(Of System.String)()
+            Return GetInputFiles(arguments, 1024)
+        End Function
+
         Private Shared Function GetInputFiles(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object), maximumCount As System.Int32) As System.Collections.Generic.List(Of System.String)
             Dim result As New System.Collections.Generic.List(Of System.String)()
             Dim raw As System.Object = Nothing
@@ -1201,6 +1751,63 @@ Namespace Agents
             builder.AppendLine("__redink_agent_api.input_path = __redink_mapped_input_path")
             builder.Append("__redink_source = __redink_base64.b64decode('")
             builder.Append(encodedSource)
+            builder.AppendLine("').decode('utf-8')")
+            builder.AppendLine("__redink_globals = {'__name__': '__main__', '__file__': 'code.py', '__package__': None, '__cached__': None}")
+            builder.AppendLine("exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            Return builder.ToString()
+        End Function
+
+        ''' <summary>
+        ''' Wraps agent_api.publish_result so common deterministic Python/library boundary values are converted
+        ''' to the JSON-safe forms already required by the public python_execute contract. This is intentionally
+        ''' narrow: unknown custom objects are left unchanged so the PythonAgent validator can still reject them
+        ''' instead of the host silently stringifying arbitrary values.
+        ''' </summary>
+        Private Shared Function WrapCodeForJsonSafePublishedResults(code As System.String) As System.String
+            Dim encoded As System.String = System.Convert.ToBase64String(New System.Text.UTF8Encoding(False, True).GetBytes(code))
+            Dim builder As New System.Text.StringBuilder()
+            builder.AppendLine("import base64 as __redink_base64")
+            builder.AppendLine("import datetime as __redink_datetime")
+            builder.AppendLine("import decimal as __redink_decimal")
+            builder.AppendLine("import enum as __redink_enum")
+            builder.AppendLine("import math as __redink_math")
+            builder.AppendLine("import os as __redink_os")
+            builder.AppendLine("from redink_pythonagent import agent_api as __redink_agent_api")
+            builder.AppendLine("__redink_original_publish_result = __redink_agent_api.publish_result")
+            builder.AppendLine("def __redink_json_safe(value, _seen=None):")
+            builder.AppendLine("    if value is None or isinstance(value, (str, bool, int)):")
+            builder.AppendLine("        return value")
+            builder.AppendLine("    if isinstance(value, float):")
+            builder.AppendLine("        return value if __redink_math.isfinite(value) else str(value)")
+            builder.AppendLine("    if isinstance(value, (__redink_datetime.datetime, __redink_datetime.date, __redink_datetime.time)):")
+            builder.AppendLine("        return value.isoformat()")
+            builder.AppendLine("    if isinstance(value, __redink_decimal.Decimal):")
+            builder.AppendLine("        return str(value)")
+            builder.AppendLine("    if isinstance(value, __redink_enum.Enum):")
+            builder.AppendLine("        return __redink_json_safe(value.value, _seen)")
+            builder.AppendLine("    if isinstance(value, __redink_os.PathLike):")
+            builder.AppendLine("        return __redink_os.fspath(value)")
+            builder.AppendLine("    if isinstance(value, (list, tuple, set, frozenset, dict)):")
+            builder.AppendLine("        if _seen is None:")
+            builder.AppendLine("            _seen = set()")
+            builder.AppendLine("        marker = id(value)")
+            builder.AppendLine("        if marker in _seen:")
+            builder.AppendLine("            raise TypeError('Cyclic container cannot be published as JSON')")
+            builder.AppendLine("        _seen.add(marker)")
+            builder.AppendLine("        try:")
+            builder.AppendLine("            if isinstance(value, dict):")
+            builder.AppendLine("                return {str(k): __redink_json_safe(v, _seen) for k, v in value.items()}")
+            builder.AppendLine("            if isinstance(value, (set, frozenset)):")
+            builder.AppendLine("                return [__redink_json_safe(v, _seen) for v in sorted(value, key=lambda item: repr(item))]")
+            builder.AppendLine("            return [__redink_json_safe(v, _seen) for v in value]")
+            builder.AppendLine("        finally:")
+            builder.AppendLine("            _seen.remove(marker)")
+            builder.AppendLine("    return value")
+            builder.AppendLine("def __redink_publish_result_json_safe(value):")
+            builder.AppendLine("    return __redink_original_publish_result(__redink_json_safe(value))")
+            builder.AppendLine("__redink_agent_api.publish_result = __redink_publish_result_json_safe")
+            builder.Append("__redink_source = __redink_base64.b64decode('")
+            builder.Append(encoded)
             builder.AppendLine("').decode('utf-8')")
             builder.AppendLine("__redink_globals = {'__name__': '__main__', '__file__': 'code.py', '__package__': None, '__cached__': None}")
             builder.AppendLine("exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")

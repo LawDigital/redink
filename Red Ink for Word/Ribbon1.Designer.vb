@@ -112,6 +112,7 @@ Partial Class Ribbon1
         Me.RI_DiscussInky = Me.Factory.CreateRibbonButton
         Me.RI_Search = Me.Factory.CreateRibbonButton
         Me.Menu2 = Me.Factory.CreateRibbonMenu
+        Me.RI_Translator = Me.Factory.CreateRibbonButton
         Me.RI_Halves = Me.Factory.CreateRibbonButton
         Me.RI_LiveCompare = Me.Factory.CreateRibbonButton
         Me.RI_AcceptFormat = Me.Factory.CreateRibbonButton
@@ -699,6 +700,7 @@ Partial Class Ribbon1
         '
         'Menu2
         '
+        Me.Menu2.Items.Add(Me.RI_Translator)
         Me.Menu2.Items.Add(Me.RI_Halves)
         Me.Menu2.Items.Add(Me.RI_LiveCompare)
         Me.Menu2.Items.Add(Me.RI_AcceptFormat)
@@ -721,6 +723,14 @@ Partial Class Ribbon1
         Me.Menu2.OfficeImageId = "GalInsertAspNet"
         Me.Menu2.ScreenTip = "Provides additional useful tools in word (no AI used)"
         Me.Menu2.ShowImage = True
+        '
+        'RI_Translator
+        '
+        Me.RI_Translator.Label = "Translate on-the-fly"
+        Me.RI_Translator.Name = "RI_Translator"
+        Me.RI_Translator.OfficeImageId = "TranslateMenu"
+        Me.RI_Translator.ScreenTip = "Open Translate on-the-fly"
+        Me.RI_Translator.ShowImage = True
         '
         'RI_Halves
         '
@@ -1304,6 +1314,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Convincing As RibbonButton
     Friend WithEvents RI_SpecialModel As RibbonButton
     Friend WithEvents RI_InsertClipboard As RibbonButton
+    Friend WithEvents RI_Translator As RibbonButton
     Friend WithEvents RI_BalloonMergePart As RibbonButton
     Friend WithEvents RI_BalloonMergeFull As RibbonButton
     Friend WithEvents RI_BalloonMergePartPrompt As RibbonButton

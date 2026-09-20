@@ -66,6 +66,7 @@ Namespace SharedLibrary
         ' Track SystemEvents subscription to avoid duplicate handlers
         Private _isDisplaySettingsHooked As Boolean = False
         Private _dialogOwnerScope As System.IDisposable = Nothing
+        Private _hasPersistedBounds As System.Boolean = False
 
         ' Win32 API for cue banner (placeholder text)
         Private Const EM_SETCUEBANNER As Integer = &H1501
@@ -87,6 +88,8 @@ Namespace SharedLibrary
         Private WithEvents btnClear2 As Button
         Private WithEvents btnCopy2 As Button
         Private WithEvents btnEditUserDictionary As Button
+        Private WithEvents btnDictionarySegments As Button
+        Private dictionaryButtonPanel As System.Windows.Forms.FlowLayoutPanel
         Private lblSpinner As Label
         Private lblSpinner2 As Label
         Private mainTable As TableLayoutPanel
@@ -122,8 +125,9 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Async translation function: (textToTranslate, targetLanguage, sourceLanguage, cancellationToken) -> translated text.
         ''' </summary>
-        Private ReadOnly _translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String))
-        Private ReadOnly _editUserDictionaryAction As Action
+        Private ReadOnly _translateFunc As System.Func(Of System.String, System.String, System.String, System.Collections.Generic.HashSet(Of System.String), System.Threading.CancellationToken, System.Threading.Tasks.Task(Of System.String))
+        Private ReadOnly _editUserDictionaryAction As System.Action
+        Private ReadOnly _dictionaryContext As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext
 
         ' Default language from context
         ''' <summary>Default target language used when no target language is provided.</summary>
@@ -151,14 +155,36 @@ Namespace SharedLibrary
         ''' Async function that takes (textToTranslate, targetLanguage, sourceLanguage, cancellationToken) and returns the translated text.
         ''' </param>
         ''' <param name="defaultLanguage">The default target language.</param>
-        Public Sub New(translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String)),
-                       defaultLanguage As String,
-                       Optional editUserDictionaryAction As Action = Nothing)
+        Public Sub New(translateFunc As System.Func(Of System.String, System.String, System.String, System.Threading.CancellationToken, System.Threading.Tasks.Task(Of System.String)),
+                       defaultLanguage As System.String,
+                       Optional editUserDictionaryAction As System.Action = Nothing)
+            Me.New(
+                Async Function(textToTranslate As System.String,
+                               targetLanguage As System.String,
+                               sourceLanguage As System.String,
+                               unusedDictionarySegments As System.Collections.Generic.HashSet(Of System.String),
+                               cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.String)
+                    Return Await translateFunc(textToTranslate, targetLanguage, sourceLanguage, cancellationToken)
+                End Function,
+                defaultLanguage,
+                editUserDictionaryAction,
+                Nothing)
+        End Sub
+
+        ''' <summary>
+        ''' Creates a widget whose translation callback receives the widget-specific dictionary segment selection.
+        ''' </summary>
+        Public Sub New(translateFunc As System.Func(Of System.String, System.String, System.String, System.Collections.Generic.HashSet(Of System.String), System.Threading.CancellationToken, System.Threading.Tasks.Task(Of System.String)),
+                       defaultLanguage As System.String,
+                       Optional editUserDictionaryAction As System.Action = Nothing,
+                       Optional dictionaryContext As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext = Nothing)
             _translateFunc = translateFunc
             _defaultLanguage = If(defaultLanguage, "English")
             _editUserDictionaryAction = editUserDictionaryAction
+            _dictionaryContext = dictionaryContext
             InitializeComponent()
             RestoreSettings()
+            UpdateDictionarySegmentButtonState()
         End Sub
 
         ''' <summary>
@@ -373,28 +399,52 @@ Namespace SharedLibrary
             }
             rightFlow.Controls.Add(btnClear)
 
-            btnEditUserDictionary = New Button() With {
+            dictionaryButtonPanel = New System.Windows.Forms.FlowLayoutPanel() With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .WrapContents = False,
+                .Margin = New System.Windows.Forms.Padding(5, 0, 0, 0),
+                .Padding = New System.Windows.Forms.Padding(0)
+            }
+
+            btnEditUserDictionary = New System.Windows.Forms.Button() With {
                 .Text = "📖",
                 .AutoSize = False,
-                .Font = New Font("Segoe UI Emoji", 10.0F, FontStyle.Regular, GraphicsUnit.Point),
-                .Size = New Size(30, btnClear.Height),
-                .MinimumSize = New Size(30, btnClear.Height),
-                .MaximumSize = New Size(30, btnClear.Height),
-                .Padding = New Padding(0),
-                .Margin = New Padding(5, 0, 0, 0),
+                .Font = New System.Drawing.Font("Segoe UI Emoji", 10.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point),
+                .Size = New System.Drawing.Size(30, btnClear.Height),
+                .MinimumSize = New System.Drawing.Size(30, btnClear.Height),
+                .MaximumSize = New System.Drawing.Size(30, btnClear.Height),
+                .Padding = New System.Windows.Forms.Padding(0),
+                .Margin = New System.Windows.Forms.Padding(0),
                 .Visible = (_editUserDictionaryAction IsNot Nothing)
             }
-            rightFlow.Controls.Add(btnEditUserDictionary)
+            dictionaryButtonPanel.Controls.Add(btnEditUserDictionary)
             toolTip.SetToolTip(btnEditUserDictionary, "Open the configured local user dictionary in the internal editor")
             AddHandler btnEditUserDictionary.Click,
                 Sub()
                     If _editUserDictionaryAction Is Nothing Then Return
                     Try
                         _editUserDictionaryAction.Invoke()
-                    Catch ex As Exception
+                        UpdateDictionarySegmentButtonState()
+                    Catch ex As System.Exception
                         SharedMethods.ShowCustomMessageBox("Could not open the user dictionary: " & ex.Message)
                     End Try
                 End Sub
+
+            btnDictionarySegments = New System.Windows.Forms.Button() With {
+                .Text = "▼",
+                .AutoSize = False,
+                .Font = New System.Drawing.Font("Segoe UI", 8.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point),
+                .Size = New System.Drawing.Size(18, btnClear.Height),
+                .MinimumSize = New System.Drawing.Size(18, btnClear.Height),
+                .MaximumSize = New System.Drawing.Size(18, btnClear.Height),
+                .Padding = New System.Windows.Forms.Padding(0),
+                .Margin = New System.Windows.Forms.Padding(1, 0, 0, 0),
+                .Visible = False
+            }
+            dictionaryButtonPanel.Controls.Add(btnDictionarySegments)
+            AddHandler btnDictionarySegments.Click, AddressOf SelectDictionarySegmentsForWidget
+            rightFlow.Controls.Add(dictionaryButtonPanel)
 
             btnCollapse = New Button() With {
                 .Text = "◀ Collapse",
@@ -418,8 +468,8 @@ Namespace SharedLibrary
             Dim leftContentWidth As Integer = txtSourceLanguage.Width + 5 + lblArrow.PreferredWidth + 10 + txtLanguage.Width + 5 + lblSpinner.PreferredWidth + 15
             ' Right side: Clear + Copy + Close + optional Edit User Dictionary button + Margins
             Dim rightContentWidth As Integer = btnClear.PreferredSize.Width + 5 + btnCopy.PreferredSize.Width + 5 + btnClose.PreferredSize.Width + 5
-            If btnEditUserDictionary IsNot Nothing AndAlso btnEditUserDictionary.Visible Then
-                rightContentWidth += btnEditUserDictionary.Width + 5
+            If dictionaryButtonPanel IsNot Nothing AndAlso dictionaryButtonPanel.Visible Then
+                rightContentWidth += dictionaryButtonPanel.PreferredSize.Width + 5
             End If
 
             ' Total width required (content + padding)
@@ -496,9 +546,11 @@ Namespace SharedLibrary
                 Dim w As Integer = My.Settings.QuickTranslateWidth
                 Dim h As Integer = My.Settings.QuickTranslateHeight
 
-                Dim hasSavedBounds As Boolean = w > 0 AndAlso h > 0
+                ' X=0/Y=0 with a non-zero size can occur after an early first show and
+                ' must not be treated as an intentional persisted top-left position.
+                _hasPersistedBounds = w > 0 AndAlso h > 0 AndAlso Not (x = 0 AndAlso y = 0)
 
-                If hasSavedBounds Then
+                If _hasPersistedBounds Then
                     Me.SetBounds(x, y, w, h)
                 Else
                     PositionOnScreen()
@@ -507,6 +559,7 @@ Namespace SharedLibrary
                 EnsureWidgetVisible()
 
             Catch
+                _hasPersistedBounds = False
                 txtLanguage.Text = _defaultLanguage
                 PositionOnScreen()
                 EnsureWidgetVisible()
@@ -674,6 +727,15 @@ Namespace SharedLibrary
         ''' Shows the widget or brings it to front if already visible.
         ''' </summary>
         Public Sub ShowWidget()
+            ' Resolve only a same-thread Office/dialog owner as required by
+            ' SharedMethods.DialogOwner.vb. The owner is used as the screen anchor only;
+            ' this modeless widget is deliberately not assigned a foreign/unverified owner.
+            Dim safeOwner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
+
+            If Not Me.Visible AndAlso Not _hasPersistedBounds Then
+                PositionOnScreen(safeOwner)
+            End If
+
             EnsureWidgetVisible()
 
             If Me.Visible Then
@@ -687,13 +749,99 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Positions the widget near the top-right of the screen at the current cursor position.
+        ''' Positions the widget near the top-right of the screen that contains the safe
+        ''' current-thread Office/dialog owner. Falls back to the cursor screen only when
+        ''' no safe owner is available.
         ''' </summary>
-        Private Sub PositionOnScreen()
-            Dim wa As Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
-            Const MARGIN As Integer = 30
-            Me.Location = New Point(wa.Right - Me.Width - MARGIN, wa.Top + MARGIN)
+        Private Sub PositionOnScreen(Optional owner As System.Windows.Forms.IWin32Window = Nothing)
+            Dim targetScreen As System.Windows.Forms.Screen = Nothing
+
+            If owner IsNot Nothing Then
+                Try
+                    Dim ownerHandle As System.IntPtr = owner.Handle
+                    If ownerHandle <> System.IntPtr.Zero Then
+                        targetScreen = System.Windows.Forms.Screen.FromHandle(ownerHandle)
+                    End If
+                Catch
+                    targetScreen = Nothing
+                End Try
+            End If
+
+            If targetScreen Is Nothing Then
+                targetScreen = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position)
+            End If
+
+            Dim wa As System.Drawing.Rectangle = targetScreen.WorkingArea
+            Const MARGIN As System.Int32 = 30
+            Me.Location = New System.Drawing.Point(wa.Right - Me.Width - MARGIN, wa.Top + MARGIN)
         End Sub
+
+        ''' <summary>
+        ''' Refreshes the widget-only dictionary segment selector when the target language changes.
+        ''' </summary>
+        Private Sub txtLanguage_TextChanged(sender As System.Object, e As System.EventArgs) Handles txtLanguage.TextChanged
+            UpdateDictionarySegmentButtonState()
+        End Sub
+
+        Private Sub UpdateDictionarySegmentButtonState()
+            If btnDictionarySegments Is Nothing Then Return
+
+            Dim targetLanguage As System.String = If(txtLanguage Is Nothing, System.String.Empty, txtLanguage.Text.Trim())
+            If System.String.IsNullOrWhiteSpace(targetLanguage) Then targetLanguage = _defaultLanguage
+
+            Dim hasSegments As System.Boolean = False
+            If _dictionaryContext IsNot Nothing Then
+                hasSegments = SharedMethods.HasTranslatorWidgetDictionarySegments(_dictionaryContext, targetLanguage)
+            End If
+
+            btnDictionarySegments.Visible = hasSegments
+            If dictionaryButtonPanel IsNot Nothing Then
+                dictionaryButtonPanel.Visible = (_editUserDictionaryAction IsNot Nothing) OrElse hasSegments
+            End If
+
+            If hasSegments Then
+                Dim summary As System.String =
+                    SharedMethods.GetTranslatorWidgetDictionarySegmentSummary(_dictionaryContext, targetLanguage)
+                Dim tip As System.String = "Select optional dictionary segments for " & targetLanguage & "."
+                If System.String.IsNullOrWhiteSpace(summary) Then
+                    tip &= System.Environment.NewLine & "Currently: no optional segment selected."
+                Else
+                    tip &= System.Environment.NewLine & "Currently: " & summary
+                End If
+                toolTip.SetToolTip(btnDictionarySegments, tip)
+            End If
+        End Sub
+
+        Private Sub SelectDictionarySegmentsForWidget(sender As System.Object, e As System.EventArgs)
+            If _dictionaryContext Is Nothing Then Return
+
+            Dim targetLanguage As System.String = txtLanguage.Text.Trim()
+            If System.String.IsNullOrWhiteSpace(targetLanguage) Then targetLanguage = _defaultLanguage
+            If Not SharedMethods.HasTranslatorWidgetDictionarySegments(_dictionaryContext, targetLanguage) Then
+                UpdateDictionarySegmentButtonState()
+                Return
+            End If
+
+            Dim cancelled As System.Boolean = False
+            SharedMethods.SelectTranslatorWidgetDictionarySegments(
+                _dictionaryContext,
+                SharedMethods.AN & " - Translator dictionary",
+                targetLanguage,
+                cancelled)
+
+            UpdateDictionarySegmentButtonState()
+            If Not cancelled AndAlso Not System.String.IsNullOrWhiteSpace(txtInput.Text) Then
+                debounceTimer.Stop()
+                PerformTranslationAsync()
+            End If
+        End Sub
+
+        Private Function GetCurrentDictionarySegmentSelection(ByVal targetLanguage As System.String) As System.Collections.Generic.HashSet(Of System.String)
+            If _dictionaryContext Is Nothing Then
+                Return New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            End If
+            Return SharedMethods.GetTranslatorWidgetDictionarySegments(_dictionaryContext, targetLanguage)
+        End Function
 
         ''' <summary>
         ''' Persists language and (collapsed) window position/size into <c>My.Settings</c>.
@@ -769,7 +917,9 @@ Namespace SharedLibrary
             Try
                 ' Call translate function - let it handle its own threading
                 ' Do NOT use ConfigureAwait(False) to stay on UI context
-                Dim result As String = Await _translateFunc(textToTranslate, targetLanguage, sourceLanguage, token)
+                Dim selectedDictionarySegments As System.Collections.Generic.HashSet(Of System.String) =
+                    GetCurrentDictionarySegmentSelection(targetLanguage)
+                Dim result As System.String = Await _translateFunc(textToTranslate, targetLanguage, sourceLanguage, selectedDictionarySegments, token)
 
                 If Not token.IsCancellationRequested AndAlso Not _isClosing Then
                     rtbOutput.Text = If(result, "")
@@ -823,7 +973,9 @@ Namespace SharedLibrary
             Try
                 Dim result As String = Await Task.Run(
                     Async Function()
-                        Return Await _translateFunc(word, targetLanguage, sourceLanguage, token)
+                        Dim selectedDictionarySegments As System.Collections.Generic.HashSet(Of System.String) =
+                            GetCurrentDictionarySegmentSelection(targetLanguage)
+                        Return Await _translateFunc(word, targetLanguage, sourceLanguage, selectedDictionarySegments, token)
                     End Function, token).ConfigureAwait(False)
 
                 If Not token.IsCancellationRequested AndAlso Not _isClosing Then

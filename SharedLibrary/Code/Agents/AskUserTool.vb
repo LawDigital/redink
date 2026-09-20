@@ -77,8 +77,8 @@ Namespace Agents
         End Function
 
         ''' <summary>True when a live user is available to answer in the current run.</summary>
-        Private Shared Function IsInteractive() As Boolean
-            Dim p As Func(Of Boolean) = InteractivityProvider
+        Public Shared Function IsInteractive() As Boolean
+            Dim p As System.Func(Of System.Boolean) = InteractivityProvider
             If p Is Nothing Then Return True
             Try
                 Return p()

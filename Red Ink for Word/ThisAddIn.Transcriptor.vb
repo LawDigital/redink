@@ -88,6 +88,7 @@ Partial Public Class ThisAddIn
         Private _selectedAudioOutputDeviceId As String = ""
         Private _alternateOpenAiConfig As ModelConfig = Nothing
         Private _alternateGoogleConfig As ModelConfig = Nothing
+        Private _alternateGoogleApiKeyConfig As ModelConfig = Nothing
 
         Private _fileTranscribing As Boolean = False
         Private _fileProgressPercent As Integer = 0
@@ -387,6 +388,20 @@ Partial Public Class ThisAddIn
                 })
             End If
 
+            If HasConfiguredGeminiTranscribeProvider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = GeminiTranscribeEngine.DisplayNameValue,
+                    .Kind = EngineKind.GeminiTranscribe,
+                    .ModelOrTag = "gemini-3.5-transcribe"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = GeminiTranscribeLiveEngine.DisplayNameValue,
+                    .Kind = EngineKind.GeminiTranscribeLive,
+                    .ModelOrTag = "gemini-3.5-transcribe"
+                })
+            End If
+
             If HasConfiguredOpenAiProvider() Then
                 _engines.Add(New EngineDescriptor With {
                     .DisplayName = "OpenAI gpt-4o-transcribe (REST)",
@@ -471,6 +486,7 @@ Partial Public Class ThisAddIn
         Private Sub LoadAlternateProviderFallbacks()
             _alternateOpenAiConfig = Nothing
             _alternateGoogleConfig = Nothing
+            _alternateGoogleApiKeyConfig = Nothing
 
             Try
                 Dim altPath As String = ExpandEnvironmentVariables(Globals.ThisAddIn.INI_AlternateModelPath)
@@ -492,6 +508,7 @@ Partial Public Class ThisAddIn
 
                 _alternateOpenAiConfig = models.FirstOrDefault(Function(m) IsUsableOpenAiConfig(m))
                 _alternateGoogleConfig = models.FirstOrDefault(Function(m) IsUsableGoogleConfig(m))
+                _alternateGoogleApiKeyConfig = models.FirstOrDefault(Function(m) IsUsableGoogleApiKeyConfig(m))
             Catch
             End Try
         End Sub
@@ -505,6 +522,14 @@ Partial Public Class ThisAddIn
         Private Function HasConfiguredGoogleV2Provider() As Boolean
             Return HasConfiguredGoogleV1Provider() AndAlso
                    Not String.IsNullOrWhiteSpace(ResolveGoogleProjectId())
+        End Function
+
+        Private Function HasConfiguredGeminiTranscribeProvider() As Boolean
+            If HasConfiguredGoogleV2Provider() Then
+                Return True
+            End If
+
+            Return ResolveGoogleApiKeyConfig() IsNot Nothing
         End Function
 
         Private Function HasConfiguredAzureProvider() As Boolean
@@ -585,6 +610,23 @@ Partial Public Class ThisAddIn
             }
         End Function
 
+        Private Function BuildConfiguredGoogleApiKeyModelConfig(useSecond As Boolean) As ModelConfig
+            Dim endpoint As String = If(useSecond, INI_Endpoint_2, INI_Endpoint)
+            Dim oauthEnabled As Boolean = If(useSecond, INI_OAuth2_2, INI_OAuth2)
+
+            If oauthEnabled OrElse
+               String.IsNullOrWhiteSpace(endpoint) OrElse
+               endpoint.IndexOf("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase) < 0 Then
+                Return Nothing
+            End If
+
+            Return New ModelConfig With {
+                .Endpoint = endpoint,
+                .APIKey = If(useSecond, INI_APIKey_2, INI_APIKey),
+                .DecodedAPI = If(useSecond, DecodedAPI_2, DecodedAPI)
+            }
+        End Function
+
         Private Function BuildConfiguredOpenAiModelConfig(useSecond As Boolean) As ModelConfig
             Dim endpoint As String = If(useSecond, INI_Endpoint_2, INI_Endpoint)
 
@@ -645,6 +687,30 @@ Partial Public Class ThisAddIn
             End If
 
             Return Not String.IsNullOrWhiteSpace(config.APIKey)
+        End Function
+
+        Private Function IsUsableGoogleApiKeyConfig(config As ModelConfig) As Boolean
+            If config Is Nothing Then
+                Return False
+            End If
+
+            If String.IsNullOrWhiteSpace(config.Endpoint) OrElse
+               config.Endpoint.IndexOf("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase) < 0 Then
+                Return False
+            End If
+
+            Return Not String.IsNullOrWhiteSpace(GetApiKeyFromModelConfig(config))
+        End Function
+
+        Private Function ResolveGoogleApiKeyConfig() As ModelConfig
+            Dim primaryConfig As ModelConfig = BuildConfiguredGoogleApiKeyModelConfig(False)
+            If IsUsableGoogleApiKeyConfig(primaryConfig) Then Return primaryConfig
+
+            Dim secondaryConfig As ModelConfig = BuildConfiguredGoogleApiKeyModelConfig(True)
+            If IsUsableGoogleApiKeyConfig(secondaryConfig) Then Return secondaryConfig
+
+            If IsUsableGoogleApiKeyConfig(_alternateGoogleApiKeyConfig) Then Return _alternateGoogleApiKeyConfig
+            Return Nothing
         End Function
 
         Private Function ResolveGoogleTranscriptionConfig(ByRef cacheSlot As String) As ModelConfig
@@ -739,6 +805,17 @@ Partial Public Class ThisAddIn
                                 Select(Function(x) CObj(x)).
                                 ToArray())
                         If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.GeminiTranscribe, EngineKind.GeminiTranscribeLive
+                        cboLang.Items.AddRange(
+                            GeminiTranscribeEngine.SupportedLanguages.
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Contains("auto") Then
+                            cboLang.SelectedItem = "auto"
+                        ElseIf cboLang.Items.Count > 0 Then
                             cboLang.SelectedIndex = 0
                         End If
 
@@ -1054,7 +1131,7 @@ Partial Public Class ThisAddIn
 
         Private Function GetAudioOutputDeviceChoices() As List(Of KeyValuePair(Of String, String))
             Dim result As New List(Of KeyValuePair(Of String, String)) From {
-                New KeyValuePair(Of String, String)("Default Audio Output Device", "")
+                New KeyValuePair(Of String, String)("Automatic default + communications fallback", "")
             }
 
             Dim enumr As New MMDeviceEnumerator()
@@ -1135,6 +1212,119 @@ Partial Public Class ThisAddIn
         End Sub
 
 
+        Private Function BuildPublicEngineConfiguration(d As EngineDescriptor) As System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String))
+            Dim result As New System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String))()
+            If d Is Nothing Then
+                Return result
+            End If
+
+            result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Engine", d.DisplayName))
+
+            Select Case d.Kind
+                Case EngineKind.Vosk, EngineKind.WhisperLocal
+                    Dim modelRoot As System.String = ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath)
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model / tag", d.ModelOrTag))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Local model path", System.IO.Path.Combine(modelRoot, d.ModelOrTag)))
+
+                Case EngineKind.GoogleV1
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Authentication", "Google OAuth2 / configured service account"))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Endpoint", "eu-speech.googleapis.com:443"))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model", ResolveGoogleSttSetting(d.ModelOrTag, "model", If(System.String.IsNullOrWhiteSpace(_opts.Model), "(provider default)", _opts.Model))))
+
+                Case EngineKind.GoogleV2
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Authentication", "Google OAuth2 / configured service account"))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "endpoint", "europe-west4-speech.googleapis.com:443")))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Location", ResolveGoogleSttSetting(d.ModelOrTag, "location", "europe-west4")))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Recognizer", ResolveGoogleSttSetting(d.ModelOrTag, "recognizer", "_")))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model", ResolveGoogleSttSetting(d.ModelOrTag, "model", "chirp_2")))
+
+                Case EngineKind.GeminiTranscribe
+                    AppendGeminiPublicConfiguration(result, d, False)
+
+                Case EngineKind.GeminiTranscribeLive
+                    AppendGeminiPublicConfiguration(result, d, True)
+
+                Case EngineKind.OpenAiRest
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Endpoint", "https://api.openai.com/v1/audio/transcriptions"))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model", ResolveOpenAiSttSetting(d.ModelOrTag, "model", d.ModelOrTag)))
+
+                Case EngineKind.OpenAiRealtime
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Endpoint", "wss://api.openai.com/v1/realtime?intent=transcription"))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model", ResolveOpenAiSttSetting(d.ModelOrTag, "model", "gpt-realtime-whisper")))
+
+                Case EngineKind.AzureSpeechRealtime
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Region / endpoint", ResolveAzureRealtimeLocation(d.ModelOrTag)))
+
+                Case EngineKind.AzureSpeechFastRest
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Region / endpoint", ResolveAzureFastRestLocation(d.ModelOrTag)))
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("API version", ResolveAzureSttSetting(d.ModelOrTag, "api-version", "(provider default)")))
+
+                Case EngineKind.TeamsAcsRealtime
+                    result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Bridge WebSocket", ResolveTeamsAcsBridgeWebSocketUri()))
+            End Select
+
+            Return result
+        End Function
+
+        Private Sub AppendGeminiPublicConfiguration(result As System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String)),
+                                                     d As EngineDescriptor,
+                                                     live As System.Boolean)
+            Dim googleCacheSlot As System.String = ""
+            Dim vertexConfig As ModelConfig = ResolveGoogleTranscriptionConfig(googleCacheSlot)
+            Dim useVertex As System.Boolean = vertexConfig IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(ResolveGoogleProjectId())
+            Dim location As System.String = ResolveGoogleSttSetting(d.ModelOrTag, "location", GeminiTranscribeEngine.DefaultLocation)
+
+            If useVertex Then
+                Dim model As System.String = If(live,
+                    ResolveGoogleSttSetting(d.ModelOrTag, "live_model", GeminiTranscribeLiveEngine.DefaultVertexModel),
+                    ResolveGoogleSttSetting(d.ModelOrTag, "model", GeminiTranscribeEngine.DefaultVertexModel))
+                Dim endpointOverride As System.String = If(live,
+                    ResolveGoogleSttSetting(d.ModelOrTag, "live_vertex_endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "vertex_endpoint", "")),
+                    ResolveGoogleSttSetting(d.ModelOrTag, "vertex_endpoint", ""))
+
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Authentication", "Vertex OAuth2 / configured service account"))
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Location", location))
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model", model))
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Endpoint", ResolveGeminiEndpointForDisplay(location, model, live, True, endpointOverride)))
+            Else
+                Dim model As System.String = If(live,
+                    ResolveGoogleSttSetting(d.ModelOrTag, "live_api_model", GeminiTranscribeLiveEngine.DefaultGeminiApiModel),
+                    ResolveGoogleSttSetting(d.ModelOrTag, "api_model", GeminiTranscribeEngine.DefaultGeminiApiModel))
+                Dim endpointOverride As System.String = If(live,
+                    ResolveGoogleSttSetting(d.ModelOrTag, "live_api_endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "api_endpoint", "")),
+                    ResolveGoogleSttSetting(d.ModelOrTag, "api_endpoint", ""))
+
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Authentication", "Gemini API key from configured Google model"))
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model", model))
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Endpoint", ResolveGeminiEndpointForDisplay(location, model, live, False, endpointOverride)))
+            End If
+
+            result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Mode", ResolveGoogleSttSetting(d.ModelOrTag, "mode", "VERBATIM")))
+            If Not live Then
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Word timestamps", ResolveGoogleSttSetting(d.ModelOrTag, "word_timestamp", "false")))
+            End If
+        End Sub
+
+        Private Function ResolveGeminiEndpointForDisplay(location As System.String, model As System.String, live As System.Boolean, useVertex As System.Boolean, endpointOverride As System.String) As System.String
+            Dim configured As System.String = If(endpointOverride, "").Trim()
+            If configured.Length > 0 Then
+                Return configured.Replace("{project}", ResolveGoogleProjectId()).Replace("{location}", location).Replace("{model}", model).Replace("{api_key}", "<redacted>")
+            End If
+
+            If Not useVertex Then
+                If live Then
+                    Return "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=<redacted>"
+                End If
+                Return "https://generativelanguage.googleapis.com/v1beta/models/" & model & ":generateContent"
+            End If
+
+            Dim host As System.String = If(System.String.Equals(location, "global", System.StringComparison.OrdinalIgnoreCase), "aiplatform.googleapis.com", location & "-aiplatform.googleapis.com")
+            If live Then
+                Return "wss://" & host & "/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent"
+            End If
+            Return "https://" & host & "/v1/projects/" & ResolveGoogleProjectId() & "/locations/" & location & "/publishers/google/models/" & model & ":generateContent"
+        End Function
+
         Private Sub OnOptions(sender As Object, e As EventArgs)
             Dim d As EngineDescriptor = CurrentDescriptor()
             If d Is Nothing Then
@@ -1150,7 +1340,8 @@ Partial Public Class ThisAddIn
                 langs,
                 If(String.IsNullOrWhiteSpace(_selectedAudioSourceMode), "MicrophoneOnly", _selectedAudioSourceMode),
                 GetConfiguredOutputDeviceId(),
-                GetAudioOutputDeviceChoices())
+                GetAudioOutputDeviceChoices(),
+                BuildPublicEngineConfiguration(d))
 
                 If dlg.ShowDialog(Me) = DialogResult.OK Then
                     _opts = dlg.Options
@@ -1248,6 +1439,59 @@ Partial Public Class ThisAddIn
                         ResolveGoogleSttSetting(d.ModelOrTag, "language", ""),
                         googleConfig.OAuth2Scopes,
                         "Transcriptor")
+
+                Case EngineKind.GeminiTranscribe
+                    Dim configuredMode As String = ResolveGoogleSttSetting(d.ModelOrTag, "mode", "VERBATIM")
+                    Dim configuredWordTimestamp As Boolean = ParseBooleanSttSetting(ResolveGoogleSttSetting(d.ModelOrTag, "word_timestamp", "false"), False)
+                    Dim configuredVocabulary As System.Collections.Generic.IEnumerable(Of String) = ParseVocabularySetting(ResolveGoogleSttSetting(d.ModelOrTag, "custom_vocabulary", ""))
+
+                    Dim googleCacheSlotGemini As String = ""
+                    Dim googleVertexConfig As ModelConfig = ResolveGoogleTranscriptionConfig(googleCacheSlotGemini)
+                    Dim projectId As String = ResolveGoogleProjectId()
+
+                    If googleVertexConfig IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(projectId) Then
+                        Dim tokenFactory As System.Func(Of System.Threading.Tasks.Task(Of String)) =
+                            Function() GetFreshGoogleTokenAsync(googleVertexConfig, googleCacheSlotGemini)
+                        Dim configuredVertexModel As String = ResolveGoogleSttSetting(d.ModelOrTag, "model", GeminiTranscribeEngine.DefaultVertexModel)
+                        Dim configuredLocation As String = ResolveGoogleSttSetting(d.ModelOrTag, "location", GeminiTranscribeEngine.DefaultLocation)
+                        Dim configuredVertexEndpoint As String = ResolveGoogleSttSetting(d.ModelOrTag, "vertex_endpoint", "")
+                        Return New GeminiTranscribeEngine(projectId, tokenFactory, configuredVertexModel, configuredLocation, configuredMode, configuredWordTimestamp, configuredVocabulary, configuredVertexEndpoint)
+                    End If
+
+                    Dim googleApiKeyConfig As ModelConfig = ResolveGoogleApiKeyConfig()
+                    If googleApiKeyConfig IsNot Nothing Then
+                        Dim configuredApiModel As String = ResolveGoogleSttSetting(d.ModelOrTag, "api_model", GeminiTranscribeEngine.DefaultGeminiApiModel)
+                        Dim configuredApiEndpoint As String = ResolveGoogleSttSetting(d.ModelOrTag, "api_endpoint", "")
+                        Return New GeminiTranscribeEngine(GetApiKeyFromModelConfig(googleApiKeyConfig), configuredApiModel, configuredMode, configuredWordTimestamp, configuredVocabulary, configuredApiEndpoint)
+                    End If
+
+                    Throw New System.InvalidOperationException("No usable Google Vertex OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe.")
+
+                Case EngineKind.GeminiTranscribeLive
+                    Dim configuredModeLive As String = ResolveGoogleSttSetting(d.ModelOrTag, "mode", "VERBATIM")
+                    Dim configuredVocabularyLive As System.Collections.Generic.IEnumerable(Of String) = ParseVocabularySetting(ResolveGoogleSttSetting(d.ModelOrTag, "custom_vocabulary", ""))
+
+                    Dim googleCacheSlotGeminiLive As String = ""
+                    Dim googleVertexConfigLive As ModelConfig = ResolveGoogleTranscriptionConfig(googleCacheSlotGeminiLive)
+                    Dim projectIdLive As String = ResolveGoogleProjectId()
+
+                    If googleVertexConfigLive IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(projectIdLive) Then
+                        Dim tokenFactoryLive As System.Func(Of System.Threading.Tasks.Task(Of String)) =
+                            Function() GetFreshGoogleTokenAsync(googleVertexConfigLive, googleCacheSlotGeminiLive)
+                        Dim configuredVertexLiveModel As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_model", GeminiTranscribeLiveEngine.DefaultVertexModel)
+                        Dim configuredLiveLocation As String = ResolveGoogleSttSetting(d.ModelOrTag, "location", GeminiTranscribeLiveEngine.DefaultLocation)
+                        Dim configuredVertexLiveEndpoint As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_vertex_endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "vertex_endpoint", ""))
+                        Return New GeminiTranscribeLiveEngine(projectIdLive, tokenFactoryLive, configuredVertexLiveModel, configuredLiveLocation, configuredModeLive, configuredVocabularyLive, configuredVertexLiveEndpoint)
+                    End If
+
+                    Dim googleApiKeyConfigLive As ModelConfig = ResolveGoogleApiKeyConfig()
+                    If googleApiKeyConfigLive IsNot Nothing Then
+                        Dim configuredApiLiveModel As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_api_model", GeminiTranscribeLiveEngine.DefaultGeminiApiModel)
+                        Dim configuredApiLiveEndpoint As String = ResolveGoogleSttSetting(d.ModelOrTag, "live_api_endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "api_endpoint", ""))
+                        Return New GeminiTranscribeLiveEngine(GetApiKeyFromModelConfig(googleApiKeyConfigLive), configuredApiLiveModel, configuredModeLive, configuredVocabularyLive, configuredApiLiveEndpoint)
+                    End If
+
+                    Throw New System.InvalidOperationException("No usable Google Vertex OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe Live.")
 
                 Case EngineKind.OpenAiRest
                     Dim key As String = ResolveOpenAiKey()
@@ -2426,6 +2670,21 @@ Partial Public Class ThisAddIn
             Return defaultValue
         End Function
 
+        Private Shared Function ParseBooleanSttSetting(value As String, defaultValue As Boolean) As Boolean
+            Dim parsed As Boolean
+            If System.Boolean.TryParse(If(value, "").Trim(), parsed) Then Return parsed
+            Return defaultValue
+        End Function
+
+        Private Shared Function ParseVocabularySetting(value As String) As System.Collections.Generic.IEnumerable(Of String)
+            Return If(value, "").Split(New Char() {","c, "|"c}, System.StringSplitOptions.RemoveEmptyEntries).
+                Select(Function(item As String) item.Trim()).
+                Where(Function(item As String) Not System.String.IsNullOrWhiteSpace(item)).
+                Distinct(System.StringComparer.OrdinalIgnoreCase).
+                Take(1000).
+                ToArray()
+        End Function
+
         Private Function ResolveGoogleProjectId() As String
             Return If(INI_STT_Google_ProjectID, "").Trim()
         End Function
@@ -2521,7 +2780,7 @@ Partial Public Class ThisAddIn
 
         Private Shared Function IsLiveOnlyEngine(kind As EngineKind) As Boolean
             Select Case kind
-                Case EngineKind.OpenAiRealtime, EngineKind.AzureSpeechRealtime, EngineKind.TeamsAcsRealtime
+                Case EngineKind.OpenAiRealtime, EngineKind.AzureSpeechRealtime, EngineKind.TeamsAcsRealtime, EngineKind.GeminiTranscribeLive
                     Return True
                 Case Else
                     Return False
@@ -2530,7 +2789,7 @@ Partial Public Class ThisAddIn
 
         Private Shared Function IsFileOnlyEngine(kind As EngineKind) As Boolean
             Select Case kind
-                Case EngineKind.OpenAiRest, EngineKind.AzureSpeechFastRest
+                Case EngineKind.OpenAiRest, EngineKind.AzureSpeechFastRest, EngineKind.GeminiTranscribe
                     Return True
                 Case Else
                     Return False

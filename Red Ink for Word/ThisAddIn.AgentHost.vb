@@ -118,7 +118,7 @@ Partial Public Class ThisAddIn
                         $"[subagent-host] Model '{modelKey}' was not found. Falling back to 'agentdefaultmodel'.")
                     swapped = GetSpecialTaskModel(_context, INI_AlternateModelPath, "agentdefaultmodel")
                 End If
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Throw New InvalidOperationException(
                     $"Sub-agent model '{modelKey}' could not be resolved via GetSpecialTaskModel: {ex.Message}", ex)
             End Try
@@ -374,6 +374,7 @@ Partial Public Class ThisAddIn
                     fullPromptOverride:=request.UserMessage,
                     hideSplash:=True,
                     hideLogWindow:=True,
+                    cancellationToken:=ct,
                     subAgentMode:=True,
                     subAgentAllowedToolNames:=effectiveAllowedToolNames,
                     subAgentSpecialModelKey:=request.SpecialModelKey,
@@ -385,7 +386,8 @@ Partial Public Class ThisAddIn
                     subAgentName:=request.AgentName,
                     workflowId:=request.WorkflowId,
                     finalResponseContract:=SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText,
-                    subAgentExpectedArtifactsJson:=request.ExpectedArtifactsJson).ConfigureAwait(False)
+                    subAgentExpectedArtifactsJson:=request.ExpectedArtifactsJson,
+                    subAgentRequiredSuccessfulToolNames:=request.RequiredSuccessfulToolNames).ConfigureAwait(False)
 
             If subAgentTaskId <> "" AndAlso
                _activeToolingContext IsNot Nothing AndAlso
@@ -399,6 +401,15 @@ Partial Public Class ThisAddIn
 
                 Dim errorCode As String =
                     If(normalized Is Nothing, "", normalized.GetErrorCode())
+                Dim declaredResultKind As String = ""
+                Dim hasDeclaredContractFailure As Boolean = False
+                If normalized IsNot Nothing Then
+                    hasDeclaredContractFailure =
+                        Global.SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(
+                            normalized.ToJson(),
+                            errorCode,
+                            declaredResultKind)
+                End If
 
                 Dim isRetryableEmptyResult As Boolean =
                     normalized IsNot Nothing AndAlso
@@ -417,7 +428,9 @@ Partial Public Class ThisAddIn
                     ' permitted internal empty-response retry and will call this host
                     ' again with the same SubAgentTaskId and RunnerRetryIndex = 1.
 
-                ElseIf normalized IsNot Nothing AndAlso Not normalized.IsError Then
+                ElseIf normalized IsNot Nothing AndAlso
+                       Not normalized.IsError AndAlso
+                       Not hasDeclaredContractFailure Then
 
                     _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkCompleted(
                         request.AgentName,
@@ -431,15 +444,25 @@ Partial Public Class ThisAddIn
                         If(errorCode, ""))
 
                 Else
+                    Dim explicitlyRetryable As Boolean = True
+                    Dim declaredRetryable As Boolean = True
+                    If normalized IsNot Nothing AndAlso
+                       Global.SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeRetryable(
+                           normalized.ToJson(),
+                           declaredRetryable) Then
+                        explicitlyRetryable = declaredRetryable
+                    End If
+
                     _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
                         request.AgentName,
                         subAgentTaskId,
-                        If(errorCode, "subagent_failed"))
+                        If(errorCode, "subagent_failed"),
+                        forceTerminal:=Not explicitlyRetryable)
                 End If
             End If
 
             Return If(result, "")
-        Catch ex As Exception
+        Catch ex As System.Exception
             If subAgentTaskId <> "" AndAlso
                _activeToolingContext IsNot Nothing AndAlso
                _activeToolingContext.SequencingState IsNot Nothing AndAlso

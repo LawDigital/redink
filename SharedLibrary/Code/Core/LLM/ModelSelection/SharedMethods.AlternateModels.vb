@@ -209,7 +209,7 @@ Namespace SharedLibrary
                 mc.ToolCallExtractionMap = context.INI_ToolCallExtractionMap_2
 
             Catch ex As System.Exception
-                MessageBox.Show("Error in GetCurrentConfig: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetCurrentConfig: " & ex.Message, "Error")
             End Try
             Return mc
         End Function
@@ -268,7 +268,7 @@ Namespace SharedLibrary
 
             Catch ex As System.Exception
                 If Not ErrorFlag Then
-                    MessageBox.Show("Error in ApplyModelConfig: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ApplyModelConfig: " & ex.Message, "Error")
                 End If
                 ErrorFlag = True
             End Try
@@ -426,6 +426,52 @@ Namespace SharedLibrary
                     GetAlternativeModelIniSections(normalizedPath, cacheHit)
             Catch
                 ' Non-fatal. LoadAlternativeModels will retry synchronously on demand.
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Warms the decrypted-API-key cache for all encrypted models in the given INI file.
+        ''' This pre-runs the expensive PBKDF2 key derivation (see DecodeStringStrong) so the first
+        ''' model-list build (e.g. opening the local chat) is not blocked by decryption.
+        ''' Only pure crypto/registry work is performed - no Office COM, no WinForms, and no
+        ''' ModelConfig materialization (which could show message boxes) occurs. Safe for a
+        ''' background startup task. On any failure the on-demand path decrypts normally.
+        ''' </summary>
+        ''' <param name="iniFilePath">Path to the alternative-models INI file.</param>
+        ''' <param name="context">Shared context providing the CodeBasis used for decryption.</param>
+        Public Shared Sub WarmAlternativeModelsDecryptCache(ByVal iniFilePath As String, ByVal context As ISharedContext)
+            Try
+                Dim normalizedPath As String = NormalizeAlternativeModelIniPath(iniFilePath)
+                If String.IsNullOrWhiteSpace(normalizedPath) OrElse Not File.Exists(normalizedPath) Then Return
+
+                Dim codebasis As String = ResolveRestrictedAccessCodebasis(context)
+                If String.IsNullOrWhiteSpace(codebasis) Then Return
+
+                Dim cacheHit As Boolean = False
+                Dim sections As List(Of AlternativeModelIniSection) =
+                    GetAlternativeModelIniSections(normalizedPath, cacheHit)
+
+                For Each section As AlternativeModelIniSection In sections
+                    If section Is Nothing OrElse section.Values Is Nothing Then Continue For
+
+                    ' Only non-OAuth2 encrypted keys go through DecodeString. OAuth2 resolution
+                    ' is intentionally left to the on-demand path (it may involve network calls).
+                    If ParseBoolean(section.Values, "OAuth2") Then Continue For
+                    If Not ParseBoolean(section.Values, "APIKeyEncrypted") Then Continue For
+
+                    Dim apiKey As String = GetConfigString(section.Values, "APIKey")
+                    If String.IsNullOrWhiteSpace(apiKey) Then Continue For
+
+                    Dim prefix As String = GetConfigString(section.Values, "APIKeyPrefix")
+                    If Not String.IsNullOrEmpty(prefix) AndAlso apiKey.StartsWith(prefix) Then
+                        apiKey = apiKey.Substring(prefix.Length)
+                    End If
+
+                    ' Populates _decodeStringCache as a side effect; result is discarded here.
+                    Dim ignored As String = DecodeString(apiKey, codebasis)
+                Next
+            Catch
+                ' Non-fatal. The on-demand decrypt path runs normally if the cache is cold.
             End Try
         End Sub
 
@@ -708,7 +754,7 @@ Namespace SharedLibrary
                     Return False
                 End If
             Catch ex As System.Exception
-                MessageBox.Show("Error in ShowModelSelection: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ShowModelSelection: " & ex.Message, "Error")
                 Return False
             End Try
         End Function
@@ -724,13 +770,13 @@ Namespace SharedLibrary
             Try
                 Dim iniPath As String = ExpandEnvironmentVariables(modelPath)
                 If String.IsNullOrWhiteSpace(iniPath) OrElse Not System.IO.File.Exists(iniPath) Then
-                    System.Windows.Forms.MessageBox.Show("The configured alternate model path does not exist.", AN, System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The configured alternate model path does not exist.", AN)
                     Return False
                 End If
 
                 Dim alternativeModels As System.Collections.Generic.List(Of ModelConfig) = LoadAlternativeModels(iniPath, context)
                 If alternativeModels Is Nothing OrElse alternativeModels.Count = 0 Then
-                    System.Windows.Forms.MessageBox.Show("No alternate model configurations found in the specified file.", AN, System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("No alternate model configurations found in the specified file.", AN)
                     Return False
                 End If
 
@@ -748,7 +794,7 @@ Namespace SharedLibrary
                     Return True
                 End Using
             Catch ex As System.Exception
-                System.Windows.Forms.MessageBox.Show("Error during multi-model selection: " & ex.Message, AN, System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error during multi-model selection: " & ex.Message, AN)
                 Return False
             End Try
         End Function
@@ -855,7 +901,7 @@ Namespace SharedLibrary
                 Return False
 
             Catch ex As Exception
-                MessageBox.Show("Error in GetSpecialTaskModel: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetSpecialTaskModel: " & ex.Message, "Error")
                 Return False
             End Try
         End Function

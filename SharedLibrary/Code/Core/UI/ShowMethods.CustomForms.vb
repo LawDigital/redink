@@ -366,7 +366,6 @@ Namespace SharedLibrary
             Return selectedOption
         End Function
 
-
         ''' <summary>
         ''' Shows a modal input dialog supporting single-line or multi-line text entry.
         ''' </summary>
@@ -1657,6 +1656,54 @@ Namespace SharedLibrary
         End Function
 
 
+        Private Shared Function HtmlBodyTextLooksLikeFullDocument(bodyText As String) As Boolean
+            If String.IsNullOrWhiteSpace(bodyText) Then Return False
+
+            Dim sample As String = bodyText
+            If sample.Length > 2048 Then
+                sample = sample.Substring(0, 2048)
+            End If
+
+            sample = sample.ToLowerInvariant()
+
+            Return sample.Contains("<html") OrElse
+                   sample.Contains("<body") OrElse
+                   sample.Contains("<head") OrElse
+                   sample.Contains("<!doctype")
+        End Function
+
+        Private Shared Sub ApplyHtmlViewerBodyStyle(
+            htmlBrowser As System.Windows.Forms.WebBrowser,
+            hostBackColor As System.Drawing.Color,
+            bodyText As String)
+
+            If htmlBrowser Is Nothing OrElse htmlBrowser.Document?.Body Is Nothing Then Return
+
+            Dim body As System.Windows.Forms.HtmlElement = htmlBrowser.Document.Body
+            If body Is Nothing Then Return
+
+            ' Word-exported HTML already contains its own layout/style information.
+            ' Overwriting the body style corrupts tracked-change rendering, especially deletions.
+            If HtmlBodyTextLooksLikeFullDocument(bodyText) Then
+                Return
+            End If
+
+            Dim existingStyle As String = ""
+            Try
+                existingStyle = If(body.GetAttribute("style"), "")
+            Catch
+            End Try
+
+            Dim appendedStyle As String =
+                $"background-color: rgb({hostBackColor.R}, {hostBackColor.G}, {hostBackColor.B}); margin: 20px; font-family: 'Segoe UI'; font-size: 9pt;"
+
+            If String.IsNullOrWhiteSpace(existingStyle) Then
+                body.Style = appendedStyle
+            Else
+                body.Style = existingStyle.Trim().TrimEnd(";"c) & "; " & appendedStyle
+            End If
+        End Sub
+
         ''' <summary>
         ''' Shows an HTML message dialog using a WinForms WebBrowser control on an STA thread.
         ''' </summary>
@@ -1740,11 +1787,7 @@ Namespace SharedLibrary
                 .Margin = New System.Windows.Forms.Padding(20)
             }
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
-                                                          If htmlBrowser.Document?.Body IsNot Nothing Then
-                                                              htmlBrowser.Document.Body.Style =
-                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
-                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
-                                                          End If
+                                                          ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
 
             ' OK button
@@ -1910,11 +1953,7 @@ Namespace SharedLibrary
                 .Margin = New System.Windows.Forms.Padding(20)
             }
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
-                                                          If htmlBrowser.Document?.Body IsNot Nothing Then
-                                                              htmlBrowser.Document.Body.Style =
-                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
-                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
-                                                          End If
+                                                          ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
 
             ' OK button
@@ -2102,11 +2141,7 @@ Namespace SharedLibrary
                 .Margin = New System.Windows.Forms.Padding(20)
             }
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
-                                                          If htmlBrowser.Document?.Body IsNot Nothing Then
-                                                              htmlBrowser.Document.Body.Style =
-                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
-                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
-                                                          End If
+                                                          ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
 
             ' OK button.

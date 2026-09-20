@@ -920,6 +920,7 @@ Partial Public Class ThisAddIn
         Dim previousSessionStagingRoot As String = Nothing
         Dim mayDeleteTempDirectory As Boolean = False
         Dim runIsolationOwned As Boolean = False
+        Dim senderDesignScope As System.IDisposable = Nothing
 
         Try
             Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
@@ -1026,6 +1027,20 @@ Partial Public Class ThisAddIn
 
             INI_ToolingMaximumIterations = AP_MaxToolIterations
 
+            ' Per-sender rules belong to AutoPilot senders only. A Local Chat scheduled task
+            ' must never inherit stale AutoPilot sender policy state from an earlier session.
+            Dim applySenderPolicy As System.Boolean =
+                _apActive AndAlso task IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(task.CreatedBy)
+
+            If applySenderPolicy AndAlso _apConfig IsNot Nothing Then LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
+            Dim senderDesignAccess As AutoPilotSenderDesignAccess =
+                If(applySenderPolicy,
+                   ResolveDesignAccessForSender(task.CreatedBy),
+                   New AutoPilotSenderDesignAccess())
+
+            senderDesignScope = SharedLibrary.Agents.DesignRepository.PushAccessScope(
+                senderDesignAccess.AllowDesigns, senderDesignAccess.AllowDesignSets)
+
             ' Build prompts — tell the LLM it is executing a scheduled task
             Dim userPrompt As StringBuilder =
                 BuildScheduledTaskExecutionPrompt(
@@ -1034,6 +1049,16 @@ Partial Public Class ThisAddIn
                     workspaceFileNames)
 
             Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+
+            ' A task created by an AutoPilot sender must retain the same hard sender policy
+            ' when it executes later; scheduling must not become a policy-bypass path.
+            If applySenderPolicy Then
+                Dim senderPromptAddition As System.String = ResolveSystemPromptAdditionForSender(task.CreatedBy)
+                If Not System.String.IsNullOrWhiteSpace(senderPromptAddition) Then
+                    systemPrompt &= vbLf & vbLf & "[PER-SENDER POLICY INSTRUCTION]" & vbLf & senderPromptAddition
+                    ApDashboardLog("Applied per-sender system-prompt instruction (scheduled task).", "step")
+                End If
+            End If
 
             ResolveScheduledTaskExecutionContext(
                 task,
@@ -1063,6 +1088,10 @@ Partial Public Class ThisAddIn
                     Function(t) t IsNot Nothing AndAlso
                                 Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
                                 Not t.ToolName.Equals(AP_Tool_ManageScheduledTasks, StringComparison.OrdinalIgnoreCase)).ToList()
+
+                If applySenderPolicy Then
+                    schedulerTools = ResolveToolsForSender(task.CreatedBy, schedulerTools)
+                End If
 
                 If schedulerTools.Count > 0 Then
                     response = Await ExecuteToolingLoop(
@@ -1195,6 +1224,11 @@ Partial Public Class ThisAddIn
                     End Try
                 ElseIf tempDir IsNot Nothing AndAlso Directory.Exists(tempDir) Then
                     ApDashboardLog($"📅 Scheduled task recovery files preserved at: {tempDir}", "warn")
+                End If
+
+                If senderDesignScope IsNot Nothing Then
+                    senderDesignScope.Dispose()
+                    senderDesignScope = Nothing
                 End If
 
                 SharedLibrary.Agents.AgentGate.EndOwnedScope()
@@ -1742,11 +1776,18 @@ Partial Public Class ThisAddIn
                 htmlBody &= sourcesHtml
             End If
 
+            Dim disclaimerHtml As System.String = System.String.Empty
+            If _apActive AndAlso Not System.String.IsNullOrWhiteSpace(task.CreatedBy) Then
+                If _apConfig IsNot Nothing Then LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
+                disclaimerHtml = BuildAutoPilotDisclaimerHtml(ResolveDisclaimerForSender(task.CreatedBy))
+            End If
+
             Dim footerHtml As String = BuildAutoPilotFooter()
             Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
-                PrepareAutoPilotOutgoingDelivery(htmlBody & footerHtml, resultAttachments)
+                PrepareAutoPilotOutgoingDelivery(htmlBody & disclaimerHtml & footerHtml, resultAttachments)
 
             htmlBody &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            htmlBody &= disclaimerHtml
             htmlBody &= footerHtml
             newMail.HTMLBody = htmlBody
 
@@ -1876,7 +1917,8 @@ Partial Public Class ThisAddIn
                 cleanupGroupId,
                 cleanupIsEligible,
                 cleanupAnsweredUtc,
-                cleanupDeleteAfterUtc)
+                cleanupDeleteAfterUtc,
+                disclaimerHtml)
 
             ApDashboardLog(
     $"📅 Result e-mail submitted to: {String.Join(", ", task.DeliverTo)}",

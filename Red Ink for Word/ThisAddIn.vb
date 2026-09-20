@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 25.8.2026
+' 20.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -67,7 +67,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.250826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.200926" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -459,6 +459,7 @@ Partial Public Class ThisAddIn
 
     Private mainThreadControl As New System.Windows.Forms.Control()
     Public StartupInitialized As Boolean = False
+    Private _webView2StartupCleanupScheduled As Integer = 0
     Private WithEvents wordApp As Word.Application
 
     ' UI threading context and scheduler (captured at Startup)
@@ -658,11 +659,13 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub DelayedStartupTasks()
+        Dim startupTimings As New System.Collections.Generic.List(Of String)()
+        Dim totalStartupStopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
         Try
-            InitializeAddInFeatures()
-            StartupHttpListener(INI_WebServerBlock)
-            ' Initialize Knowledge Store background indexing service
-            InitializeKnowledgeStoreService()
+            MeasureWordStartupStep("InitializeAddInFeatures", Sub() InitializeAddInFeatures(startupTimings), startupTimings)
+            MeasureWordStartupStep("StartupHttpListener.schedule", Sub() StartupHttpListener(INI_WebServerBlock), startupTimings)
+            ' Initialize Knowledge Store background indexing service.
+            MeasureWordStartupStep("KnowledgeStore.schedule", Sub() InitializeKnowledgeStoreService(), startupTimings)
 
             Try
                 If System.Threading.SynchronizationContext.Current Is Nothing Then
@@ -673,9 +676,24 @@ Partial Public Class ThisAddIn
                 Using anchor As New System.Windows.Forms.Control()
                     Dim h = anchor.Handle
                 End Using
-                SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2Profiles()
+                SharedLibrary.SharedLibrary.SharedMethods.CleanupReusableLegacyWebView2Folders()
                 SharedLibrary.Agents.WebView2JsSandbox.Initialize(
                     System.Threading.SynchronizationContext.Current)
+
+                If System.Threading.Interlocked.CompareExchange(_webView2StartupCleanupScheduled, 1, 0) = 0 Then
+                    Dim orphanedWebView2Profiles =
+                        SharedLibrary.SharedLibrary.SharedMethods.CaptureOrphanedWebView2ProfileCleanupCandidates()
+                    System.Threading.Tasks.Task.Run(
+                        Sub()
+                            Try
+                                SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2ProfileCandidates(
+                                    orphanedWebView2Profiles)
+                            Catch ex As System.Exception
+                                System.Diagnostics.Debug.WriteLine(
+                                    "[PERF] Background WebView2 profile cleanup failed: " & ex.Message)
+                            End Try
+                        End Sub)
+                End If
             Catch
                 ' js_run will report "sandbox_uninitialized" if this failed.
             End Try
@@ -683,10 +701,17 @@ Partial Public Class ThisAddIn
             ' Warm the Python Agent version cache off the UI thread so the first tooling run
             ' does not pay the version-probe cost. The lazy path in ResolveAndValidateAvailability
             ' re-probes if this warm-up is skipped or the cache is cold.
-            PrimePythonAgentVersionCache()
-
+            MeasureWordStartupStep("PythonAgentWarmup.schedule", Sub() PrimePythonAgentVersionCache(), startupTimings)
         Catch ex As System.Exception
-            ' Handle exceptions gracefully.
+            startupTimings.Add("DelayedStartupTasks.ERROR=" & ex.GetType().FullName & ": " & ex.Message)
+        Finally
+            totalStartupStopwatch.Stop()
+            startupTimings.Add(
+                "DelayedStartupTasks.total=" &
+                totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; uiThread=" &
+                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString())
+            QueueWordStartupTimingSnapshot(startupTimings)
         End Try
     End Sub
 
@@ -710,6 +735,8 @@ Partial Public Class ThisAddIn
                     Try
                         SharedMethods.WarmAlternativeModelsCache(alternateModelPath)
                         SharedMethods.WarmAlternativeModelsCache(specialServicePath)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(alternateModelPath, _context)
+                        SharedMethods.WarmAlternativeModelsDecryptCache(specialServicePath, _context)
                         SharedLibrary.Agents.AgentResources.EnsureFresh()
                     Catch ex As System.Exception
                         System.Diagnostics.Debug.WriteLine("[PERF] Word startup warm-up failed: " & ex.Message)
@@ -761,55 +788,132 @@ Partial Public Class ThisAddIn
         RemoveOldContextMenu()
     End Sub
 
-    Public Sub InitializeAddInFeatures()
-        InitializeConfig(True, True)
-        QueueModelAndAgentResourceWarmup()
+    Public Sub InitializeAddInFeatures(Optional startupTimings As System.Collections.Generic.List(Of String) = Nothing)
+        MeasureWordStartupStep("InitializeConfig", Sub() InitializeConfig(True, True), startupTimings)
+        MeasureWordStartupStep("ModelAndAgentWarmup.schedule", Sub() QueueModelAndAgentResourceWarmup(), startupTimings)
 
         ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
         ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
-        Try
-            If My.Settings.CrashLog <> INI_Crashlog Then
-                My.Settings.CrashLog = INI_Crashlog
-                My.Settings.Save()
-            End If
-        Catch
-        End Try
-
-        If DLLDIAGNOSTICS Then WriteDllLoadDiagnosticsIfEnabled()
-
-        ' Restore the previously selected primary model (if multi-model is configured)
-        If _context.INIloaded Then
-            Try
-                Dim saved = PrimaryModelManager.LoadSavedModelNumber()
-                If PrimaryModelManager.GetAvailableModels().Count > 0 Then
-                    ' Try saved selection first; fall back to model 1 if it no longer exists
-                    If Not PrimaryModelManager.SelectModel(_context, saved) Then
-                        PrimaryModelManager.SelectModel(_context, PrimaryModelManager.GetAvailableModels()(0))
+        MeasureWordStartupStep(
+            "CrashLogSetting.reconcile",
+            Sub()
+                Try
+                    If My.Settings.CrashLog <> INI_Crashlog Then
+                        My.Settings.CrashLog = INI_Crashlog
+                        My.Settings.Save()
                     End If
-                End If
-            Catch
-                ' non-critical
-            End Try
+                Catch ex As System.Exception
+                End Try
+            End Sub,
+            startupTimings)
+
+        If DLLDIAGNOSTICS Then
+            MeasureWordStartupStep("DllDiagnostics", Sub() WriteDllLoadDiagnosticsIfEnabled(), startupTimings)
         End If
 
-        AddContextMenu()
+        ' Restore the previously selected primary model (if multi-model is configured).
+        MeasureWordStartupStep(
+            "PrimaryModel.restore",
+            Sub()
+                If _context.INIloaded Then
+                    Try
+                        Dim saved = PrimaryModelManager.LoadSavedModelNumber()
+                        If PrimaryModelManager.GetAvailableModels().Count > 0 Then
+                            ' Try saved selection first; fall back to model 1 if it no longer exists.
+                            If Not PrimaryModelManager.SelectModel(_context, saved) Then
+                                PrimaryModelManager.SelectModel(_context, PrimaryModelManager.GetAvailableModels()(0))
+                            End If
+                        End If
+                    Catch ex As System.Exception
+                        ' non-critical
+                    End Try
+                End If
+            End Sub,
+            startupTimings)
+
+        MeasureWordStartupStep("ContextMenu.schedule", Sub() AddContextMenu(), startupTimings)
 
         If _context IsNot Nothing AndAlso _context.INIloaded Then
-            SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "WD")
+            MeasureWordStartupStep(
+                "LicenseCounter.schedule",
+                Sub() SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "WD"),
+                startupTimings)
         End If
 
-        UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
+        MeasureWordStartupStep(
+            "UpdateCheck.schedule",
+            Sub() UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context),
+            startupTimings)
 
-        ' Initialize model menu buttons on the ribbon
+        ' Initialize model menu buttons on the ribbon.
+        MeasureWordStartupStep(
+            "Ribbon.initialize",
+            Sub()
+                Try
+                    If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                        Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+                        Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+                    End If
+                Catch ex As System.Exception
+                    ' non-critical
+                End Try
+            End Sub,
+            startupTimings)
+
+    End Sub
+
+    Private Sub MeasureWordStartupStep(
+            label As String,
+            action As System.Action,
+            timings As System.Collections.Generic.List(Of String))
+
+        Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
         Try
-            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
-                Globals.Ribbons.Ribbon1.UpdateModelsMenu()
-                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
-            End If
-        Catch
-            ' non-critical
-        End Try
+            action.Invoke()
+        Finally
+            stopwatch.Stop()
+            Dim entry As String =
+                label & "=" &
+                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; uiThread=" &
+                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString()
 
+            System.Diagnostics.Debug.WriteLine("[PERF] Word startup " & entry)
+            If timings IsNot Nothing Then timings.Add(entry)
+        End Try
+    End Sub
+
+    Private Sub QueueWordStartupTimingSnapshot(timings As System.Collections.Generic.List(Of String))
+        If timings Is Nothing OrElse timings.Count = 0 Then Return
+
+        Dim snapshot As String() = timings.ToArray()
+        Dim versionSnapshot As String = Version
+        Dim uiThreadIdSnapshot As Integer = UiThreadId
+
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Dim basePath As String =
+                        System.IO.Path.Combine(
+                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                            "redink")
+                    System.IO.Directory.CreateDirectory(basePath)
+
+                    Dim outputPath As String =
+                        System.IO.Path.Combine(basePath, "RI_Word_Startup_Perf.txt")
+
+                    Dim lines As New System.Collections.Generic.List(Of String)()
+                    lines.Add("Red Ink Word Startup Performance")
+                    lines.Add("Created=" & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                    lines.Add("Version=" & If(versionSnapshot, ""))
+                    lines.Add("UIThreadId=" & uiThreadIdSnapshot.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    lines.AddRange(snapshot)
+
+                    System.IO.File.WriteAllLines(outputPath, lines, System.Text.Encoding.UTF8)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[PERF] Word startup timing snapshot failed: " & ex.Message)
+                End Try
+            End Sub)
     End Sub
 
 

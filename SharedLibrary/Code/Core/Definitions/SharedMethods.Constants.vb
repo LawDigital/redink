@@ -411,6 +411,7 @@ Namespace SharedLibrary
         Public Const DEFAULT_OAUTH2_AT_EXPIRY_2 As Long = 3600
         Public Const DEFAULT_MAX_OUTPUT_TOKEN As Integer = 0
         Public Const DEFAULT_MAX_OUTPUT_TOKEN_2 As Integer = 0
+        Public Const DEFAULT_WEB_SERVER_BLOCK As Integer = 0
 
         Public Const DEFAULT_KEEPFORMAT_CAP As Integer = 5000
         Public Const DEFAULT_MARKUP_METHOD_HELPER As Integer = 2
@@ -448,6 +449,10 @@ Namespace SharedLibrary
 
         Public Const DEFAULT_TOOLING_MAXIMUMITERATIONS As Integer = Agents.DefaultMaxToolIterations
         Public Const DEFAULT_BOOL_TOOLINGLOGWINDOW As Boolean = False
+        Public Const DEFAULT_TOOL_RESPONSE_PAYLOAD_BUDGET_CHARS As Integer = Agents.ToolingConstants.ToolResponsePayloadBudgetChars
+        Public Const DEFAULT_BUDGET_MEDIUM_COMPACTION_THRESHOLD_CHARS As Integer = Agents.ToolingConstants.BudgetMediumCompactionThresholdChars
+        Public Const DEFAULT_BUDGET_AGGRESSIVE_COMPACTION_THRESHOLD_CHARS As Integer = Agents.ToolingConstants.BudgetAggressiveCompactionThresholdChars
+        Public Const DEFAULT_BUDGET_COMPACTION_PREVIEW_CHARS As Integer = Agents.ToolingConstants.BudgetCompactionPreviewChars
 
         ' Tooling Constants
 

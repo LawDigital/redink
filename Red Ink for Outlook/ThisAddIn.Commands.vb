@@ -47,6 +47,19 @@ Partial Public Class ThisAddIn
         Public Property Style As Object
         Public Property Font As Microsoft.Office.Interop.Word.Font
         Public Property ParagraphFormat As Microsoft.Office.Interop.Word.ParagraphFormat
+        Public Property HasListFormat As System.Boolean
+        Public Property ListTemplate As Microsoft.Office.Interop.Word.ListTemplate
+        Public Property ListLevel As System.Int32
+        Public Property ListValue As System.Int32
+        Public Property ListStartAt As System.Int32 = 1
+        Public Property ListIsOrdered As System.Boolean
+    End Class
+
+    Private Class ReplacementBoundaryFormattingSnapshot
+        Public Property LastVisibleParagraphSpaceAfter As System.Single
+        Public Property HasFollowingParagraph As System.Boolean
+        Public Property FollowingParagraphSpaceBefore As System.Single
+        Public Property FollowingParagraphWasEmpty As System.Boolean
     End Class
 
     Private Shared Function RangeWithoutTrailingParagraphMark(sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
@@ -102,10 +115,39 @@ Partial Public Class ThisAddIn
             Dim textRange As Microsoft.Office.Interop.Word.Range =
             TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
 
+            Dim hasListFormat As System.Boolean = False
+            Dim listTemplate As Microsoft.Office.Interop.Word.ListTemplate = Nothing
+            Dim listLevel As System.Int32 = 0
+            Dim listValue As System.Int32 = 0
+            Dim listStartAt As System.Int32 = 1
+            Dim listIsOrdered As System.Boolean = False
+
+            Try
+                Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+                hasListFormat = listFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering
+                If hasListFormat Then
+                    listTemplate = listFormat.ListTemplate
+                    listLevel = listFormat.ListLevelNumber
+                    listValue = listFormat.ListValue
+                    listIsOrdered = IsOrderedWordList(listFormat, listFormat.ListType, If(listFormat.ListString, System.String.Empty))
+                    If listTemplate IsNot Nothing AndAlso listLevel > 0 Then
+                        listStartAt = listTemplate.ListLevels(listLevel).StartAt
+                    End If
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not capture Outlook list formatting: " & ex.Message)
+            End Try
+
             snapshots.Add(New ParagraphFormattingSnapshot() With {
             .Style = paragraphRange.Style,
             .Font = textRange.Font.Duplicate,
-            .ParagraphFormat = paragraphRange.ParagraphFormat.Duplicate
+            .ParagraphFormat = paragraphRange.ParagraphFormat.Duplicate,
+            .HasListFormat = hasListFormat,
+            .ListTemplate = listTemplate,
+            .ListLevel = listLevel,
+            .ListValue = listValue,
+            .ListStartAt = listStartAt,
+            .ListIsOrdered = listIsOrdered
         })
         Next
 
@@ -117,7 +159,7 @@ Partial Public Class ThisAddIn
         If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return
 
         Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
-        Dim index As Integer = 0
+        Dim index As System.Int32 = 0
 
         For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In effectiveRange.Paragraphs
             Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
@@ -125,31 +167,458 @@ Partial Public Class ThisAddIn
             If paragraphRange.Start >= effectiveRange.End Then Continue For
             If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
 
-            Dim snapshot As ParagraphFormattingSnapshot = snapshots(Math.Min(index, snapshots.Count - 1))
+            Dim snapshot As ParagraphFormattingSnapshot = snapshots(System.Math.Min(index, snapshots.Count - 1))
 
+            Dim targetHasNativeList As System.Boolean = False
             Try
-                paragraphRange.Style = snapshot.Style
-            Catch
+                targetHasNativeList =
+                    paragraphRange.ListFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering
+            Catch exListProbe As System.Exception
+                System.Diagnostics.Debug.WriteLine(
+                    "Could not probe inserted Outlook paragraph list state: " & exListProbe.Message)
             End Try
 
-            Try
-                paragraphRange.ParagraphFormat = snapshot.ParagraphFormat
-            Catch
-            End Try
+            ' The Markdown/HTML renderer is the structural authority for native lists. Re-applying
+            ' the source Style/ParagraphFormat after RILIST reconciliation can overwrite the list
+            ' level, hanging indent or tab geometry that was just repaired. Ordinary paragraphs
+            ' retain the established InsertAfter behavior.
+            If Not targetHasNativeList Then
+                Try
+                    paragraphRange.Style = snapshot.Style
+                Catch exStyle As System.Exception
+                    System.Diagnostics.Debug.WriteLine(
+                        "Could not restore Outlook paragraph style: " & exStyle.Message)
+                End Try
 
+                Try
+                    paragraphRange.ParagraphFormat = snapshot.ParagraphFormat
+                Catch exParagraph As System.Exception
+                    System.Diagnostics.Debug.WriteLine(
+                        "Could not restore Outlook paragraph format: " & exParagraph.Message)
+                End Try
+            Else
+                System.Diagnostics.Debug.WriteLine(
+                    "Outlook InsertAfter paragraph-format restore skipped for native Markdown list paragraph.")
+            End If
+
+            ' Never assign the complete Word.Font snapshot here. Doing so paragraph-wide resets
+            ' semantic inline runs generated from Markdown (<strong>, <em>, links, etc.). Only the
+            ' base typeface and size are inherited; emphasis and other inline properties remain
+            ' owned by the rendered runs.
             Try
                 Dim textRange As Microsoft.Office.Interop.Word.Range =
-                TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
+                    TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
 
-                If textRange.End > textRange.Start Then
-                    textRange.Font = snapshot.Font
+                If textRange.End > textRange.Start AndAlso snapshot.Font IsNot Nothing Then
+                    Dim sourceFontName As System.String = snapshot.Font.Name
+                    If Not System.String.IsNullOrEmpty(sourceFontName) Then
+                        textRange.Font.Name = sourceFontName
+                    End If
+
+                    Dim sourceFontSize As System.Single = snapshot.Font.Size
+                    If sourceFontSize > 0.0F AndAlso sourceFontSize < 1000.0F Then
+                        textRange.Font.Size = sourceFontSize
+                    End If
                 End If
-            Catch
+            Catch exFont As System.Exception
+                System.Diagnostics.Debug.WriteLine(
+                    "Could not restore Outlook base font without flattening inline formatting: " & exFont.Message)
             End Try
 
             index += 1
         Next
     End Sub
+
+    Private Shared Function TargetListStructureMatchesSource(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        snapshots As System.Collections.Generic.List(Of ParagraphFormattingSnapshot)) As System.Boolean
+
+        If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return False
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
+        Dim targetParagraphs As Microsoft.Office.Interop.Word.Paragraphs = effectiveRange.Paragraphs
+        If targetParagraphs Is Nothing OrElse targetParagraphs.Count <> snapshots.Count Then Return False
+
+        ' Do not short-circuit when the source selection starts inside an existing outer
+        ' list or in the middle of an ordered sequence. In those cases the native Word
+        ' template restore is required to reconnect the replacement to surrounding content.
+        Dim firstListSnapshot As ParagraphFormattingSnapshot =
+            snapshots.Find(Function(item) item IsNot Nothing AndAlso item.HasListFormat)
+        If firstListSnapshot IsNot Nothing Then
+            If firstListSnapshot.ListLevel > 1 Then Return False
+            If firstListSnapshot.ListIsOrdered AndAlso
+               firstListSnapshot.ListValue > 0 AndAlso
+               firstListSnapshot.ListValue <> firstListSnapshot.ListStartAt Then
+                Return False
+            End If
+        End If
+
+        For index As System.Int32 = 1 To targetParagraphs.Count
+            Dim snapshot As ParagraphFormattingSnapshot = snapshots(index - 1)
+            If snapshot Is Nothing Then Return False
+
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = targetParagraphs(index).Range.Duplicate
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Try
+                Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+                Dim targetHasList As System.Boolean =
+                    listFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering
+
+                If targetHasList <> snapshot.HasListFormat Then Return False
+                If Not snapshot.HasListFormat Then Continue For
+
+                If System.Math.Max(1, listFormat.ListLevelNumber) <> System.Math.Max(1, snapshot.ListLevel) Then
+                    Return False
+                End If
+
+                Dim targetIsOrdered As System.Boolean =
+                    IsOrderedWordList(listFormat, listFormat.ListType, If(listFormat.ListString, System.String.Empty))
+                If targetIsOrdered <> snapshot.ListIsOrdered Then Return False
+
+                ' Ordered lists carry semantically relevant numbering. If Word/HTML already
+                ' reproduced it exactly, there is no benefit in re-applying the source template.
+                If snapshot.ListIsOrdered AndAlso snapshot.ListValue > 0 AndAlso listFormat.ListValue <> snapshot.ListValue Then
+                    Return False
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Could not validate pasted Outlook list structure: " & ex.Message)
+                Return False
+            End Try
+        Next
+
+        Return True
+    End Function
+
+    Private Shared Sub ApplyListFormattingIfCompatible(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        snapshots As System.Collections.Generic.List(Of ParagraphFormattingSnapshot))
+
+        If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return
+        If Not snapshots.Exists(Function(item) item IsNot Nothing AndAlso item.HasListFormat) Then Return
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
+        Dim targetParagraphs As Microsoft.Office.Interop.Word.Paragraphs = effectiveRange.Paragraphs
+
+        If targetParagraphs Is Nothing OrElse targetParagraphs.Count <> snapshots.Count Then
+            System.Diagnostics.Debug.WriteLine(
+                $"List formatting restore skipped: source paragraphs={snapshots.Count}, target paragraphs={If(targetParagraphs Is Nothing, 0, targetParagraphs.Count)}.")
+            Return
+        End If
+
+        ' Markdown -> HTML -> Word often reconstructs the list hierarchy perfectly. Re-applying
+        ' ListTemplate paragraph-by-paragraph in that situation is harmful: Word can merge the
+        ' final item back into the outer list (format bleeding). Preserve the successful paste
+        ' and restore native list metadata only when the resulting structure actually differs.
+        If TargetListStructureMatchesSource(effectiveRange, snapshots) Then
+            System.Diagnostics.Debug.WriteLine("List formatting restore skipped: pasted list structure already matches source.")
+            Return
+        End If
+
+        For index As System.Int32 = 1 To targetParagraphs.Count
+            Dim snapshot As ParagraphFormattingSnapshot = snapshots(index - 1)
+            If snapshot Is Nothing Then Continue For
+
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = targetParagraphs(index).Range.Duplicate
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Try
+                If paragraphRange.ListFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                    paragraphRange.ListFormat.RemoveNumbers()
+                End If
+
+                ' When paragraph counts still match, list/non-list membership is part of the
+                ' source structure too. Do not let HTML/Markdown list formatting bleed into
+                ' a paragraph that was not a list item before the transformation.
+                If Not snapshot.HasListFormat Then Continue For
+                If snapshot.ListTemplate Is Nothing Then
+                    System.Diagnostics.Debug.WriteLine($"List formatting restore skipped for paragraph {index}: source list template is unavailable.")
+                    Continue For
+                End If
+
+                Dim continuePrevious As System.Boolean =
+                    index > 1 AndAlso snapshots(index - 2) IsNot Nothing AndAlso snapshots(index - 2).HasListFormat
+
+                If Not continuePrevious Then
+                    ' If the selected range begins in the middle of a list (or at a nested
+                    ' level), continue the compatible list that still exists immediately
+                    ' before/outside the replacement instead of restarting at 1.
+                    continuePrevious =
+                        snapshot.ListLevel > 1 OrElse
+                        (snapshot.ListValue > 0 AndAlso snapshot.ListValue > System.Math.Max(0, snapshot.ListStartAt))
+                End If
+
+                Dim applyLevel As System.Object = System.Math.Max(1, snapshot.ListLevel)
+                paragraphRange.ListFormat.ApplyListTemplateWithLevel(
+                    ListTemplate:=snapshot.ListTemplate,
+                    ContinuePreviousList:=continuePrevious,
+                    ApplyTo:=Microsoft.Office.Interop.Word.WdListApplyTo.wdListApplyToSelection,
+                    DefaultListBehavior:=Microsoft.Office.Interop.Word.WdDefaultListBehavior.wdWord10ListBehavior,
+                    ApplyLevel:=applyLevel)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("List formatting restore failed: " & ex.Message)
+            End Try
+        Next
+    End Sub
+
+    Private Shared Sub RestoreMarkdownListBaseFont(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        snapshots As System.Collections.Generic.List(Of ParagraphFormattingSnapshot))
+
+        If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
+        Dim paragraphIndex As System.Int32 = 0
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In effectiveRange.Paragraphs
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+            If paragraphRange.Start >= effectiveRange.End Then Continue For
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Dim snapshot As ParagraphFormattingSnapshot =
+                snapshots(System.Math.Min(paragraphIndex, snapshots.Count - 1))
+
+            Try
+                Dim listFormat As Microsoft.Office.Interop.Word.ListFormat = paragraphRange.ListFormat
+                If listFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering AndAlso
+                   snapshot IsNot Nothing AndAlso snapshot.Font IsNot Nothing Then
+
+                    Dim textRange As Microsoft.Office.Interop.Word.Range =
+                        TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
+
+                    If textRange.End > textRange.Start Then
+                        Dim sourceFontName As System.String = snapshot.Font.Name
+                        If Not System.String.IsNullOrWhiteSpace(sourceFontName) Then
+                            ' Apply only the base typeface slots. Do not assign the complete Font object:
+                            ' Bold/Italic/Underline and other inline Markdown runs must remain untouched.
+                            textRange.Font.Name = sourceFontName
+                            textRange.Font.NameAscii = sourceFontName
+                            textRange.Font.NameOther = sourceFontName
+                        End If
+
+                        Dim sourceFontSize As System.Single = snapshot.Font.Size
+                        If sourceFontSize > 0.0F AndAlso sourceFontSize < 1000.0F Then
+                            textRange.Font.Size = sourceFontSize
+                        End If
+
+                    End If
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine(
+                    "Could not restore Outlook Markdown list base font: " & ex.Message)
+            End Try
+
+            paragraphIndex += 1
+        Next
+    End Sub
+
+    Private Shared Function ResolveInsertionFormattingSourceBeforePosition(
+        sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
+
+        If sourceRange Is Nothing OrElse sourceRange.Document Is Nothing Then Return Nothing
+
+        Dim document As Microsoft.Office.Interop.Word.Document = sourceRange.Document
+        Dim insertionPosition As System.Int32 = sourceRange.End
+        Dim documentStart As System.Int32 = document.Content.Start
+        Const probeWindow As System.Int32 = 4096
+
+        Dim searchStart As System.Int32 = System.Math.Max(documentStart, insertionPosition - probeWindow)
+        Dim probe As Microsoft.Office.Interop.Word.Range = document.Content.Duplicate()
+
+        For position As System.Int32 = insertionPosition - 1 To searchStart Step -1
+            probe.SetRange(position, position + 1)
+            Dim value As System.String = probe.Text
+            If System.String.IsNullOrEmpty(value) Then Continue For
+
+            Dim character As System.Char = value.Chars(0)
+            If character = Microsoft.VisualBasic.ControlChars.Cr OrElse
+               character = Microsoft.VisualBasic.ControlChars.Lf OrElse
+               character = Microsoft.VisualBasic.ControlChars.Tab OrElse
+               character = Microsoft.VisualBasic.ChrW(7) OrElse
+               character = Microsoft.VisualBasic.ChrW(11) OrElse
+               System.Char.IsWhiteSpace(character) Then
+                Continue For
+            End If
+
+            Return probe.Duplicate()
+        Next
+
+        ' Empty/new message fallback: use the insertion point itself only when there is no
+        ' preceding concrete text from which Outlook can inherit the destination formatting.
+        Dim fallback As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate()
+        fallback.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+        Return fallback
+    End Function
+
+    Private Shared Function CaptureReplacementBoundaryFormatting(
+        sourceRange As Microsoft.Office.Interop.Word.Range) As ReplacementBoundaryFormattingSnapshot
+
+        If sourceRange Is Nothing OrElse sourceRange.Document Is Nothing Then Return Nothing
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(sourceRange)
+        If effectiveRange.Paragraphs Is Nothing OrElse effectiveRange.Paragraphs.Count = 0 Then Return Nothing
+
+        Dim snapshot As New ReplacementBoundaryFormattingSnapshot()
+        Dim lastSourceParagraph As Microsoft.Office.Interop.Word.Paragraph =
+            effectiveRange.Paragraphs(effectiveRange.Paragraphs.Count)
+        Dim lastSourceParagraphRange As Microsoft.Office.Interop.Word.Range = lastSourceParagraph.Range.Duplicate()
+
+        snapshot.LastVisibleParagraphSpaceAfter = lastSourceParagraphRange.ParagraphFormat.SpaceAfter
+
+        ' Only treat the next paragraph as an external block boundary when the original
+        ' selection ended at the end of its last paragraph (with or without selecting the
+        ' paragraph mark). A selection ending inside a paragraph has no following-paragraph
+        ' boundary to restore.
+        Dim sourceEndsAtParagraphBoundary As System.Boolean =
+            sourceRange.End >= System.Math.Max(lastSourceParagraphRange.Start, lastSourceParagraphRange.End - 1)
+
+        If sourceEndsAtParagraphBoundary Then
+            Dim nextParagraphPosition As System.Int32 = lastSourceParagraphRange.End
+            Dim documentEnd As System.Int32 = sourceRange.Document.Content.End
+            If nextParagraphPosition < documentEnd Then
+                Dim nextParagraphProbe As Microsoft.Office.Interop.Word.Range = sourceRange.Document.Content.Duplicate()
+                nextParagraphProbe.SetRange(
+                    nextParagraphPosition,
+                    System.Math.Min(documentEnd, nextParagraphPosition + 1))
+                snapshot.HasFollowingParagraph = True
+                snapshot.FollowingParagraphSpaceBefore = nextParagraphProbe.ParagraphFormat.SpaceBefore
+
+                Dim followingParagraphText As System.String =
+                    If(nextParagraphProbe.Paragraphs(1).Range.Text, System.String.Empty)
+                followingParagraphText = followingParagraphText.Replace(vbCr, System.String.Empty).Replace(vbLf, System.String.Empty)
+                followingParagraphText = followingParagraphText.Replace(Microsoft.VisualBasic.ChrW(7), System.String.Empty)
+                snapshot.FollowingParagraphWasEmpty = System.String.IsNullOrWhiteSpace(followingParagraphText)
+            End If
+        End If
+
+        Return snapshot
+    End Function
+
+    Private Shared Function FindLastVisibleParagraphRange(
+        targetRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
+
+        If targetRange Is Nothing Then Return Nothing
+
+        Dim paragraphs As Microsoft.Office.Interop.Word.Paragraphs = targetRange.Paragraphs
+        If paragraphs Is Nothing OrElse paragraphs.Count = 0 Then Return Nothing
+
+        For index As System.Int32 = paragraphs.Count To 1 Step -1
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraphs(index).Range.Duplicate()
+            If paragraphRange.Start >= targetRange.End Then Continue For
+            If paragraphRange.End > targetRange.End Then paragraphRange.End = targetRange.End
+
+            Dim paragraphText As System.String = If(paragraphRange.Text, System.String.Empty)
+            paragraphText = paragraphText.Replace(vbCr, System.String.Empty).Replace(vbLf, System.String.Empty)
+            paragraphText = paragraphText.Replace(Microsoft.VisualBasic.ChrW(7), System.String.Empty)
+
+            Dim hasNativeList As System.Boolean = False
+            Try
+                hasNativeList =
+                    paragraphRange.ListFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering
+            Catch
+                hasNativeList = False
+            End Try
+
+            If hasNativeList OrElse Not System.String.IsNullOrWhiteSpace(paragraphText) Then
+                Return paragraphRange
+            End If
+        Next
+
+        Return Nothing
+    End Function
+
+    Private Shared Sub RestoreReplacementBoundaryFormatting(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        snapshot As ReplacementBoundaryFormattingSnapshot)
+
+        If targetRange Is Nothing OrElse snapshot Is Nothing OrElse targetRange.Document Is Nothing Then Return
+
+        Try
+            ' HTML paste may append a transport/empty paragraph to the selected range. The
+            ' visible block boundary is therefore the last paragraph containing text or native
+            ' list semantics, not blindly Paragraphs(Paragraphs.Count).
+            Dim lastVisibleParagraphRange As Microsoft.Office.Interop.Word.Range =
+                FindLastVisibleParagraphRange(targetRange)
+            If lastVisibleParagraphRange IsNot Nothing Then
+                lastVisibleParagraphRange.ParagraphFormat.SpaceAfter = snapshot.LastVisibleParagraphSpaceAfter
+
+                If snapshot.HasFollowingParagraph Then
+                    Dim nextParagraphPosition As System.Int32 = lastVisibleParagraphRange.Paragraphs(1).Range.End
+
+                    ' PasteAndFormat can leave an empty transport paragraph between the rendered
+                    ' block and content that originally followed it. Remove such paragraphs only
+                    ' when the original boundary had no empty paragraph. This is a boundary repair,
+                    ' not a general whitespace normalization.
+                    If Not snapshot.FollowingParagraphWasEmpty Then
+                        Dim continueRemovingTransportParagraphs As System.Boolean = True
+                        While continueRemovingTransportParagraphs AndAlso
+                              nextParagraphPosition < targetRange.Document.Content.End
+
+                            Dim candidateProbe As Microsoft.Office.Interop.Word.Range = targetRange.Document.Content.Duplicate()
+                            candidateProbe.SetRange(
+                                nextParagraphPosition,
+                                System.Math.Min(targetRange.Document.Content.End, nextParagraphPosition + 1))
+                            Dim candidateParagraph As Microsoft.Office.Interop.Word.Range =
+                                candidateProbe.Paragraphs(1).Range.Duplicate()
+                            Dim candidateText As System.String = If(candidateParagraph.Text, System.String.Empty)
+                            candidateText = candidateText.Replace(vbCr, System.String.Empty).Replace(vbLf, System.String.Empty)
+                            candidateText = candidateText.Replace(Microsoft.VisualBasic.ChrW(7), System.String.Empty)
+
+                            If System.String.IsNullOrWhiteSpace(candidateText) Then
+                                candidateParagraph.Delete()
+                            Else
+                                continueRemovingTransportParagraphs = False
+                            End If
+                        End While
+                    End If
+
+                    Dim documentEnd As System.Int32 = targetRange.Document.Content.End
+                    If nextParagraphPosition < documentEnd Then
+                        Dim nextParagraphProbe As Microsoft.Office.Interop.Word.Range = targetRange.Document.Content.Duplicate()
+                        nextParagraphProbe.SetRange(
+                            nextParagraphPosition,
+                            System.Math.Min(documentEnd, nextParagraphPosition + 1))
+                        nextParagraphProbe.ParagraphFormat.SpaceBefore = snapshot.FollowingParagraphSpaceBefore
+                    End If
+                End If
+            End If
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine(
+                "Could not restore Outlook replacement block boundary formatting: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Shared Function CaptureInsertionPointFormatting(
+        sourceRange As Microsoft.Office.Interop.Word.Range) As System.Collections.Generic.List(Of ParagraphFormattingSnapshot)
+
+        Dim snapshots As New System.Collections.Generic.List(Of ParagraphFormattingSnapshot)()
+        If sourceRange Is Nothing Then Return snapshots
+
+        Dim insertionRange As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate
+        If insertionRange.Start = insertionRange.End Then
+            insertionRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+        End If
+
+        Try
+            snapshots.Add(New ParagraphFormattingSnapshot() With {
+                .Style = insertionRange.Style,
+                .Font = insertionRange.Font.Duplicate,
+                .ParagraphFormat = insertionRange.ParagraphFormat.Duplicate,
+                .HasListFormat = False,
+                .ListTemplate = Nothing,
+                .ListLevel = 0,
+                .ListValue = 0,
+                .ListStartAt = 1,
+                .ListIsOrdered = False
+            })
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine(
+                "Could not capture Outlook insertion-point formatting: " & ex.Message)
+        End Try
+
+        Return snapshots
+    End Function
+
 
     ''' <summary>
     ''' Main command dispatcher. Guards reentrancy, ensures configuration is loaded, validates active MailItem,
@@ -204,7 +673,7 @@ Partial Public Class ThisAddIn
 
                 inspector = ComRetry(Function() outlookApp.ActiveInspector())
                 If inspector Is Nothing Then
-                    System.Windows.Forms.MessageBox.Show("Error in MainMenu: No active email item found.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in MainMenu: No active email item found.", "Error")
                     Return
                 End If
             End If
@@ -228,10 +697,16 @@ Partial Public Class ThisAddIn
                         INI_Language2,
                         _context)
                     If String.IsNullOrEmpty(TranslateLanguage) Then Return
-                    Command_InsertAfter(InterpolateAtRuntime(SP_Translate), False, INI_KeepFormat1, INI_ReplaceText1)
+                    Dim dictionarySelectionCancelled As System.Boolean = False
+                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    If dictionarySelectionCancelled Then Return
+                    Command_InsertAfter(translatePrompt, False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "PrimLang"
                     TranslateLanguage = INI_Language1
-                    Command_InsertAfter(InterpolateAtRuntime(SP_Translate), False, INI_KeepFormat1, INI_ReplaceText1)
+                    Dim dictionarySelectionCancelled As System.Boolean = False
+                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    If dictionarySelectionCancelled Then Return
+                    Command_InsertAfter(translatePrompt, False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "Correct"
                     Command_InsertAfter(InterpolateAtRuntime(SP_Correct), INI_DoMarkupOutlook, INI_KeepFormat2, Override(INI_ReplaceText2, INI_ReplaceText2Override), Override(INI_MarkupMethodOutlook, INI_MarkupMethodOutlookOverride))
                 Case "Summarize"
@@ -331,14 +806,14 @@ Partial Public Class ThisAddIn
                 Case "InsertClipboard"
                     InsertClipboard()
                 Case Else
-                    System.Windows.Forms.MessageBox.Show("Error in MainMenu: Invalid internal command.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in MainMenu: Invalid internal command.", "Error")
             End Select
 
             If inspector IsNot Nothing Then Marshal.ReleaseComObject(inspector) : inspector = Nothing
             'If outlookApp IsNot Nothing Then Marshal.ReleaseComObject(outlookApp) : outlookApp = Nothing
 
         Catch ex As System.Exception
-            System.Windows.Forms.MessageBox.Show("Error in MainMenu: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in MainMenu: " & ex.Message, "Error")
         Finally
             ' Always release the reentrancy guard so subsequent calls work
             System.Threading.Interlocked.Exchange(inMainMenu, 0)
@@ -540,8 +1015,7 @@ Partial Public Class ThisAddIn
             ' Open the Inspector modelessly
             Dim inspector As Inspector = mailItem.GetInspector
             If inspector Is Nothing Then
-                MessageBox.Show("Error in OpenInspectorAndReapplySelection: Failed to open the ActiveInspector.",
-                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in OpenInspectorAndReapplySelection: Failed to open the ActiveInspector.", "Error")
                 Return
             End If
             inspector.Display(False) ' modeless - do not block
@@ -553,16 +1027,14 @@ Partial Public Class ThisAddIn
             If inspector Is Nothing Then
                 inspector = ComRetry(Function() Globals.ThisAddIn.Application.ActiveInspector())
                 If inspector Is Nothing Then
-                    MessageBox.Show("Error in OpenInspectorAndReapplySelection: No active Inspector available.",
-                                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in OpenInspectorAndReapplySelection: No active Inspector available.", "Error")
                     Return
                 End If
             End If
 
             Dim curr As Object = ComRetry(Function() inspector.CurrentItem)
             If curr Is Nothing OrElse Not TypeOf curr Is Microsoft.Office.Interop.Outlook.MailItem Then
-                MessageBox.Show("Error in OpenInspectorAndReapplySelection: The Inspector is not ready or no email item is active.",
-                                "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in OpenInspectorAndReapplySelection: The Inspector is not ready or no email item is active.", "Error")
                 Return
             End If
 
@@ -580,8 +1052,7 @@ Partial Public Class ThisAddIn
                 End If
 
             Catch ex As System.Exception
-                MessageBox.Show("Error in OpenInspectorAndReapplySelection: Failed to restore the original selection: " & ex.Message,
-                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in OpenInspectorAndReapplySelection: Failed to restore the original selection: " & ex.Message, "Error")
                 Return
             End Try
 
@@ -596,8 +1067,7 @@ Partial Public Class ThisAddIn
             Return
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in OpenInspectorAndReapplySelection: " & ex.Message,
-                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in OpenInspectorAndReapplySelection: " & ex.Message, "Error")
         End Try
     End Sub
 
@@ -727,8 +1197,7 @@ Partial Public Class ThisAddIn
             selEnd = wordSel.End
             Return True
         Catch ex As System.Exception
-            MessageBox.Show("Failed to retrieve the selection: " & ex.Message,
-                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Failed to retrieve the selection: " & ex.Message, "Error")
             Return False
         End Try
     End Function
@@ -777,8 +1246,11 @@ Partial Public Class ThisAddIn
     Private Async Sub ShowTranslate(selectedtext As String)
 
         Dim LLMResult As String = ""
+        Dim dictionarySelectionCancelled As System.Boolean = False
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        If dictionarySelectionCancelled Then Return
 
-        LLMResult = Await LLM(InterpolateAtRuntime(SP_Translate), "<TEXTTOPROCESS>" & selectedtext & "</TEXTTOPROCESS>", "", "", 0, EnsureUI:=False)
+        LLMResult = Await LLM(translatePrompt, "<TEXTTOPROCESS>" & selectedtext & "</TEXTTOPROCESS>", "", "", 0, EnsureUI:=False)
 
         If INI_PostCorrection <> "" Then
             LLMResult = Await PostCorrection(LLMResult)
@@ -1166,8 +1638,16 @@ Partial Public Class ThisAddIn
                 ' Move cursor to the very beginning of the document
                 editorSel.HomeKey(Microsoft.Office.Interop.Word.WdUnits.wdStory)
 
+                ' The reply is a new block inserted at the very top of the document. Its formatting
+                ' authority is the actual insertion point, not the text one line below. Capture the
+                ' collapsed insertion point and pass it as the formatting source so Outlook does not
+                ' inherit the font/size from the following paragraph.
+                Dim replyFormattingSource As Microsoft.Office.Interop.Word.Range = editorSel.Range.Duplicate()
+                replyFormattingSource.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+
                 ' Insert the raw LLM result (Markdown), not the pre-converted HTML
-                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True, INI_UseHostColorOutlook)
+                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True, INI_UseHostColorOutlook,
+                                            FormattingSourceRange:=replyFormattingSource)
             Else
                 ' Convert HTML to plain text for non-HTML formats (optional)
                 Dim doc As New HtmlAgilityPack.HtmlDocument()
@@ -1188,7 +1668,7 @@ Partial Public Class ThisAddIn
             'If outlookApp IsNot Nothing Then Marshal.ReleaseComObject(outlookApp) : outlookApp = Nothing
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in Freestyle_InsertBefore: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Freestyle_InsertBefore: " & ex.Message, "Error")
         End Try
     End Sub
 
@@ -1246,7 +1726,19 @@ Partial Public Class ThisAddIn
             ' Get the selected text and range
             Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
             Dim range As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate ' Duplicate to preserve original
+
+            ' Capture both authorities BEFORE ConvertRangeToMarkdown or any review/selection
+            ' operation can move/reshape the live Word Selection. InsertAfter must never derive
+            ' its font from the later mutable selection.
+            Dim originalInsertAfterFormattingSource As Microsoft.Office.Interop.Word.Range = Nothing
+            If Not Inplace Then
+                originalInsertAfterFormattingSource = ResolveInsertionFormattingSourceBeforePosition(range)
+            End If
+
+            Dim sourceBoundaryFormatting As ReplacementBoundaryFormattingSnapshot =
+                CaptureReplacementBoundaryFormatting(range)
             Dim SelectedText As String
+            Dim sourceParagraphFormatting As System.Collections.Generic.List(Of ParagraphFormattingSnapshot) = Nothing
 
             'Try
             'Using New WordUndoScope(wordEditor, $"{AN} Changes")
@@ -1256,6 +1748,10 @@ Partial Public Class ThisAddIn
             End If
 
             If INI_KeepFormatCap > 0 Then If Len(selection.Text) > INI_KeepFormatCap Then KeepFormat = False
+
+            If Not KeepFormat AndAlso INI_MarkdownConvert Then
+                sourceParagraphFormatting = CaptureParagraphFormatting(range)
+            End If
 
             If KeepFormat Then
                 SelectedText = SLib.GetRangeHtml(selection.Range)
@@ -1380,20 +1876,41 @@ Partial Public Class ThisAddIn
                     If Inplace Then
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
+                        Dim replacementStart As System.Int32 = range.Start
+
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR, INI_UseHostColorOutlook)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:</p>", trailingCR, INI_UseHostColorOutlook)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR, INI_UseHostColorOutlook)
+                        End If
+
+                        If sourceParagraphFormatting IsNot Nothing AndAlso sourceParagraphFormatting.Count > 0 Then
+                            Dim replacementEnd As System.Int32 =
+                                System.Math.Max(selection.Range.Start, selection.Range.End)
+                            If replacementEnd > replacementStart Then
+                                Dim insertedRange As Microsoft.Office.Interop.Word.Range =
+                                    wordEditor.Range(replacementStart, replacementEnd)
+                                ApplyListFormattingIfCompatible(insertedRange, sourceParagraphFormatting)
+                                RestoreMarkdownListBaseFont(insertedRange, sourceParagraphFormatting)
+                                RestoreReplacementBoundaryFormatting(insertedRange, sourceBoundaryFormatting)
+                            End If
                         End If
 
                         If restoreReviewTrailingSpaces Then
                             RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
                         End If
                     Else
-                        ' Insert two new line breaks and select final position while preserving formatting.
-                        Dim sourceFormatting As List(Of ParagraphFormattingSnapshot) = CaptureParagraphFormatting(range)
-                        Dim selRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
+                        ' InsertAfter is a new block. Its formatting authority is the actual insertion
+                        ' point, not paragraph N of the source selection. Otherwise a later source
+                        ' paragraph can leak an unrelated font/size into paragraph N of the new block.
+                        Dim insertionFormattingSource As Microsoft.Office.Interop.Word.Range =
+                            If(originalInsertAfterFormattingSource IsNot Nothing,
+                               originalInsertAfterFormattingSource.Duplicate(),
+                               ResolveInsertionFormattingSourceBeforePosition(range))
+                        Dim sourceFormatting As System.Collections.Generic.List(Of ParagraphFormattingSnapshot) =
+                            CaptureInsertionPointFormatting(insertionFormattingSource)
 
+                        Dim selRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
                         selRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                         selRange.Text = vbCrLf & vbCrLf
 
@@ -1402,9 +1919,19 @@ Partial Public Class ThisAddIn
                         selection.SetRange(newStart, newEnd)
 
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR, INI_UseHostColorOutlook)
+                            SLib.InsertTextWithMarkdown(
+                                selection,
+                                LLMResult & "<p>MARKUP:</p>" & vbCrLf,
+                                trailingCR,
+                                INI_UseHostColorOutlook,
+                                FormattingSourceRange:=insertionFormattingSource)
                         Else
-                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR, INI_UseHostColorOutlook)
+                            SLib.InsertTextWithMarkdown(
+                                selection,
+                                LLMResult,
+                                trailingCR,
+                                INI_UseHostColorOutlook,
+                                FormattingSourceRange:=insertionFormattingSource)
                         End If
 
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range =
@@ -1459,7 +1986,7 @@ Partial Public Class ThisAddIn
             'If outlookApp IsNot Nothing Then Marshal.ReleaseComObject(outlookApp) : outlookApp = Nothing
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in Command_InsertAfter: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Command_InsertAfter: " & ex.Message, "Error")
         End Try
     End Sub
 
@@ -2262,7 +2789,7 @@ SkipPromptWin:
 
                 ' Insert result
                 If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR, INI_UseHostColorOutlook)
+                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:</p>", trailingCR, INI_UseHostColorOutlook)
                 Else
                     If DoInplace Then
                         Dim insertText As String = LLMResult
@@ -2276,7 +2803,17 @@ SkipPromptWin:
                             RestoreTrailingSpacesAtSelectionEnd(selection, trailingSpaces, selectionEndsWithPara)
                         End If
                     Else
-                        SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf, trailingCR, INI_UseHostColorOutlook)
+                        ' Freestyle inserts at the current cursor position. Preserve that exact
+                        ' insertion-point formatting instead of allowing the shared resolver to
+                        ' search forward into unrelated later text.
+                        Dim freestyleFormattingSource As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate()
+
+                        SLib.InsertTextWithMarkdown(
+                            selection,
+                            vbCrLf & LLMResult & vbCrLf,
+                            trailingCR,
+                            INI_UseHostColorOutlook,
+                            FormattingSourceRange:=freestyleFormattingSource)
                     End If
                 End If
 
@@ -2318,7 +2855,7 @@ SkipPromptWin:
             End If
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in Freestyle_InsertAfter: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Freestyle_InsertAfter: " & ex.Message, "Error")
         End Try
     End Sub
 
@@ -2485,7 +3022,20 @@ SkipPromptWin:
                                      Return 0
                                  End Function)
 
-                        InsertTextWithMarkdown(selection, result, True, INI_UseHostColorOutlook)
+                        Dim clipboardFormattingSource As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate()
+                        Try
+                            SLib.InsertTextWithMarkdown(
+                                selection,
+                                result,
+                                True,
+                                INI_UseHostColorOutlook,
+                                FormattingSourceRange:=clipboardFormattingSource)
+                        Finally
+                            If clipboardFormattingSource IsNot Nothing Then
+                                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(clipboardFormattingSource) : Catch : End Try
+                                clipboardFormattingSource = Nothing
+                            End If
+                        End Try
                         inserted = True
                         Exit For
 
@@ -2756,6 +3306,7 @@ SkipPromptWin:
                         {"PreCorrection", "Additional instruction for prompts"},
                         {"PostCorrection", "Prompt to apply after queries"},
                         {"Language1", "Default translation language"},
+                        {"DictionarySegmentPrompt", "Ask for dictionary segment(s)"},
                         {"PromptLibPath", "Prompt library file"},
                         {"PromptLibPathLocal", "Prompt library file (local)"},
                         {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
@@ -2795,6 +3346,7 @@ SkipPromptWin:
                         {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},
                         {"PostCorrection", "Add a prompt that will be applied to each result before it is further processed (slow!)"},
                         {"Language1", "The language (in English) that will be used for the quick access button in the ribbon"},
+                        {"DictionarySegmentPrompt", "Temporarily enable or disable the interactive dictionary-segment selection. When disabled, translations use only global dictionary content plus the common [TargetLanguage] block."},
                         {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
                         {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
                         {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added automatically)."},

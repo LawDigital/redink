@@ -895,6 +895,30 @@ Namespace My
                 Me("SkillAuthorCentralWrites") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DictionarySegmentSelections() As String
+            Get
+                Return CType(Me("DictionarySegmentSelections"),String)
+            End Get
+            Set
+                Me("DictionarySegmentSelections") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property TranslatorWidgetDictionarySegments() As String
+            Get
+                Return CType(Me("TranslatorWidgetDictionarySegments"),String)
+            End Get
+            Set
+                Me("TranslatorWidgetDictionarySegments") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

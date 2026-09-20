@@ -313,11 +313,7 @@ Partial Public Class ThisAddIn
             Return token
 
         Catch ex As System.Exception
-            System.Windows.Forms.MessageBox.Show(
-            $"Error fetching TTS token: {ex.Message}",
-            "TTS Error",
-            System.Windows.Forms.MessageBoxButtons.OK,
-            System.Windows.Forms.MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error fetching TTS token: {ex.Message}", "TTS Error")
             Return String.Empty
         End Try
     End Function
@@ -383,7 +379,7 @@ Partial Public Class ThisAddIn
                 End If
             End Using
         Catch ex As Exception
-            MessageBox.Show($"Error in GenerateOpenAITTSAsync: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in GenerateOpenAITTSAsync: {ex.Message}", "Error")
         End Try
         Return System.Array.Empty(Of Byte)()
     End Function
@@ -515,13 +511,13 @@ Partial Public Class ThisAddIn
                     ShowCustomMessageBox("Audio generation aborted.")
                     Return Nothing
                 Catch ex As Exception
-                    MessageBox.Show($"Error in GenerateAudioFromText (HTTP): {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in GenerateAudioFromText (HTTP): {ex.Message}", "Error")
                     Return Nothing
                 End Try
 
             End Using
         Catch ex As Exception
-            MessageBox.Show($"Error in GenerateAudioFromText: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in GenerateAudioFromText: {ex.Message}", "Error")
             Return Nothing
         Finally
             ' Release sleep lock if this module acquired it
@@ -1489,7 +1485,7 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox($"Reading out the selected text (using {My.Settings.LastVoice}). You can stop this by again calling this function.", "Text-to-Speech")
 
         Catch ex As Exception
-            MessageBox.Show("Error in SpeakSelectedText: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in SpeakSelectedText: " & ex.Message, "Error")
         End Try
     End Sub
 

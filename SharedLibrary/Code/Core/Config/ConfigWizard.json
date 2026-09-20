@@ -797,14 +797,14 @@
                     "label": "Google STT Settings",
                     "type": "string",
                     "default": "",
-                    "description": "Optional advanced settings for Google Speech-to-Text engines, in 'key=value;key=value' format. [STT_Google]"
+                    "description": "Optional advanced settings for Google transcription engines, in 'key=value;key=value' format. Gemini 3.5 Transcribe supports gemini-3.5-transcribe.model (Vertex file model), .api_model (Gemini API file model), .live_model (Vertex live model), .live_api_model (Gemini API live model), .location, .vertex_endpoint, .live_vertex_endpoint, .api_endpoint, .live_api_endpoint, .mode (VERBATIM or SMART), .word_timestamp (True/False; file only), and .custom_vocabulary (comma- or pipe-separated terms). Defaults are provided but are not forced: model, location and endpoints can all be overridden. Endpoint overrides may use {project}, {location}, {model}; Gemini-API live overrides may additionally use {api_key}. Long file audio is chunked automatically; live sessions rotate automatically before Google's time limit. [STT_Google]"
                 },
                 {
                     "key": "STT_Google_ProjectID",
                     "label": "Google STT Project ID",
                     "type": "string",
                     "default": "",
-                    "description": "Google Cloud project ID used for Google Speech-to-Text. Required to enable Google transcription engines. [STT_Google_ProjectID]"
+                    "description": "Google Cloud project ID used for Google transcription engines, including Gemini 3.5 Transcribe on Vertex AI. Required for Google V2 / Gemini transcription. [STT_Google_ProjectID]"
                 },
                 {
                     "key": "STT_OpenAI",
@@ -1211,6 +1211,20 @@
                     "description": "Enable this to hard-disable the browser tools (PlayWright) across the application. When True, browser tool execution is not exposed to tooling and any direct browser tool call is rejected. Example: False. [BrowserToolsDisable]"
                 },
                 {
+                    "key": "PlayWrightPath",
+                    "label": "Playwright Runtime Path",
+                    "type": "string",
+                    "default": "",
+                    "description": "Required source path for browser tools. May point to a .playwright directory, to its parent directory, or to a central directory containing versioned Playwright runtime folders. The runtime must contain node\\win32_x64\\node.exe and package\\cli.js. Example: C:\\ProgramData\\RedInk\\Playwright. [PlayWrightPath]"
+                },
+                {
+                    "key": "PlayWrightUseLocalCache",
+                    "label": "Cache Playwright Runtime Locally",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "When True, Red Ink copies the selected configured Playwright runtime (and an optional sibling browsers folder) to %LOCALAPPDATA%\\RedInk\\Playwright before use. This is recommended for central/UNC runtime locations. Example: True. [PlayWrightUseLocalCache]"
+                },
+                {
                     "key": "InkyMemoryCap",
                     "label": "InkyMemory Item Cap",
                     "type": "integer",
@@ -1384,6 +1398,13 @@
                 "type": "path",
                 "default": "",
                 "description": "Path to the user's local translation dictionary text file. Its content is injected into translation prompts inside <userdictionary>...</userdictionary>; if both dictionaries exist, the user dictionary takes precedence. Example: %APPDATA%\\Microsoft\\Word\\dictionary_local.txt. [DictionaryPathLocal]"
+            },
+            {
+                "key": "DictionarySegmentPrompt",
+                "label": "Ask for Dictionary Segments",
+                "type": "boolean",
+                "default": false,
+                "description": "When enabled, interactive translations show a multi-selection dialog only when the dictionary contains selectable segments for the current target language. Use [German] for entries always applied to German and [German:Hochdeutsch] for an optional German segment. Text before the first header is global and always included. Agentic and AutoPilot runs never show a dialog and use only global plus target-language common entries. [DictionarySegmentPrompt]"
             }
         ]
     },

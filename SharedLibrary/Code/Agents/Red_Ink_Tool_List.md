@@ -7,6 +7,7 @@ Notes:
 - Availability can still depend on configuration, feature flags, model support, and current execution mode.
 - `js_run` may be disabled by the user by setting the `JsRunDisable` parameter in the configuration file.
 - `browser_open`, `browser_snapshot`, and `browser_interact` may be disabled by the user by setting the `BrowserToolsDisable` parameter in the configuration file.
+- Browser tools are exposed only when `PlayWrightPath` resolves to a compatible external Playwright runtime. `PlayWrightUseLocalCache=True` copies that selected runtime to `%LOCALAPPDATA%\RedInk\Playwright\<version>` before use. Red Ink prefers installed Microsoft Edge and falls back to an available Playwright Chromium runtime. Multiple runtime versions may coexist; the runtime resolver selects a version compatible with the loaded Microsoft.Playwright client rather than hard-coding one release.
 - `python_execute` requires the `redink-pythonagent` helper to be installed and configured; Python execution is unavailable without it.
 - The `Outlook` column refers to Outlook tooling outside AutoPilot, primarily Local Chat / Agent mode.
 - `AutoPilot` is listed separately because it does not expose the full Outlook tool surface.
@@ -14,7 +15,7 @@ Notes:
 
 ## Skill/agent resource dependency semantics
 
-- A skill may list the helper tools it is permitted to use in `allowed-tools`; the runtime still exposes only tools available for the current Word/Outlook surface.
+- A skill lists the helper tools it is permitted to use in `allowed-tools`. After the skill is entered, Word/Outlook Local Chat and AutoPilot restrict substantive tool execution to that declared helper surface (plus host-owned control/safety tools such as progress, tool loading, and inability reporting).
 - For an **agent**, `allowed-tools` are hard dependencies. If an exact required tool cannot be resolved from the parent host's authoritative registry snapshot, the isolated run may be blocked before model execution.
 - Agents may additionally declare `optional-tools`. The host includes only optional names that are actually present in the authoritative registry snapshot; missing optional tools are ignored. Use this for host-specific source access (`m365_*`, attachment-only tools, `agent_workspace_*`) and configuration-dependent helpers such as `js_run` when they are useful but not fundamental to the agent's bounded job.
 - `ask_user` belongs to interactive parent Word/Outlook workflows. Sub-agents must not ask the end user; they return missing information to the parent.
@@ -46,6 +47,7 @@ Notes:
 | `text_write` | Writes, replaces, or appends a UTF-8 text file. | Yes | Yes | Yes |
 | `text_search` | Searches text files for substring or regex matches. | Yes | Yes | Yes |
 | `text_export_to_text` | Silently extracts readable text from a supported file or from supported files in a directory and writes UTF-8 `.txt` outputs without host UI prompts. | Yes | Yes | Yes |
+| `text_analyze_file` | Reads one existing plain-text file completely inside the tool, sends the full text plus caller instructions to one isolated LLM call, and returns only the model response; no chunking or retrieval. Very good and memory efficient for analyzing text for certain criteria. For documents, have them first converted to a text file using `text_export_to_text`. | Yes | Yes | Yes |
 | `semantic_index_create_from_file` | Creates a self-indexed semantic-search text file from an existing text file. | Yes | Yes | Yes |
 | `semantic_index_create_from_text` | Creates a self-indexed semantic-search text file from supplied in-memory text. | Yes | Yes | Yes |
 | `semantic_index_validate` | Validates whether a file is a readable semantic-search index and returns basic counts. | Yes | Yes | Yes |
@@ -57,9 +59,9 @@ Notes:
 | `semantic_index_reset_conversation` | Resets and removes a stored semantic-search conversation handle. | Yes | Yes | Yes |
 | `semantic_index_invalidate_cache` | Invalidates one indexed-file cache entry or the full semantic-search cache. | Yes | Yes | Yes |
 | `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. Availability is subject to the user's `JsRunDisable` configuration setting. | Yes | Yes | Yes |
-| `browser_open` | Opens or navigates the shared Playwright browser session to a rendered public website. Prefer it for site-specific exploration, dynamic/JavaScript content, menus, pagination, and finding links/pages/downloads that simple retrieval may miss. | Yes | Yes | Yes |
-| `browser_snapshot` | Captures the rendered page as an AI-optimized Playwright ARIA snapshot, exposing links, controls, headings and short-lived refs such as `[ref=e7]`; particularly useful for scanning a specific website and finding navigable links. | Yes | Yes | Yes |
-| `browser_interact` | Performs exactly one Playwright action against one ref from the most recent `browser_snapshot`, for example following a link/menu/pagination result found while exploring a site. Take a fresh snapshot after every attempted interaction. | Yes | Yes | Yes |
+| `browser_open` | Opens or navigates the shared Playwright browser session to a rendered website, including sites that require a previously provisioned or interactive authenticated session. Interactive sign-in keeps the exact authenticated live context for the current run when a portal binds login to one browser process; after confirmation the dedicated headed browser window is hidden while automation continues. Prefer it for site-specific exploration, dynamic/JavaScript content, menus, pagination, search portals, and finding links/pages/downloads that simple retrieval may miss. | Yes | Yes | Yes |
+| `browser_snapshot` | Captures the rendered page as an AI-optimized Playwright ARIA snapshot, exposing links, controls, headings and short-lived native refs such as `[ref=e7]` or frame-qualified `[ref=f11e38]`; particularly useful for scanning a specific website and finding navigable links. | Yes | Yes | Yes |
+| `browser_interact` | Performs exactly one Playwright action against one ref from the most recent `browser_snapshot`. The result declares whether a fresh snapshot is required. A short same-form sequence may continue only when `requires_snapshot=false` and `snapshot_retained=true`; after click/submit/navigation or any result with `requires_snapshot=true`, take a fresh snapshot before another interaction. Click results also expose the browser-captured absolute `target_url` when the element had an href plus `navigation_observed`; these aid verification but do not by themselves prove that a document was retrieved. | Yes | Yes | Yes |
 | `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
 | `skill_use` | Loads a skill's instructions and file inventory for guided execution. Word and Outlook Local Chat expose this generic loader directly. AutoPilot does not advertise the generic `skill_use` tool, but it can still run selected skills through dynamic `skill_<name>` tools that route internally to the same skill loader. | Yes | Yes | No |
 | `m365_search` | Searches Microsoft 365 content such as mail, files, chats, events, and notes. | Yes | Yes | No |

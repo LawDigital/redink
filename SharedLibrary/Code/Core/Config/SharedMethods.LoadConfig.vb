@@ -273,7 +273,7 @@ Namespace SharedLibrary
                 context.INI_InkyMemoryCap = If(configDict.ContainsKey("InkyMemoryCap"), CInt(configDict("InkyMemoryCap")), DEFAULT_INKY_MEMORY_CAP)
                 context.INI_SimpleMenuHide = If(configDict.ContainsKey("SimpleMenuHide"), configDict("SimpleMenuHide"), DEFAULT_SIMPLEMENUHIDE)
                 context.INI_MenuBlock = If(configDict.ContainsKey("MenuBlock"), configDict("MenuBlock"), "")
-                context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), 0)
+                context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), DEFAULT_WEB_SERVER_BLOCK)
 
                 ' Restore shared user settings from the registry backup if My.Settings was lost.
                 TryRestoreSharedUserSettingsFromRegistry()
@@ -331,6 +331,8 @@ Namespace SharedLibrary
                 context.INI_AllowLegacyDocFiles = ParseBoolean(configDict, "AllowLegacyDocFiles")
                 context.INI_JsRunDisable = ParseBoolean(configDict, "JsRunDisable")
                 context.INI_BrowserToolsDisable = ParseBoolean(configDict, "BrowserToolsDisable")
+                context.INI_PlayWrightPath = If(configDict.ContainsKey("PlayWrightPath"), configDict("PlayWrightPath"), "")
+                context.INI_PlayWrightUseLocalCache = ParseBoolean(configDict, "PlayWrightUseLocalCache")
                 context.INI_EnablePrivacyForSearch = ParseBoolean(configDict, "EnablePrivacyForSearch")
 
                 context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")
@@ -340,10 +342,10 @@ Namespace SharedLibrary
                 context.INI_ToolingLogWindow = ParseBoolean(configDict, "ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW)
                 context.INI_ToolingDryRun = ParseBoolean(configDict, "ToolingDryRun")
                 context.INI_ToolingMaximumIterations = If(configDict.ContainsKey("ToolingMaximumIterations"), CInt(configDict("ToolingMaximumIterations")), DEFAULT_TOOLING_MAXIMUMITERATIONS)
-                context.INI_ToolResponsePayloadBudgetChars = If(configDict.ContainsKey("ToolResponsePayloadBudgetChars"), CInt(configDict("ToolResponsePayloadBudgetChars")), Agents.ToolingConstants.ToolResponsePayloadBudgetChars)
-                context.INI_BudgetMediumCompactionThresholdChars = If(configDict.ContainsKey("BudgetMediumCompactionThresholdChars"), CInt(configDict("BudgetMediumCompactionThresholdChars")), Agents.ToolingConstants.BudgetMediumCompactionThresholdChars)
-                context.INI_BudgetAggressiveCompactionThresholdChars = If(configDict.ContainsKey("BudgetAggressiveCompactionThresholdChars"), CInt(configDict("BudgetAggressiveCompactionThresholdChars")), Agents.ToolingConstants.BudgetAggressiveCompactionThresholdChars)
-                context.INI_BudgetCompactionPreviewChars = If(configDict.ContainsKey("BudgetCompactionPreviewChars"), CInt(configDict("BudgetCompactionPreviewChars")), Agents.ToolingConstants.BudgetCompactionPreviewChars)
+                context.INI_ToolResponsePayloadBudgetChars = If(configDict.ContainsKey("ToolResponsePayloadBudgetChars"), CInt(configDict("ToolResponsePayloadBudgetChars")), DEFAULT_TOOL_RESPONSE_PAYLOAD_BUDGET_CHARS)
+                context.INI_BudgetMediumCompactionThresholdChars = If(configDict.ContainsKey("BudgetMediumCompactionThresholdChars"), CInt(configDict("BudgetMediumCompactionThresholdChars")), DEFAULT_BUDGET_MEDIUM_COMPACTION_THRESHOLD_CHARS)
+                context.INI_BudgetAggressiveCompactionThresholdChars = If(configDict.ContainsKey("BudgetAggressiveCompactionThresholdChars"), CInt(configDict("BudgetAggressiveCompactionThresholdChars")), DEFAULT_BUDGET_AGGRESSIVE_COMPACTION_THRESHOLD_CHARS)
+                context.INI_BudgetCompactionPreviewChars = If(configDict.ContainsKey("BudgetCompactionPreviewChars"), CInt(configDict("BudgetCompactionPreviewChars")), DEFAULT_BUDGET_COMPACTION_PREVIEW_CHARS)
 
                 ' M365 settings
 
@@ -393,6 +395,7 @@ Namespace SharedLibrary
                 context.INI_LocalModelPath = If(configDict.ContainsKey("LocalModelPath"), configDict("LocalModelPath"), "")
                 context.INI_DictionaryPath = If(configDict.ContainsKey("DictionaryPath"), configDict("DictionaryPath"), "")
                 context.INI_DictionaryPathLocal = If(configDict.ContainsKey("DictionaryPathLocal"), configDict("DictionaryPathLocal"), "")
+                context.INI_DictionarySegmentPrompt = ParseBoolean(configDict, "DictionarySegmentPrompt", False)
 
                 context.INI_STT_Google = If(configDict.ContainsKey("STT_Google"), configDict("STT_Google"), "")
                 context.INI_STT_OpenAI = If(configDict.ContainsKey("STT_OpenAI"), configDict("STT_OpenAI"), "")
@@ -595,7 +598,7 @@ Namespace SharedLibrary
                     Else
                         context.DecodedAPI_2 = RealAPIKey(context.INI_APIKey_2, True, False, context)
                         If String.IsNullOrWhiteSpace(context.DecodedAPI_2) Then
-                            MessageBox.Show("Internal error: Could not determine API key for second API (likely a decryption error).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Internal error: Could not determine API key for second API (likely a decryption error).", "Error")
                             Return
                         End If
                     End If
@@ -617,7 +620,7 @@ Namespace SharedLibrary
                 context.INIloaded = True
 
             Catch ex As System.Exception
-                MessageBox.Show($"Error in InitializeConfig: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in InitializeConfig: {ex.Message}", "Error")
             End Try
         End Sub
 
@@ -893,7 +896,7 @@ Namespace SharedLibrary
                                                    Dim boolValue As Boolean = DirectCast(control, System.Windows.Forms.CheckBox).Checked
                                                    SetSettingValue(settingKey, boolValue.ToString(), context)
                                                Else
-                                                   MessageBox.Show($"Error in MissingSettingsWindow - unsupported control type for setting '{settingKey}' in MissingSettingsWindow.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                                   Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in MissingSettingsWindow - unsupported control type for setting '{settingKey}' in MissingSettingsWindow.", "Error")
                                                End If
                                            Next
                                            UpdateAppConfig(context) ' Save the configuration.

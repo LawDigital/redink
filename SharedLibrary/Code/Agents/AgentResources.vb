@@ -289,22 +289,80 @@ Namespace Agents
         End Property
 
         Private Shared Function NormalizeResourceLookupKey(value As String) As String
-            If String.IsNullOrWhiteSpace(value) Then Return ""
+            Return ToolRegistryBuilder.ToSafeToolSuffix(value)
+        End Function
 
-            Dim sb As New StringBuilder()
-            Dim lastWasUnderscore As Boolean = False
+        ''' <summary>
+        ''' Resolves a relative file reference against discovered Skill directories without exposing arbitrary
+        ''' resource paths to callers. The match must be unique across all discovered Skills. A bare filename
+        ''' is tried both at the Skill root and under references/; a path already beginning with references/
+        ''' is resolved only relative to the Skill root. Returns False for rooted/traversal paths, no match,
+        ''' or an ambiguous match.
+        ''' </summary>
+        Public Shared Function TryResolveUniqueSkillReferencePath(relativePath As System.String, ByRef resolvedPath As System.String) As System.Boolean
+            resolvedPath = System.String.Empty
+            If System.String.IsNullOrWhiteSpace(relativePath) Then Return False
 
-            For Each ch As Char In value.Trim()
-                If Char.IsLetterOrDigit(ch) Then
-                    sb.Append(Char.ToLowerInvariant(ch))
-                    lastWasUnderscore = False
-                ElseIf Not lastWasUnderscore Then
-                    sb.Append("_"c)
-                    lastWasUnderscore = True
-                End If
+            Dim normalized As System.String = relativePath.Replace("\"c, "/"c).Trim()
+            If normalized.Length = 0 OrElse System.IO.Path.IsPathRooted(normalized) OrElse normalized.IndexOf(":"c) >= 0 Then Return False
+            Dim parts As System.String() = normalized.Split("/"c)
+            For Each part As System.String In parts
+                If part.Length = 0 OrElse part = "." OrElse part = ".." Then Return False
             Next
 
-            Return sb.ToString().Trim("_"c)
+            Dim matches As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Try
+                For Each skill As SkillDescriptor In Skills
+                    If skill Is Nothing OrElse System.String.IsNullOrWhiteSpace(skill.DirectoryPath) Then Continue For
+                    Dim skillRoot As System.String = System.IO.Path.GetFullPath(skill.DirectoryPath)
+                    Dim candidates As New System.Collections.Generic.List(Of System.String)()
+                    candidates.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(skillRoot, normalized.Replace("/"c, System.IO.Path.DirectorySeparatorChar))))
+                    If Not normalized.StartsWith("references/", System.StringComparison.OrdinalIgnoreCase) Then
+                        candidates.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(skill.ReferencesDir, normalized.Replace("/"c, System.IO.Path.DirectorySeparatorChar))))
+                    End If
+
+                    For Each candidate As System.String In candidates
+                        Dim rootedSkill As System.String = skillRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+                        If candidate.StartsWith(rootedSkill & System.IO.Path.DirectorySeparatorChar, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                           System.IO.File.Exists(candidate) Then
+                            matches.Add(candidate)
+                        End If
+                    Next
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+                Return False
+            End Try
+
+            If matches.Count <> 1 Then Return False
+            For Each match As System.String In matches
+                resolvedPath = match
+                Exit For
+            Next
+            Return Not System.String.IsNullOrWhiteSpace(resolvedPath)
+        End Function
+
+        ''' <summary>
+        ''' Returns True only when the supplied existing physical file is located below the references/
+        ''' directory of one discovered Skill. This is a host-side trust decision based on the resolved
+        ''' physical path; model-provided metadata cannot opt a file into this trust boundary.
+        ''' </summary>
+        Public Shared Function IsPathUnderSkillReferences(fullPath As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(fullPath) Then Return False
+            Try
+                Dim candidate As System.String = System.IO.Path.GetFullPath(fullPath)
+                If Not System.IO.File.Exists(candidate) Then Return False
+                For Each skill As SkillDescriptor In Skills
+                    If skill Is Nothing OrElse System.String.IsNullOrWhiteSpace(skill.ReferencesDir) Then Continue For
+                    Dim referencesRoot As System.String = System.IO.Path.GetFullPath(skill.ReferencesDir).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+                    If candidate.StartsWith(referencesRoot & System.IO.Path.DirectorySeparatorChar, System.StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            End Try
+            Return False
         End Function
 
         Public Shared Function FindSkill(name As String) As SkillDescriptor
@@ -647,6 +705,128 @@ Namespace Agents
             Dim m = _frontmatterRegex.Match(text)
             If m.Success Then Return text.Substring(m.Length)
             Return text
+        End Function
+
+        ''' <summary>
+        ''' Validates the canonical frontmatter contract for an authored SKILL.md/AGENT.md using the
+        ''' same regex and YAML parser as the runtime loader. This prevents the authoring postcondition
+        ''' from accepting a resource that exists on disk but will load without its required metadata.
+        ''' </summary>
+        Public Shared Function TryValidateAuthoredResourceFrontmatter(mdPath As System.String,
+                                                                      ByRef failureReason As System.String) As System.Boolean
+            failureReason = System.String.Empty
+
+            If System.String.IsNullOrWhiteSpace(mdPath) OrElse Not System.IO.File.Exists(mdPath) Then
+                failureReason = "resource markdown file does not exist"
+                Return False
+            End If
+
+            Dim text As System.String
+            Try
+                text = System.IO.File.ReadAllText(mdPath, System.Text.Encoding.UTF8)
+            Catch ex As System.Exception
+                failureReason = "resource markdown file could not be read"
+                Return False
+            End Try
+
+            Dim match As System.Text.RegularExpressions.Match = _frontmatterRegex.Match(text)
+            If Not match.Success Then
+                failureReason = "missing YAML frontmatter"
+                Return False
+            End If
+
+            Dim frontmatter As System.Collections.Generic.Dictionary(Of System.String, System.String) =
+                ParseSimpleYaml(match.Groups("yaml").Value)
+
+            Dim value As System.String = Nothing
+            If Not frontmatter.TryGetValue("name", value) OrElse System.String.IsNullOrWhiteSpace(value) Then
+                failureReason = "frontmatter field 'name' is missing or empty"
+                Return False
+            End If
+
+            If Not frontmatter.TryGetValue("description", value) OrElse System.String.IsNullOrWhiteSpace(value) Then
+                failureReason = "frontmatter field 'description' is missing or empty"
+                Return False
+            End If
+
+            If Not frontmatter.ContainsKey("allowed-tools") Then
+                failureReason = "frontmatter field 'allowed-tools' is missing"
+                Return False
+            End If
+
+            Dim deliverableCount As System.Int32 = 0
+            Dim hasDeliverableCount As System.Boolean = False
+            If frontmatter.TryGetValue("deliverable-count", value) AndAlso
+               Not System.String.IsNullOrWhiteSpace(value) Then
+
+                If Not System.Int32.TryParse(
+                    value.Trim(),
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    deliverableCount) OrElse
+                   deliverableCount < 0 Then
+
+                    failureReason = "frontmatter field 'deliverable-count' must be a non-negative integer"
+                    Return False
+                End If
+
+                hasDeliverableCount = True
+            End If
+
+            If frontmatter.TryGetValue("required-successful-tools", value) AndAlso
+               Not System.String.IsNullOrWhiteSpace(value) Then
+
+                Dim toolNames As System.String() =
+                    value.Trim().Trim("["c, "]"c).Split(New System.Char() {","c, ";"c, " "c}, System.StringSplitOptions.RemoveEmptyEntries)
+
+                If toolNames.Length = 0 Then
+                    failureReason = "frontmatter field 'required-successful-tools' is empty"
+                    Return False
+                End If
+
+                Dim allowedToolNames As System.Collections.Generic.HashSet(Of System.String) =
+                    New System.Collections.Generic.HashSet(Of System.String)(
+                        ParseList(If(frontmatter("allowed-tools"), System.String.Empty)),
+                        System.StringComparer.OrdinalIgnoreCase)
+
+                For Each toolName As System.String In toolNames
+                    Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim().Trim("'"c, """"c)
+                    If Not System.Text.RegularExpressions.Regex.IsMatch(normalizedToolName, "^[A-Za-z][A-Za-z0-9_.-]{0,127}$") Then
+                        failureReason = "frontmatter field 'required-successful-tools' contains an invalid tool name"
+                        Return False
+                    End If
+                    If Not allowedToolNames.Contains(normalizedToolName) Then
+                        failureReason = "frontmatter field 'required-successful-tools' names a tool that is not present in allowed-tools"
+                        Return False
+                    End If
+                Next
+            End If
+
+            If frontmatter.TryGetValue("deliverable-required-effects", value) AndAlso
+               Not System.String.IsNullOrWhiteSpace(value) Then
+
+                If Not hasDeliverableCount OrElse deliverableCount <= 0 Then
+                    failureReason = "frontmatter field 'deliverable-required-effects' requires a positive 'deliverable-count'"
+                    Return False
+                End If
+
+                Dim effects As System.String() =
+                    value.Split(New System.Char() {","c, ";"c, " "c}, System.StringSplitOptions.RemoveEmptyEntries)
+                If effects.Length = 0 Then
+                    failureReason = "frontmatter field 'deliverable-required-effects' is empty"
+                    Return False
+                End If
+
+                For Each effect As System.String In effects
+                    Dim normalizedEffect As System.String = If(effect, System.String.Empty).Trim().ToLowerInvariant()
+                    If Not System.Text.RegularExpressions.Regex.IsMatch(normalizedEffect, "^[a-z][a-z0-9_.-]{0,63}$") Then
+                        failureReason = "frontmatter field 'deliverable-required-effects' contains an invalid effect identifier"
+                        Return False
+                    End If
+                Next
+            End If
+
+            Return True
         End Function
 
         Private Shared Sub PopulateFromMarkdown(target As AgentResourceBase, mdPath As String, isLocal As Boolean)
@@ -1988,10 +2168,56 @@ Namespace Agents
         Public Const ActiveDesignSetFileName As String = "active.json"
         Public Const SupportedSchemaVersion As Integer = 1
 
+        Private NotInheritable Class DesignAccessState
+            Public Property AllowDesigns As System.Boolean = True
+            Public Property AllowDesignSets As System.Boolean = True
+        End Class
+
+        Private NotInheritable Class DesignAccessScope
+            Implements System.IDisposable
+
+            Private ReadOnly _previous As DesignAccessState
+            Private _disposed As System.Boolean
+
+            Public Sub New(ByVal previous As DesignAccessState)
+                _previous = previous
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If _disposed Then Return
+                _disposed = True
+                _designAccessState.Value = _previous
+            End Sub
+        End Class
+
+        Private Shared ReadOnly _designAccessState As New System.Threading.AsyncLocal(Of DesignAccessState)()
+
         Private Sub New()
         End Sub
 
+        Public Shared Function PushAccessScope(ByVal allowDesigns As System.Boolean,
+                                               ByVal allowDesignSets As System.Boolean) As System.IDisposable
+            Dim previous As DesignAccessState = _designAccessState.Value
+            _designAccessState.Value = New DesignAccessState() With {
+                .AllowDesigns = allowDesigns,
+                .AllowDesignSets = allowDesigns AndAlso allowDesignSets
+            }
+            Return New DesignAccessScope(previous)
+        End Function
+
+        Private Shared Function DesignsAllowed() As System.Boolean
+            Dim state As DesignAccessState = _designAccessState.Value
+            Return state Is Nothing OrElse state.AllowDesigns
+        End Function
+
+        Private Shared Function DesignSetsAllowed() As System.Boolean
+            Dim state As DesignAccessState = _designAccessState.Value
+            Return state Is Nothing OrElse (state.AllowDesigns AndAlso state.AllowDesignSets)
+        End Function
+
         Public Shared Function GetDesigns() As IReadOnlyList(Of DocumentDesignDescriptor)
+            If Not DesignsAllowed() Then Return New System.Collections.Generic.List(Of DocumentDesignDescriptor)()
+
             Dim merged As New Dictionary(Of String, DocumentDesignDescriptor)(StringComparer.OrdinalIgnoreCase)
 
             ' Approved standalone Office template carriers placed in the conventional
@@ -2120,6 +2346,10 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildPromptFragment(Optional maxDesigns As Integer = 24) As String
+            If Not DesignsAllowed() Then
+                Return "DESIGN REPOSITORY: Named internal design profiles are not authorized in the current execution context. Do not list, infer, resolve, request, or apply repository designs or design sets. Use only another concrete authorized format source supplied for this task, otherwise use neutral professional formatting."
+            End If
+
             Dim designs As IReadOnlyList(Of DocumentDesignDescriptor) = GetDesigns()
             If designs Is Nothing OrElse designs.Count = 0 Then
                 Return "DESIGN REPOSITORY: No named Office design profiles or approved standalone template carriers are currently configured under AgentResourcesPath/AgentResourcesPathLocal\\designs. Named corporate designs must therefore not be claimed from model knowledge; use neutral professional design unless another concrete authorized source is available."
@@ -2177,6 +2407,8 @@ Namespace Agents
         End Function
 
         Public Shared Function GetCatalogPaths() As IReadOnlyList(Of String)
+            If Not DesignsAllowed() Then Return New System.Collections.Generic.List(Of System.String)()
+
             Dim result As New List(Of String)()
             AddCatalogPath(result, AgentResources.ConfiguredCentralPath)
             AddCatalogPath(result, AgentResources.ConfiguredLocalPath)
@@ -2187,6 +2419,8 @@ Namespace Agents
             If System.String.IsNullOrWhiteSpace(root) Then Return ""
             Try
                 Dim defaultDir As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, DesignsDirectoryName))
+                If Not DesignSetsAllowed() Then Return defaultDir
+
                 Dim selectorPath As String = System.IO.Path.Combine(root, DesignSetsDirectoryName, ActiveDesignSetFileName)
                 If Not System.IO.File.Exists(selectorPath) Then Return defaultDir
 

@@ -51,33 +51,125 @@ Partial Public Class ThisAddIn
         Try
             Agents.PythonExecuteTool.Configure(New Agents.PythonExecuteToolCoreOptions() With {
                 .AgentConfiguration = configuration,
-                .InputFileResolver = Function(rel) New Agents.RedInkPythonAgentInputFile(
-                                         SharedLibrary.Agents.PathPolicy.Resolve(rel, SharedLibrary.Agents.PathAccess.Read), rel),
+                .InputFileResolver = Function(rel) ResolvePythonInputFile(rel),
                 .PublishOutputFile = Sub(output) PublishPythonAgentOutput(output),
                 .HostServiceHandler = Nothing
             })
         Catch ex As Exception
             ToolingFileLogger.LogWarn("python_execute is unavailable (configuration invalid or Python Agent below the minimum required version) and will not be advertised.", ex:=ex)
+            Try
+                Global.SharedLibrary.SharedLibrary.UpdateHandler.WriteUpdateLog("[ToolAvailability] python_execute unavailable; error=" & CompactPythonAvailabilityLogValue(ex.Message))
+            Catch logEx As System.Exception
+                System.Diagnostics.Trace.WriteLine("Could not write python_execute availability diagnostics: " & logEx.ToString())
+            End Try
             Return False
         End Try
 
-        Return Agents.PythonExecuteTool.TryBuild(_context, modelConfig, toolPriority:=996, displaySuffix:=InternalToolSuffix)
+        Dim availabilityErrorCode As System.String = System.String.Empty
+        If Not Agents.PythonExecuteTool.IsAvailable(availabilityErrorCode) Then
+            Try
+                Global.SharedLibrary.SharedLibrary.UpdateHandler.WriteUpdateLog(
+                    "[ToolAvailability] python_execute unavailable; code=" & If(availabilityErrorCode, "(none)") &
+                    "; path=" & CompactPythonAvailabilityLogValue(configuration.ExecutablePath))
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine("Could not write python_execute availability diagnostics: " & ex.ToString())
+            End Try
+            Return False
+        End If
+
+        modelConfig = Agents.PythonExecuteTool.Build(_context, toolPriority:=996, displaySuffix:=InternalToolSuffix)
+        Return True
     End Function
 
     ''' <summary>
     ''' Writes a python_execute output artifact to the Word host's default writable root
     ''' (the connected workspace, or the Desktop when no workspace is maintained).
     ''' </summary>
-    Private Sub PublishPythonAgentOutput(output As Agents.RedInkPythonAgentOutput)
-        If output Is Nothing OrElse String.IsNullOrWhiteSpace(output.FullPath) OrElse Not System.IO.File.Exists(output.FullPath) Then
-            Return
+    Private Shared Function CompactPythonAvailabilityLogValue(value As System.String) As System.String
+        If System.String.IsNullOrWhiteSpace(value) Then Return "(none)"
+        Return value.Replace(System.Environment.NewLine, " ").Replace(System.Convert.ToChar(13), " "c).Replace(System.Convert.ToChar(10), " "c).Trim()
+    End Function
+
+    Private Function ResolvePythonInputFile(rel As System.String) As Agents.RedInkPythonAgentInputFile
+        Try
+            Dim resolved As System.String = SharedLibrary.Agents.PathPolicy.Resolve(rel, SharedLibrary.Agents.PathAccess.Read)
+            If Not System.String.IsNullOrWhiteSpace(resolved) AndAlso System.IO.File.Exists(resolved) Then
+                Return New Agents.RedInkPythonAgentInputFile(resolved, rel)
+            End If
+        Catch ex As System.Exception
+            System.Diagnostics.Trace.WriteLine(ex.ToString())
+        End Try
+
+        Dim skillReferencePath As System.String = System.String.Empty
+        If Agents.AgentResources.TryResolveUniqueSkillReferencePath(rel, skillReferencePath) Then
+            Return New Agents.RedInkPythonAgentInputFile(skillReferencePath, rel)
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Resolves the exact physical source inputs used by python_execute so host-side artifact
+    ''' postconditions can compare the produced output against the source without trusting model output.
+    ''' </summary>
+    Private Function ResolvePythonInputSourcePathsForVerification(
+        arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Collections.Generic.List(Of System.String)
+
+        Dim result As New System.Collections.Generic.List(Of System.String)()
+        Try
+            For Each relativePath As System.String In
+                Agents.PythonExecuteToolCore.GetDeclaredInputFilesForHostVerification(arguments)
+
+                Try
+                    Dim resolved As Agents.RedInkPythonAgentInputFile = ResolvePythonInputFile(relativePath)
+                    If resolved IsNot Nothing AndAlso
+                       Not System.String.IsNullOrWhiteSpace(resolved.SourcePath) AndAlso
+                       System.IO.File.Exists(resolved.SourcePath) Then
+
+                        result.Add(System.IO.Path.GetFullPath(resolved.SourcePath))
+                    End If
+                Catch ex As System.Exception
+                End Try
+            Next
+        Catch ex As System.Exception
+        End Try
+
+        Return result
+    End Function
+
+    Private Shared Function ExpectedArtifactRequiresEffect(
+        context As ToolExecutionContext,
+        artifactMetadata As Agents.OptionalToolArtifactMetadata,
+        effect As System.String) As System.Boolean
+
+        If context Is Nothing OrElse
+           context.SequencingState Is Nothing OrElse
+           artifactMetadata Is Nothing OrElse
+           System.String.IsNullOrWhiteSpace(effect) Then
+
+            Return False
+        End If
+
+        Dim expected As Agents.ToolCallSequencing.ExpectedDeliverableSlot =
+            context.SequencingState.GetExpectedDeliverableSlot(
+                artifactMetadata.LogicalDeliverableId,
+                artifactMetadata.OutputSlotId)
+
+        Return expected IsNot Nothing AndAlso
+               expected.RequiredEffects IsNot Nothing AndAlso
+               expected.RequiredEffects.Contains(effect.Trim().ToLowerInvariant())
+    End Function
+
+    Private Function PublishPythonAgentOutput(output As Agents.RedInkPythonAgentOutput) As System.String
+        If output Is Nothing OrElse System.String.IsNullOrWhiteSpace(output.FullPath) OrElse Not System.IO.File.Exists(output.FullPath) Then
+            Return System.String.Empty
         End If
 
         ' The core has already validated containment/size/hash and populated PublishedSubPath.
         Dim subPath As String = If(output.PublishedSubPath, "").Trim()
         If subPath.Length = 0 Then subPath = System.IO.Path.GetFileName(output.FullPath)
         subPath = subPath.Replace("/"c, System.IO.Path.DirectorySeparatorChar).TrimStart(System.IO.Path.DirectorySeparatorChar)
-        If String.IsNullOrWhiteSpace(System.IO.Path.GetFileName(subPath)) Then Return
+        If System.String.IsNullOrWhiteSpace(System.IO.Path.GetFileName(subPath)) Then Return System.String.Empty
 
         Try
             Dim targetRoot As String = ""
@@ -125,10 +217,13 @@ Partial Public Class ThisAddIn
                 System.IO.Directory.CreateDirectory(targetDir)
             End If
             System.IO.File.Copy(output.FullPath, targetPath, overwrite:=True)
-        Catch ex As Exception
+            Return targetPath
+        Catch ex As System.Exception
             ToolingFileLogger.LogWarn("Failed to publish python_execute output.", ex:=ex)
         End Try
-    End Sub
+
+        Return System.String.Empty
+    End Function
 
     ''' <summary>
     ''' Host wrapper bridging the Word ToolCall/ToolResponse/ToolExecutionContext types
@@ -147,9 +242,53 @@ Partial Public Class ThisAddIn
 
         Dim result As Agents.PythonExecuteToolCoreResult = Nothing
         Dim cancelled As Boolean = False
-        Dim unexpected As Exception = Nothing
+        Dim unexpected As System.Exception = Nothing
 
         cancellationToken.ThrowIfCancellationRequested()
+
+        Dim defaultArtifactStorage As Agents.ArtifactStorageKind = Agents.ArtifactStorageKind.SessionStaging
+        Try
+            Dim activeWorkspace As SharedLibrary.Agents.WorkspaceState = SharedLibrary.Agents.WorkspaceTools.Active
+            If activeWorkspace IsNot Nothing AndAlso
+               activeWorkspace.AllowWrite AndAlso
+               Not System.String.IsNullOrWhiteSpace(activeWorkspace.RootPath) AndAlso
+               System.IO.Directory.Exists(activeWorkspace.RootPath) Then
+                defaultArtifactStorage = Agents.ArtifactStorageKind.ConnectedWorkspace
+            End If
+        Catch ex As System.Exception
+            ' Session staging remains the safe default.
+        End Try
+
+        Dim artifactMetadata As Agents.OptionalToolArtifactMetadata = Nothing
+        Dim artifactFailureCode As System.String = System.String.Empty
+        Dim artifactFailureMessage As System.String = System.String.Empty
+        If Not Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+            toolCall.Arguments,
+            defaultArtifactStorage,
+            artifactMetadata,
+            artifactFailureCode,
+            artifactFailureMessage) Then
+
+            response.Success = False
+            response.ErrorCode = artifactFailureCode
+            response.ErrorMessage = artifactFailureMessage
+            response.Response = Agents.PythonExecuteTool.CreateHostFailurePayload("failed", artifactFailureCode)
+            context.Log("Rejected invalid python_execute artifact metadata before worker startup: " & artifactFailureCode, "warn")
+            ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute)", response.Response)
+            Return response
+        End If
+
+        Dim publishedArtifactPaths As New System.Collections.Generic.List(Of System.String)()
+        Dim artifactPublisher As System.Action(Of Agents.RedInkPythonAgentOutput) = Nothing
+        If artifactMetadata IsNot Nothing Then
+            artifactPublisher =
+                Sub(output As Agents.RedInkPythonAgentOutput)
+                    Dim publishedPath As System.String = PublishPythonAgentOutput(output)
+                    If Not System.String.IsNullOrWhiteSpace(publishedPath) Then
+                        publishedArtifactPaths.Add(publishedPath)
+                    End If
+                End Sub
+        End If
 
         ' Pre-execution guard: reject an unchanged deterministic resubmission before starting the worker, so a
         ' prior code-repair/diagnostic outcome that produced no code change does not spawn another identical
@@ -193,7 +332,9 @@ Partial Public Class ThisAddIn
                 Sub(message) context.Log(message, "warn"),
                 Sub(message) context.Log(message, "diag"),
                 hostServiceHandler,
-                allowedOperations)
+                allowedOperations,
+                artifactPublisher,
+                0)
         Catch ex As OperationCanceledException
             cancelled = True
         Catch ex As Exception
@@ -223,7 +364,70 @@ Partial Public Class ThisAddIn
             response.Response = result.Payload
             response.Success = result.Success
             response.ErrorCode = If(result.Success, String.Empty, result.ErrorCode)
-            response.ErrorMessage = If(result.Success, String.Empty, result.ErrorMessage)
+            response.ErrorMessage = If(result.Success, System.String.Empty, result.ErrorMessage)
+
+            If response.Success AndAlso artifactMetadata IsNot Nothing Then
+                If publishedArtifactPaths.Count <> 1 Then
+                    For Each publishedPath As System.String In publishedArtifactPaths
+                        Try
+                            If Not System.String.IsNullOrWhiteSpace(publishedPath) AndAlso System.IO.File.Exists(publishedPath) Then
+                                System.IO.File.Delete(publishedPath)
+                            End If
+                        Catch ex As System.Exception
+                            context.Log("Failed to clean up a rejected python_execute output: " & ex.Message, "diag")
+                        End Try
+                    Next
+
+                    response.Success = False
+                    response.ErrorCode = "EXPLICIT_ARTIFACT_OUTPUT_COUNT_MISMATCH"
+                    response.ErrorMessage = "The explicit single-file artifact contract requires exactly one published output file."
+                    response.Response = Agents.PythonExecuteTool.CreateHostFailurePayload("failed", response.ErrorCode)
+                    context.Log("python_execute explicit artifact contract did not publish exactly one file.", "warn")
+                Else
+                    Dim publishedPath As System.String = publishedArtifactPaths(0)
+                    Dim requiresContentMutation As System.Boolean =
+                        ExpectedArtifactRequiresEffect(context, artifactMetadata, "content_mutated")
+                    Dim mutationReason As System.String = System.String.Empty
+                    Dim sourceInputPaths As System.Collections.Generic.List(Of System.String) =
+                        ResolvePythonInputSourcePathsForVerification(toolCall.Arguments)
+                    Dim contentMutationVerified As System.Boolean =
+                        Agents.ArtifactDelivery.TryVerifyContentMutation(
+                            publishedPath,
+                            sourceInputPaths,
+                            mutationReason)
+
+                    If contentMutationVerified Then
+                        response.VerifiedArtifactEffects.Add("content_mutated")
+                        For Each worksheetEffect As System.String In
+                            Agents.ArtifactDelivery.GetVerifiedWorksheetMutationEffects(publishedPath, sourceInputPaths)
+                            response.VerifiedArtifactEffects.Add(worksheetEffect)
+                        Next
+                        context.Log("python_execute host-verified artifact effect: content_mutated (" & mutationReason & ").", "diag")
+                    ElseIf requiresContentMutation Then
+                        Try
+                            If System.IO.File.Exists(publishedPath) Then System.IO.File.Delete(publishedPath)
+                        Catch ex As System.Exception
+                            context.Log("Failed to clean up python_execute output rejected by the content-mutation postcondition: " & ex.Message, "diag")
+                        End Try
+
+                        response.Success = False
+                        response.ErrorCode = "ARTIFACT_REQUIRED_EFFECT_NOT_VERIFIED"
+                        response.ErrorMessage =
+                            "The produced file did not satisfy the required host-verified artifact effect 'content_mutated'."
+                        response.Response = Agents.PythonExecuteTool.CreateHostFailurePayload("failed", response.ErrorCode)
+                        context.Log("python_execute output rejected by required content-mutation postcondition: " & mutationReason, "warn")
+                    Else
+                        context.Log("python_execute content mutation was not host-verified: " & mutationReason, "diag")
+                    End If
+
+                    If response.Success Then
+                        response.Response = Agents.ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(
+                            response.Response,
+                            artifactMetadata,
+                            publishedPath)
+                    End If
+                End If
+            End If
 
             ' Task-postcondition gate (distinct from worker success): a clean process exit is not accepted as a
             ' completed task when the run produced no observable/valid result (no published result and no output
@@ -240,47 +444,8 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            ' First-failure reroute gate: when python_execute is acting as a fallback and a specialized tool that
-            ' shares its capability is available, a first failure should re-route to the specialized tool rather
-            ' than entering the sticky Python repair loop. Fully capability-driven and tool-agnostic. Scoped, like
-            ' the redundant-success nudge, to the MAIN loop only (sub-agents/skills may use Python freely).
-            Dim pythonRerouteReason As String = Nothing
-            Dim pythonReroutePayload As String = Nothing
-            Dim isSubAgentLoopForRoute As Boolean =
-                If(context.LogPrefix, "").TrimStart().StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
-            If Not response.Success AndAlso Not isSubAgentLoopForRoute AndAlso
-               Agents.PythonExecuteRepairAdvisor.TryBuildRerouteInsteadOfRepairPayload(
-                   context, toolCall.Arguments, response.Response,
-                   Agents.PythonExecuteRepairAdvisor.HasCapableNonFallbackAlternative(context.SelectedTools, toolCall.ToolName),
-                   pythonReroutePayload, pythonRerouteReason) Then
-
-                Dim originalPythonFailureCode As System.String = If(response.ErrorCode, System.String.Empty)
-                Dim originalPythonFailureMessage As System.String = If(response.ErrorMessage, System.String.Empty)
-                Dim originalPythonFailurePayload As System.String = If(response.Response, System.String.Empty)
-                context.Log(
-                    "python_execute original failure before fallback reroute: code=" &
-                    If(originalPythonFailureCode.Length = 0, "(none)", originalPythonFailureCode) &
-                    "; message=" & If(originalPythonFailureMessage.Length = 0, "(none)", originalPythonFailureMessage),
-                    "diag")
-                ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute original failure before reroute)", originalPythonFailurePayload)
-
-                response.ErrorCode = "REROUTE_TO_ALTERNATIVE"
-                response.ErrorMessage = "A specialized tool can perform this operation; not entering the Python repair loop."
-                response.Response = pythonReroutePayload
-                context.Log("python_execute failed on first fallback attempt while a specialized tool is available; advising reroute instead of repair.", "warn")
-
-                If String.IsNullOrEmpty(context.PendingContinuationGuardPrompt) Then
-                    context.PendingContinuationGuardPrompt = pythonRerouteReason
-                    context.PendingGuardTitle = "HOST FALLBACK-REROUTE GUARD"
-                    context.PendingRejectedTurnExplanation =
-                        "Your previous turn used python_execute as a fallback and it failed on its first attempt, but a specialized tool for this operation is available."
-                    context.PendingRejectedAssistantTurn = ""
-                End If
-
-                ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute)", response.Response)
-                Return response
-            End If
-
+            ' A specialized tool remains an efficiency preference only. python_execute failures flow into the
+            ' normal repair advisor; the presence of another capable tool never disables Python recovery.
             ' Annotate the model-facing payload with retry-vs-repair semantics and attempt history so the
             ' Word tooling loop stops guessing nonexistent APIs after deterministic Python errors. The
             ' ToolExecutionContext keys the per-session repair history. A terminal outcome (repair budget

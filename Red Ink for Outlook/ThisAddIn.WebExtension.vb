@@ -2138,7 +2138,7 @@ Partial Public Class ThisAddIn
         ' Poll job
         html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
         html.AppendLine("function ensureJobResultVisible(st,r){const hist=(st&&Array.isArray(st.history))?st.history.slice():[];const turn=buildAssistantTurnFromJobResult(r);if(!turn)return hist;const activeChat=Number((st&&st.activeChat)||1);const resultChat=Number((r&&r.chat)||activeChat);if(activeChat!==resultChat)return hist;const last=hist.length?hist[hist.length-1]:null;const lastMd=String((last&&last.markdown)||'').trim();if(last&&last.role==='assistant'&&lastMd===turn.markdown)return hist;hist.push(turn);return hist;}")
-        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;cancelBtn.disabled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){if(s.statusText){setTypingStatus(s.statusText);}else if(__jobCanceled){setTypingStatus('Cancelling…');}continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.disabled=false;cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
+        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;cancelBtn.disabled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);let pollFailures=0;try{for(;;){await new Promise(r=>setTimeout(r,2000));let s=null;try{s=await api('inky_jobstatus',{Job:jobId});}catch(e){pollFailures++;console.warn('job status exception',e);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{render(ensureJobResultVisible({history:[],activeChat:1},{result:'The job finished, but the final response could not be retrieved from the host.',chat:1}));}break;}if(!s||!s.ok){pollFailures++;console.warn('job status error',s&&s.error);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{const chatId=Number((s&&s.chat)||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String((s&&s.error)||'The final response could not be retrieved from the host.'),chat:chatId}));}break;}pollFailures=0;if(s.status==='running'){if(s.statusText){setTypingStatus(s.statusText);}else if(__jobCanceled){setTypingStatus('Cancelling…');}continue;}if(s.status==='done'){const stDone={history:Array.isArray(s.history)?s.history:[],activeChat:s.chat};render(ensureJobResultVisible(stDone,s));const stSync=await api('inky_getstate').catch(()=>null);if(stSync&&stSync.ok){const synced=ensureJobResultVisible({history:stSync.history||[],activeChat:s.chat},s);render(synced);if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);}else{const chatId=Number(s.chat||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String(s.error||'The job failed.'),chat:chatId}));}console.warn('job failed',s.error);break;}const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){const hist=ensureJobResultVisible({history:st.history||[],activeChat:s.chat},s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.disabled=false;cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
         html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
@@ -2285,6 +2285,12 @@ Partial Public Class ThisAddIn
             Try
                 If Not System.IO.Directory.Exists(uploadDirectory) Then System.IO.Directory.CreateDirectory(uploadDirectory)
 
+                ' Self-healing eviction: uploads that were never consumed (e.g. the user
+                ' cleared/switched/closed before sending, or a follow-up add/send failed) would
+                ' otherwise accumulate forever and permanently trip the count/size quota, which
+                ' neither Clear nor an Outlook restart resolves. Remove stale originals first.
+                EvictStaleInkyUploads(uploadDirectory)
+
                 Dim files() As System.String = System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
                 If files.Length >= SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadFileCount Then
                     errorMessage = "Too many uploaded files are active. The maximum is 50 files."
@@ -2314,6 +2320,51 @@ Partial Public Class ThisAddIn
             End Try
         End SyncLock
     End Function
+
+    ''' <summary>
+    ''' Age-based eviction of orphaned Inky upload originals. Caller must hold
+    ''' <c>_inkyUploadQuotaGate</c>. Deletes files older than the retention window so a
+    ''' full/over-count upload cache can recover on its own (fixes the case where Clear or
+    ''' an Outlook restart does not release the quota).
+    ''' </summary>
+    Private Sub EvictStaleInkyUploads(ByVal uploadDirectory As System.String)
+        Try
+            If System.String.IsNullOrWhiteSpace(uploadDirectory) OrElse Not System.IO.Directory.Exists(uploadDirectory) Then Return
+
+            Dim cutoff As System.DateTime = System.DateTime.UtcNow.AddHours(-24)
+            For Each filePath As System.String In System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
+                Try
+                    If System.IO.File.GetLastWriteTimeUtc(filePath) <= cutoff Then
+                        System.IO.File.Delete(filePath)
+                    End If
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Best-effort removal of all Inky upload originals. Used when clearing the chat while no
+    ''' background jobs are in flight, so orphaned uploads no longer count against the quota.
+    ''' </summary>
+    Private Sub PurgeInkyUploads()
+        SyncLock _inkyUploadQuotaGate
+            Try
+                Dim uploadDirectory As System.String =
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "InkyUploads")
+                If Not System.IO.Directory.Exists(uploadDirectory) Then Return
+
+                For Each filePath As System.String In System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
+                    Try
+                        System.IO.File.Delete(filePath)
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+        End SyncLock
+    End Sub
 
     Private Async Function ProcessRequestInAddIn(
         body As System.String,
@@ -3236,6 +3287,16 @@ Partial Public Class ThisAddIn
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Cancel invoked")
 
+                        ' Cancel the live tooling context immediately as well as the browser job CTS.
+                        ' This covers waits inside nested tooling/sub-agent execution without waiting
+                        ' for the outer job loop to observe its own cancellation state.
+                        Try
+                            If _activeToolingContext IsNot Nothing Then
+                                _activeToolingContext.RequestCancellation()
+                            End If
+                        Catch
+                        End Try
+
                         ' (Cancellation logic preserved)
                         ' ------------------------------------------------------------------
                         ' Optional job id (preferred modern path)
@@ -3833,6 +3894,8 @@ Partial Public Class ThisAddIn
                                     End Try
                                     If localOutput Is Nothing Then localOutput = String.Empty
                                     localOutput = SanitizeModelOutputForBrowser(localOutput).Trim()
+                                    ToolingFileLogger.LogStep(
+                                        $"Local Chat post-tooling output normalized: job={job.Id}; len={localOutput.Length}; canceled={If(jobCts.IsCancellationRequested, "true", "false")}")
                                     If localOutput.Length > 0 AndAlso
                                        localOutput.Equals("Operation was canceled by the user.", StringComparison.OrdinalIgnoreCase) Then
                                         localOutput = "Aborted by user."
@@ -3855,6 +3918,8 @@ Partial Public Class ThisAddIn
 
                                     Dim htmlOut As String = MarkdownToHtml(assistantText)
                                     Dim persisted As Boolean = PersistAssistantTurnForJob(job, assistantText, htmlOut)
+                                    ToolingFileLogger.LogStep(
+                                        $"Local Chat assistant persistence completed: job={job.Id}; persisted={If(persisted, "true", "false")}; assistantLen={assistantText.Length}")
 
                                     If Not persisted Then
                                         Debug.WriteLine(
@@ -3867,9 +3932,13 @@ Partial Public Class ThisAddIn
                                     End If
 
                                     If wasCanceled AndAlso localOutput.Length = 0 Then
-                                        tcs.TrySetCanceled()
+                                        Dim cancelAccepted As Boolean = tcs.TrySetCanceled()
+                                        ToolingFileLogger.LogStep(
+                                            $"Local Chat job completion signaled: job={job.Id}; status=canceled; accepted={If(cancelAccepted, "true", "false")}")
                                     Else
-                                        tcs.TrySetResult(assistantText)
+                                        Dim resultAccepted As Boolean = tcs.TrySetResult(assistantText)
+                                        ToolingFileLogger.LogStep(
+                                            $"Local Chat job completion signaled: job={job.Id}; status=done; accepted={If(resultAccepted, "true", "false")}; assistantLen={assistantText.Length}")
                                     End If
                                 Catch exOp As OperationCanceledException
                                     If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
@@ -4094,6 +4163,8 @@ Partial Public Class ThisAddIn
                         Else
                             Dim resultText As String = If(t.Result, "")
                             Dim stJob As InkyState = LoadInkyState(job.ChatId)
+                            ToolingFileLogger.LogStep(
+                                $"Local Chat jobstatus returning done result: job={jobId}; resultLen={resultText.Length}; historyTurns={If(stJob?.History?.Count, 0)}")
 
                             Return JsonOk(New With {
                                     .ok = True,
@@ -4198,6 +4269,13 @@ Partial Public Class ThisAddIn
 
                         ' Clear agent files on chat clear
                         ChatAgentClearFiles()
+
+                        ' Remove orphaned upload originals so Clear also releases the upload quota,
+                        ' but only when no background job is in flight (a running job still owns its
+                        ' pending upload and deletes it in its own Finally block).
+                        If System.Threading.Interlocked.CompareExchange(activeJobs, 0, 0) = 0 Then
+                            PurgeInkyUploads()
+                        End If
 
                         ' Keep ToolingEnabled / SelectedToolNames / model selection / dark mode as-is
                         SaveInkyState(stClear)
@@ -4433,9 +4511,19 @@ Partial Public Class ThisAddIn
                     Return ""
                 End If
                 TranslateLanguage = targetLang.Trim()
+
+                Dim dictionarySelectionCancelled As System.Boolean = False
+                Dim translatePrompt As System.String = Nothing
+                Await SwitchToUi(
+                    Sub()
+                        translatePrompt = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(
+                            _context, SP_Translate, AN & " Translate (for Browser)", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    End Sub)
+                If dictionarySelectionCancelled Then Return ""
+
                 ' ─── 2  call the LLM on the UI thread, get Task(Of String) ─────
                 Dim llmOut As String = Await RunLlmAsync(
-                    InterpolateAtRuntime(SP_Translate),
+                    translatePrompt,
                     $"<TEXTTOPROCESS>{textBody0}</TEXTTOPROCESS>")
                 ' ─── 3  clean up the wrapper tags / markdown ──────────────────
                 llmOut = llmOut.Replace("<TEXTTOPROCESS>", "") _

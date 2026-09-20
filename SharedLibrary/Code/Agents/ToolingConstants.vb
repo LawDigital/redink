@@ -38,6 +38,20 @@ Namespace Agents
         ''' <summary>Maximum repair attempts for premature-text / invalid-turn / empty-response recovery.</summary>
         Public Const MaxContinuationRetries As Integer = 5
 
+        ''' <summary>
+        ''' Number of full finalization re-planning passes allowed after the ordinary continuation-repair
+        ''' budget is exhausted. The restart preserves verified side effects/artifacts and asks the model to
+        ''' choose a materially different completion path; it is not permission to replay successful mutations.
+        ''' </summary>
+        Public Const MaxFinalizationRecoveryRestarts As Integer = 1
+
+        ''' <summary>
+        ''' Number of full tool-path recovery re-plans allowed after a concrete tool's own repair/circuit-breaker
+        ''' budget becomes terminal. The recovery preserves successful state but may select a different tool or
+        ''' a materially different implementation path before the host falls back to no-tool finalization.
+        ''' </summary>
+        Public Const MaxTerminalToolRecoveryRestarts As Integer = 1
+
         ''' <summary>Char threshold over which a sub-agent tool response is compacted for model replay.</summary>
         Public Const SubAgentLargeToolResponseThresholdChars As Integer = 30000
 

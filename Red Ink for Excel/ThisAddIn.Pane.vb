@@ -67,7 +67,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As Exception
-            MessageBox.Show("Error in ShowPaneAsync: " & ex.Message)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ShowPaneAsync: " & ex.Message)
         End Try
     End Sub
 

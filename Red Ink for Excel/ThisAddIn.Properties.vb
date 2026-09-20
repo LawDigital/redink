@@ -1953,6 +1953,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_DictionarySegmentPrompt As System.Boolean
+        Get
+            Return _context.INI_DictionarySegmentPrompt
+        End Get
+        Set(value As System.Boolean)
+            _context.INI_DictionarySegmentPrompt = value
+        End Set
+    End Property
+
+
     Public Shared Property INI_RedactionInstructionsPath As String
         Get
             Return _context.INI_RedactionInstructionsPath

@@ -63,6 +63,7 @@ Namespace Transcription
         Private ReadOnly _contentPanel As Panel
         Private ReadOnly _contentLayout As TableLayoutPanel
         Private ReadOnly _buttonsTable As TableLayoutPanel
+        Private ReadOnly _engineConfiguration As System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String))
 
         Private cboLang As ComboBox
         Private cboSourceMode As ComboBox
@@ -85,9 +86,11 @@ Namespace Transcription
                        langChoices As String(),
                        currentSourceMode As String,
                        currentOutputDeviceId As String,
-                       outputDevices As IEnumerable(Of KeyValuePair(Of String, String)))
+                       outputDevices As IEnumerable(Of KeyValuePair(Of String, String)),
+                       Optional engineConfiguration As System.Collections.Generic.IEnumerable(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String)) = Nothing)
 
             _kind = kind
+            _engineConfiguration = If(engineConfiguration, System.Linq.Enumerable.Empty(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String))()).ToList()
             Options = CloneOptions(currentOpts)
             SelectedSourceMode = currentSourceMode
             SelectedOutputDeviceId = currentOutputDeviceId
@@ -465,7 +468,41 @@ Namespace Transcription
 
             _contentLayout.Controls.Add(BuildRecognizerGroup(kind, recognizerDisplayName), 0, _contentLayout.RowCount)
             _contentLayout.RowCount += 1
+
+            _contentLayout.Controls.Add(BuildEngineConfigurationGroup(), 0, _contentLayout.RowCount)
+            _contentLayout.RowCount += 1
         End Sub
+
+        Private Function BuildEngineConfigurationGroup() As System.Windows.Forms.Control
+            Dim grp As New System.Windows.Forms.GroupBox() With {
+                .Text = "Effective engine configuration (non-secret)",
+                .Dock = System.Windows.Forms.DockStyle.Top,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Padding = New System.Windows.Forms.Padding(12),
+                .Margin = New System.Windows.Forms.Padding(0, 12, 0, 0)
+            }
+
+            Dim grid As New System.Windows.Forms.TableLayoutPanel() With {
+                .Dock = System.Windows.Forms.DockStyle.Top,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .ColumnCount = 2
+            }
+            grid.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Absolute, 240))
+            grid.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100))
+
+            If _engineConfiguration Is Nothing OrElse _engineConfiguration.Count = 0 Then
+                AddFullWidthRow(grid, BuildInfoLabel("No additional non-secret engine configuration is available."))
+            Else
+                For Each item As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In _engineConfiguration
+                    AddLabeledRow(grid, item.Key, BuildReadOnlyValueLabel(item.Value))
+                Next
+            End If
+
+            grp.Controls.Add(grid)
+            Return grp
+        End Function
 
         Private Function BuildGlobalGroup() As Control
             Dim grp As New GroupBox() With {
@@ -535,6 +572,13 @@ Namespace Transcription
                 Case EngineKind.GoogleV2
                     AddFullWidthRow(grid, chkMulti)
                     AddLabeledRow(grid, "Model", txtModel)
+
+                Case EngineKind.GeminiTranscribe
+                    AddFullWidthRow(grid, chkDiar)
+                    AddFullWidthRow(grid, BuildInfoLabel("Gemini 3.5 Transcribe file mode. SMART/VERBATIM, timestamps and custom vocabulary can be configured in INI_STT_Google. Files beyond the safe request duration are split automatically without a lossy re-encode."))
+
+                Case EngineKind.GeminiTranscribeLive
+                    AddFullWidthRow(grid, BuildInfoLabel("Gemini 3.5 Transcribe Live. Uses the existing 16 kHz mono PCM capture path, supports SMART/VERBATIM and custom vocabulary, and automatically starts a fresh live session before Google's connection/session time limit."))
 
                 Case EngineKind.OpenAiRest
                     AddLabeledRow(grid, "Model", txtModel)
