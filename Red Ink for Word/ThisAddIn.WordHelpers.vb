@@ -150,6 +150,40 @@ Partial Public Class ThisAddIn
         "pre { background: #f6f8fa; padding: 10px; border-radius: 4px; overflow-x: auto; }" &
         "</style>"
 
+    Private Shared Sub ShowComparisonHtmlInWebView2(
+        htmlContent As String,
+        header As String,
+        viewerHostFolder As String,
+        Optional additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)() = Nothing,
+        Optional onClose As System.Action = Nothing)
+
+        Dim t As New System.Threading.Thread(
+            Sub()
+                Try
+                    Using viewer As New ComparisonHtmlViewerForm(htmlContent, header, viewerHostFolder, additionalButtons, onClose)
+                        Dim owner As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
+                        If owner IsNot Nothing Then
+                            viewer.ShowDialog(owner)
+                        Else
+                            viewer.ShowDialog()
+                        End If
+                    End Using
+                Catch ex As System.Exception
+                    Try
+                        If onClose IsNot Nothing Then
+                            onClose.Invoke()
+                        End If
+                    Catch
+                    End Try
+
+                    ShowCustomMessageBox($"Failed to show comparison viewer: {ex.Message}", AN)
+                End Try
+            End Sub)
+
+        t.SetApartmentState(System.Threading.ApartmentState.STA)
+        t.Start()
+    End Sub
+
     ''' <summary>
     ''' Compares the active Word document with another open document selected by the user.
     ''' Generates a comparison document, exports it to filtered HTML, and displays the result
@@ -306,7 +340,7 @@ Partial Public Class ThisAddIn
                 CompareComments:=True,
                 CompareMoves:=True,
                 RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
-                IgnoreAllComparisonWarnings:=False
+                IgnoreAllComparisonWarnings:=True
             )
             If compareDoc Is Nothing Then
                 wordApp.DisplayAlerts = prevAlerts
@@ -363,10 +397,8 @@ Partial Public Class ThisAddIn
             ' Read HTML with proper encoding detection
             Dim htmlContent As String = ReadHtmlWithEncodingDetection(capturedTempHtmlPath)
 
-            ' Inject base href and Mark of the Web for security
-            Dim baseHref As String = $"<base href=""file:///{capturedTempFolder.Replace("\", "/")}/"">"
-            Dim motw As String = "<!-- saved from url=(0016)http://localhost -->"
-            htmlContent = htmlContent.Replace("<head>", "<head>" & vbCrLf & motw & vbCrLf & baseHref)
+            ' Prepare Word-generated comparison HTML for in-app display
+            htmlContent = PrepareComparisonHtmlForViewer(htmlContent, capturedTempFolder)
 
             ' Build additional buttons array
             Dim additionalButtons As New List(Of System.Tuple(Of String, System.Action, Boolean))()
@@ -491,7 +523,12 @@ Partial Public Class ThisAddIn
             ' Show result with all buttons - cleanup happens when dialog closes
             ' Title includes direction hint: Original → Revised
             Dim directionHint As String = $" ({capturedOriginalDocName} → {capturedRevisedDocName})"
-            ShowHTMLCustomMessageBox(htmlContent, $"{AN} Word Active Compare{directionHint}", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
+            ShowComparisonHtmlInWebView2(
+                htmlContent,
+                $"{AN} Word Active Compare{directionHint}",
+                capturedTempFolder,
+                additionalButtons.ToArray(),
+                cleanupAction)
 
         Catch ex As System.Exception
             ' Safety close on error
@@ -508,6 +545,33 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox($"Comparison failed: {ex.Message}", AN)
         End Try
     End Sub
+
+    Private Shared Function PrepareComparisonHtmlForViewer(htmlContent As String, baseFolder As String) As String
+        If String.IsNullOrWhiteSpace(htmlContent) Then Return String.Empty
+
+        Dim baseHref As String = $"<base href=""file:///{baseFolder.Replace("\", "/")}/"">"
+        Dim motw As String = "<!-- saved from url=(0016)http://localhost -->"
+        Dim viewerCss As String =
+            "<style>" &
+            "html, body { line-height: normal !important; }" &
+            "p, div, li, td, th { line-height: normal !important; }" &
+            "sup, sub { line-height: 0 !important; }" &
+            "ins, del, span, font, a { line-height: inherit !important; }" &
+            "del, del * { line-height: inherit !important; }" &
+            "del sup, del sub { vertical-align: baseline !important; font-size: 100% !important; line-height: inherit !important; position: static !important; }" &
+            "</style>"
+
+        If Regex.IsMatch(htmlContent, "<head\b[^>]*>", RegexOptions.IgnoreCase) Then
+            Return Regex.Replace(
+                htmlContent,
+                "<head\b[^>]*>",
+                "$0" & vbCrLf & motw & vbCrLf & baseHref & vbCrLf & viewerCss,
+                RegexOptions.IgnoreCase,
+                TimeSpan.FromSeconds(1))
+        End If
+
+        Return motw & vbCrLf & baseHref & vbCrLf & viewerCss & vbCrLf & htmlContent
+    End Function
 
     ''' <summary>
     ''' Reads an HTML file with proper encoding detection.
@@ -746,10 +810,8 @@ Partial Public Class ThisAddIn
                 ' Read HTML with proper encoding detection
                 Dim htmlContent As String = ReadHtmlWithEncodingDetection(capturedTempHtmlPath)
 
-                ' Inject base href and Mark of the Web for security
-                Dim baseHref As String = $"<base href=""file:///{capturedTempFolder.Replace("\", "/")}/"">"
-                Dim motw As String = "<!-- saved from url=(0016)http://localhost -->"
-                htmlContent = htmlContent.Replace("<head>", "<head>" & vbCrLf & motw & vbCrLf & baseHref)
+                ' Prepare Word-generated comparison HTML for in-app display
+                htmlContent = PrepareComparisonHtmlForViewer(htmlContent, capturedTempFolder)
 
                 ' Build additional buttons
                 Dim additionalButtons As New List(Of System.Tuple(Of String, System.Action, Boolean))()
@@ -863,7 +925,12 @@ Partial Public Class ThisAddIn
                     End Sub
 
                 ' Show result in HTML viewer - cleanup happens when dialog closes
-                ShowHTMLCustomMessageBox(htmlContent, $"{AN} Text Selection Compare", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
+                ShowComparisonHtmlInWebView2(
+                    htmlContent,
+                    $"{AN} Text Selection Compare",
+                    capturedTempFolder,
+                    additionalButtons.ToArray(),
+                    cleanupAction)
 
             Catch ex As Exception
                 ' Cleanup on error
@@ -2407,16 +2474,16 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"Output directory: {outputBaseDir}")
         End If
 
-            If Not String.IsNullOrWhiteSpace(combinedOutputPath) Then
-                summary.AppendLine()
-                summary.AppendLine($"Combined file: {combinedOutputPath}")
-                If Not String.IsNullOrWhiteSpace(indexOutputPath) Then
-                    summary.AppendLine($"Index file: {indexOutputPath}")
-                End If
-            ElseIf Not String.IsNullOrWhiteSpace(indexOutputPath) Then
-                summary.AppendLine()
+        If Not String.IsNullOrWhiteSpace(combinedOutputPath) Then
+            summary.AppendLine()
+            summary.AppendLine($"Combined file: {combinedOutputPath}")
+            If Not String.IsNullOrWhiteSpace(indexOutputPath) Then
                 summary.AppendLine($"Index file: {indexOutputPath}")
             End If
+        ElseIf Not String.IsNullOrWhiteSpace(indexOutputPath) Then
+            summary.AppendLine()
+            summary.AppendLine($"Index file: {indexOutputPath}")
+        End If
 
         If doOcr Then
             summary.AppendLine("OCR was enabled for PDF files.")
@@ -2529,7 +2596,7 @@ Partial Public Class ThisAddIn
             summary.AppendLine("(Detailed log copied to clipboard)")
         End If
 
-            ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Convert to Text")
+        ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Convert to Text")
     End Sub
 
     Private Async Function CreateSemanticSearchIndexWithUserOptionsAsync(
@@ -2800,15 +2867,15 @@ Partial Public Class ThisAddIn
 
                     Dim llmResult As String = String.Empty
                     Try
-                        llmResult = LLM(
-                            _context,
-                            systemPrompt,
-                            userPrompt,
-                            "",
-                            "",
-                            0,
-                            False,
-                            False).GetAwaiter().GetResult()
+                        llmResult = SharedMethods.LLM(
+                            context:=_context,
+                            promptSystem:=systemPrompt,
+                            promptUser:=userPrompt,
+                            Model:="",
+                            Temperature:="",
+                            Timeout:=0,
+                            UseSecondAPI:=False,
+                            Hidesplash:=False).GetAwaiter().GetResult()
                     Catch ex As System.Exception
                         llmResult = $"Error calling LLM: {ex.Message}"
                     End Try
@@ -2828,7 +2895,24 @@ Partial Public Class ThisAddIn
                         htmlResult = $"<html><body><pre>{System.Security.SecurityElement.Escape(If(llmResult, ex.Message))}</pre></body></html>"
                     End Try
 
-                    ShowHTMLCustomMessageBox(htmlResult, $"{AN} Change Summary")
+                    Dim summaryTempFolder As String = Path.Combine(Path.GetTempPath(), $"{AN2}_change_summary_" & Guid.NewGuid().ToString("N"))
+                    Directory.CreateDirectory(summaryTempFolder)
+
+                    Dim cleanupAction As System.Action =
+                        Sub()
+                            Try
+                                If Directory.Exists(summaryTempFolder) Then
+                                    Directory.Delete(summaryTempFolder, recursive:=True)
+                                End If
+                            Catch
+                            End Try
+                        End Sub
+
+                    ShowComparisonHtmlInWebView2(
+                        htmlResult,
+                        $"{AN} Change Summary",
+                        summaryTempFolder,
+                        onClose:=cleanupAction)
 
                 Catch ex As System.Exception
                     ShowCustomMessageBox($"Failed to summarize changes: {ex.Message}", AN)
