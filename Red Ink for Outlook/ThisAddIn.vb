@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 15.9.2026
+' 20.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -75,7 +75,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.150926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.200926" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -523,6 +523,24 @@ Partial Public Class ThisAddIn
 
             ' Initialize Knowledge Store background indexing service
             MeasureOutlookStartupStep("KnowledgeStore.schedule", Sub() InitializeKnowledgeStoreService(), startupTimings)
+
+            ' Reclaim orphaned Local Chat upload originals left in %TEMP%\InkyUploads by prior
+            ' sessions (uploads that were never consumed). Runs off the UI thread so it does not
+            ' delay startup; the internal quota gate keeps it safe against concurrent uploads.
+            MeasureOutlookStartupStep(
+                "InkyUploadCache.purge.schedule",
+                Sub()
+                    System.Threading.Tasks.Task.Run(
+                        Sub()
+                            Try
+                                PurgeInkyUploads()
+                            Catch ex As System.Exception
+                                System.Diagnostics.Debug.WriteLine(
+                                    "[PERF] Outlook background Inky upload cache purge failed: " & ex.Message)
+                            End Try
+                        End Sub)
+                End Sub,
+                startupTimings)
 
             Try
                 If System.Threading.SynchronizationContext.Current Is Nothing Then

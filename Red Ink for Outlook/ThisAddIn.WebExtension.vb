@@ -2285,6 +2285,12 @@ Partial Public Class ThisAddIn
             Try
                 If Not System.IO.Directory.Exists(uploadDirectory) Then System.IO.Directory.CreateDirectory(uploadDirectory)
 
+                ' Self-healing eviction: uploads that were never consumed (e.g. the user
+                ' cleared/switched/closed before sending, or a follow-up add/send failed) would
+                ' otherwise accumulate forever and permanently trip the count/size quota, which
+                ' neither Clear nor an Outlook restart resolves. Remove stale originals first.
+                EvictStaleInkyUploads(uploadDirectory)
+
                 Dim files() As System.String = System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
                 If files.Length >= SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadFileCount Then
                     errorMessage = "Too many uploaded files are active. The maximum is 50 files."
@@ -2314,6 +2320,51 @@ Partial Public Class ThisAddIn
             End Try
         End SyncLock
     End Function
+
+    ''' <summary>
+    ''' Age-based eviction of orphaned Inky upload originals. Caller must hold
+    ''' <c>_inkyUploadQuotaGate</c>. Deletes files older than the retention window so a
+    ''' full/over-count upload cache can recover on its own (fixes the case where Clear or
+    ''' an Outlook restart does not release the quota).
+    ''' </summary>
+    Private Sub EvictStaleInkyUploads(ByVal uploadDirectory As System.String)
+        Try
+            If System.String.IsNullOrWhiteSpace(uploadDirectory) OrElse Not System.IO.Directory.Exists(uploadDirectory) Then Return
+
+            Dim cutoff As System.DateTime = System.DateTime.UtcNow.AddHours(-24)
+            For Each filePath As System.String In System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
+                Try
+                    If System.IO.File.GetLastWriteTimeUtc(filePath) <= cutoff Then
+                        System.IO.File.Delete(filePath)
+                    End If
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Best-effort removal of all Inky upload originals. Used when clearing the chat while no
+    ''' background jobs are in flight, so orphaned uploads no longer count against the quota.
+    ''' </summary>
+    Private Sub PurgeInkyUploads()
+        SyncLock _inkyUploadQuotaGate
+            Try
+                Dim uploadDirectory As System.String =
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "InkyUploads")
+                If Not System.IO.Directory.Exists(uploadDirectory) Then Return
+
+                For Each filePath As System.String In System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
+                    Try
+                        System.IO.File.Delete(filePath)
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+        End SyncLock
+    End Sub
 
     Private Async Function ProcessRequestInAddIn(
         body As System.String,
@@ -4218,6 +4269,13 @@ Partial Public Class ThisAddIn
 
                         ' Clear agent files on chat clear
                         ChatAgentClearFiles()
+
+                        ' Remove orphaned upload originals so Clear also releases the upload quota,
+                        ' but only when no background job is in flight (a running job still owns its
+                        ' pending upload and deletes it in its own Finally block).
+                        If System.Threading.Interlocked.CompareExchange(activeJobs, 0, 0) = 0 Then
+                            PurgeInkyUploads()
+                        End If
 
                         ' Keep ToolingEnabled / SelectedToolNames / model selection / dark mode as-is
                         SaveInkyState(stClear)
