@@ -859,6 +859,11 @@ Public Class frmAIChat
         Dim userPrompt As String = txtUserInput.Text.Trim()
         If userPrompt = "" Then Return
 
+        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+            "WordChat",
+            "btnSend_Click start (promptLength=" &
+            userPrompt.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
+
         Dim errorOccurred As Boolean = False
         Dim errorMessage As String = ""
 
@@ -1304,6 +1309,10 @@ Public Class frmAIChat
                     ' Call ExecuteToolingLoop with the same fullPrompt as non-tooling calls
                     ' hideSplash:=True suppresses splash during chat
                     ' hideLogWindow:=True suppresses log window for chat integration
+                    SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                        "WordChat",
+                        "Calling ExecuteToolingLoop (targetDoc=" & requestTargetDocumentName & ")")
+
                     aiResponseOriginal = Await Globals.ThisAddIn.ExecuteToolingLoop(
                         SystemPrompt,
                         userPrompt,
@@ -1329,8 +1338,18 @@ Public Class frmAIChat
                 End Try
             Else
                 ' Standard LLM call (normal behavior)
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                    "WordChat",
+                    "Calling LLM (standard, useSecondApi=" &
+                    _useSecondApi.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
+
                 aiResponseOriginal = Await CallLlmWithSelectedModelAsync(SystemPrompt, fullPrompt.ToString())
             End If
+
+            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                "WordChat",
+                "LLM returned (responseLength=" &
+                If(aiResponseOriginal, "").Length.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 9: Process LLM Response
@@ -1414,8 +1433,20 @@ Public Class frmAIChat
 
                                     If My.Settings.DoCommands And Not String.IsNullOrWhiteSpace(CommandsString) Then
                                         Try
+                                            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                                                "WordChat",
+                                                "ExecuteAnyCommands start (targetDoc=" & requestTargetDocumentName & ")")
+
                                             ExecuteAnyCommands(CommandsString, chkIncludeselection.Checked, requestTargetDocumentName, requestTargetDocumentFullName, requestTargetSelectionStart, requestTargetSelectionEnd)
+
+                                            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                                                "WordChat",
+                                                "ExecuteAnyCommands done")
                                         Catch cmdEx As Exception
+                                            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                                                "WordChat",
+                                                "ExecuteAnyCommands error: " & cmdEx.Message)
+
                                             ' Report command execution error to chat
                                             ReportCommandExecutionError(cmdEx.Message)
                                         End Try
@@ -1434,6 +1465,10 @@ Public Class frmAIChat
 
         Catch ex As System.Exception
             ' Capture error without performing async work inside catch block
+            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                "WordChat",
+                "btnSend_Click exception: " & ex.GetType().Name & ": " & ex.Message)
+
             errorOccurred = True
             errorMessage = $"Error processing request: {ex.Message}"
         End Try
@@ -2834,8 +2869,12 @@ Public Class frmAIChat
         Dim results As New List(Of ParsedCommand)
         Try
             ' Tempered-greedy regex pattern for command parsing
-            ' See function remarks for detailed explanation
-            Dim pattern As String = "\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:§§(?<arg2>(?:[^§]|§(?!§))*?)§§)?\s*#\]"
+            ' See function remarks for detailed explanation.
+            ' Fault-tolerant additions (safe, no side effects):
+            '  - arg2 may open AND close with either §§ or @@ (tolerates swapped delimiters)
+            '  - the final # before ] is optional (tolerates a missing closing #)
+            ' arg1 stays strict (@@ ... @@) because it is the verbatim document anchor.
+            Dim pattern As String = "\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:(?:§§|@@)(?<arg2>(?:[^@§]|@(?!@)|§(?!§))*?)(?:§§|@@))?\s*#?\]"
             Dim regex As New Regex(pattern, RegexOptions.Singleline)
 
             For Each m As Match In regex.Matches(input)
@@ -2880,11 +2919,11 @@ Public Class frmAIChat
         Dim output As String = input
 
         Try
-            ' Keep this pattern aligned with ParseCommands:
-            ' - single @ is allowed inside @@...@@
-            ' - single § is allowed inside §§...§§
-            ' - only @@ and §§ close their respective arguments
-            Dim commandPattern As String = "\s*[\r\n]*\s*\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:§§(?<arg2>(?:[^§]|§(?!§))*?)§§)?\s*#\]\s*[\r\n]*\s*"
+            ' Keep this pattern aligned with ParseCommands (including the fault-tolerant parts):
+            ' - single @ is allowed inside the @@...@@ anchor
+            ' - single § is allowed inside the §§...§§ argument
+            ' - arg2 may open/close with either §§ or @@, and the final # before ] is optional
+            Dim commandPattern As String = "\s*[\r\n]*\s*\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:(?:§§|@@)(?<arg2>(?:[^@§]|@(?!@)|§(?!§))*?)(?:§§|@@))?\s*#?\]\s*[\r\n]*\s*"
             Dim regex As New Regex(commandPattern, RegexOptions.Singleline)
             output = regex.Replace(input, "")
 

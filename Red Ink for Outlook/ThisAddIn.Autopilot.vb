@@ -3149,42 +3149,44 @@ Partial Public Class ThisAddIn
                     RunDeferredApprovalAsync(deferredEntryId, deferredMailInfo, deferredResponse,
                                              deferredAttachments, deferredSourcesHtml, deferredMailSentUtc)
 
-                    ' The per-mail originals can now be cleaned: every prepared deliverable
-                    ' has been copied into the deferred-approval staging directory, whose own
-                    ' lifecycle preserves it on approval/send failure.
-                    deliverableHandoffCompletedOrDiscarded = True
+                        ' The per-mail originals can now be cleaned: every prepared deliverable
+                        ' has been copied into the deferred-approval staging directory, whose own
+                        ' lifecycle preserves it on approval/send failure.
+                        deliverableHandoffCompletedOrDiscarded = True
+                        ClearAutoPilotError()
 
-                    ApDashboardLog($"Reply for {mailInfo.SenderEmail} is awaiting operator approval — queue continues.", "info")
-                Else
-                    If requiresApproval AndAlso _apConfig.IsUnattended Then
-                        ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
+                        ApDashboardLog($"Reply for {mailInfo.SenderEmail} is awaiting operator approval — queue continues.", "info")
+                    Else
+                        If requiresApproval AndAlso _apConfig.IsUnattended Then
+                            ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
+                        End If
+                        Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                        outcomeHandoffEstablished = True
+                        deliverableHandoffCompletedOrDiscarded = True
+                        Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+
+                        ' ── Retain this mail's inbound attachments for follow-up discussion ──
+                        ' Whitelisted senders only; opt-in via ThreadRetentionDays. Refreshes the
+                        ' retention clock so an active discussion keeps the files alive.
+                        Try
+                            PersistInboundAttachmentsToThread(mailInfo, attachmentPaths, isWhitelisted)
+                        Catch exPersist As System.Exception
+                            ApDashboardLog($"⚠ Could not retain conversation files: {exPersist.Message}", "warn")
+                        End Try
+
+                        Await Task.Delay(1500)
+                        Await SwitchToUi(Sub() ResendOutboxAutoPilotItemsUnconditional())
+
+                        Interlocked.Increment(_apSessionReplyCount)
+                        RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                        RecordLastProcessedTime()
+                        ClearAutoPilotError()
+                        TrackAutoPilotConversation(mi)
+                        Dim dummyBool As Boolean
+                        _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
+                        ApDashboardLog($"✓ SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
                     End If
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
-                    outcomeHandoffEstablished = True
-                    deliverableHandoffCompletedOrDiscarded = True
-                    Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
-
-                    ' ── Retain this mail's inbound attachments for follow-up discussion ──
-                    ' Whitelisted senders only; opt-in via ThreadRetentionDays. Refreshes the
-                    ' retention clock so an active discussion keeps the files alive.
-                    Try
-                        PersistInboundAttachmentsToThread(mailInfo, attachmentPaths, isWhitelisted)
-                    Catch exPersist As System.Exception
-                        ApDashboardLog($"⚠ Could not retain conversation files: {exPersist.Message}", "warn")
-                    End Try
-
-                    Await Task.Delay(1500)
-                    Await SwitchToUi(Sub() ResendOutboxAutoPilotItemsUnconditional())
-
-                    Interlocked.Increment(_apSessionReplyCount)
-                    RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
-                    RecordLastProcessedTime()
-                    TrackAutoPilotConversation(mi)
-                    Dim dummyBool As Boolean
-                    _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
-                    ApDashboardLog($"✓ SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
-                End If
-            Finally
+                Finally
                 ' ── SECURITY / RECOVERY: clean only after a successful handoff/discard,
                 ' or when no known generated deliverable remains in this per-mail staging
                 ' directory. A send/materialization/finalization failure must not destroy
@@ -6330,6 +6332,45 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Clears the most recent error once AutoPilot has completed a healthy handoff again.
+    ''' This prevents a transient processing failure from remaining latched in the heartbeat
+    ''' until Outlook is restarted. Best-effort and must never throw.
+    ''' </summary>
+    Private Sub ClearAutoPilotError()
+        Try
+            _apLastError = Nothing
+            _apLastErrorUtc = DateTime.MinValue
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Returns True only for errors that should affect externally reported AutoPilot availability.
+    ''' Operational/content failures such as an incomplete expected-artifact contract are surfaced
+    ''' diagnostically but do not mean the AutoPilot runtime itself is unavailable.
+    ''' </summary>
+    Private Shared Function ShouldAutoPilotErrorAffectAvailability(message As String) As Boolean
+        Dim normalized As String = If(message, "").Trim()
+        If String.IsNullOrWhiteSpace(normalized) Then Return False
+
+        If normalized.IndexOf(
+            "expected-artifact contract is incomplete",
+            StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+            Return False
+        End If
+
+        If normalized.IndexOf(
+            "automatic delivery of a partial sibling set is blocked",
+            StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+            Return False
+        End If
+
+        Return True
+    End Function
+
+    ''' <summary>
     ''' Records a progress signal for the currently-processing job so the heartbeat can
     ''' distinguish a slow-but-advancing job from a hung one. Best-effort; must never throw.
     ''' </summary>
@@ -6395,10 +6436,23 @@ Partial Public Class ThisAddIn
                 payload("jobStalled") = False
                 payload("jobOverrun") = False
             End If
-            payload("hasError") = Not String.IsNullOrEmpty(_apLastError)
-            payload("lastError") = If(_apLastError, "")
-            payload("lastErrorUtc") = If(_apLastErrorUtc = DateTime.MinValue, "",
-                                         _apLastErrorUtc.ToString("o", Globalization.CultureInfo.InvariantCulture))
+            Dim hasObservedError As Boolean = Not String.IsNullOrEmpty(_apLastError)
+            Dim affectsAvailability As Boolean =
+                hasObservedError AndAlso
+                ShouldAutoPilotErrorAffectAvailability(_apLastError)
+
+            payload("hasError") = affectsAvailability
+            payload("lastError") = If(affectsAvailability, _apLastError, "")
+            payload("lastErrorUtc") = If(
+                affectsAvailability AndAlso _apLastErrorUtc <> DateTime.MinValue,
+                _apLastErrorUtc.ToString("o", Globalization.CultureInfo.InvariantCulture),
+                "")
+            payload("lastObservedError") = If(_apLastError, "")
+            payload("lastObservedErrorUtc") = If(
+                _apLastErrorUtc = DateTime.MinValue,
+                "",
+                _apLastErrorUtc.ToString("o", Globalization.CultureInfo.InvariantCulture))
+            payload("lastObservedErrorAffectsAvailability") = affectsAvailability
 
             Dim fileName As String = $"{AN3}-autopilot-status-{Environment.MachineName}.json"
             Dim fullPath As String = Path.Combine(logDir, fileName)
