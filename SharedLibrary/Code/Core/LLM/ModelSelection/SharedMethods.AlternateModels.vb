@@ -37,6 +37,18 @@ Namespace SharedLibrary
 
     Partial Public Class SharedMethods
 
+        Private Shared _missingAlternateModelCodeBasisWarningShown As Integer = 0
+
+        Private Shared Sub ShowMissingAlternateModelCodeBasisWarningOnce()
+            If System.Threading.Interlocked.CompareExchange(_missingAlternateModelCodeBasisWarningShown, 1, 0) <> 0 Then
+                Return
+            End If
+
+            ShowCustomMessageBox(
+                "No encryption key is installed in the registry. Alternate models with encryption turned on will not work until an encryption key is installed in the registry.",
+                "Alternate Models")
+        End Sub
+
         ''' <summary>
         ''' Creates a <see cref="ModelConfig"/> instance from an INI-section dictionary.
         ''' Populates properties from known keys, initializes OAuth2-related fields, and resolves
@@ -116,7 +128,13 @@ Namespace SharedLibrary
                 mc.ToolPriority = GetConfigInt(configDict, "ToolPriority", 100)
 
             Catch ex As System.Exception
-                ShowCustomMessageBox("Error in CreateModelConfigFromDict: " & ex.Message)
+                If TypeOf ex Is InvalidOperationException AndAlso
+                   ex.Message.Equals("Missing CodeBasis for encrypted alternate model API key.", StringComparison.Ordinal) Then
+
+                    ShowMissingAlternateModelCodeBasisWarningOnce()
+                Else
+                    ShowCustomMessageBox("Error in CreateModelConfigFromDict: " & ex.Message)
+                End If
             End Try
 
             Return mc
@@ -444,12 +462,12 @@ Namespace SharedLibrary
                 Dim normalizedPath As String = NormalizeAlternativeModelIniPath(iniFilePath)
                 If String.IsNullOrWhiteSpace(normalizedPath) OrElse Not File.Exists(normalizedPath) Then Return
 
-                Dim codebasis As String = ResolveRestrictedAccessCodebasis(context)
-                If String.IsNullOrWhiteSpace(codebasis) Then Return
-
                 Dim cacheHit As Boolean = False
                 Dim sections As List(Of AlternativeModelIniSection) =
                     GetAlternativeModelIniSections(normalizedPath, cacheHit)
+
+                Dim codebasis As String = ""
+                Dim codebasisResolved As Boolean = False
 
                 For Each section As AlternativeModelIniSection In sections
                     If section Is Nothing OrElse section.Values Is Nothing Then Continue For
@@ -465,6 +483,15 @@ Namespace SharedLibrary
                     Dim prefix As String = GetConfigString(section.Values, "APIKeyPrefix")
                     If Not String.IsNullOrEmpty(prefix) AndAlso apiKey.StartsWith(prefix) Then
                         apiKey = apiKey.Substring(prefix.Length)
+                    End If
+
+                    If Not codebasisResolved Then
+                        codebasis = ResolveRestrictedAccessCodebasis(context)
+                        codebasisResolved = True
+
+                        If String.IsNullOrWhiteSpace(codebasis) Then
+                            Return
+                        End If
                     End If
 
                     ' Populates _decodeStringCache as a side effect; result is discarded here.

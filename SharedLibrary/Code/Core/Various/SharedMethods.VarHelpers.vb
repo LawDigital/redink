@@ -454,13 +454,21 @@ Namespace SharedLibrary
         ''' <returns>The registry value as a string with CR/LF removed, or an empty string on failure/not found.</returns>
         Public Shared Function GetFromRegistry(registryPath As String, valueName As String, Optional suppressErrors As Boolean = False) As String
             Try
+                If String.IsNullOrWhiteSpace(registryPath) Then
+                    Return ""
+                End If
+
                 ' Split the registry path into hive and subkey
                 Dim hiveName As String = registryPath.Split("\"c)(0)
+                If String.IsNullOrWhiteSpace(hiveName) OrElse registryPath.Length <= hiveName.Length Then
+                    Return ""
+                End If
+
                 Dim subKeyPath As String = registryPath.Substring(hiveName.Length + 1)
 
                 ' Determine the registry hive
                 Dim hive As RegistryKey = Nothing
-                Select Case hiveName.ToUpper()
+                Select Case hiveName.ToUpperInvariant()
                     Case "HKEY_CURRENT_USER"
                         hive = Registry.CurrentUser
                     Case "HKEY_LOCAL_MACHINE"
@@ -472,28 +480,23 @@ Namespace SharedLibrary
                     Case "HKEY_CURRENT_CONFIG"
                         hive = Registry.CurrentConfig
                     Case Else
-                        If Not suppressErrors Then
-                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetFromRegistry - invalid registry hive: " & hiveName, "Error")
-                        End If
                         Return ""
                 End Select
 
-                ' Open the subkey and retrieve the value
+                If hive Is Nothing OrElse String.IsNullOrWhiteSpace(subKeyPath) Then
+                    Return ""
+                End If
+
+                ' Registry reads are intentionally silent.
                 Using subKey As RegistryKey = hive.OpenSubKey(subKeyPath)
-                    If subKey IsNot Nothing Then
-                        Return RemoveCR(subKey.GetValue(valueName, Nothing)?.ToString())
-                    Else
-                        If Not suppressErrors Then
-                            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetFromRegistry - Registry key not found: " & subKeyPath, "Error")
-                        End If
+                    If subKey Is Nothing Then
                         Return ""
                     End If
+
+                    Return RemoveCR(subKey.GetValue(valueName, Nothing)?.ToString())
                 End Using
 
-            Catch ex As System.Exception
-                If Not suppressErrors Then
-                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("An error occurred: " & ex.Message, "Error")
-                End If
+            Catch
                 Return ""
             End Try
         End Function
