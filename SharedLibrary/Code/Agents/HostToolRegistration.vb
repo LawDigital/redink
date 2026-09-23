@@ -99,6 +99,7 @@ Namespace Agents
             "summarize_thread",
             "pdf_to_word",
             "create_word_document",
+            "process_word_document",
             "complete_word_tables",
             "create_excel_spreadsheet",
             "create_powerpoint",

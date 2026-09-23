@@ -1175,6 +1175,9 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
+    Private Const AutoPilotPowerPointProcessRichMaxItems As Integer = 5
+    Private Const AutoPilotPowerPointTimelineRichMaxItems As Integer = 6
+
     Private Shared Sub NormalizeAutoPilotPowerPointSlidePlan(slidesArray As JArray,
                                                               allowTextHeavy As Boolean,
                                                               allowVisualHeavy As Boolean,
@@ -1220,9 +1223,9 @@ Partial Public Class ThisAddIn
                 End If
             ElseIf layout = "process" AndAlso TryCast(slideObj("steps"), JArray) Is Nothing Then
                 Dim processLines As List(Of String) = SplitAutoPilotPowerPointBulletLines(slideObj.Value(Of String)("body"))
-                If processLines.Count >= 2 AndAlso processLines.Count <= 6 Then
+                If processLines.Count >= 2 AndAlso processLines.Count <= AutoPilotPowerPointProcessRichMaxItems Then
                     Dim steps As New JArray()
-                    For Each processLine As String In processLines.Take(5)
+                    For Each processLine As String In processLines
                         Dim stepTitle As String = processLine
                         Dim stepBody As String = processLine
                         Dim colon As Integer = processLine.IndexOf(":"c)
@@ -1241,6 +1244,36 @@ Partial Public Class ThisAddIn
                 Else
                     slideObj("layout") = "bullets"
                     layout = "bullets"
+                    If context IsNot Nothing AndAlso processLines.Count > AutoPilotPowerPointProcessRichMaxItems Then
+                        context.Log($"PowerPoint plan normalizer demoted oversized process slide '{If(slideObj.Value(Of String)("title"), "")}' to native bullets: items={processLines.Count}; richCapacity={AutoPilotPowerPointProcessRichMaxItems}. No content was discarded.", "diag")
+                    End If
+                End If
+            ElseIf layout = "process" Then
+                Dim processSteps As JArray = TryCast(slideObj("steps"), JArray)
+                If processSteps IsNot Nothing AndAlso processSteps.Count > AutoPilotPowerPointProcessRichMaxItems Then
+                    Dim fallbackBody As String = BuildPowerPointFallbackBody(slideObj)
+                    slideObj("layout") = "bullets"
+                    slideObj("body") = fallbackBody
+                    layout = "bullets"
+                    If context IsNot Nothing Then
+                        context.Log($"PowerPoint plan normalizer demoted oversized process slide '{If(slideObj.Value(Of String)("title"), "")}' to native bullets: items={processSteps.Count}; richCapacity={AutoPilotPowerPointProcessRichMaxItems}. No content was discarded.", "diag")
+                    End If
+                End If
+            ElseIf layout = "timeline" Then
+                Dim timelineEvents As JArray = TryCast(slideObj("events"), JArray)
+                If timelineEvents Is Nothing Then timelineEvents = TryCast(slideObj("timeline"), JArray)
+                If timelineEvents Is Nothing Then
+                    Dim timelineObject As JObject = TryCast(slideObj("timeline"), JObject)
+                    If timelineObject IsNot Nothing Then timelineEvents = TryCast(timelineObject("events"), JArray)
+                End If
+                If timelineEvents IsNot Nothing AndAlso timelineEvents.Count > AutoPilotPowerPointTimelineRichMaxItems Then
+                    Dim fallbackBody As String = BuildPowerPointFallbackBody(slideObj)
+                    slideObj("layout") = "bullets"
+                    slideObj("body") = fallbackBody
+                    layout = "bullets"
+                    If context IsNot Nothing Then
+                        context.Log($"PowerPoint plan normalizer demoted oversized timeline slide '{If(slideObj.Value(Of String)("title"), "")}' to native bullets: items={timelineEvents.Count}; richCapacity={AutoPilotPowerPointTimelineRichMaxItems}. No content was discarded.", "diag")
+                    End If
                 End If
             ElseIf richLayouts.Contains(layout) AndAlso Not HasAutoPilotPowerPointStructuredPayload(slideObj, layout) Then
                 slideObj("layout") = "bullets"
@@ -2302,7 +2335,7 @@ Partial Public Class ThisAddIn
                         End If
                         If steps Is Nothing OrElse steps.Count = 0 Then Continue For
 
-                        Dim count As Integer = Math.Min(GetPowerPointGuidanceSettingInteger(settings, "rich.process_max_items", 4), steps.Count)
+                        Dim count As Integer = steps.Count
                         Dim processRect As AutoPilotPowerPointVisualRect = FitPowerPointVisualRectHeight(canvas, GetPowerPointGuidanceSettingDouble(settings, "rich.process_height_pct", 80.0R))
                         Dim segmentW As Int64 = processRect.W \ count
                         Dim lineY As Int64 = processRect.Y + CLng(processRect.H * 0.24R)
@@ -5549,7 +5582,7 @@ Partial Public Class ThisAddIn
                                         secondary As Integer)
         If steps Is Nothing OrElse steps.Count = 0 Then Exit Sub
 
-        Dim count As Integer = Math.Min(5, steps.Count)
+        Dim count As Integer = steps.Count
         Dim left As Single = 48.0F
         Dim top As Single = 165.0F
         Dim gap As Single = 28.0F
@@ -5804,7 +5837,7 @@ Partial Public Class ThisAddIn
                                          accent As Integer,
                                          secondary As Integer)
         If events Is Nothing OrElse events.Count = 0 Then Exit Sub
-        Dim count As Integer = Math.Min(6, events.Count)
+        Dim count As Integer = events.Count
         Dim left As Single = 75.0F
         Dim right As Single = slideW - 75.0F
         ' Keep the timeline axis in a stable vertical band across arbitrary 16:9-style

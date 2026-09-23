@@ -198,6 +198,7 @@ Partial Public Class ThisAddIn
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
+        .CapabilityTags = "artifact_generation",
         .ModelDescription = "Process Word/PowerPoint/Excel Document (built-in)",
         .ToolInstructionsPrompt =
             AP_Tool_ProcessWordDoc & ": PREFERRED for transforming an EXISTING Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachment while preserving the source document's native structure, styles, layout/master, and formatting. " &

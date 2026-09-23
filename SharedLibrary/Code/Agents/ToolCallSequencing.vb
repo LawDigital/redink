@@ -192,6 +192,9 @@ Namespace Agents
             ' success is recorded as recovery evidence and committed only on an accepted final turn.
             Public Property RecoveryEvidenceObserved As Boolean
             Public Property RecoveryEvidenceToolName As String = String.Empty
+            ' Host-owned bounded whole-path recovery may deliberately cross an opaque
+            ' operation/task scope. Normal alternative recovery remains scope-exact.
+            Public Property CrossScopeAlternativeRecoveryAllowed As Boolean = False
             ' Substantive progress epoch at which this failure occurred. Consecutive fallback
             ' failures created after the same prior substantive success share an epoch and may
             ' be superseded together by one later successful alternative path.
@@ -1586,6 +1589,7 @@ Namespace Agents
                 ' exact unresolved failure.
                 record.RecoveryEvidenceObserved = False
                 record.RecoveryEvidenceToolName = String.Empty
+                record.CrossScopeAlternativeRecoveryAllowed = False
                 record.ProgressEpoch = _substantiveProgressEpoch
 
                 ProjectLatestUnresolvedFailure()
@@ -1659,6 +1663,7 @@ Namespace Agents
                     candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
                     candidate.RecoveryEvidenceObserved = False
                     candidate.RecoveryEvidenceToolName = String.Empty
+                    candidate.CrossScopeAlternativeRecoveryAllowed = True
                     candidate.ProgressEpoch = _substantiveProgressEpoch
                 Next
 
@@ -1791,6 +1796,19 @@ Namespace Agents
 
                     If Not IsCompatibleAlternativeRecoveryTool(candidate, normalizedToolName, normalizedRecoveryScopeKey) Then
                         Exit For
+                    End If
+
+                    ' A host-opened cross-scope recovery is deliberately broader than normal
+                    ' operation-id matching, but it still requires outcome evidence. For tasks
+                    ' that require a created deliverable, a successful read/preparation call can
+                    ' never recover a failed producer. The alternative must itself be deliverable-
+                    ' capable and the shared registry/compatibility layer must already validate a
+                    ' current output. This keeps recovery model-, tool-, provider- and host-agnostic.
+                    If candidate.CrossScopeAlternativeRecoveryAllowed AndAlso
+                       RequestRequiresCreatedDeliverable AndAlso
+                       (Not IsDeliverableCapableTool(normalizedToolName) OrElse
+                        Not HasValidatedDeliverableForCompletion) Then
+                        Continue For
                     End If
 
                     ' For an explicit artifact-scoped failure, a different producer is recovery
@@ -1982,6 +2000,11 @@ Namespace Agents
                     Return True
                 End If
 
+                If failure.CrossScopeAlternativeRecoveryAllowed AndAlso
+                   failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
+                    Return True
+                End If
+
                 Return RecoveryScopeKeysMatch(failure.RecoveryScopeKey, normalizedRecoveryScopeKey)
             End Function
 
@@ -2157,6 +2180,28 @@ Namespace Agents
             End If
 
             Dim recoveryScopeKey As String = ResolveExplicitRecoveryScopeKey(arguments)
+
+            ' Once the host has explicitly opened a bounded alternative/full-path recovery,
+            ' the exhausted tool itself is no longer a valid recovery action. This prohibition
+            ' is deliberately scope-agnostic because callers may issue a fresh operation/task id
+            ' on every attempt. Allowing the same failed tool under a new scope would bypass the
+            ' circuit breaker and turn a bounded alternative recovery into another retry loop.
+            If runState.HasUnresolvedToolFailure AndAlso runState.UnresolvedToolFailures IsNot Nothing Then
+                For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
+                    If failure Is Nothing Then Continue For
+                    If failure.CrossScopeAlternativeRecoveryAllowed AndAlso
+                       failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly AndAlso
+                       System.String.Equals(failure.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then
+
+                        validationError =
+                            "The previous execution path for tool '" & normalizedToolName &
+                            "' exhausted its retry budget. Bounded alternative recovery requires a materially different tool/path; " &
+                            "changing operation/task identifiers does not make the exhausted tool eligible again."
+                        Return False
+                    End If
+                Next
+            End If
+
             Dim retryInvariantKey As String = BuildRetryInvariantKey(normalizedToolName, recoveryScopeKey)
             Dim captured As System.Collections.Generic.Dictionary(Of String, String) = Nothing
             runState.RetryInvariantArgumentsByTool.TryGetValue(retryInvariantKey, captured)
