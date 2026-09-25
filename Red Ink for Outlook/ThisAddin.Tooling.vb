@@ -1655,6 +1655,36 @@ Partial Public Class ThisAddIn
 
                             cancellationToken.ThrowIfCancellationRequested()
 
+                        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+                            context.LogWarn(
+                                "Transient LLM transport retry budget exhausted; the model turn will not be treated as an invalid assistant turn.",
+                                details:=$"status={ex.StatusCode}; attempts={ex.AttemptCount}/{ex.MaxAttempts}; host={context.HostKind}; subAgentMode={subAgentMode}")
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = "llm_transport_retry_exhausted"
+                            ToolingFileLogger.EndSession(False, $"LLM transport retry exhausted (HTTP {ex.StatusCode})")
+
+                            If subAgentMode Then
+                                Return SharedLibrary.Agents.ToolCallSequencing.BuildBlockedResultPayload(
+                                    "llm_transport_retry_exhausted",
+                                    "llm_transport",
+                                    ex.Message,
+                                    retryable:=False)
+                            End If
+
+                            Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                                context.SequencingState,
+                                "llm_transport_retry_exhausted",
+                                ex.Message,
+                                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
+                                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
+                                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+
                         Catch ex As System.TimeoutException
                             context.LogError("LLM call timed out in the shared LLM transport.", ex:=ex)
                             ToolingFileLogger.EndSession(False, "LLM timeout")
@@ -3252,8 +3282,9 @@ Partial Public Class ThisAddIn
 
                 Else
                     If subAgentMode Then
-                        currentResponse = StripTaskStatus(currentResponse)
-
+                        ' Sub-agent final output is caller-defined data for the parent. Never mutate
+                        ' literal <TASK_STATUS>...</TASK_STATUS> content embedded in JSON/text here;
+                        ' TASK_STATUS stripping belongs only to the top-level parent egress path.
                         Dim nestedExpectedContractIncomplete As Boolean =
                             context.SequencingState IsNot Nothing AndAlso
                             context.SequencingState.ExpectedDeliverableContractLocked AndAlso
@@ -4277,6 +4308,9 @@ Partial Public Class ThisAddIn
             context.Log($"Final response origin: {If(context.SequencingState IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.SequencingState.FinalResponseOrigin), context.SequencingState.FinalResponseOrigin, "model_provided")}")
             context.Log($"Total iterations: {iteration}")
             context.Log($"Total tool calls: {context.AllToolResponses.Count}")
+            context.Log($"Sub-agent logical tasks: {System.Math.Max(0, context.SubAgentInvocationCount - context.SubAgentInternalRetryCount)}", "diag")
+            context.Log($"Sub-agent invocations: {context.SubAgentInvocationCount}", "diag")
+            context.Log($"Sub-agent internal retries: {context.SubAgentInternalRetryCount}", "diag")
             ' A lazy-load deferral (tool_not_exposed_in_current_turn) is expected behaviour, not a
             ' failure: the tool was allowed and loaded on demand, and the model re-issues the call
             ' with the real schema on the next turn. Count it separately so it is neither reported
@@ -6750,7 +6784,8 @@ Partial Public Class ThisAddIn
                         wasSuccessful:=apResult.Success,
                         resultExcerpt:=excerpt,
                         elapsed:=elapsed,
-                        urls:=Nothing)
+                        urls:=Nothing,
+                        capabilityTags:=If(toolConfig?.CapabilityTags, ""))
                 End If
 
                 Return apResult
@@ -6977,7 +7012,8 @@ __AfterDispatch:
                     wasSuccessful:=response.Success,
                     resultExcerpt:=excerpt,
                     elapsed:=elapsed,
-                    urls:=toolUrls)
+                    urls:=toolUrls,
+                    capabilityTags:=If(toolConfig?.CapabilityTags, ""))
             End If
 
         Catch ex As OperationCanceledException

@@ -421,6 +421,53 @@ Namespace Agents
         End Function
 
         ''' <summary>
+        ''' Returns whether a tool call is safe and semantically appropriate to expose as
+        ''' an external evidence source in a user-facing "Sources used" footer. Unlike
+        ''' selected_online_sources routing, this is intentionally positive-only: an
+        ''' arbitrary external action tool is not a source unless it declares a source
+        ''' capability. This prevents mutation/file-operation tools from leaking as sources.
+        ''' </summary>
+        Public Function IsSourceEvidenceTool(toolName As String, capabilityTags As String) As Boolean
+            Dim name As String = If(toolName, "").Trim()
+            If name = "" Then Return False
+
+            If HasCapabilityTag(capabilityTags, "source_evidence") OrElse
+               HasCapabilityTag(capabilityTags, "source_retrieval") Then
+                Return True
+            End If
+
+            If name.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) OrElse
+               name.StartsWith("agent_", System.StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Select Case name.ToLowerInvariant()
+                Case "internet_search",
+                     "web_grounding",
+                     "retrieve_web_content",
+                     "web_content_retriever",
+                     "knowledge_search"
+                    Return True
+            End Select
+
+            ' Dynamically named knowledge-store search tools are evidence retrieval tools.
+            If name.StartsWith("knowledge_search_store_", System.StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+
+            ' Compatibility fallbacks for built-ins that predate capability tags.
+            ' Keep them retrieval-specific: namespace membership alone must never turn
+            ' future mutation/action tools into user-facing evidence sources.
+            If SharedLibrary.M365ToolService.IsSourceRetrievalToolName(name) Then Return True
+            If String.Equals(name, BrowserTools.BrowserOpenToolName, StringComparison.OrdinalIgnoreCase) OrElse
+               String.Equals(name, BrowserTools.BrowserSnapshotToolName, StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+
+            Return False
+        End Function
+
+        ''' <summary>
         ''' Classifies a tool for the special <c>selected_online_sources</c> agent/skill alias.
         ''' The caller supplies the authoritative registry for the current run, which is already
         ''' narrowed to tools selected/authorized for that run (including explicit dependencies of

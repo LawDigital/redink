@@ -133,8 +133,16 @@ Namespace SharedLibrary
                 Dim ResponseString As String = ""
                 Select Case Mode
                     Case 1
-                        ' 1) Join all matches in document order.
-                        ResponseString = FindJsonPropertyCustom(jObj, template, SelectionMode.JoinAll)
+                        ' 1) Losslessly concatenate all matches in document order. LLM providers may
+                        ' split one logical text value at arbitrary token boundaries; inserting CR/LF
+                        ' or trimming individual fragments corrupts JSON and other structured output.
+                        ' Thought/reasoning text is not part of the user-visible response payload.
+                        ResponseString = FindJsonPropertyCustom(
+                            jObj,
+                            template,
+                            SelectionMode.JoinAllLossless,
+                            String.Empty,
+                            excludeThoughtContainers:=True)
                     Case 2
                         ' 2) Select a single match: longest non-empty.
                         ResponseString = FindJsonPropertyCustom(jObj, template, SelectionMode.LongestNonEmpty)
@@ -235,6 +243,9 @@ Namespace SharedLibrary
 
             ''' <summary>Join all non-empty matches in traversal order.</summary>
             JoinAll = 2
+
+            ''' <summary>Concatenate all matches exactly as returned, without trimming or separators.</summary>
+            JoinAllLossless = 3
         End Enum
 
         ''' <summary>
@@ -248,7 +259,8 @@ Namespace SharedLibrary
         Public Function FindJsonPropertyCustom(jObj As JObject,
                                  propertyName As String,
                                  Optional mode As SelectionMode = SelectionMode.JoinAll,
-                                 Optional separator As String = vbCrLf & vbCrLf) As String
+                                 Optional separator As String = vbCrLf & vbCrLf,
+                                 Optional excludeThoughtContainers As Boolean = False) As String
             If jObj Is Nothing Then
                 Throw New System.ArgumentNullException(NameOf(jObj))
             End If
@@ -256,7 +268,7 @@ Namespace SharedLibrary
                 Throw New System.ArgumentException("propertyName must not be empty.", NameOf(propertyName))
             End If
 
-            Dim matches As System.Collections.Generic.List(Of String) = CollectPropertyValues(jObj, propertyName)
+            Dim matches As System.Collections.Generic.List(Of String) = CollectPropertyValues(jObj, propertyName, excludeThoughtContainers)
 
             If matches Is Nothing OrElse matches.Count = 0 Then
                 Return String.Empty
@@ -293,6 +305,20 @@ Namespace SharedLibrary
                     Next
                     Return sb.ToString()
 
+                Case SelectionMode.JoinAllLossless
+                    If matches.Count > 1 Then
+                        Dim diagnostic As String =
+                            $"[LLM] Response extraction matched {matches.Count} text fragments; concatenating losslessly without separators."
+                        System.Diagnostics.Debug.WriteLine(diagnostic)
+                        System.Diagnostics.Trace.TraceWarning(diagnostic)
+                    End If
+
+                    Dim sb As New System.Text.StringBuilder()
+                    For Each s As String In matches
+                        sb.Append(If(s, String.Empty))
+                    Next
+                    Return sb.ToString()
+
                 Case Else
                     ' Fallback.
                     Return String.Join(separator, matches)
@@ -308,7 +334,9 @@ Namespace SharedLibrary
         ''' <param name="root">Root token to traverse.</param>
         ''' <param name="propertyName">Property name to match (case-insensitive).</param>
         ''' <returns>List of matched values as strings (may contain empty values).</returns>
-        Private Function CollectPropertyValues(root As JToken, propertyName As String) As System.Collections.Generic.List(Of String)
+        Private Function CollectPropertyValues(root As JToken,
+                                               propertyName As String,
+                                               Optional excludeThoughtContainers As Boolean = False) As System.Collections.Generic.List(Of String)
             Dim results As New System.Collections.Generic.List(Of String)()
             Dim stack As New System.Collections.Generic.Stack(Of JToken)()
             stack.Push(root)
@@ -328,8 +356,22 @@ Namespace SharedLibrary
                     Case JTokenType.Property
                         Dim jp As JProperty = CType(node, JProperty)
                         If jp.Name.Equals(propertyName, StringComparison.OrdinalIgnoreCase) Then
-                            Dim s As String = ConvertTokenToString(jp.Value)
-                            results.Add(s)
+                            Dim includeValue As Boolean = True
+
+                            If excludeThoughtContainers Then
+                                Dim parentObject As JObject = TryCast(jp.Parent, JObject)
+                                Dim thoughtToken As JToken = If(parentObject Is Nothing, Nothing, parentObject("thought"))
+                                If thoughtToken IsNot Nothing AndAlso
+                                   thoughtToken.Type = JTokenType.Boolean AndAlso
+                                   thoughtToken.Value(Of Boolean)() Then
+                                    includeValue = False
+                                End If
+                            End If
+
+                            If includeValue Then
+                                Dim s As String = ConvertTokenToString(jp.Value)
+                                results.Add(s)
+                            End If
                         End If
                         If jp.Value IsNot Nothing Then
                             stack.Push(jp.Value)

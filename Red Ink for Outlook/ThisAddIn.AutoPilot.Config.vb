@@ -77,6 +77,12 @@ Partial Public Class ThisAddIn
         Public Property FooterText As String = ""
 
         ''' <summary>
+        ''' Host-generated evidence footer mode: "external" includes only positively
+        ''' classified external evidence sources; "off" suppresses the block entirely.
+        ''' </summary>
+        Public Property SourcesFooterMode As String = "external"
+
+        ''' <summary>
         ''' When True, the session was auto-started (timer expired) without explicit user interaction.
         ''' Unattended mode skips the catch-up preview dialog (auto-selects all) and auto-approves
         ''' replies for non-whitelisted senders instead of blocking with an approval dialog.
@@ -395,6 +401,10 @@ Partial Public Class ThisAddIn
             .Name = "Enable privacy protection for web/search queries (restrict personal data in queries)",
             .Value = saved.EnablePrivacyProtection
         }
+        Dim pIncludeSourcesFooter As New InputParameter() With {
+            .Name = "Include host-generated Sources used footer (external evidence sources only)",
+            .Value = Not String.Equals(saved.SourcesFooterMode, "off", StringComparison.OrdinalIgnoreCase)
+        }
         Dim pThreadRetentionDays As New InputParameter() With {
             .Name = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
             .Value = saved.ThreadRetentionDays.ToString()
@@ -411,6 +421,7 @@ Partial Public Class ThisAddIn
             pEnableUserMemory,
             pEnableUserFiles,
             pEnablePrivacyProtection,
+            pIncludeSourcesFooter,
             pThreadRetentionDays
         }
 
@@ -476,6 +487,7 @@ Partial Public Class ThisAddIn
         config.EnableUserMemory = CBool(If(pEnableUserMemory.Value, False))
         config.EnableUserFiles = CBool(If(pEnableUserFiles.Value, False))
         config.EnablePrivacyProtection = CBool(If(pEnablePrivacyProtection.Value, False))
+        config.SourcesFooterMode = If(CBool(If(pIncludeSourcesFooter.Value, True)), "external", "off")
 
         Dim threadRetentionDays As Integer
         If Integer.TryParse(pThreadRetentionDays.Value?.ToString(), threadRetentionDays) AndAlso threadRetentionDays >= 0 Then
@@ -589,6 +601,7 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Auto-delete: {If(config.AutoDeleteAfterHours > 0, $"enabled after {config.AutoDeleteAfterHours}h", "disabled")}")
         summaryBuilder.AppendLine($"Web grounding: {If(config.EnableWebGrounding, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Task scheduler: {If(config.EnableScheduler, "enabled", "disabled")}")
+        summaryBuilder.AppendLine($"Sources used footer: {If(String.Equals(config.SourcesFooterMode, "off", StringComparison.OrdinalIgnoreCase), "disabled", "external evidence only")}")
         summaryBuilder.AppendLine($"User memory: {If(config.EnableUserMemory, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"User file storage: {If(config.EnableUserFiles, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
@@ -697,11 +710,13 @@ Partial Public Class ThisAddIn
         End If
 
         SaveAutoPilotSettingsWithRegistryBackup()
+        SaveAutoPilotSourcesFooterMode(config.SourcesFooterMode)
     End Sub
 
     ''' <summary>Loads previously saved config as defaults for the dialog.</summary>
     Private Function LoadAutoPilotConfigDefaults() As AutoPilotConfig
         Dim config As New AutoPilotConfig()
+        config.SourcesFooterMode = LoadAutoPilotSourcesFooterMode()
         config.SubjectTriggerWord = If(String.IsNullOrWhiteSpace(My.Settings.AP_SubjectTriggerWord), Nothing, My.Settings.AP_SubjectTriggerWord)
         config.CooldownSeconds = If(My.Settings.AP_CooldownSeconds > 0, CInt(My.Settings.AP_CooldownSeconds), AP_DefaultCooldownSeconds)
         config.MaxRepliesPerSession = If(My.Settings.AP_MaxRepliesPerSession >= 0, My.Settings.AP_MaxRepliesPerSession, AP_DefaultMaxRepliesPerSession)

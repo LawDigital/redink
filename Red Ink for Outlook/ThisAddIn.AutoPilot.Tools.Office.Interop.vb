@@ -1072,12 +1072,12 @@ Partial Public Class ThisAddIn
                    bordersApplied OrElse
                    structureApplied OrElse
                    protectionApplied Then
-                    issue("status") = "applied"
-                    issue("message") =
-                        $"Applied update to cell '{APExcelGetRangeAddress(anchorRange)}' on worksheet '{worksheetName}'."
                     result.AppliedCount += 1
                     If valueOrFormulaApplied Then APExcelRecordContentMutation(result, worksheetName)
-                    result.Issues.Add(issue)
+                    ' Successful per-cell echoes are intentionally not appended to Issues.
+                    ' Counts/mutated worksheets carry the success information; Issues is
+                    ' reserved for failed/partial/skipped updates so writer responses stay
+                    ' compact and do not consume the parent model's replay budget.
                 Else
                     issue("status") = "failed"
                     issue("message") =

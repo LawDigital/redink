@@ -101,6 +101,12 @@ Namespace Agents
         ''' Default for medium-context models; override via INI ToolResponsePayloadBudgetChars.
         ''' </summary>
         Public Const ToolResponsePayloadBudgetChars As Integer = 60000
+        ''' <summary>
+        ''' Results carrying deliverable/reference identity larger than this are replayed
+        ''' to the model through a compact lossless envelope plus result_ref. The full
+        ''' ToolResponse remains untouched for artifact registration/verification.
+        ''' </summary>
+        Public Const DeliverableSafeReplayEnvelopeThresholdChars As Integer = 4000
 
         ''' <summary>First (milder) threshold for reference-compacting older medium-sized results under budget pressure. Override via INI BudgetMediumCompactionThresholdChars.</summary>
         Public Const BudgetMediumCompactionThresholdChars As Integer = 6000

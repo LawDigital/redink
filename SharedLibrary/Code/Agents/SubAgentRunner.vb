@@ -220,6 +220,8 @@ Namespace Agents
 
             Dim retryCount As Integer = 0
             Dim userMessageForRun As String = baseUserMessage.ToString()
+            Dim previousDiscardedResponseExcerpt As String = ""
+            Dim previousDiscardedResponseLength As Integer = 0
 
             Await AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
             AgentGate.MarkCurrentFlowAsOwner()
@@ -238,6 +240,8 @@ Namespace Agents
                 .WorkflowId = effectiveWorkflowId,
                 .SubAgentTaskId = normalizedSubAgentTaskId,
                 .RunnerRetryIndex = retryCount,
+                .PreviousDiscardedResponseExcerpt = previousDiscardedResponseExcerpt,
+                .PreviousDiscardedResponseLength = previousDiscardedResponseLength,
                 .ExpectedArtifactsJson = lockedExpectedArtifactsJson,
                 .RequiredSuccessfulToolNames = If(HasCanonicalSourceResultRefs(canonicalSourceResultRefs),
                                                   CType(New String() {"context_expand"}, IReadOnlyList(Of String)),
@@ -334,6 +338,16 @@ Namespace Agents
                     End If
 
                     If retryCount = 0 AndAlso retryableErrorCodes.Contains(effectiveErrorCode) Then
+                        previousDiscardedResponseLength = If(finalText, "").Length
+                        previousDiscardedResponseExcerpt =
+                            System.Text.RegularExpressions.Regex.Replace(
+                                If(finalText, ""),
+                                "\s+",
+                                " ").Trim()
+                        If previousDiscardedResponseExcerpt.Length > 200 Then
+                            previousDiscardedResponseExcerpt = previousDiscardedResponseExcerpt.Substring(0, 200)
+                        End If
+
                         retryCount += 1
                         userMessageForRun = BuildRetryUserMessage(baseUserMessage.ToString(), normalized, allowedTools)
                         Continue Do

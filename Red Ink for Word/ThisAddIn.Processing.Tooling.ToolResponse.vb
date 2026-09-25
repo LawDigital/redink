@@ -213,6 +213,18 @@ Partial Public Class ThisAddIn
         End If
 
         If Not compactForSubAgent Then
+            ' Large deliverable/reference-bearing responses are expensive to echo on every
+            ' model turn. Replay a compact envelope proactively while retaining resp.Response
+            ' losslessly for artifact registration, promotion and verification.
+            If rawContent.Length > SharedLibrary.Agents.ToolingConstants.DeliverableSafeReplayEnvelopeThresholdChars Then
+                Dim safeEnvelope As String = TryBuildDeliverableSafeReplayEnvelope(resp, rawContent)
+                If safeEnvelope IsNot Nothing Then
+                    resp.ModelReplayContent = safeEnvelope
+                    resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+                    resp.WasCompactedForModelReplay = True
+                    Return safeEnvelope
+                End If
+            End If
             Return rawContent
         End If
 
@@ -303,6 +315,139 @@ Partial Public Class ThisAddIn
         Return stub.ToString(Formatting.None)
     End Function
 
+
+    Private Sub CopyReplayFieldIfPresent(source As JObject, target As JObject, fieldName As String)
+        If source Is Nothing OrElse target Is Nothing OrElse String.IsNullOrWhiteSpace(fieldName) Then Return
+        Dim token As JToken = source(fieldName)
+        If token Is Nothing OrElse token.Type = JTokenType.Null Then Return
+        target(fieldName) = token.DeepClone()
+    End Sub
+
+    ''' <summary>
+    ''' Builds a compact replay envelope for large deliverable/reference-bearing tool
+    ''' results. The full raw response is stored losslessly in ToolResultStore, while
+    ''' artifact identity/reference fields and mutation counts remain directly visible
+    ''' to the model. Artifact registration itself always uses ToolResponse.Response and
+    ''' therefore occurs independently of this replay-only compaction.
+    ''' </summary>
+    Private Function TryBuildDeliverableSafeReplayEnvelope(resp As ToolResponse, rawContent As String) As String
+        If resp Is Nothing Then Return Nothing
+
+        Dim raw As String = If(rawContent, "")
+        If raw = "" OrElse Not MustPreserveFullResponseForReplay(resp, raw) Then Return Nothing
+
+        ' Reuse an existing lossless replay envelope for this immutable ToolResponse.
+        ' This keeps result_ref stable across iterations and avoids storing the same
+        ' large result repeatedly merely because the parent prompt is rebuilt.
+        If resp.WasCompactedForModelReplay AndAlso Not String.IsNullOrWhiteSpace(resp.ModelReplayContent) Then
+            Try
+                Dim existing As JObject = JObject.Parse(resp.ModelReplayContent)
+                Dim compactedToken As JToken = existing("compacted_for_model_replay")
+                If compactedToken IsNot Nothing AndAlso
+                   compactedToken.Type = JTokenType.Boolean AndAlso
+                   compactedToken.Value(Of Boolean)() AndAlso
+                   Not String.IsNullOrWhiteSpace(existing.Value(Of String)("result_ref")) Then
+                    Return resp.ModelReplayContent
+                End If
+            Catch
+            End Try
+        End If
+
+        Dim source As JObject
+        Try
+            source = JObject.Parse(raw)
+        Catch
+            Return Nothing
+        End Try
+
+        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult =
+            SharedLibrary.Agents.ToolResultStore.Put(
+                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
+                If(resp.ToolName, ""),
+                raw)
+
+        Dim compact As New JObject(
+            New JProperty("ok", resp.Success),
+            New JProperty("tool", If(resp.ToolName, "")),
+            New JProperty("summary", BuildToolReplaySummary(resp)),
+            New JProperty("result_ref", stored.Ref),
+            New JProperty("total_chars", raw.Length),
+            New JProperty("compacted_for_model_replay", True))
+
+        Dim replayFields As String() = {
+            "artifact_id",
+            "logical_deliverable_id",
+            "output_slot_id",
+            "artifact_state",
+            "storage_kind",
+            "output_reference",
+            "output_file",
+            "output_filename",
+            "output_path",
+            "saved_path",
+            "path",
+            "attachment_name",
+            "memory_key",
+            "reference",
+            "applied_update_count",
+            "content_mutation_update_count",
+            "failed_update_count",
+            "skipped_non_writable_count",
+            "partial_success",
+            "write_blocked_by_protection",
+            "edited_in_place",
+            "mutated_worksheets"
+        }
+
+        For Each fieldName As String In replayFields
+            CopyReplayFieldIfPresent(source, compact, fieldName)
+        Next
+
+        ' Preserve generic structured/output references even when the producing tool
+        ' nests them instead of exposing a conventional top-level property.
+        Try
+            Dim structuredRef As String = SharedLibrary.Agents.WorkflowContinuity.ExtractStructuredResultReference(raw)
+            If Not String.IsNullOrWhiteSpace(structuredRef) AndAlso compact("structured_result_reference") Is Nothing Then
+                compact("structured_result_reference") = structuredRef
+            End If
+
+            Dim outputRef As String = SharedLibrary.Agents.WorkflowContinuity.ExtractOutputReference(raw)
+            If Not String.IsNullOrWhiteSpace(outputRef) AndAlso compact("output_reference") Is Nothing Then
+                compact("output_reference") = outputRef
+            End If
+        Catch
+        End Try
+
+        Dim issues As JArray = TryCast(source("issues"), JArray)
+        If issues IsNot Nothing Then
+            compact("issue_count") = issues.Count
+
+            Dim nonAppliedIssues As New JArray()
+            For Each issueToken As JToken In issues
+                Dim issueObject As JObject = TryCast(issueToken, JObject)
+                If issueObject Is Nothing Then Continue For
+
+                Dim status As String = If(issueObject.Value(Of String)("status"), "").Trim()
+                If String.Equals(status, "applied", StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                nonAppliedIssues.Add(issueObject.DeepClone())
+                If nonAppliedIssues.Count >= 5 Then Exit For
+            Next
+
+            If nonAppliedIssues.Count > 0 Then
+                compact("issues") = nonAppliedIssues
+                If nonAppliedIssues.Count < issues.Count Then
+                    compact("issues_truncated") = True
+                End If
+            End If
+        End If
+
+        compact("continuation") =
+            "The full tool result is stored losslessly. Use context_expand with result_ref only if additional detail is required."
+
+        Return compact.ToString(Formatting.None)
+    End Function
+
     Private Function CompactToolResponseContentForSubAgent(resp As ToolResponse, rawContent As String,
                                                            Optional overrideThresholdChars As Integer = -1,
                                                            Optional overridePreviewChars As Integer = -1) As String
@@ -328,6 +473,14 @@ Partial Public Class ThisAddIn
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = False
             Return raw
+        End If
+
+        Dim deliverableSafeEnvelope As String = TryBuildDeliverableSafeReplayEnvelope(resp, raw)
+        If deliverableSafeEnvelope IsNot Nothing Then
+            resp.ModelReplayContent = deliverableSafeEnvelope
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = True
+            Return deliverableSafeEnvelope
         End If
 
         If MustPreserveFullResponseForReplay(resp, raw) Then

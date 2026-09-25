@@ -54,24 +54,36 @@ Namespace Agents
             "<TASK_STATUS>\s*(?<body>\{[\s\S]*?\})\s*</TASK_STATUS>",
             RegexOptions.Compiled Or RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant)
 
+        Private ReadOnly _trailingEnvelopeRx As New Regex(
+            "(?<footer><TASK_STATUS>\s*\{[\s\S]*?\}\s*</TASK_STATUS>)\s*$",
+            RegexOptions.Compiled Or RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant)
+
         ''' <summary>Parses the trailing TASK_STATUS footer. Returns Missing if none, Invalid if malformed or duplicated.</summary>
         Public Function Parse(text As String) As TaskStatusFooter
             Dim result As New TaskStatusFooter() With {.Kind = TaskStatusKind.Missing}
             If String.IsNullOrWhiteSpace(text) Then Return result
 
-            Dim matches As MatchCollection = _envelopeRx.Matches(text)
-            If matches.Count = 0 Then Return result
+            ' TASK_STATUS is a trailing parent-response contract. Literal tags inside
+            ' JSON/tool/agent data are not protocol envelopes and must be ignored.
+            Dim m As Match = _trailingEnvelopeRx.Match(text)
+            If Not m.Success Then Return result
 
-            If matches.Count > 1 Then
+            Dim prefix As String = text.Substring(0, m.Index).TrimEnd()
+            If _trailingEnvelopeRx.IsMatch(prefix) Then
                 result.Kind = TaskStatusKind.Invalid
-                result.InvalidDetail = "multiple_task_status_footers:" & matches.Count.ToString()
+                result.InvalidDetail = "multiple_task_status_footers"
                 Return result
             End If
 
-            Dim m As Match = matches(0)
             result.StartIndex = m.Index
             result.EndIndex = m.Index + m.Length
-            result.RawJson = m.Groups("body").Value
+            Dim strictMatch As Match = _envelopeRx.Match(m.Groups("footer").Value)
+            If Not strictMatch.Success Then
+                result.Kind = TaskStatusKind.Invalid
+                result.InvalidDetail = "malformed_task_status_footer"
+                Return result
+            End If
+            result.RawJson = strictMatch.Groups("body").Value
 
             Dim parsedKind As TaskStatusKind = TaskStatusKind.Invalid
             Dim parsedReason As String = ""
@@ -105,7 +117,7 @@ Namespace Agents
             Catch ex As JsonReaderException
                 parsedKind = TaskStatusKind.Invalid
                 parsedDetail = "invalid_json:" & ex.Message
-            Catch ex As Exception
+            Catch ex As System.Exception
                 parsedKind = TaskStatusKind.Invalid
                 parsedDetail = "footer_parse_error:" & ex.Message
             End Try
@@ -116,10 +128,13 @@ Namespace Agents
             Return result
         End Function
 
-        ''' <summary>Strips all &lt;TASK_STATUS&gt;...&lt;/TASK_STATUS&gt; envelopes from the text, including malformed ones.</summary>
+        ''' <summary>
+        ''' Strips only a trailing top-level TASK_STATUS envelope. Literal TASK_STATUS
+        ''' text embedded in agent/tool payloads is data and must remain untouched.
+        ''' </summary>
         Public Function Strip(text As String) As String
             If String.IsNullOrEmpty(text) Then Return text
-            Dim cleaned As String = _envelopeRx.Replace(text, "")
+            Dim cleaned As String = _trailingEnvelopeRx.Replace(text, "")
             Return cleaned.TrimEnd()
         End Function
 

@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 23.9.2026
+' 21.9.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -75,7 +75,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.230926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210926" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -671,6 +671,16 @@ Partial Public Class ThisAddIn
     ''' Outlook add-in shutdown handler. Sequentially stops HTTP listener, watchdog, and power watch components.
     ''' </summary>
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+
+        ' Best-effort final snapshot of the AutoPilot queue. The journal is NOT
+        ' cleared on application shutdown; only an explicit operator Stop clears it.
+        ' This distinction is what allows interrupted work to resume after Outlook
+        ' restarts without resurrecting work the operator intentionally stopped.
+        Try
+            If _apActive Then PersistAutoPilotQueueJournal()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("PersistAutoPilotQueueJournal during shutdown failed: " & ex.Message)
+        End Try
 
         Try
             RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")

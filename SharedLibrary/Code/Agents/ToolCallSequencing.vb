@@ -2565,14 +2565,9 @@ Namespace Agents
                 Return ""
             End If
 
-            Dim stripped As String =
-                Regex.Replace(
-                    raw,
-                    "\s*<TASK_STATUS>\s*\{.*?\}\s*</TASK_STATUS>\s*",
-                    "",
-                    RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
-
-            Return stripped.Trim()
+            ' TASK_STATUS is an egress contract for the parent answer, not a global
+            ' scrub token. Preserve literal tags inside JSON/tool/agent payload data.
+            Return TaskStatusFooterParser.Strip(raw).Trim()
         End Function
 
         Public Shared Function ExtractVisibleUserFacingText(text As String) As String

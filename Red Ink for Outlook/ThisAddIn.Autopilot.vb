@@ -419,6 +419,23 @@ Partial Public Class ThisAddIn
     Private ReadOnly _apSenderLastMailSentUtc As New ConcurrentDictionary(Of String, DateTime)(StringComparer.OrdinalIgnoreCase)
     Private _apSessionReplyCount As Integer = 0
     Private ReadOnly _apMailQueue As New ConcurrentQueue(Of String)()
+    Private ReadOnly _apQueueJournalSyncRoot As New Object()
+
+    ' Manual Stop and Outlook shutdown have different persistence semantics.
+    ' Once an operator explicitly stops AutoPilot, background/pump cleanup must
+    ' not be able to recreate the queue journal after StopAutoPilot deleted it.
+    Private _apQueueJournalPersistenceEnabled As Boolean = True
+
+    Private Const AP_QueueStateQueued As String = "queued"
+    Private Const AP_QueueStateProcessing As String = "processing"
+    Private Const AP_QueueStateApprovalPending As String = "approval_pending"
+    Private Const AP_QueueStateDeliveryCommitted As String = "delivery_committed"
+
+    ''' <summary>
+    ''' Operational state for queued/processing entries. This is intentionally
+    ''' separate from mail content and is persisted only as opaque state metadata.
+    ''' </summary>
+    Private ReadOnly _apQueueStates As New ConcurrentDictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
     ''' <summary>
     ''' EntryIDs currently queued or actively being processed.
@@ -573,7 +590,16 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Stops AutoPilot processing and clears runtime state.</summary>
     Public Sub StopAutoPilot()
-        If Not _apActive Then Return
+        ' Disable persistence before any cancellation/cleanup. This closes the race
+        ' where an in-flight pump Finally block could otherwise recreate the journal
+        ' after an explicit operator Stop had just deleted it. Outlook shutdown does
+        ' NOT call this switch and therefore remains resumable.
+        SetAutoPilotQueueJournalPersistenceEnabled(False)
+
+        If Not _apActive Then
+            ClearAutoPilotQueueJournal()
+            Return
+        End If
         _apActive = False
         Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
         Try : SaveAutoPilotDashboardBounds(_apDashboard) : Catch : End Try
@@ -611,6 +637,7 @@ Partial Public Class ThisAddIn
         _apProcessedConversations.Clear()
         _apQueueNotifiedEntryIds.Clear()
         _apQueueEnqueueTimes.Clear()
+        _apQueueStates.Clear()
         _apQueuedOrProcessingEntryIds.Clear()
         _apCategoryTimings.Clear()
         _apCurrentProcessingStopwatch = Nothing
@@ -625,6 +652,7 @@ Partial Public Class ThisAddIn
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
         _apVoicemailCallerIdMap = Nothing
+        ClearAutoPilotQueueJournal()
 
         If INI_WebServerBlock <> 4 Then
             EnsureLocalSchedulerTimerStarted()
@@ -713,6 +741,7 @@ Partial Public Class ThisAddIn
         End Try
 
         StopLocalSchedulerRuntime()
+        SetAutoPilotQueueJournalPersistenceEnabled(True)
         _apActive = True
         _apCts = New CancellationTokenSource()
         _apSessionReplyCount = 0
@@ -919,6 +948,32 @@ Partial Public Class ThisAddIn
         ' the catch-up/reprocess dialog. Otherwise mail arriving during startup or
         ' while the modal dialog is open is never observed by AutoPilot.
         AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
+
+        ' Recover only AutoPilot-owned operational state after an Outlook restart.
+        ' This is deliberately performed on the Outlook UI thread because queue
+        ' validation touches MAPI objects. The queue journal itself stores only
+        ' EntryIDs/timestamps/state -- never mail bodies or attachment content.
+        Dim recoverOperationalState As System.Action =
+            Sub()
+                Try
+                    ResubmitUnsubmittedAutoPilotOutboxItems()
+                Catch ex As System.Exception
+                    ApDashboardLog("Outbox recovery failed: " & ex.Message, "warn")
+                End Try
+
+                Try
+                    RestoreAutoPilotQueueJournal()
+                Catch ex As System.Exception
+                    ApDashboardLog("Queue recovery failed: " & ex.Message, "warn")
+                End Try
+            End Sub
+
+        If UiSyncContext IsNot Nothing AndAlso
+           System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+            UiSyncContext.Send(Sub() recoverOperationalState(), Nothing)
+        Else
+            recoverOperationalState()
+        End If
 
         ' Start the processing pump immediately as well. This allows genuinely new
         ' mail to be processed even while the operator leaves the catch-up/reprocess
@@ -1823,7 +1878,9 @@ Partial Public Class ThisAddIn
     ''' Returns True when the mail was newly queued, False when it was already
     ''' queued or currently being processed.
     ''' </summary>
-    Private Function EnqueueAutoPilotMail(entryId As String) As Boolean
+    Private Function EnqueueAutoPilotMail(entryId As String,
+                                          Optional enqueueTimeUtc As System.Nullable(Of DateTime) = Nothing,
+                                          Optional persistJournal As Boolean = True) As Boolean
         If String.IsNullOrWhiteSpace(entryId) Then Return False
 
         entryId = entryId.Trim()
@@ -1834,10 +1891,383 @@ Partial Public Class ThisAddIn
         End If
 
         _apMailQueue.Enqueue(entryId)
-        _apQueueEnqueueTimes.TryAdd(entryId, DateTime.UtcNow)
+        _apQueueEnqueueTimes.TryAdd(entryId, If(enqueueTimeUtc.HasValue, enqueueTimeUtc.Value, DateTime.UtcNow))
+        _apQueueStates(entryId) = AP_QueueStateQueued
+
+        If persistJournal Then PersistAutoPilotQueueJournal()
 
         Return True
     End Function
+
+    Private Sub SetAutoPilotQueueJournalPersistenceEnabled(enabled As Boolean)
+        SyncLock _apQueueJournalSyncRoot
+            _apQueueJournalPersistenceEnabled = enabled
+        End SyncLock
+    End Sub
+
+    Private Sub MarkAutoPilotQueueDeliveryCommitted(entryId As String)
+        Dim id As String = If(entryId, "").Trim()
+        If id = "" Then Return
+
+        _apQueueStates(id) = AP_QueueStateDeliveryCommitted
+        PersistAutoPilotQueueJournal()
+        ApDashboardLog("AutoPilot delivery committed before source-mail finalization.", "step")
+    End Sub
+
+    Private Sub CompleteAutoPilotQueueSourceFinalization(entryId As String, persistImmediately As Boolean)
+        Dim id As String = If(entryId, "").Trim()
+        If id = "" Then Return
+
+        Dim currentState As String = Nothing
+        If _apQueueStates.TryGetValue(id, currentState) AndAlso
+           String.Equals(currentState, AP_QueueStateDeliveryCommitted, StringComparison.OrdinalIgnoreCase) Then
+            Dim removedState As String = Nothing
+            _apQueueStates.TryRemove(id, removedState)
+        End If
+
+        If persistImmediately Then
+            Dim removedEnqueue As DateTime
+            _apQueueEnqueueTimes.TryRemove(id, removedEnqueue)
+            PersistAutoPilotQueueJournal()
+        End If
+    End Sub
+
+    Private Function GetAutoPilotQueueJournalPath() As String
+        Dim root As String = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
+        Return Path.Combine(root, "redink", "autopilot-queue.json")
+    End Function
+
+    ''' <summary>
+    ''' Persists the current AutoPilot queue as a small operational journal. Only
+    ''' opaque Outlook EntryIDs, queue state, and timestamps are stored. Mail bodies,
+    ''' subjects, addresses, attachment names, and model/tool content are never persisted.
+    ''' </summary>
+    Private Sub PersistAutoPilotQueueJournal()
+        Try
+            SyncLock _apQueueJournalSyncRoot
+                If Not _apQueueJournalPersistenceEnabled Then Return
+
+                Dim queuedIds As String() = _apMailQueue.ToArray()
+                Dim processingId As String = If(_apCurrentProcessingEntryId, "").Trim()
+
+                ' Preserve deterministic FIFO order across restarts. A HashSet alone would
+                ' deduplicate correctly but lose queue ordering, which can reorder replies.
+                Dim orderedIds As New List(Of String)()
+                Dim seenIds As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                If processingId <> "" AndAlso seenIds.Add(processingId) Then orderedIds.Add(processingId)
+                For Each rawId As String In queuedIds
+                    Dim id As String = If(rawId, "").Trim()
+                    If id <> "" AndAlso seenIds.Add(id) Then orderedIds.Add(id)
+                Next
+
+                ' Manual-approval requests are operational queue state too. Persist only
+                ' their opaque EntryIDs/state/timestamps; sender/body/subject remain live
+                ' Outlook data and are reconstructed after restart.
+                For Each pendingIdRaw As String In _apPendingApprovals.Keys
+                    Dim pendingId As String = If(pendingIdRaw, "").Trim()
+                    If pendingId <> "" AndAlso seenIds.Add(pendingId) Then orderedIds.Add(pendingId)
+                Next
+
+                ' A delivery-committed item has already produced/submitted its user-facing
+                ' reply but may still need idempotent source-mail finalization. It must remain
+                ' journaled even after the processing pump has dequeued it; otherwise a crash
+                ' or tagging failure could cause the original request to be re-run and replied
+                ' to a second time after restart.
+                For Each statePair As KeyValuePair(Of String, String) In _apQueueStates
+                    If String.Equals(statePair.Value, AP_QueueStateDeliveryCommitted, StringComparison.OrdinalIgnoreCase) Then
+                        Dim committedId As String = If(statePair.Key, "").Trim()
+                        If committedId <> "" AndAlso seenIds.Add(committedId) Then orderedIds.Add(committedId)
+                    End If
+                Next
+
+                Dim journalPath As String = GetAutoPilotQueueJournalPath()
+                If orderedIds.Count = 0 Then
+                    Try
+                        If File.Exists(journalPath) Then File.Delete(journalPath)
+                    Catch
+                    End Try
+                    Return
+                End If
+
+                Dim items As New JArray()
+                For Each id As String In orderedIds
+                    Dim enqueueUtc As DateTime = DateTime.UtcNow
+                    Dim storedEnqueueUtc As DateTime
+                    If _apQueueEnqueueTimes.TryGetValue(id, storedEnqueueUtc) Then
+                        enqueueUtc = storedEnqueueUtc
+                    End If
+
+                    Dim queueState As String = ""
+                    If Not _apQueueStates.TryGetValue(id, queueState) OrElse String.IsNullOrWhiteSpace(queueState) Then
+                        queueState = If(String.Equals(id, processingId, StringComparison.OrdinalIgnoreCase),
+                                        AP_QueueStateProcessing,
+                                        AP_QueueStateQueued)
+                    ElseIf String.Equals(id, processingId, StringComparison.OrdinalIgnoreCase) AndAlso
+                           Not String.Equals(queueState, AP_QueueStateDeliveryCommitted, StringComparison.OrdinalIgnoreCase) Then
+                        queueState = AP_QueueStateProcessing
+                    End If
+
+                    If _apPendingApprovals.ContainsKey(id) AndAlso
+                       Not String.Equals(queueState, AP_QueueStateDeliveryCommitted, StringComparison.OrdinalIgnoreCase) Then
+                        queueState = AP_QueueStateApprovalPending
+                    End If
+
+                    Dim item As New JObject(
+                        New JProperty("entry_id", id),
+                        New JProperty("state", queueState),
+                        New JProperty("enqueued_utc", enqueueUtc.ToUniversalTime().ToString("o", Globalization.CultureInfo.InvariantCulture)))
+
+                    Dim notifiedUtc As DateTime
+                    If _apQueueNotifiedEntryIds.TryGetValue(id, notifiedUtc) Then
+                        item("last_holding_notification_utc") = notifiedUtc.ToUniversalTime().ToString("o", Globalization.CultureInfo.InvariantCulture)
+                    End If
+
+                    items.Add(item)
+                Next
+
+                Dim payload As New JObject(
+                    New JProperty("version", 2),
+                    New JProperty("updated_utc", DateTime.UtcNow.ToString("o", Globalization.CultureInfo.InvariantCulture)),
+                    New JProperty("items", items))
+
+                Dim dir As String = Path.GetDirectoryName(journalPath)
+                Directory.CreateDirectory(dir)
+                Dim tempPath As String = journalPath & ".tmp-" & Guid.NewGuid().ToString("N")
+                File.WriteAllText(tempPath, payload.ToString(Formatting.None), New UTF8Encoding(False))
+
+                Try
+                    If File.Exists(journalPath) Then
+                        File.Replace(tempPath, journalPath, Nothing)
+                    Else
+                        File.Move(tempPath, journalPath)
+                    End If
+                Catch
+                    Try
+                        If File.Exists(journalPath) Then File.Delete(journalPath)
+                        If File.Exists(tempPath) Then File.Move(tempPath, journalPath)
+                    Catch
+                        Try
+                            If File.Exists(tempPath) Then File.Delete(tempPath)
+                        Catch
+                        End Try
+                        Throw
+                    End Try
+                End Try
+            End SyncLock
+        Catch ex As System.Exception
+            Debug.WriteLine("[AutoPilot] PersistAutoPilotQueueJournal error: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Sub ClearAutoPilotQueueJournal()
+        Try
+            SyncLock _apQueueJournalSyncRoot
+                Dim journalPath As String = GetAutoPilotQueueJournalPath()
+                If File.Exists(journalPath) Then File.Delete(journalPath)
+            End SyncLock
+        Catch ex As System.Exception
+            Debug.WriteLine("[AutoPilot] ClearAutoPilotQueueJournal error: " & ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Restores restart-interrupted queue entries only when the source mail still
+    ''' exists, is not already completed, and still satisfies the current AutoPilot
+    ''' policy. The caller must be on Outlook's UI/STA thread.
+    ''' </summary>
+    Private Sub RestoreAutoPilotQueueJournal()
+        Dim journalPath As String = GetAutoPilotQueueJournalPath()
+        If Not File.Exists(journalPath) Then Return
+
+        Dim payload As JObject
+        Try
+            payload = JObject.Parse(File.ReadAllText(journalPath, Encoding.UTF8))
+        Catch ex As System.Exception
+            ApDashboardLog("Discarding unreadable AutoPilot queue journal: " & ex.Message, "warn")
+            ClearAutoPilotQueueJournal()
+            Return
+        End Try
+
+        Dim items As JArray = TryCast(payload("items"), JArray)
+        If items Is Nothing OrElse items.Count = 0 Then
+            ClearAutoPilotQueueJournal()
+            Return
+        End If
+
+        Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
+        Dim restored As Integer = 0
+        Dim restoredApprovals As Integer = 0
+        Dim finalizedCommitted As Integer = 0
+        Dim dropped As Integer = 0
+
+        Try
+            ns = Application.GetNamespace("MAPI")
+
+            For Each token As JToken In items
+                Dim item As JObject = TryCast(token, JObject)
+                If item Is Nothing Then
+                    dropped += 1
+                    Continue For
+                End If
+
+                Dim entryId As String = If(item.Value(Of String)("entry_id"), "").Trim()
+                If entryId = "" Then
+                    dropped += 1
+                    Continue For
+                End If
+
+                Dim journalState As String = If(item.Value(Of String)("state"), AP_QueueStateQueued).Trim()
+
+                If IsAutoPilotMailAlreadyProcessedByEntryId(entryId) Then
+                    dropped += 1
+                    Continue For
+                End If
+
+                Dim obj As Object = Nothing
+                Dim mi As MailItem = Nothing
+                Try
+                    obj = ns.GetItemFromID(entryId)
+                    mi = TryCast(obj, MailItem)
+                    If mi Is Nothing Then
+                        dropped += 1
+                        Continue For
+                    End If
+
+                    ' A final reply may have been successfully submitted immediately before
+                    ' Outlook terminated, while tagging the source mail had not yet run.
+                    ' Re-running the whole request would risk a duplicate reply. Complete only
+                    ' the idempotent source-mail finalization and rely on Outbox recovery for
+                    ' any unsubmitted AutoPilot reply.
+                    If String.Equals(journalState, AP_QueueStateDeliveryCommitted, StringComparison.OrdinalIgnoreCase) Then
+                        ' Rehydrate the checkpoint before attempting finalization so a transient
+                        ' Outlook/MAPI failure cannot erase it when the journal is rewritten below.
+                        Dim committedEnqueueUtc As DateTime = DateTime.UtcNow
+                        Dim committedEnqueueRaw As String = If(item.Value(Of String)("enqueued_utc"), "")
+                        Dim parsedCommittedEnqueue As DateTime
+                        If DateTime.TryParse(committedEnqueueRaw,
+                                             Globalization.CultureInfo.InvariantCulture,
+                                             Globalization.DateTimeStyles.RoundtripKind,
+                                             parsedCommittedEnqueue) Then
+                            committedEnqueueUtc = parsedCommittedEnqueue.ToUniversalTime()
+                        End If
+                        _apQueueEnqueueTimes(entryId) = committedEnqueueUtc
+                        _apQueueStates(entryId) = AP_QueueStateDeliveryCommitted
+
+                        If TryTagOriginalMailAsProcessed(mi) Then
+                            Try
+                                TrackAutoPilotConversation(mi)
+                            Catch trackEx As System.Exception
+                                ApDashboardLog("Delivery-committed source mail was finalized, but conversation tracking failed: " & trackEx.Message, "warn")
+                            End Try
+
+                            Dim finalizedState As String = Nothing
+                            _apQueueStates.TryRemove(entryId, finalizedState)
+                            Dim finalizedEnqueue As DateTime
+                            _apQueueEnqueueTimes.TryRemove(entryId, finalizedEnqueue)
+                            finalizedCommitted += 1
+                        Else
+                            ' Keep delivery_committed in the journal. The reply must never be
+                            ' regenerated merely because source-mail finalization was temporarily
+                            ' unavailable.
+                            ApDashboardLog("Could not finalize a delivery-committed queue item after restart; checkpoint retained.", "warn")
+                        End If
+                        Continue For
+                    End If
+
+                    If String.Equals(journalState, AP_QueueStateApprovalPending, StringComparison.OrdinalIgnoreCase) Then
+                        If Not WouldMailBeProcessed(mi, entryId) Then
+                            dropped += 1
+                            Continue For
+                        End If
+
+                        Dim pendingInfo As AutoPilotMailInfo = ExtractMailInfo(mi)
+                        If pendingInfo Is Nothing Then
+                            dropped += 1
+                            Continue For
+                        End If
+
+                        Dim restoredPending As New AutoPilotPendingApproval() With {
+                            .EntryID = entryId,
+                            .SenderName = pendingInfo.SenderName,
+                            .SenderEmail = pendingInfo.SenderEmail,
+                            .Subject = pendingInfo.Subject,
+                            .ReceivedTime = pendingInfo.ReceivedTime,
+                            .BodyPreview = BuildApprovalBodyPreview(pendingInfo.Body)
+                        }
+
+                        If _apPendingApprovals.TryAdd(entryId, restoredPending) Then
+                            _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+                            _apQueueStates(entryId) = AP_QueueStateApprovalPending
+
+                            Dim pendingEnqueueUtc As DateTime = DateTime.UtcNow
+                            Dim pendingEnqueueRaw As String = If(item.Value(Of String)("enqueued_utc"), "")
+                            Dim parsedPendingEnqueue As DateTime
+                            If DateTime.TryParse(pendingEnqueueRaw,
+                                                 Globalization.CultureInfo.InvariantCulture,
+                                                 Globalization.DateTimeStyles.RoundtripKind,
+                                                 parsedPendingEnqueue) Then
+                                pendingEnqueueUtc = parsedPendingEnqueue.ToUniversalTime()
+                            End If
+                            _apQueueEnqueueTimes(entryId) = pendingEnqueueUtc
+                            restoredApprovals += 1
+                        End If
+                        Continue For
+                    End If
+
+                    If Not WouldMailBeProcessed(mi, entryId) Then
+                        dropped += 1
+                        Continue For
+                    End If
+
+                    Dim enqueueUtc As DateTime = DateTime.UtcNow
+                    Dim enqueueRaw As String = If(item.Value(Of String)("enqueued_utc"), "")
+                    Dim parsedEnqueue As DateTime
+                    If DateTime.TryParse(enqueueRaw,
+                                         Globalization.CultureInfo.InvariantCulture,
+                                         Globalization.DateTimeStyles.RoundtripKind,
+                                         parsedEnqueue) Then
+                        enqueueUtc = parsedEnqueue.ToUniversalTime()
+                    End If
+
+                    Dim notificationRaw As String = If(item.Value(Of String)("last_holding_notification_utc"), "")
+                    Dim parsedNotification As DateTime
+                    If DateTime.TryParse(notificationRaw,
+                                         Globalization.CultureInfo.InvariantCulture,
+                                         Globalization.DateTimeStyles.RoundtripKind,
+                                         parsedNotification) Then
+                        _apQueueNotifiedEntryIds(entryId) = parsedNotification.ToUniversalTime()
+                    End If
+
+                    If EnqueueAutoPilotMail(entryId, enqueueUtc, persistJournal:=False) Then
+                        restored += 1
+                    End If
+                Catch
+                    dropped += 1
+                Finally
+                    If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+                    If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then Try : Marshal.ReleaseComObject(obj) : Catch : End Try
+                End Try
+            Next
+        Finally
+            If ns IsNot Nothing Then Try : Marshal.ReleaseComObject(ns) : Catch : End Try
+        End Try
+
+        PersistAutoPilotQueueJournal()
+
+        If restored > 0 Then
+            ApDashboardLog($"♻ Restored {restored} AutoPilot queue item(s) after restart.", "warn")
+        End If
+        If restoredApprovals > 0 Then
+            UpdateApprovalsDashboardButton()
+            ApDashboardLog($"♻ Restored {restoredApprovals} pending AutoPilot approval request(s) after restart.", "warn")
+        End If
+        If finalizedCommitted > 0 Then
+            ApDashboardLog($"♻ Finalized {finalizedCommitted} delivery-committed AutoPilot item(s) without re-running them.", "warn")
+        End If
+        If dropped > 0 Then
+            ApDashboardLog($"Queue recovery skipped {dropped} stale/ineligible item(s).", "step")
+        End If
+    End Sub
 
 
 
@@ -1904,16 +2334,17 @@ Partial Public Class ThisAddIn
                         '    $"RemainingQueue={_apMailQueue.Count}",
                         '    "warn")
 
-                        ' Clean up enqueue time tracking for this mail
-                        Dim dummy As DateTime
-                        _apQueueEnqueueTimes.TryRemove(entryId, dummy)
+                        ' Preserve the original enqueue timestamp while processing so a
+                        ' shutdown snapshot retains stable queue chronology.
                         ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
                         ' ProcessIncomingMailAsync needs to check it for the holding-notice
                         ' cooldown bypass. It is cleaned up after processing completes.
 
                         ' Track the active job for progress notifications
                         _apCurrentProcessingEntryId = entryId
+                        _apQueueStates(entryId) = AP_QueueStateProcessing
                         _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                        PersistAutoPilotQueueJournal()
 
                         ' Start the job-liveness clocks for hang/stall detection in the heartbeat.
                         _apCurrentJobStartUtc = DateTime.UtcNow
@@ -1963,7 +2394,30 @@ Partial Public Class ThisAddIn
                             _apCurrentJobStartUtc = DateTime.MinValue
                             _apCurrentJobLastActivityUtc = DateTime.MinValue
                             ' Clean up notification and catch-up tracking AFTER processing is complete.
-                            _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
+                            Dim dummyNotification As DateTime
+                            _apQueueNotifiedEntryIds.TryRemove(entryId, dummyNotification)
+
+                            Dim remainsPendingApproval As Boolean = _apPendingApprovals.ContainsKey(entryId)
+                            Dim currentQueueState As String = Nothing
+                            Dim isDeliveryCommitted As Boolean =
+                                _apQueueStates.TryGetValue(entryId, currentQueueState) AndAlso
+                                String.Equals(currentQueueState, AP_QueueStateDeliveryCommitted, StringComparison.OrdinalIgnoreCase)
+
+                            If remainsPendingApproval Then
+                                _apQueueStates(entryId) = AP_QueueStateApprovalPending
+                            ElseIf isDeliveryCommitted Then
+                                ' The primary reply has already been submitted, but source-mail
+                                ' finalization failed or did not complete. Preserve the checkpoint
+                                ' for restart recovery instead of making the mail eligible for a
+                                ' second full processing/reply pass.
+                                _apQueueStates(entryId) = AP_QueueStateDeliveryCommitted
+                            Else
+                                Dim dummyEnqueue As DateTime
+                                _apQueueEnqueueTimes.TryRemove(entryId, dummyEnqueue)
+
+                                Dim dummyQueueState As String = Nothing
+                                _apQueueStates.TryRemove(entryId, dummyQueueState)
+                            End If
 
                             Dim dummyCatchUp As Boolean
                             _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
@@ -1973,6 +2427,8 @@ Partial Public Class ThisAddIn
                             ' from creating a second concurrent processing pass for the same message.
                             Dim dummyQueuedOrProcessing As Boolean
                             _apQueuedOrProcessingEntryIds.TryRemove(entryId, dummyQueuedOrProcessing)
+
+                            PersistAutoPilotQueueJournal()
 
                             Try : _apCurrentJobCts?.Dispose() : Catch : End Try
                             _apCurrentJobCts = Nothing
@@ -2690,6 +3146,8 @@ Partial Public Class ThisAddIn
                     Await SwitchToUi(Sub() SendReplyToSender(mi, approvalNotice, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
                     outcomeHandoffEstablished = True
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+                    _apQueueStates(entryId) = AP_QueueStateApprovalPending
+                    PersistAutoPilotQueueJournal()
                     UpdateApprovalsDashboardButton()
                     ApDashboardLog($"⏸ Held for manual approval (see Approvals in dashboard): {mailInfo.SenderEmail} — {mailInfo.Subject}", "step")
                 Else
@@ -2753,8 +3211,14 @@ Partial Public Class ThisAddIn
 
                     Dim oversizedMessage = oversizedSb.ToString()
                     Await SwitchToUi(Sub() SendReplyToSender(mi, oversizedMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    MarkAutoPilotQueueDeliveryCommitted(entryId)
                     outcomeHandoffEstablished = True
-                    Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                    Dim sizeLimitSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                    If sizeLimitSourceFinalized Then
+                        CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+                    Else
+                        ApDashboardLog("⚠ Size-limit reply was submitted, but source-mail finalization failed; delivery checkpoint retained.", "warn")
+                    End If
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                     RecordLastProcessedTime()
@@ -3100,7 +3564,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' Build "Sources used:" footer
-                Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
+                Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog, If(_apConfig?.SourcesFooterMode, "external"))
 
                 ' ── Approval or auto-send ──
                 If requiresApproval AndAlso Not _apConfig.IsUnattended Then
@@ -3161,9 +3625,20 @@ Partial Public Class ThisAddIn
                             ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
                         End If
                         Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                        MarkAutoPilotQueueDeliveryCommitted(entryId)
                         outcomeHandoffEstablished = True
                         deliverableHandoffCompletedOrDiscarded = True
-                        Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                        Dim sourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+
+                        If sourceFinalized Then
+                            ' The source mail is now durably marked as processed. Clear the in-memory
+                            ' delivery checkpoint; the on-disk checkpoint is intentionally removed only
+                            ' by the pump's normal journal rewrite. If Outlook terminates in this tiny
+                            ' window, restart recovery merely re-applies the idempotent source tag.
+                            CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+                        Else
+                            ApDashboardLog("⚠ Reply was submitted, but source-mail finalization failed; delivery checkpoint retained.", "warn")
+                        End If
 
                         ' ── Retain this mail's inbound attachments for follow-up discussion ──
                         ' Whitelisted senders only; opt-in via ThreadRetentionDays. Refreshes the
@@ -3174,8 +3649,8 @@ Partial Public Class ThisAddIn
                             ApDashboardLog($"⚠ Could not retain conversation files: {exPersist.Message}", "warn")
                         End Try
 
-                        Await Task.Delay(1500)
-                        Await SwitchToUi(Sub() ResendOutboxAutoPilotItemsUnconditional())
+                        Await System.Threading.Tasks.Task.Delay(1500)
+                        Await SwitchToUi(Sub() ResubmitUnsubmittedAutoPilotOutboxItems())
 
                         Interlocked.Increment(_apSessionReplyCount)
                         RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
@@ -3267,12 +3742,12 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
-    ''' Re-submits AutoPilot's own items currently in the Outbox by calling .Send() again,
-    ''' mirroring the manual "open item → Send" action that is known to transmit stuck items.
-    ''' Does NOT depend on PR_SUBMIT_FLAGS (which is not readable on this store). Only AutoPilot-
-    ''' tagged items are touched. Must run on the UI thread.
+    ''' Re-submits only AutoPilot's own UN-SUBMITTED items currently in the Outbox by
+    ''' calling .Send() again, mirroring the manual "open item → Send" recovery action.
+    ''' Items whose Outlook Submitted flag is already True are left untouched to avoid
+    ''' duplicate submission. Only AutoPilot-tagged items are considered. Must run on the UI thread.
     ''' </summary>
-    Friend Sub ResendOutboxAutoPilotItemsUnconditional()
+    Friend Sub ResubmitUnsubmittedAutoPilotOutboxItems()
         Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
         Dim outbox As MAPIFolder = Nothing
         Dim items As Items = Nothing
@@ -3296,12 +3771,24 @@ Partial Public Class ThisAddIn
                     If String.IsNullOrEmpty(cats) OrElse
                        cats.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) < 0 Then Continue For
 
+                    Dim submitted As Boolean
+                    Try
+                        submitted = mi.Submitted
+                    Catch submittedEx As System.Exception
+                        ' If Outlook cannot tell us whether the item is already submitted,
+                        ' the safe behavior is to leave it untouched rather than risk a duplicate.
+                        ApDashboardLog("✉ Skipped AutoPilot Outbox recovery item because Submitted state could not be read: " & submittedEx.Message, "warn")
+                        Continue For
+                    End Try
+
+                    If submitted Then Continue For
+
                     Dim toAddr As String = Nothing
                     Try : toAddr = mi.To : Catch : End Try
 
                     Try
                         mi.Send()
-                        ApDashboardLog($"✉ Re-submitted Outbox item via .Send() → {If(toAddr, "(unknown)")}", "warn")
+                        ApDashboardLog($"✉ Re-submitted unsubmitted AutoPilot Outbox item via .Send() → {If(toAddr, "(unknown)")}", "warn")
                     Catch exSend As System.Exception
                         ApDashboardLog($"✉ Re-submit .Send() failed for '{If(toAddr, "(unknown)")}': {exSend.Message}", "warn")
                     End Try
@@ -3311,7 +3798,7 @@ Partial Public Class ThisAddIn
                 End Try
             Next
         Catch ex As System.Exception
-            Debug.WriteLine($"[AutoPilot] ResendOutboxAutoPilotItemsUnconditional error: {ex.Message}")
+            Debug.WriteLine($"[AutoPilot] ResubmitUnsubmittedAutoPilotOutboxItems error: {ex.Message}")
         Finally
             If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
             If outbox IsNot Nothing Then Try : Marshal.ReleaseComObject(outbox) : Catch : End Try
@@ -3436,7 +3923,13 @@ Partial Public Class ThisAddIn
                     If rejectMail IsNot Nothing Then
                         Try
                             Await SwitchToUi(Sub() SendReplyToSender(rejectMail, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True))
-                            Await SwitchToUi(Sub() TagOriginalMailAsProcessed(rejectMail))
+                            MarkAutoPilotQueueDeliveryCommitted(entryId)
+                            Dim rejectionSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(rejectMail))
+                            If rejectionSourceFinalized Then
+                                CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=True)
+                            Else
+                                ApDashboardLog("⚠ Rejection was submitted, but source-mail finalization failed; delivery checkpoint retained.", "warn")
+                            End If
                             RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                             RecordLastProcessedTime()
                             Dim rejectDummy As Boolean
@@ -3475,8 +3968,14 @@ Partial Public Class ThisAddIn
 
             Try
                 Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                MarkAutoPilotQueueDeliveryCommitted(entryId)
                 cleanupDeferredStaging = True
-                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                Dim approvedSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                If approvedSourceFinalized Then
+                    CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=True)
+                Else
+                    ApDashboardLog("⚠ Approved reply was submitted, but source-mail finalization failed; delivery checkpoint retained.", "warn")
+                End If
                 Interlocked.Increment(_apSessionReplyCount)
                 RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                 RecordLastProcessedTime()
@@ -3525,7 +4024,7 @@ Partial Public Class ThisAddIn
     ''' the catch-up scan can identify it as already processed.
     ''' Also starts the auto-delete retention clock for the whole cleanup group.
     ''' </summary>
-    Private Sub TagOriginalMailAsProcessed(mi As MailItem)
+    Private Function TryTagOriginalMailAsProcessed(mi As MailItem) As Boolean
         Try
             Dim existing = mi.Categories
             Dim needsSave As Boolean = False
@@ -3543,9 +4042,18 @@ Partial Public Class ThisAddIn
             End If
 
             MarkMailGroupAsAnsweredAndEligible(mi)
+            Return True
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] TagOriginalMailAsProcessed error: {ex.Message}")
+            Return False
         End Try
+    End Function
+
+    ' Backward-compatible best-effort wrapper for legacy call sites that do not own
+    ' a delivery checkpoint. Critical final-delivery paths use the Boolean helper
+    ' above so a failed source tag cannot silently clear delivery_committed state.
+    Private Sub TagOriginalMailAsProcessed(mi As MailItem)
+        TryTagOriginalMailAsProcessed(mi)
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -6178,13 +6686,12 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Approves a pending request: re-queues it for normal processing (auto-send).</summary>
     Private Async Sub ApprovePendingRequest(entryId As String)
-        Dim removed As AutoPilotPendingApproval = Nothing
-        _apPendingApprovals.TryRemove(entryId, removed)
+        Dim pending As AutoPilotPendingApproval = Nothing
+        _apPendingApprovals.TryGetValue(entryId, pending)
 
-        _apApprovedEntryIds.TryAdd(entryId, True)
-
-        ' The previous processing pass may still be unwinding.
-        ' Wait until it has released the queue/processing marker.
+        ' The previous processing pass may still be unwinding. Keep the approval
+        ' request in the persisted pending set until re-queueing actually succeeds;
+        ' this prevents a restart in the hand-off window from losing the request.
         For attempt As Integer = 1 To 50
             If Not _apQueuedOrProcessingEntryIds.ContainsKey(entryId) Then
                 Exit For
@@ -6193,49 +6700,104 @@ Partial Public Class ThisAddIn
             Await System.Threading.Tasks.Task.Delay(50)
         Next
 
-        If EnqueueAutoPilotMail(entryId) Then
+        _apApprovedEntryIds.TryAdd(entryId, True)
+
+        If EnqueueAutoPilotMail(entryId, persistJournal:=False) Then
+            Dim removed As AutoPilotPendingApproval = Nothing
+            _apPendingApprovals.TryRemove(entryId, removed)
+            _apQueueStates(entryId) = AP_QueueStateQueued
+            PersistAutoPilotQueueJournal()
+            UpdateApprovalsDashboardButton()
             ApDashboardLog(
-            $"✅ Approved for processing: {If(removed IsNot Nothing, removed.SenderEmail, entryId)}",
+            $"✅ Approved for processing: {If(removed IsNot Nothing, removed.SenderEmail, If(pending IsNot Nothing, pending.SenderEmail, entryId))}",
             "success")
         Else
+            Dim approvedDummy As Boolean
+            _apApprovedEntryIds.TryRemove(entryId, approvedDummy)
+            _apQueueStates(entryId) = AP_QueueStateApprovalPending
+            PersistAutoPilotQueueJournal()
+            UpdateApprovalsDashboardButton()
             ApDashboardLog(
-            $"⚠ Approved mail could not be re-queued because it is still queued/processing: {If(removed IsNot Nothing, removed.SenderEmail, entryId)}",
+            $"⚠ Approved mail could not be re-queued because it is still queued/processing; approval remains pending: {If(pending IsNot Nothing, pending.SenderEmail, entryId)}",
             "warn")
         End If
     End Sub
 
     ''' <summary>Rejects a pending request: sends a rejection notice and marks the mail processed.</summary>
     Private Sub RejectPendingRequest(entryId As String)
-        Dim removed As AutoPilotPendingApproval = Nothing
-        _apPendingApprovals.TryRemove(entryId, removed)
-        Dim senderLabel As String = If(removed IsNot Nothing, removed.SenderEmail, entryId)
+        Dim pending As AutoPilotPendingApproval = Nothing
+        _apPendingApprovals.TryGetValue(entryId, pending)
+        Dim senderLabel As String = If(pending IsNot Nothing, pending.SenderEmail, entryId)
 
+        Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
+        Dim obj As Object = Nothing
+        Dim mi As MailItem = Nothing
         Try
-            Dim mi As MailItem = Nothing
             Try
-                Dim ns = Application.GetNamespace("MAPI")
-                Dim obj = ns.GetItemFromID(entryId)
-                If TypeOf obj Is MailItem Then mi = DirectCast(obj, MailItem)
+                ns = Application.GetNamespace("MAPI")
+                obj = ns.GetItemFromID(entryId)
+                mi = TryCast(obj, MailItem)
             Catch
             End Try
 
             If mi Is Nothing Then
-                ApDashboardLog($"🚫 Rejected (sender not notified — mail no longer available): {senderLabel}", "warn")
+                ' Keep the approval pending: a transient/moved-item resolution failure must
+                ' not silently turn an explicit operator decision into lost work.
+                _apQueueStates(entryId) = AP_QueueStateApprovalPending
+                PersistAutoPilotQueueJournal()
+                UpdateApprovalsDashboardButton()
+                ApDashboardLog($"🚫 Rejection could not be completed — mail is currently unavailable; approval remains pending: {senderLabel}", "warn")
                 Return
             End If
 
-            Try
-                SendReplyToSender(mi, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True)
-                TagOriginalMailAsProcessed(mi)
-                RecordLastProcessedTime()
-                Dim removedHolding As Boolean
-                _apHoldingOnlyEntryIds.TryRemove(entryId, removedHolding)
-                ApDashboardLog($"🚫 Rejected & notified sender: {senderLabel}", "step")
-            Finally
-                Try : Marshal.ReleaseComObject(mi) : Catch : End Try
-            End Try
+            SendReplyToSender(mi, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True)
+            MarkAutoPilotQueueDeliveryCommitted(entryId)
+            If Not TryTagOriginalMailAsProcessed(mi) Then
+                Throw New System.InvalidOperationException("The rejection was submitted, but the source mail could not be finalized.")
+            End If
+
+            Dim removed As AutoPilotPendingApproval = Nothing
+            _apPendingApprovals.TryRemove(entryId, removed)
+
+            Dim rejectedEnqueue As DateTime
+            _apQueueEnqueueTimes.TryRemove(entryId, rejectedEnqueue)
+            Dim rejectedState As String = Nothing
+            _apQueueStates.TryRemove(entryId, rejectedState)
+            PersistAutoPilotQueueJournal()
+            UpdateApprovalsDashboardButton()
+
+            RecordLastProcessedTime()
+            Dim removedHolding As Boolean
+            _apHoldingOnlyEntryIds.TryRemove(entryId, removedHolding)
+            ApDashboardLog($"🚫 Rejected & notified sender: {senderLabel}", "step")
         Catch ex As System.Exception
-            ApDashboardLog($"⚠ Failed to process rejection for {senderLabel}: {ex.Message}", "warn")
+            Dim rejectionState As String = Nothing
+            Dim rejectionWasDelivered As Boolean =
+                _apQueueStates.TryGetValue(entryId, rejectionState) AndAlso
+                String.Equals(rejectionState, AP_QueueStateDeliveryCommitted, StringComparison.OrdinalIgnoreCase)
+
+            If rejectionWasDelivered Then
+                ' The rejection reply was already submitted. Keep the delivery checkpoint
+                ' instead of restoring approval_pending, otherwise a restart/operator retry
+                ' could send the rejection twice merely because source tagging failed.
+                _apPendingApprovals.TryRemove(entryId, pending)
+                _apQueueStates(entryId) = AP_QueueStateDeliveryCommitted
+                PersistAutoPilotQueueJournal()
+                UpdateApprovalsDashboardButton()
+                ApDashboardLog($"⚠ Rejection was sent but source-mail finalization failed; delivery checkpoint retained: {ex.Message}", "warn")
+            Else
+                ' Failure occurred before delivery was committed. Keep the request pending
+                ' so the operator can retry without losing the decision workflow.
+                If pending IsNot Nothing Then _apPendingApprovals.TryAdd(entryId, pending)
+                _apQueueStates(entryId) = AP_QueueStateApprovalPending
+                PersistAutoPilotQueueJournal()
+                UpdateApprovalsDashboardButton()
+                ApDashboardLog($"⚠ Failed to process rejection for {senderLabel}; approval remains pending: {ex.Message}", "warn")
+            End If
+        Finally
+            If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+            If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then Try : Marshal.ReleaseComObject(obj) : Catch : End Try
+            If ns IsNot Nothing Then Try : Marshal.ReleaseComObject(ns) : Catch : End Try
         End Try
     End Sub
 
@@ -6486,37 +7048,41 @@ Partial Public Class ThisAddIn
         Dim toolName As String = If(entry.ToolName, "").Trim()
         If toolName = "" Then Return False
 
-        ' Never show loader/helper/meta tools.
-        If toolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+        ' Positive source classification is shared with skill/agent source routing.
+        ' Mutation, artifact, file-operation, agent, memory and helper tools are
+        ' therefore excluded by capability rather than by a growing local blacklist.
+        Return SharedLibrary.Agents.HostToolRegistration.IsSourceEvidenceTool(toolName, entry.CapabilityTags)
+    End Function
+
+    Private Shared Function TryNormalizeSafeSourceUrl(rawUrl As String, ByRef safeUrl As String) As Boolean
+        safeUrl = ""
+        Dim raw As String = If(rawUrl, "").Trim()
+        If raw = "" Then Return False
+
+        Dim uri As System.Uri = Nothing
+        If Not System.Uri.TryCreate(raw, System.UriKind.Absolute, uri) OrElse uri Is Nothing Then Return False
+
+        If Not String.Equals(uri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) AndAlso
+           Not String.Equals(uri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) Then
             Return False
         End If
 
-        ' Real built-in source tools.
-        If toolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith(InternalKnowledgeToolNamePrefix, StringComparison.OrdinalIgnoreCase) OrElse
-           SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(toolName) OrElse
-           SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolName) Then
-            Return True
+        safeUrl = uri.AbsoluteUri
+        Return True
+    End Function
+
+    Private Shared Function SanitizeSourceFooterParamSummary(rawSummary As String) As String
+        Dim raw As String = If(rawSummary, "").Trim()
+        If raw = "" Then Return ""
+
+        ' Never disclose local or UNC paths in an externally visible reply footer.
+        If Regex.IsMatch(raw, "(?i)(?:[A-Z]:[\\/]|\\\\|file://|%APPDATA%|%TEMP%|AppData[\\/]|[\\/]redink[\\/])") Then
+            Return ""
         End If
 
-        ' Never show agent-layer or other classical/helper tools.
-        If toolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
-           SharedLibrary.Agents.MemoryTools.IsMemoryTool(toolName) OrElse
-           SharedLibrary.Agents.TextTools.IsTextTool(toolName) OrElse
-           SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
-           SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
-           SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
-           SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) Then
-            Return False
-        End If
-
-        ' External tools are treated as real sources by default
-        ' (e.g. Special Services tools), unless excluded above.
-        Return Not entry.IsInternalTool
+        raw = Regex.Replace(raw, "\s+", " ").Trim()
+        If raw.Length > 240 Then raw = raw.Substring(0, 240).TrimEnd() & "…"
+        Return raw
     End Function
 
     ''' <summary>
@@ -6526,32 +7092,52 @@ Partial Public Class ThisAddIn
     ''' Excludes helper/meta/classical tools such as tool_loader, skills, agents,
     ''' memory/text/workspace/js tools, and other non-source internals.
     ''' </summary>
-    Private Shared Function BuildSourcesUsedHtml(toolCallLog As List(Of AutoPilotToolCallEntry)) As String
+    Private Shared Function BuildSourcesUsedHtml(toolCallLog As List(Of AutoPilotToolCallEntry),
+                                                  Optional sourcesFooterMode As String = "external") As String
+        If String.Equals(If(sourcesFooterMode, "external").Trim(), "off", StringComparison.OrdinalIgnoreCase) Then Return ""
         If toolCallLog Is Nothing OrElse toolCallLog.Count = 0 Then Return ""
 
         Dim sourceCalls = toolCallLog.Where(Function(e) IsSourceEntryForFooter(e)).ToList()
         If sourceCalls.Count = 0 Then Return ""
 
         Dim sb As New StringBuilder()
+        Dim emittedSourceKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         sb.AppendLine("<div style='font-size:8pt;color:#999999;margin-top:16px;border-top:1px solid #eeeeee;padding-top:8px;'>")
         sb.AppendLine("<b style='color:#888888;'>Sources used:</b><br/>")
 
         For Each entry In sourceCalls
-            Dim toolLabel = If(Not String.IsNullOrEmpty(entry.ToolDisplayName), entry.ToolDisplayName, entry.ToolName)
+            Dim toolLabel As String = If(Not String.IsNullOrEmpty(entry.ToolDisplayName), entry.ToolDisplayName, entry.ToolName)
+            Dim safeToolLabel As String = SanitizeSourceFooterParamSummary(toolLabel)
+            If String.IsNullOrWhiteSpace(safeToolLabel) Then safeToolLabel = If(entry.ToolName, "source")
             Dim icon = If(entry.WasSuccessful, "✓", "✗")
 
-            If entry.Urls IsNot Nothing AndAlso entry.Urls.Count > 0 Then
-                For Each url In entry.Urls
+            Dim safeUrls As New List(Of String)()
+            If entry.Urls IsNot Nothing Then
+                For Each url As String In entry.Urls
+                    Dim safeUrl As String = ""
+                    If TryNormalizeSafeSourceUrl(url, safeUrl) Then safeUrls.Add(safeUrl)
+                Next
+            End If
+
+            If safeUrls.Count > 0 Then
+                For Each url As String In safeUrls.Distinct(StringComparer.OrdinalIgnoreCase)
+                    Dim sourceKey As String = "url|" & url
+                    If Not emittedSourceKeys.Add(sourceKey) Then Continue For
+
                     Dim encodedUrl = System.Net.WebUtility.HtmlEncode(url)
                     sb.AppendLine($"&bull; {icon} <a href='{encodedUrl}' style='color:#4A90D9;text-decoration:underline;'>{encodedUrl}</a><br/>")
                 Next
             Else
                 Dim paramInfo = ""
-                If Not String.IsNullOrEmpty(entry.ParamSummary) Then
-                    paramInfo = $" — {System.Net.WebUtility.HtmlEncode(entry.ParamSummary)}"
+                Dim safeParamSummary As String = SanitizeSourceFooterParamSummary(entry.ParamSummary)
+                If Not String.IsNullOrEmpty(safeParamSummary) Then
+                    paramInfo = $" — {System.Net.WebUtility.HtmlEncode(safeParamSummary)}"
                 End If
 
-                sb.AppendLine($"&bull; {icon} {System.Net.WebUtility.HtmlEncode(toolLabel)}{paramInfo}<br/>")
+                Dim sourceKey As String = "tool|" & If(entry.ToolName, "") & "|" & safeParamSummary
+                If Not emittedSourceKeys.Add(sourceKey) Then Continue For
+
+                sb.AppendLine($"&bull; {icon} {System.Net.WebUtility.HtmlEncode(safeToolLabel)}{paramInfo}<br/>")
             End If
         Next
 
@@ -6570,7 +7156,8 @@ Partial Public Class ThisAddIn
                                        paramSummary As String, isInternalTool As Boolean,
                                        wasSuccessful As Boolean, resultExcerpt As String,
                                        elapsed As TimeSpan,
-                                       Optional urls As List(Of String) = Nothing)
+                                       Optional urls As List(Of String) = Nothing,
+                                       Optional capabilityTags As String = Nothing)
         MarkAutoPilotJobActivity()
 
         If _apCurrentToolCallLog Is Nothing Then Return
@@ -6583,7 +7170,8 @@ Partial Public Class ThisAddIn
             .WasSuccessful = wasSuccessful,
             .ResultExcerpt = resultExcerpt,
             .Elapsed = elapsed,
-            .Urls = urls
+            .Urls = urls,
+            .CapabilityTags = If(capabilityTags, "")
         })
     End Sub
 
@@ -7677,7 +8265,13 @@ Partial Public Class ThisAddIn
                             "",
                             $"This notice relates to a voicemail received on {mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}.")
                     End Sub)
-                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                MarkAutoPilotQueueDeliveryCommitted(entryId)
+                Dim voicemailTranscriptionFailureSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                If voicemailTranscriptionFailureSourceFinalized Then
+                    CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+                Else
+                    ApDashboardLog("⚠ Voicemail transcription-failure notice was submitted, but source-mail finalization failed; delivery checkpoint retained.", "warn")
+                End If
                 Interlocked.Increment(_apSessionReplyCount)
                 RecordLastProcessedTime()
                 ApDashboardLog($"✓ SENT voicemail transcription-failure notice to: {recipientEmail} (caller: {rawCallerId})", "warn")
@@ -7858,7 +8452,13 @@ Partial Public Class ThisAddIn
                             "",
                             $"This notice relates to a voicemail received on {mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}.")
                     End Sub)
-                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                MarkAutoPilotQueueDeliveryCommitted(entryId)
+                Dim voicemailProcessingFailureSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                If voicemailProcessingFailureSourceFinalized Then
+                    CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+                Else
+                    ApDashboardLog("⚠ Voicemail processing-failure notice was submitted, but source-mail finalization failed; delivery checkpoint retained.", "warn")
+                End If
                 Interlocked.Increment(_apSessionReplyCount)
                 RecordLastProcessedTime()
                 ApDashboardLog($"✓ SENT voicemail processing-failure notice to: {recipientEmail} (caller: {rawCallerId})", "warn")
@@ -7892,7 +8492,7 @@ Partial Public Class ThisAddIn
                 resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0
 
             ' Build "Sources used:" footer
-            Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
+            Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog, If(_apConfig?.SourcesFooterMode, "external"))
 
             ' ── Build voicemail footer note ──
             Dim voicemailNote = $"This reply was generated from a voicemail received on " &
@@ -7906,8 +8506,14 @@ Partial Public Class ThisAddIn
                                                     sourcesHtml, voicemailNote)
                              End Sub)
             voicemailDeliverableHandoffCompleted = True
+            MarkAutoPilotQueueDeliveryCommitted(entryId)
 
-            Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+            Dim voicemailSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+            If voicemailSourceFinalized Then
+                CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+            Else
+                ApDashboardLog("⚠ Voicemail reply was submitted, but source-mail finalization failed; delivery checkpoint retained.", "warn")
+            End If
             Interlocked.Increment(_apSessionReplyCount)
             RecordLastProcessedTime()
             ApDashboardLog($"✓ SENT voicemail reply to: {recipientEmail} (caller: {rawCallerId})", "info")
@@ -8236,6 +8842,7 @@ Partial Public Class ThisAddIn
         Public Property Elapsed As TimeSpan
 
         Public Property Urls As List(Of String)
+        Public Property CapabilityTags As String
     End Class
 
 End Class
