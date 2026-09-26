@@ -710,6 +710,17 @@ Namespace Agents
                 arguments As IDictionary(Of String, Object),
                 ByRef failureReason As String) As Boolean
 
+                Return ValidateLockedExpectedArtifactArguments(
+                    arguments,
+                    failureReason,
+                    "")
+            End Function
+
+            Public Function ValidateLockedExpectedArtifactArguments(
+                arguments As IDictionary(Of String, Object),
+                ByRef failureReason As String,
+                toolName As System.String) As Boolean
+
                 failureReason = ""
 
                 If Not ExpectedDeliverableContractLocked Then Return True
@@ -738,10 +749,19 @@ Namespace Agents
                     hasSupersedesArtifactId
 
                 ' expected_artifacts on agent_* is the CHILD delegation contract and is
-                ' intentionally independent from this run's locked contract. Only calls
-                ' that carry direct artifact identity for an output produced in THIS run
-                ' are validated against the current lock here.
-                If Not hasDirectArtifactIdentity Then Return True
+                ' intentionally independent from this run's locked contract. For a
+                ' deliverable-producing call in THIS run, however, a locked multi-slot
+                ' contract must never permit an ambiguous physical side effect. If the
+                ' call clearly declares a final/deliverable output but no opaque slot
+                ' pair is supplied while multiple slots remain unresolved, reject it
+                ' before tool execution rather than inferring from file names or types.
+                If Not hasDirectArtifactIdentity Then
+                    If RequiresExplicitLockedProducerSlotSelection(toolName, arguments) Then
+                        failureReason = "locked_expected_artifact_slot_required"
+                        Return False
+                    End If
+                    Return True
+                End If
 
                 If hasLogicalId OrElse hasSlotId OrElse hasArtifactId OrElse hasSupersedesArtifactId Then
                     Dim logicalId As String =
@@ -867,21 +887,99 @@ Namespace Agents
                 Return True
             End Function
 
-            ''' <summary>
-            ''' Completes optional artifact metadata for an output-producing tool when this run
-            ''' has exactly one locked expected deliverable slot. The logical slot remains caller/skill
-            ''' authority; physical revision ids are host-owned and deterministic. Explicit conflicting
-            ''' logical/slot values are never overwritten and will be rejected by the normal validators.
-            ''' </summary>
-            Public Function ShouldNormalizeSingleLockedProducerArtifactArguments(
+            Private Function RequiresExplicitLockedProducerSlotSelection(
                 toolName As System.String,
                 arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
 
                 If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return False
-                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <> 1 Then Return False
+                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <= 1 Then Return False
+                If Not IsDeliverableCapableTool(toolName) Then Return False
 
-                ' Explicit artifact identity is an opt-in boundary: complete any missing host-owned
-                ' physical revision metadata, but never reinterpret an explicit logical contradiction.
+                Dim unresolvedCount As System.Int32 = 0
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    If Not IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then
+                        unresolvedCount += 1
+                        If unresolvedCount > 1 Then Exit For
+                    End If
+                Next
+                If unresolvedCount <= 1 Then Return False
+
+                Dim stateText As System.String = GetArgumentText(arguments, "artifact_state")
+                Dim intentText As System.String = GetArgumentText(arguments, "artifact_delivery_intent")
+                If System.String.Equals(stateText, "final", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(intentText, "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(intentText, "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                If GetArgumentText(arguments, "output_filename") <> System.String.Empty Then Return True
+
+                Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
+                If System.String.Equals(normalizedToolName, "python_execute", System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim code As System.String = GetArgumentText(arguments, "code")
+                    If code.IndexOf("agent_api.output_path", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+                End If
+
+                Return False
+            End Function
+
+            Private Function ResolveLockedProducerArtifactSlot(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As ExpectedDeliverableSlot
+
+                If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return Nothing
+                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count = 0 Then Return Nothing
+
+                Dim suppliedLogicalId As System.String = GetArgumentText(arguments, "logical_deliverable_id")
+                Dim suppliedSlotId As System.String = GetArgumentText(arguments, "output_slot_id")
+
+                If suppliedLogicalId <> System.String.Empty OrElse suppliedSlotId <> System.String.Empty Then
+                    If suppliedLogicalId = System.String.Empty OrElse suppliedSlotId = System.String.Empty Then Return Nothing
+                    Return GetExpectedDeliverableSlot(suppliedLogicalId, suppliedSlotId)
+                End If
+
+                Dim unresolved As New System.Collections.Generic.List(Of ExpectedDeliverableSlot)()
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    If Not IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then
+                        unresolved.Add(expected)
+                    End If
+                Next
+
+                If unresolved.Count = 1 Then Return unresolved(0)
+                Return Nothing
+            End Function
+
+            Private Function BuildLockedExpectedArtifactArguments() As System.Collections.Generic.List(Of System.Object)
+                Dim result As New System.Collections.Generic.List(Of System.Object)()
+                If ExpectedDeliverableSlots Is Nothing Then Return result
+
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    result.Add(
+                        New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.Ordinal) From {
+                            {"logical_deliverable_id", If(expected.LogicalDeliverableId, System.String.Empty)},
+                            {"output_slot_id", If(expected.OutputSlotId, System.String.Empty)}
+                        })
+                Next
+
+                Return result
+            End Function
+
+            ''' <summary>
+            ''' Completes host-owned artifact metadata for an output-producing call whenever
+            ''' its locked expected slot can be identified without heuristic inference. For
+            ''' multiple-slot contracts the caller must name the exact host-issued logical/slot
+            ''' pair while more than one slot remains open. Once exactly one unresolved slot
+            ''' remains, the host may bind that slot automatically.
+            ''' </summary>
+            Public Function ShouldNormalizeLockedProducerArtifactArguments(
+                toolName As System.String,
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+                Dim expected As ExpectedDeliverableSlot = ResolveLockedProducerArtifactSlot(arguments)
+                If expected Is Nothing Then Return False
+
                 If ArtifactDelivery.HasExplicitArtifactIdentityArguments(arguments) Then Return True
 
                 Dim stateText As System.String = GetArgumentText(arguments, "artifact_state")
@@ -892,28 +990,16 @@ Namespace Agents
                     Return True
                 End If
 
-                ' A producer that explicitly names a new output file is a genuine output-producing
-                ' invocation. Staging/copy tools use different argument names and are intentionally
-                ' not promoted merely because they are deliverable-capable.
                 If GetArgumentText(arguments, "output_filename") <> System.String.Empty Then Return True
 
                 Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
-
-                ' python_execute is dual-use. Only bind the final artifact contract implicitly when
-                ' the script actually requests an output file. Pure inspection/calculation scripts
-                ' that only publish JSON/text must remain result-only calls.
                 If System.String.Equals(normalizedToolName, "python_execute", System.StringComparison.OrdinalIgnoreCase) Then
                     Dim code As System.String = GetArgumentText(arguments, "code")
-                    If code.IndexOf("agent_api.output_path", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
-                    Return False
+                    Return code.IndexOf("agent_api.output_path", System.StringComparison.OrdinalIgnoreCase) >= 0
                 End If
 
-                ' Revisions of an already-current Excel deliverable are commonly edited in place.
-                ' Bind that mutation only when the call targets the basename of the current Final
-                ' and carries actual updates. A read/staging call cannot satisfy this branch.
                 If System.String.Equals(normalizedToolName, "excel_complete_live_workbook", System.StringComparison.OrdinalIgnoreCase) AndAlso
                    arguments.ContainsKey("updates") AndAlso arguments("updates") IsNot Nothing Then
-
                     Dim attachmentName As System.String = GetArgumentText(arguments, "attachment_name")
                     If attachmentName <> System.String.Empty AndAlso RegisteredDeliverableArtifacts IsNot Nothing Then
                         For i As System.Int32 = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
@@ -929,47 +1015,39 @@ Namespace Agents
                 Return False
             End Function
 
-            Public Sub NormalizeSingleLockedProducerArtifactArguments(
-                arguments As IDictionary(Of String, Object),
-                toolCallId As String)
+            Public Sub NormalizeLockedProducerArtifactArguments(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                toolCallId As System.String)
 
-                If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return
-                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <> 1 Then Return
-
-                Dim expected As ExpectedDeliverableSlot = ExpectedDeliverableSlots(0)
+                Dim expected As ExpectedDeliverableSlot = ResolveLockedProducerArtifactSlot(arguments)
                 If expected Is Nothing Then Return
 
-                Dim expectedLogicalId As String = If(expected.LogicalDeliverableId, "").Trim()
-                Dim expectedSlotId As String = If(expected.OutputSlotId, "").Trim()
-                If expectedLogicalId = "" OrElse expectedSlotId = "" Then Return
+                Dim expectedLogicalId As System.String = If(expected.LogicalDeliverableId, System.String.Empty).Trim()
+                Dim expectedSlotId As System.String = If(expected.OutputSlotId, System.String.Empty).Trim()
+                If expectedLogicalId = System.String.Empty OrElse expectedSlotId = System.String.Empty Then Return
 
-                Dim suppliedLogicalId As String = GetArgumentText(arguments, "logical_deliverable_id")
-                Dim suppliedSlotId As String = GetArgumentText(arguments, "output_slot_id")
+                Dim suppliedLogicalId As System.String = GetArgumentText(arguments, "logical_deliverable_id")
+                Dim suppliedSlotId As System.String = GetArgumentText(arguments, "output_slot_id")
 
-                ' Never repair an explicit contradiction. The locked-contract validator must surface it.
-                If suppliedLogicalId <> "" AndAlso
+                If suppliedLogicalId <> System.String.Empty AndAlso
                    Not System.String.Equals(suppliedLogicalId, expectedLogicalId, System.StringComparison.Ordinal) Then Return
-                If suppliedSlotId <> "" AndAlso
+                If suppliedSlotId <> System.String.Empty AndAlso
                    Not System.String.Equals(suppliedSlotId, expectedSlotId, System.StringComparison.Ordinal) Then Return
 
-                If suppliedLogicalId = "" Then arguments("logical_deliverable_id") = expectedLogicalId
-                If suppliedSlotId = "" Then arguments("output_slot_id") = expectedSlotId
+                If suppliedLogicalId = System.String.Empty Then arguments("logical_deliverable_id") = expectedLogicalId
+                If suppliedSlotId = System.String.Empty Then arguments("output_slot_id") = expectedSlotId
 
-                ' Physical revision identity is host-owned for a single locked logical slot.
-                ' Never depend on a model-generated artifact_id/supersedes pair: every producer
-                ' invocation gets a fresh run-local revision id and the host links it to the
-                ' current prior revision of the same slot when one exists.
-                Dim artifactId As String = BuildHostArtifactRevisionId(toolCallId, expectedLogicalId, expectedSlotId)
+                Dim artifactId As System.String = BuildHostArtifactRevisionId(toolCallId, expectedLogicalId, expectedSlotId)
                 arguments("artifact_id") = artifactId
                 arguments.Remove("supersedes_artifact_id")
 
                 If RegisteredDeliverableArtifacts IsNot Nothing Then
-                    For i As Integer = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
+                    For i As System.Int32 = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
                         Dim prior As DeliverableArtifact = RegisteredDeliverableArtifacts(i)
                         If prior Is Nothing Then Continue For
                         If prior.LifecycleState = ArtifactLifecycleState.Superseded Then Continue For
-                        If Not System.String.Equals(If(prior.LogicalDeliverableId, "").Trim(), expectedLogicalId, System.StringComparison.Ordinal) Then Continue For
-                        If Not System.String.Equals(If(prior.OutputSlotId, "").Trim(), expectedSlotId, System.StringComparison.Ordinal) Then Continue For
+                        If Not System.String.Equals(If(prior.LogicalDeliverableId, System.String.Empty).Trim(), expectedLogicalId, System.StringComparison.Ordinal) Then Continue For
+                        If Not System.String.Equals(If(prior.OutputSlotId, System.String.Empty).Trim(), expectedSlotId, System.StringComparison.Ordinal) Then Continue For
                         If Not System.String.IsNullOrWhiteSpace(prior.ArtifactId) Then
                             arguments("supersedes_artifact_id") = prior.ArtifactId.Trim()
                         End If
@@ -977,20 +1055,16 @@ Namespace Agents
                     Next
                 End If
 
-                If GetArgumentText(arguments, "artifact_state") = "" Then
+                If GetArgumentText(arguments, "artifact_state") = System.String.Empty Then
                     arguments("artifact_state") = "final"
                 End If
-                If GetArgumentText(arguments, "artifact_delivery_intent") = "" Then
+                If GetArgumentText(arguments, "artifact_delivery_intent") = System.String.Empty Then
                     arguments("artifact_delivery_intent") = "deliver_to_user"
                 End If
 
-                Dim expectedRaw As Object = Nothing
+                Dim expectedRaw As System.Object = Nothing
                 If Not arguments.TryGetValue("expected_artifacts", expectedRaw) OrElse expectedRaw Is Nothing Then
-                    Dim expectedItem As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.Ordinal) From {
-                        {"logical_deliverable_id", expectedLogicalId},
-                        {"output_slot_id", expectedSlotId}
-                    }
-                    arguments("expected_artifacts") = New System.Collections.Generic.List(Of Object) From {expectedItem}
+                    arguments("expected_artifacts") = BuildLockedExpectedArtifactArguments()
                 End If
             End Sub
 
@@ -4797,6 +4871,129 @@ Namespace Agents
             Return "<TASK_STATUS>" & footerObject.ToString(Formatting.None) & "</TASK_STATUS>"
         End Function
 
+        Public Enum HostFailureCategory
+            Unknown = 0
+            TransportRateLimited = 1
+            TransportUnavailable = 2
+            TransportTimeout = 3
+            RequiredCapabilityUnavailable = 4
+            DeliverableValidationFailed = 5
+            InternalExecutionFailure = 6
+        End Enum
+
+        Public Shared Function ClassifyHostFailure(errorCode As System.String,
+                                                   message As System.String) As HostFailureCategory
+            Dim code As System.String = If(errorCode, System.String.Empty).Trim().ToLowerInvariant()
+            Dim detail As System.String = If(message, System.String.Empty).Trim().ToLowerInvariant()
+
+            If code = "llm_transport_timeout" OrElse code.Contains("timeout") Then
+                Return HostFailureCategory.TransportTimeout
+            End If
+
+            If code = "llm_transport_retry_exhausted" OrElse code.Contains("transport") Then
+                If detail.Contains("429") OrElse detail.Contains("rate limit") OrElse detail.Contains("rate-limit") OrElse detail.Contains("quota") Then
+                    Return HostFailureCategory.TransportRateLimited
+                End If
+                Return HostFailureCategory.TransportUnavailable
+            End If
+
+            If code.Contains("not_available") OrElse code.Contains("unavailable_tool") OrElse
+               code.Contains("required_capability") OrElse code.Contains("missing_required_tool") Then
+                Return HostFailureCategory.RequiredCapabilityUnavailable
+            End If
+
+            If code.Contains("deliverable") OrElse code.Contains("artifact") OrElse
+               code.Contains("validation") Then
+                Return HostFailureCategory.DeliverableValidationFailed
+            End If
+
+            If code = "invalid_text_only_finalization" OrElse
+               code = "complete_missing_required_successful_tools" OrElse
+               code = "host_generated_blocked" Then
+                Return HostFailureCategory.InternalExecutionFailure
+            End If
+
+            Return HostFailureCategory.Unknown
+        End Function
+
+        Public Shared Function TryBuildDeterministicHostFailureMessage(errorCode As System.String,
+                                                                       message As System.String,
+                                                                       userLanguage As System.String,
+                                                                       ByRef result As System.String) As System.Boolean
+            result = System.String.Empty
+            Dim category As HostFailureCategory = ClassifyHostFailure(errorCode, message)
+            If category = HostFailureCategory.Unknown Then Return False
+
+            Dim lang As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant()
+            Dim sep As System.Int32 = lang.IndexOfAny(New System.Char() {"-"c, "_"c})
+            If sep > 0 Then lang = lang.Substring(0, sep)
+
+            Select Case lang
+                Case "de"
+                    Select Case category
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "Der KI-Dienst ist vorübergehend ausgelastet oder rate-limitiert. Der Vorgang konnte deshalb nicht zuverlässig abgeschlossen werden. Bitte versuchen Sie es später erneut."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "Der KI-Dienst ist vorübergehend nicht erreichbar. Der Vorgang konnte deshalb nicht zuverlässig abgeschlossen werden. Bitte versuchen Sie es später erneut."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "Die Anfrage an den KI-Dienst hat das zulässige Zeitlimit überschritten. Bitte versuchen Sie es erneut."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "Eine für diesen Vorgang erforderliche Funktion ist derzeit nicht verfügbar. Der Vorgang konnte deshalb nicht zuverlässig abgeschlossen werden."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "Das angeforderte Ergebnis konnte nicht vollständig und zuverlässig validiert werden. Es wurde deshalb nicht als abgeschlossen ausgeliefert."
+                        Case Else
+                            result = "Der Vorgang konnte aufgrund eines internen Ausführungsfehlers nicht zuverlässig abgeschlossen werden. Bitte versuchen Sie es erneut."
+                    End Select
+                Case "fr"
+                    Select Case category
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "Le service d’IA est temporairement saturé ou limité en débit. La tâche n’a donc pas pu être terminée de manière fiable. Veuillez réessayer plus tard."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "Le service d’IA est temporairement indisponible. La tâche n’a donc pas pu être terminée de manière fiable. Veuillez réessayer plus tard."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "La requête adressée au service d’IA a dépassé le délai autorisé. Veuillez réessayer."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "Une fonction requise pour cette tâche n’est actuellement pas disponible. La tâche n’a donc pas pu être terminée de manière fiable."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "Le résultat demandé n’a pas pu être validé complètement et de manière fiable. Il n’a donc pas été remis comme résultat final."
+                        Case Else
+                            result = "La tâche n’a pas pu être terminée de manière fiable en raison d’une erreur d’exécution interne. Veuillez réessayer."
+                    End Select
+                Case "it"
+                    Select Case category
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "Il servizio di IA è temporaneamente sovraccarico o soggetto a limiti di frequenza. L’operazione non ha quindi potuto essere completata in modo affidabile. Riprova più tardi."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "Il servizio di IA è temporaneamente non disponibile. L’operazione non ha quindi potuto essere completata in modo affidabile. Riprova più tardi."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "La richiesta al servizio di IA ha superato il tempo massimo consentito. Riprova."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "Una funzione necessaria per questa operazione non è attualmente disponibile. L’operazione non ha quindi potuto essere completata in modo affidabile."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "Il risultato richiesto non ha potuto essere convalidato in modo completo e affidabile e pertanto non è stato consegnato come risultato finale."
+                        Case Else
+                            result = "L’operazione non ha potuto essere completata in modo affidabile a causa di un errore interno di esecuzione. Riprova."
+                    End Select
+                Case Else
+                    Select Case category
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "The AI service is temporarily busy or rate-limited, so the task could not be completed reliably. Please try again later."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "The AI service is temporarily unavailable, so the task could not be completed reliably. Please try again later."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "The request to the AI service exceeded the allowed time limit. Please try again."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "A capability required for this task is currently unavailable, so the task could not be completed reliably."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "The requested result could not be fully and reliably validated, so it was not delivered as complete."
+                        Case Else
+                            result = "The task could not be completed reliably because of an internal execution error. Please try again."
+                    End Select
+            End Select
+
+            Return result <> System.String.Empty
+        End Function
+
         Public Shared Function BuildUserSafeBlockedFinalMessage(runState As ToolingRunState,
                                                                 errorCode As String,
                                                                 message As String,
@@ -4804,6 +5001,14 @@ Namespace Agents
                                                                 failedCount As Integer,
                                                                 Optional userLanguage As String = "",
                                                                 Optional appendTaskStatusFooter As Boolean = True) As String
+            Dim deterministicMessage As System.String = System.String.Empty
+            If TryBuildDeterministicHostFailureMessage(errorCode, message, userLanguage, deterministicMessage) Then
+                If appendTaskStatusFooter Then
+                    deterministicMessage &= " " & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
+                End If
+                Return deterministicMessage.Trim()
+            End If
+
             Dim useMemoryMessage As Boolean =
                 String.Equals(errorCode, MissingRequiredMemoryAccessCode, StringComparison.OrdinalIgnoreCase) OrElse
                 String.Equals(errorCode, MemoryListDoneButMemoryGetRequiredCode, StringComparison.OrdinalIgnoreCase) OrElse

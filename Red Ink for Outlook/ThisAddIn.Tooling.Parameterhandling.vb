@@ -739,6 +739,9 @@ Partial Public Class ThisAddIn
             .ModelReplayContent = source.ModelReplayContent,
             .ModelReplaySummary = source.ModelReplaySummary,
             .WasCompactedForModelReplay = source.WasCompactedForModelReplay,
+            .ReplayRetention = source.ReplayRetention,
+            .ProducedIteration = source.ProducedIteration,
+            .ControlPlanePayloadKey = source.ControlPlanePayloadKey,
             .NormalizedCallSignature = source.NormalizedCallSignature,
             .WasDuplicateReplay = True
         }

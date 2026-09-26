@@ -2379,7 +2379,15 @@ Partial Public Class ThisAddIn
 
                         _apCurrentProcessingStopwatch = Stopwatch.StartNew()
                         Try
-                            Await ProcessIncomingMailAsync(entryId, jobCt)
+                            ' The entire unattended mail job owns one provider-agnostic transport
+                            ' profile. AsyncLocal flow lets nested helper/tool/sub-agent LLM calls
+                            ' inherit the same bounded retry contract without host/model special cases.
+                            Using transportRetryScope As System.IDisposable =
+                                Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.Push(
+                                    Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
+
+                                Await ProcessIncomingMailAsync(entryId, jobCt)
+                            End Using
                         Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
                             ' Job-level abort (not session-level) — log and continue to next mail
                             ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
@@ -3411,7 +3419,8 @@ Partial Public Class ThisAddIn
                             memoryGroundingModeIsExplicit:=True,
                             toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
                                 If(String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
-                                mailInfo.Subject))
+                                mailInfo.Subject),
+                            transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -3419,7 +3428,8 @@ Partial Public Class ThisAddIn
                                              UseSecondAPI:=_apUseSecondApi,
                                              HideSplash:=True, EnsureUI:=False,
                                              cancellationToken:=ct,
-                                             binaryOutputDirectory:=_apCurrentTempDir)
+                                             binaryOutputDirectory:=_apCurrentTempDir,
+                                             transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                     End If
                 Catch ex As OperationCanceledException
                     ' Check if this is a job-level abort (not session-level)
@@ -8399,14 +8409,16 @@ Partial Public Class ThisAddIn
                         workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
                         memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
                         memoryGroundingModeIsExplicit:=True,
-                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(recipientName, voicemailMailInfo.Subject))
+                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(recipientName, voicemailMailInfo.Subject),
+                        transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
                     response = Await LLM(effectiveSystemPrompt, userPrompt,
                                          UseSecondAPI:=_apUseSecondApi,
                                          HideSplash:=True, EnsureUI:=False,
                                          cancellationToken:=ct,
-                                         binaryOutputDirectory:=tempDir)
+                                         binaryOutputDirectory:=tempDir,
+                                         transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 End If
             Finally
                 If senderDesignScope IsNot Nothing Then senderDesignScope.Dispose()

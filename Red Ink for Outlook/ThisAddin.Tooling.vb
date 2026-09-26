@@ -177,6 +177,9 @@ Partial Public Class ThisAddIn
         Public Property ModelReplayContent As String
         Public Property ModelReplaySummary As String
         Public Property WasCompactedForModelReplay As Boolean
+        Public Property ReplayRetention As SharedLibrary.Agents.ToolReplayRetentionKind
+        Public Property ProducedIteration As Integer
+        Public Property ControlPlanePayloadKey As String
 
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
@@ -413,6 +416,10 @@ Partial Public Class ThisAddIn
             Catch
                 Return raw.Trim().Trim(""""c)
             End Try
+        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+            Throw
+        Catch ex As System.OperationCanceledException
+            Throw
         Catch
             Return ""
         End Try
@@ -461,6 +468,11 @@ Partial Public Class ThisAddIn
                 cancellationToken,
                 True,
                 False)
+        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+            sw.Stop()
+            ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight transport retry exhausted: elapsedMs={sw.ElapsedMilliseconds}; status={ex.StatusCode}; attempts={ex.AttemptCount}/{ex.MaxAttempts}; profile={ex.RetryProfile}.")
+            context.LogWarn("Bootstrap preflight stopped after transient LLM transport retry exhaustion.", details:=$"host={context.HostKind}; status={ex.StatusCode}; attempts={ex.AttemptCount}/{ex.MaxAttempts}; profile={ex.RetryProfile}")
+            Throw
         Catch ex As System.TimeoutException
             sw.Stop()
             ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight timed out: elapsedMs={sw.ElapsedMilliseconds}.")
@@ -759,7 +771,8 @@ Partial Public Class ThisAddIn
         Optional progressSink As Action(Of String) = Nothing,
         Optional subAgentExpectedArtifactsJson As String = Nothing,
         Optional toolingLogArchivePath As String = Nothing,
-        Optional subAgentRequiredSuccessfulToolNames As IReadOnlyList(Of String) = Nothing) As Task(Of String)
+        Optional subAgentRequiredSuccessfulToolNames As IReadOnlyList(Of String) = Nothing,
+        Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -1141,6 +1154,17 @@ Partial Public Class ThisAddIn
             End If
         Else
             context.SelectedTools = BuildInitialToolExposure(fullAllowedTools, context.AllowedToolRegistry, toolSelectionHintText)
+
+            If context.AllowedToolRegistry IsNot Nothing Then
+                Dim runtimePrimitiveNames As List(Of String) =
+                    SharedLibrary.Agents.ToolingRuntimePrimitives.AddAvailableRequiredRuntimePrimitives(
+                        New List(Of String)(),
+                        context.AllowedToolRegistry)
+                For Each runtimePrimitiveName As String In runtimePrimitiveNames
+                    EnsureVisibleToolLoaded(runtimePrimitiveName, context)
+                Next
+            End If
+
             context.LazyToolLoadingEnabled =
                 context.SelectedTools IsNot Nothing AndAlso
                 context.SelectedTools.Any(
@@ -1256,6 +1280,14 @@ Partial Public Class ThisAddIn
         If configuredTimeoutMs <= 0 Then configuredTimeoutMs = 30000
         Dim effectiveTimeout As Integer = System.Math.Max(1, CInt(System.Math.Ceiling(configuredTimeoutMs / 1000.0)))
 
+        Dim effectiveTransportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile =
+            Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.ResolveProfile(transportRetryProfile)
+        Dim transportRetryPolicy As Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicy =
+            Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicy.ForProfile(effectiveTransportRetryProfile)
+        Dim transportRetryScope As System.IDisposable =
+            Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.Push(effectiveTransportRetryProfile)
+        context.Log("LLM transport retry profile: " & effectiveTransportRetryProfile.ToString(), "diag")
+
         Try
             Dim bootstrapDecision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision = Nothing
 
@@ -1330,7 +1362,8 @@ Partial Public Class ThisAddIn
                     INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
                         context.AllToolResponses,
                         context.ToolingModel,
-                        compactForSubAgent:=False)
+                        compactForSubAgent:=False,
+                        currentIteration:=context.CurrentIteration)
                     context.Log("Initial tool responses prepared for model", "diag")
                 End If
             End If
@@ -1433,7 +1466,8 @@ Partial Public Class ThisAddIn
                     INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
                         context.AllToolResponses,
                         context.ToolingModel,
-                        compactForSubAgent:=False)
+                        compactForSubAgent:=False,
+                        currentIteration:=context.CurrentIteration)
                     context.Log("Initial tool responses prepared for model", "diag")
                 End If
             End If
@@ -1634,8 +1668,11 @@ Partial Public Class ThisAddIn
 
                 ' Create linked cancellation with timeout (matches RunLlmAsync pattern).
                 Using timeoutCts As New System.Threading.CancellationTokenSource()
-                    Dim totalTimeout As Integer = CInt(System.Math.Ceiling(perCallTimeoutMs / 1000.0)) + 60 ' transport timeout + host buffer
-                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+                    Dim hostOperationTimeoutMs As Integer =
+                        transportRetryPolicy.GetHostOperationTimeoutMilliseconds(perCallTimeoutMs, 60000)
+                    Dim totalTimeout As Integer =
+                        System.Math.Max(1, CInt(System.Math.Ceiling(hostOperationTimeoutMs / 1000.0R)))
+                    timeoutCts.CancelAfter(System.TimeSpan.FromSeconds(totalTimeout))
 
                     Using combinedCts As System.Threading.CancellationTokenSource =
                         System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
@@ -1683,18 +1720,33 @@ Partial Public Class ThisAddIn
                                 ex.Message,
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
+                                userLanguage:=ResolveBlockedFallbackUserLanguage(context),
                                 appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
 
                         Catch ex As System.TimeoutException
                             context.LogError("LLM call timed out in the shared LLM transport.", ex:=ex)
                             ToolingFileLogger.EndSession(False, "LLM timeout")
-                            Return "The AI request timed out before a response was received. Please try again."
+                            Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                                context.SequencingState,
+                                "llm_transport_timeout",
+                                "The AI request timed out before a response was received.",
+                                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
+                                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
+                                userLanguage:=ResolveBlockedFallbackUserLanguage(context),
+                                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
 
                         Catch ex As System.OperationCanceledException When timeoutCts.IsCancellationRequested AndAlso
                                                                           Not cancellationToken.IsCancellationRequested
                             context.LogError($"LLM call timed out after {totalTimeout}s")
                             ToolingFileLogger.EndSession(False, $"Timeout after {totalTimeout}s")
-                            Return "The AI request timed out before a response was received. Please try again."
+                            Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                                context.SequencingState,
+                                "llm_transport_timeout",
+                                "The AI request timed out before a response was received.",
+                                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
+                                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
+                                userLanguage:=ResolveBlockedFallbackUserLanguage(context),
+                                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
 
                         Catch ex As System.OperationCanceledException
                             If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -1761,7 +1813,8 @@ Partial Public Class ThisAddIn
                             INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
                                 context.AllToolResponses,
                                 context.ToolingModel,
-                                compactForSubAgent:=False)
+                                compactForSubAgent:=False,
+                                currentIteration:=context.CurrentIteration)
 
                             LogLatestUserRequestDiagnostic(context, "continuation")
 
@@ -1807,7 +1860,8 @@ Partial Public Class ThisAddIn
                             INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
                                 context.AllToolResponses,
                                 context.ToolingModel,
-                                compactForSubAgent:=False)
+                                compactForSubAgent:=False,
+                                currentIteration:=context.CurrentIteration)
 
                             LogLatestUserRequestDiagnostic(context, "continuation")
 
@@ -1834,7 +1888,8 @@ Partial Public Class ThisAddIn
                         INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
                             context.AllToolResponses,
                             context.ToolingModel,
-                            compactForSubAgent:=False)
+                            compactForSubAgent:=False,
+                            currentIteration:=context.CurrentIteration)
 
                         LogLatestUserRequestDiagnostic(context, "continuation")
 
@@ -1858,7 +1913,8 @@ Partial Public Class ThisAddIn
                         INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
             context.AllToolResponses,
             context.ToolingModel,
-            compactForSubAgent:=True)
+            compactForSubAgent:=True,
+            currentIteration:=context.CurrentIteration)
 
                         context.LogWarn(
             $"Empty sub-agent model response after successful tool result; retrying with compact context ({context.SubAgentEmptyResponseRetryCount}/1).",
@@ -1957,7 +2013,7 @@ Partial Public Class ThisAddIn
                                 .Response = "{""ok"":true}",
                                 .OriginalCallJson = tc.RawJson
                             }
-                            context.AllToolResponses.Add(progressResponse)
+                            AddToolResponseToHistory(context, progressResponse)
 
                             context.Log("Progress update reported to the user.", "diag")
                             Continue For
@@ -1965,14 +2021,14 @@ Partial Public Class ThisAddIn
 
                         If SharedLibrary.Agents.CapabilityRoutingTool.IsResolverToolName(tc.ToolName) Then
                             Dim routingResponse As ToolResponse = ResolveCapabilityRoutingCall(tc, context)
-                            context.AllToolResponses.Add(routingResponse)
+                            AddToolResponseToHistory(context, routingResponse)
                             restartForCapabilityRouting = True
                             Exit For
                         End If
 
                         If ShouldBlockForCapabilityRouting(tc.ToolName, context) Then
                             Dim blockedRoutingResponse As ToolResponse = BuildCapabilityRoutingBlockedResponse(tc, context)
-                            context.AllToolResponses.Add(blockedRoutingResponse)
+                            AddToolResponseToHistory(context, blockedRoutingResponse)
                             context.PendingContinuationGuardPrompt = BuildCapabilityRoutingGuardPrompt(context)
                             context.PendingGuardTitle = "HOST CAPABILITY ROUTING GUARD"
                             context.PendingRejectedTurnExplanation = "The previous turn attempted substantive tooling before mandatory capability routing was completed."
@@ -2033,17 +2089,16 @@ Partial Public Class ThisAddIn
 
                         Dim normalizedToolName As String = If(tc.ToolName, "").Trim()
 
-                        ' A skill/delegation may lock exactly one logical output slot while producer
-                        ' artifact metadata remains optional in the tool schema. Bind missing physical
-                        ' revision metadata host-side so partial model metadata cannot make a valid
-                        ' mutation call structurally impossible. Explicit slot contradictions are left
-                        ' untouched and are rejected by the validators below.
+                        ' A skill/delegation may lock one or more logical output slots while producer
+                        ' artifact metadata remains optional in the tool schema. Bind host-owned revision
+                        ' metadata whenever the exact slot is unambiguous. With multiple unresolved slots,
+                        ' the producer must select one of the host-issued opaque slot pairs explicitly.
                         If context.SequencingState IsNot Nothing AndAlso
                            context.SequencingState.IsDeliverableCapableTool(normalizedToolName) AndAlso
-                           context.SequencingState.ShouldNormalizeSingleLockedProducerArtifactArguments(
+                           context.SequencingState.ShouldNormalizeLockedProducerArtifactArguments(
                                normalizedToolName,
                                tc.Arguments) Then
-                            context.SequencingState.NormalizeSingleLockedProducerArtifactArguments(
+                            context.SequencingState.NormalizeLockedProducerArtifactArguments(
                                 tc.Arguments,
                                 tc.CallId)
                         End If
@@ -2076,7 +2131,7 @@ Partial Public Class ThisAddIn
                                 })
                             End If
 
-                            context.AllToolResponses.Add(hiddenResponse)
+                            AddToolResponseToHistory(context, hiddenResponse)
 
                             If context.SequencingState IsNot Nothing AndAlso Not preparedForNextTurn Then
                                 context.SequencingState.NoteToolFailure(
@@ -2125,7 +2180,7 @@ Partial Public Class ThisAddIn
 
                         If subAgentMode AndAlso Not IsToolAllowedForCurrentContext(tc.ToolName, context) Then
                             Dim blockedResponse = BuildToolNotAllowedResponse(tc, context)
-                            context.AllToolResponses.Add(blockedResponse)
+                            AddToolResponseToHistory(context, blockedResponse)
 
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.NoteToolFailure(
@@ -2192,7 +2247,7 @@ Partial Public Class ThisAddIn
                                     .OriginalCallJson = tc.RawJson
                                 }
 
-                                context.AllToolResponses.Add(errorResp)
+                                AddToolResponseToHistory(context, errorResp)
 
                                 If context.SequencingState IsNot Nothing Then
                                     context.SequencingState.NoteToolFailure(tc.ToolName, "unknown_tool", errorResp.ErrorMessage, toolErrorHandling:="skip", recoveryScopeKey:=recoveryScopeKey)
@@ -2209,7 +2264,7 @@ Partial Public Class ThisAddIn
                             Dim invalidArgsResponse As ToolResponse =
                                 BuildInvalidToolArgumentsResponse(tc, toolArgumentValidationError)
 
-                            context.AllToolResponses.Add(invalidArgsResponse)
+                            AddToolResponseToHistory(context, invalidArgsResponse)
 
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.NoteToolFailure(
@@ -2308,7 +2363,7 @@ Partial Public Class ThisAddIn
                                     .NormalizedCallSignature = normalizedToolCallSignature
                                 }
 
-                                context.AllToolResponses.Add(syntheticSubAgentTerminal)
+                                AddToolResponseToHistory(context, syntheticSubAgentTerminal)
 
                                 context.SequencingState.NoteToolFailure(
                                     tc.ToolName,
@@ -2382,7 +2437,7 @@ Partial Public Class ThisAddIn
                                 .NormalizedCallSignature = normalizedToolCallSignature
                             }
 
-                            context.AllToolResponses.Add(syntheticExplicitTerminal)
+                            AddToolResponseToHistory(context, syntheticExplicitTerminal)
 
                             context.SequencingState.NoteToolFailure(
                                 tc.ToolName,
@@ -2414,7 +2469,8 @@ Partial Public Class ThisAddIn
                         If context.SequencingState IsNot Nothing AndAlso
                            Not context.SequencingState.ValidateLockedExpectedArtifactArguments(
                                tc.Arguments,
-                               lockedArtifactContractFailureReason) Then
+                               lockedArtifactContractFailureReason,
+                               normalizedToolName) Then
 
                             Dim lockedArtifactErrorCode As String =
                                 If(String.IsNullOrWhiteSpace(lockedArtifactContractFailureReason),
@@ -2437,7 +2493,7 @@ Partial Public Class ThisAddIn
                                 .NormalizedCallSignature = normalizedToolCallSignature
                             }
 
-                            context.AllToolResponses.Add(syntheticLockedArtifactContract)
+                            AddToolResponseToHistory(context, syntheticLockedArtifactContract)
 
                             context.SequencingState.NoteToolFailure(
                                 tc.ToolName,
@@ -2489,7 +2545,7 @@ Partial Public Class ThisAddIn
                                 .NormalizedCallSignature = normalizedToolCallSignature
                             }
 
-                            context.AllToolResponses.Add(syntheticExplicitArtifactIdentity)
+                            AddToolResponseToHistory(context, syntheticExplicitArtifactIdentity)
 
                             ' An incomplete explicit artifact identity is not a valid opaque
                             ' operation identity and therefore must not poison a corrected retry
@@ -2555,7 +2611,7 @@ Partial Public Class ThisAddIn
                                         .OriginalCallJson = tc.RawJson,
                                         .NormalizedCallSignature = normalizedToolCallSignature
                                     }
-                                    context.AllToolResponses.Add(syntheticExpand)
+                                    AddToolResponseToHistory(context, syntheticExpand)
 
                                     context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
                                     context.PendingGuardTitle = "HOST NO-PROGRESS BREAKER"
@@ -2751,7 +2807,7 @@ Partial Public Class ThisAddIn
 
                         toolResponse.OriginalCallJson = tc.RawJson
                         toolResponse.NormalizedCallSignature = normalizedToolCallSignature
-                        context.AllToolResponses.Add(toolResponse)
+                        AddToolResponseToHistory(context, toolResponse)
 
                         If Not toolResponse.WasDuplicateReplay Then
                             SharedLibrary.Agents.ToolCallSequencing.NoteToolExecutionMetadata(
@@ -3218,7 +3274,8 @@ Partial Public Class ThisAddIn
                         Dim preparedRoutingResponses As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
-                            compactForSubAgent:=subAgentMode)
+                            compactForSubAgent:=subAgentMode,
+                            currentIteration:=context.CurrentIteration)
                         INI_APICall_ToolResponses_2 = preparedRoutingResponses
                         context.Log("Capability routing completed/guarded; restarting next iteration.", "diag")
                         Continue While
@@ -3233,7 +3290,8 @@ Partial Public Class ThisAddIn
                         Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
-                            compactForSubAgent:=subAgentMode)
+                            compactForSubAgent:=subAgentMode,
+                            currentIteration:=context.CurrentIteration)
 
                         INI_APICall_ToolResponses_2 = preparedToolResponsesAfterExposureMiss
                         context.Log("Tool was prepared after exposure miss; restarting next iteration with refreshed tool definitions.", "diag")
@@ -3244,7 +3302,8 @@ Partial Public Class ThisAddIn
                         Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
-                            compactForSubAgent:=subAgentMode)
+                            compactForSubAgent:=subAgentMode,
+                            currentIteration:=context.CurrentIteration)
 
                         INI_APICall_ToolResponses_2 = preparedToolResponsesAfterLoader
                         context.Log("tool_loader completed; refreshed tool definitions will be exposed on the next iteration.", "diag")
@@ -3255,7 +3314,8 @@ Partial Public Class ThisAddIn
                         Dim preparedToolResponses As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
-                            compactForSubAgent:=subAgentMode)
+                            compactForSubAgent:=subAgentMode,
+                            currentIteration:=context.CurrentIteration)
                         INI_APICall_ToolResponses_2 = preparedToolResponses
                         context.Log("Tool responses prepared for next iteration", "diag")
                         Continue While
@@ -3272,7 +3332,8 @@ Partial Public Class ThisAddIn
                     Dim toolResponses = BuildToolResponsesForModelBudgeted(
     context.AllToolResponses,
     context.ToolingModel,
-    compactForSubAgent:=subAgentMode)
+    compactForSubAgent:=subAgentMode,
+    currentIteration:=context.CurrentIteration)
                     INI_APICall_ToolResponses_2 = toolResponses
                     context.Log("Tool responses prepared for next iteration", "diag")
                     If abortDueToToolError Then
@@ -4003,8 +4064,11 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
                 Using timeoutCts As New System.Threading.CancellationTokenSource()
-                    Dim totalTimeout = effectiveTimeout + 60
-                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+                    Dim hostOperationTimeoutMs As Integer =
+                        transportRetryPolicy.GetHostOperationTimeoutMilliseconds(effectiveTimeout * 1000, 60000)
+                    Dim totalTimeout As Integer =
+                        System.Math.Max(1, CInt(System.Math.Ceiling(hostOperationTimeoutMs / 1000.0R)))
+                    timeoutCts.CancelAfter(System.TimeSpan.FromSeconds(totalTimeout))
 
                     Using combinedCts As System.Threading.CancellationTokenSource =
                         System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
@@ -4041,6 +4105,8 @@ Partial Public Class ThisAddIn
                               details:=$"host={context.HostKind}; iteration={iteration}")
                             End If
 
+                        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+                            Throw
                         Catch ex As System.TimeoutException
                             context.LogWarn("Forced final LLM call timed out.", details:=ex.Message)
                             context.EmptyMainModelResponse = True
@@ -4123,8 +4189,11 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
                 Using timeoutCts As New System.Threading.CancellationTokenSource()
-                    Dim totalTimeout = effectiveTimeout + 60
-                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+                    Dim hostOperationTimeoutMs As Integer =
+                        transportRetryPolicy.GetHostOperationTimeoutMilliseconds(effectiveTimeout * 1000, 60000)
+                    Dim totalTimeout As Integer =
+                        System.Math.Max(1, CInt(System.Math.Ceiling(hostOperationTimeoutMs / 1000.0R)))
+                    timeoutCts.CancelAfter(System.TimeSpan.FromSeconds(totalTimeout))
 
                     Using combinedCts As System.Threading.CancellationTokenSource =
             System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
@@ -4153,6 +4222,8 @@ Partial Public Class ThisAddIn
                            $"The tool-assisted run stopped before completion. Failed tool: {abortToolName}. Reason: {abortToolErrorMessage}")
                             End If
 
+                        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+                            Throw
                         Catch ex As System.TimeoutException
                             context.LogWarn("Final abort-summary LLM call timed out.", details:=ex.Message)
                             currentResponse =
@@ -4443,12 +4514,43 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(sessionSucceeded, sessionSummary)
             Return currentResponse
 
-        Catch ex As OperationCanceledException
+        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+            context.LogWarn(
+                "Transient LLM transport retry budget exhausted outside the main model-turn handler.",
+                details:=$"status={ex.StatusCode}; attempts={ex.AttemptCount}/{ex.MaxAttempts}; profile={ex.RetryProfile}; host={context.HostKind}; subAgentMode={subAgentMode}")
+
+            If context.SequencingState IsNot Nothing Then
+                context.SequencingState.FinalResponseOrigin = "host_generated"
+                context.SequencingState.HasOpenToolWorkflow = False
+            End If
+
+            context.FinalizationBlocked = True
+            context.FinalizationBlockedReason = "llm_transport_retry_exhausted"
+            ToolingFileLogger.EndSession(False, $"LLM transport retry exhausted (HTTP {ex.StatusCode})")
+
+            If subAgentMode Then
+                Return SharedLibrary.Agents.ToolCallSequencing.BuildBlockedResultPayload(
+                    "llm_transport_retry_exhausted",
+                    "llm_transport",
+                    ex.Message,
+                    retryable:=False)
+            End If
+
+            Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                context.SequencingState,
+                "llm_transport_retry_exhausted",
+                ex.Message,
+                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
+                context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
+                userLanguage:=ResolveBlockedFallbackUserLanguage(context),
+                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+
+        Catch ex As System.OperationCanceledException
             context.LogWarn("Operation cancelled")
             ToolingFileLogger.EndSession(False, "Cancelled")
             Return "Operation was canceled by the user."
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             context.LogError($"Error in tooling loop: {ex.Message}", ex:=ex)
             If ShouldShowToolingModalDialogs() Then
                 ShowCustomMessageBox($"Error during tool execution: {ex.Message}")
@@ -4457,6 +4559,11 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, $"Exception: {ex.Message}", ex:=ex)
             Return $"Error during tool execution: {ex.Message}"
         Finally
+
+            If transportRetryScope IsNot Nothing Then
+                transportRetryScope.Dispose()
+                transportRetryScope = Nothing
+            End If
 
             If workflowScope IsNot Nothing Then
                 workflowScope.Dispose()
@@ -4468,6 +4575,7 @@ Partial Public Class ThisAddIn
             If Not subAgentMode Then
                 Try
                     SharedLibrary.Agents.ToolResultStore.ClearWorkflow(context.WorkflowId)
+                    SharedLibrary.Agents.ToolingControlPlaneStore.ClearWorkflow(context.WorkflowId)
                     SharedLibrary.Agents.SkillAuthoringPostcondition.Clear(context.WorkflowId)
                     ToolingFileLogger.LogStep($"ClearWorkflow: tool result store cleared for workflow '{context.WorkflowId}'.")
                 Catch ex As Exception
@@ -4565,11 +4673,26 @@ Partial Public Class ThisAddIn
             Return ""
         End If
 
-        Return SharedLibrary.Agents.WorkflowContinuity.BuildPromptContextBlock(
-            context.WorkflowId,
-            includeRecentWorkflowMemoryStubs:=context.SequencingState IsNot Nothing AndAlso
-                                              context.SequencingState.ShouldExposeRecentMemoryStubs)
+        Dim runtimeStateBlock As String =
+            SharedLibrary.Agents.WorkflowContinuity.BuildPromptContextBlock(
+                context.WorkflowId,
+                includeRecentWorkflowMemoryStubs:=context.SequencingState IsNot Nothing AndAlso
+                                                  context.SequencingState.ShouldExposeRecentMemoryStubs)
+
+        Dim controlPlaneBlock As String =
+            SharedLibrary.Agents.ToolingControlPlaneStore.BuildPromptContextBlock(context.WorkflowId)
+
+        If String.IsNullOrWhiteSpace(runtimeStateBlock) Then Return controlPlaneBlock
+        If String.IsNullOrWhiteSpace(controlPlaneBlock) Then Return runtimeStateBlock
+        Return runtimeStateBlock & Environment.NewLine & Environment.NewLine & controlPlaneBlock
     End Function
+
+    Private Sub AddToolResponseToHistory(context As ToolExecutionContext,
+                                         response As ToolResponse)
+        If context Is Nothing OrElse response Is Nothing Then Return
+        response.ProducedIteration = context.CurrentIteration
+        context.AllToolResponses.Add(response)
+    End Sub
 
     Private Function ExtractWorkflowSkillName(toolCall As ToolCall,
                                               toolResponse As ToolResponse) As String
@@ -4626,6 +4749,24 @@ Partial Public Class ThisAddIn
                     context.WorkflowId,
                     context.HostKind,
                     skillName)
+
+            If Not context.IsSubAgentRun AndAlso
+               toolResponse IsNot Nothing AndAlso
+               toolResponse.Success Then
+                Dim pinnedControlPlane As SharedLibrary.Agents.ToolingControlPlaneStore.PinnedPayload =
+                    SharedLibrary.Agents.ToolingControlPlaneStore.PinActiveSkillPayload(
+                        context.WorkflowId,
+                        skillName,
+                        rawResponse)
+
+                If pinnedControlPlane IsNot Nothing AndAlso toolResponse IsNot Nothing Then
+                    toolResponse.ReplayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.ControlPlanePinned
+                    toolResponse.ControlPlanePayloadKey = pinnedControlPlane.Key
+                    context.Log(
+                        $"Control-plane payload pinned: kind={pinnedControlPlane.Kind}; name={pinnedControlPlane.Name}; chars={pinnedControlPlane.TotalChars}",
+                        "diag")
+                End If
+            End If
         End If
 
         context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
@@ -4642,6 +4783,7 @@ Partial Public Class ThisAddIn
         ' to bypass the declared helper contract because tool_loader itself re-checks
         ' every requested substantive tool through this same function.
         If IsReportProgressToolName(toolName) Then Return True
+        If SharedLibrary.Agents.ToolingRuntimePrimitives.IsRequiredRuntimePrimitive(toolName) Then Return True
         If toolName.Trim().Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then Return True
         If toolName.Trim().Equals("report_inability", StringComparison.OrdinalIgnoreCase) Then Return True
 
@@ -5356,6 +5498,19 @@ Partial Public Class ThisAddIn
             failedCount = context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count()
         End If
 
+        Dim deterministicHostMessage As System.String = System.String.Empty
+        If SharedLibrary.Agents.ToolCallSequencing.TryBuildDeterministicHostFailureMessage(
+            errorCode,
+            message,
+            ResolveBlockedFallbackUserLanguage(context),
+            deterministicHostMessage) Then
+
+            Return deterministicHostMessage.Trim() & " " &
+                SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
+                    "blocked",
+                    If(errorCode, "host_generated_blocked"))
+        End If
+
         Dim partialMessage As String =
             Await BuildTaskSpecificPartialBlockedMessageAsync(
                 context,
@@ -5566,10 +5721,15 @@ Partial Public Class ThisAddIn
                 requestedToolNames,
                 context.AllowedToolRegistry)
 
-            ' A loaded skill is an execution boundary, not merely a preload hint.
-            ' Restrict the parent run to exactly the helpers declared by that skill.
-            ' This prevents undeclared lazy loads (for example context_expand) while
-            ' keeping the mechanism completely skill-agnostic and identical across hosts.
+            expandedToolNames =
+                SharedLibrary.Agents.ToolingRuntimePrimitives.AddAvailableRequiredRuntimePrimitives(
+                    expandedToolNames,
+                    context.AllowedToolRegistry)
+
+            ' A loaded skill is an execution boundary for substantive helpers. Host-owned
+            ' runtime primitives remain available so lossless host protocols (for example
+            ' reading a result_ref) cannot become unusable merely because a skill did not
+            ' declare infrastructure tools as part of its domain helper contract.
             context.AllowedToolNames = New HashSet(Of String)(expandedToolNames, StringComparer.OrdinalIgnoreCase)
             context.EnforceAllowedToolScope = True
 
@@ -6910,6 +7070,14 @@ Partial Public Class ThisAddIn
                 End If
 
                 response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
+
+                Dim hostExpectedArtifacts As Object = Nothing
+                If toolCall.Arguments IsNot Nothing AndAlso
+                   skillArgs.TryGetValue("expected_artifacts", hostExpectedArtifacts) AndAlso
+                   hostExpectedArtifacts IsNot Nothing Then
+                    toolCall.Arguments("expected_artifacts") = hostExpectedArtifacts
+                End If
+
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
 
                 ApplyStructuredAgentResult(response, context)
@@ -7714,8 +7882,14 @@ __AfterDispatch:
         ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
         Using timeoutCts As New System.Threading.CancellationTokenSource()
-            Dim totalTimeout = effectiveTimeout + 60
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+            Dim retryPolicy As Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicy =
+                Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicy.ForProfile(
+                    Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit)
+            Dim hostOperationTimeoutMs As Integer =
+                retryPolicy.GetHostOperationTimeoutMilliseconds(effectiveTimeout * 1000, 60000)
+            Dim totalTimeout As Integer =
+                System.Math.Max(1, CInt(System.Math.Ceiling(hostOperationTimeoutMs / 1000.0R)))
+            timeoutCts.CancelAfter(System.TimeSpan.FromSeconds(totalTimeout))
 
             Using combinedCts As System.Threading.CancellationTokenSource =
                 System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
@@ -7741,6 +7915,8 @@ __AfterDispatch:
                     End If
 
                     Return If(forcedFinalResponse, "")
+                Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+                    Throw
                 Catch ex As System.TimeoutException
                     context.LogWarn("Forced no-tool finalization timed out.", details:=ex.Message)
                     Return ""

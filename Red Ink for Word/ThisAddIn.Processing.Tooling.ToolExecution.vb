@@ -490,6 +490,14 @@ Partial Public Class ThisAddIn
                 End If
 
                 response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
+
+                Dim hostExpectedArtifacts As Object = Nothing
+                If toolCall.Arguments IsNot Nothing AndAlso
+                   skillArgs.TryGetValue("expected_artifacts", hostExpectedArtifacts) AndAlso
+                   hostExpectedArtifacts IsNot Nothing Then
+                    toolCall.Arguments("expected_artifacts") = hostExpectedArtifacts
+                End If
+
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
 
                 ApplyStructuredAgentResult(response, context)

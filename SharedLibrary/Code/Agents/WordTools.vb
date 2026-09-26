@@ -278,6 +278,7 @@ Namespace Agents
                 Dim body As W.Body =
                     doc.MainDocumentPart.Document.Body
 
+                Using revisionScope As System.IDisposable = BeginRevisionIdScope(doc)
                 For Each t As MarkupTask In tasks
                     Dim op As String =
                         If(String.IsNullOrWhiteSpace(t.Op), "replace", t.Op)
@@ -427,6 +428,7 @@ Namespace Agents
                         doc.MainDocumentPart.EndnotesPart.Endnotes.Save()
                     End If
                 End If
+                End Using
             End Using
 
             Dim appliedCount As Integer =
@@ -635,6 +637,93 @@ Namespace Agents
                 End If
             Next
         End Sub
+
+        Private Shared ReadOnly _activeRevisionIdAllocator As New System.Threading.AsyncLocal(Of RevisionIdAllocator)()
+
+        Private NotInheritable Class RevisionIdAllocator
+            Private _lastId As System.Int32
+
+            Public Sub New(document As WordprocessingDocument)
+                _lastId = ScanExistingMaximum(document)
+            End Sub
+
+            Public Function NextId() As System.Int32
+                _lastId += 1
+                Return _lastId
+            End Function
+
+            Private Shared Function ScanExistingMaximum(document As WordprocessingDocument) As System.Int32
+                Dim maxId As System.Int32 = 0
+                If document Is Nothing OrElse document.MainDocumentPart Is Nothing Then Return maxId
+
+                ScanRevisionIds(document.MainDocumentPart.Document, maxId)
+
+                For Each part As HeaderPart In document.MainDocumentPart.HeaderParts
+                    If part IsNot Nothing Then ScanRevisionIds(part.Header, maxId)
+                Next
+                For Each part As FooterPart In document.MainDocumentPart.FooterParts
+                    If part IsNot Nothing Then ScanRevisionIds(part.Footer, maxId)
+                Next
+                If document.MainDocumentPart.FootnotesPart IsNot Nothing Then
+                    ScanRevisionIds(document.MainDocumentPart.FootnotesPart.Footnotes, maxId)
+                End If
+                If document.MainDocumentPart.EndnotesPart IsNot Nothing Then
+                    ScanRevisionIds(document.MainDocumentPart.EndnotesPart.Endnotes, maxId)
+                End If
+                If document.MainDocumentPart.WordprocessingCommentsPart IsNot Nothing Then
+                    ScanRevisionIds(document.MainDocumentPart.WordprocessingCommentsPart.Comments, maxId)
+                End If
+
+                Return maxId
+            End Function
+
+            Private Shared Sub ScanRevisionIds(root As OpenXmlElement, ByRef maxId As System.Int32)
+                If root Is Nothing Then Return
+
+                Dim candidates As New System.Collections.Generic.List(Of OpenXmlElement) From {root}
+                candidates.AddRange(root.Descendants())
+
+                For Each element As OpenXmlElement In candidates
+                    If element Is Nothing OrElse Not IsRevisionElementName(element.LocalName) Then Continue For
+                    For Each attr As OpenXmlAttribute In element.GetAttributes()
+                        If Not System.String.Equals(attr.LocalName, "id", System.StringComparison.Ordinal) Then Continue For
+                        Dim value As System.Int32
+                        If System.Int32.TryParse(attr.Value, value) AndAlso value > maxId Then maxId = value
+                    Next
+                Next
+            End Sub
+
+            Private Shared Function IsRevisionElementName(localName As System.String) As System.Boolean
+                Select Case If(localName, System.String.Empty)
+                    Case "ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "numPrChange"
+                        Return True
+                    Case Else
+                        Return False
+                End Select
+            End Function
+        End Class
+
+        Private NotInheritable Class RevisionIdScope
+            Implements System.IDisposable
+
+            Private ReadOnly _previous As RevisionIdAllocator
+            Private _disposed As System.Boolean
+
+            Public Sub New(document As WordprocessingDocument)
+                _previous = _activeRevisionIdAllocator.Value
+                _activeRevisionIdAllocator.Value = New RevisionIdAllocator(document)
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If _disposed Then Return
+                _disposed = True
+                _activeRevisionIdAllocator.Value = _previous
+            End Sub
+        End Class
+
+        Private Shared Function BeginRevisionIdScope(document As WordprocessingDocument) As System.IDisposable
+            Return New RevisionIdScope(document)
+        End Function
 
         ' Coalescing emitter. Mode: 1 = plain, 2 = inserted (w:ins), 3 = deleted (w:del).
         Private NotInheritable Class MarkupEmitter
@@ -1270,12 +1359,22 @@ Namespace Agents
                             .Date = DateTime.UtcNow
                         }
 
-                        cmt.AppendChild(
-                            New W.Paragraph(
-                                New W.Run(
-                                    New W.Text(t.Text) With {
-                                        .Space = SpaceProcessingModeValues.Preserve
-                                    })))
+                        Dim commentParagraph As New W.Paragraph()
+                        Dim commentReferenceRun As New W.Run()
+                        Dim commentReferenceProperties As New W.RunProperties()
+                        commentReferenceProperties.AppendChild(
+                            New W.RunStyle() With {.Val = "CommentReference"})
+                        commentReferenceRun.AppendChild(commentReferenceProperties)
+                        commentReferenceRun.AppendChild(New W.AnnotationReferenceMark())
+                        commentParagraph.AppendChild(commentReferenceRun)
+
+                        Dim commentTextRun As New W.Run()
+                        commentTextRun.AppendChild(
+                            New W.Text(t.Text) With {
+                                .Space = SpaceProcessingModeValues.Preserve
+                            })
+                        commentParagraph.AppendChild(commentTextRun)
+                        cmt.AppendChild(commentParagraph)
 
                         commentsPart.Comments.AppendChild(cmt)
                         anyApplied = True
@@ -2163,21 +2262,25 @@ Namespace Agents
         End Function
 
         Private Shared Function NextChangeId(scope As OpenXmlElement) As Integer
-            Dim maxId As Integer = 0
+            Dim allocator As RevisionIdAllocator = _activeRevisionIdAllocator.Value
+            If allocator IsNot Nothing Then Return allocator.NextId()
 
-            For Each n As W.InsertedRun In scope.Descendants(Of W.InsertedRun)()
-                Dim v As Integer
-                If n.Id IsNot Nothing AndAlso Integer.TryParse(n.Id.Value, v) AndAlso v > maxId Then
-                    maxId = v
-                End If
-            Next
-
-            For Each n As W.DeletedRun In scope.Descendants(Of W.DeletedRun)()
-                Dim v As Integer
-                If n.Id IsNot Nothing AndAlso Integer.TryParse(n.Id.Value, v) AndAlso v > maxId Then
-                    maxId = v
-                End If
-            Next
+            Dim maxId As System.Int32 = 0
+            If scope IsNot Nothing Then
+                Dim candidates As New System.Collections.Generic.List(Of OpenXmlElement) From {scope}
+                candidates.AddRange(scope.Descendants())
+                For Each element As OpenXmlElement In candidates
+                    If element Is Nothing Then Continue For
+                    Select Case If(element.LocalName, System.String.Empty)
+                        Case "ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "numPrChange"
+                            For Each attr As OpenXmlAttribute In element.GetAttributes()
+                                If Not System.String.Equals(attr.LocalName, "id", System.StringComparison.Ordinal) Then Continue For
+                                Dim value As System.Int32
+                                If System.Int32.TryParse(attr.Value, value) AndAlso value > maxId Then maxId = value
+                            Next
+                    End Select
+                Next
+            End If
 
             Return maxId + 1
         End Function

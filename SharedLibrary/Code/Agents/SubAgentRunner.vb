@@ -215,8 +215,15 @@ Namespace Agents
                     allowedTools = ApplyCanonicalSourceHandlePolicy(allowedTools)
                     optionalTools = ApplyCanonicalSourceHandlePolicy(optionalTools)
                 End If
-                optionalTools = EnsureToolName(optionalTools, "context_expand")
             End If
+
+            ' context_expand is a host runtime primitive, not a domain/helper capability.
+            ' Any isolated tooling scope can receive a lossless result_ref when one of its
+            ' own tool results is reference-compacted, so the corresponding reader must be
+            ' available independently of the agent's declared substantive helper list.
+            ' Apply this after any canonical-source narrowing so infrastructure cannot be
+            ' removed by a substantive helper filter.
+            optionalTools = EnsureToolName(optionalTools, ContextExpandTool.ToolName)
 
             Dim retryCount As Integer = 0
             Dim userMessageForRun As String = baseUserMessage.ToString()

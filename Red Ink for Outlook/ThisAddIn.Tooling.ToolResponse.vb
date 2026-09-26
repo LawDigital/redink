@@ -70,7 +70,8 @@ Partial Public Class ThisAddIn
                                            Optional compactStaleLargeResponses As Boolean = False,
                                            Optional keepRecentFullCount As Integer = 2,
                                            Optional staleCompactionThresholdChars As Integer = -1,
-                                           Optional staleCompactionPreviewChars As Integer = -1) As String
+                                           Optional staleCompactionPreviewChars As Integer = -1,
+                                           Optional currentIteration As Integer = -1) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
             Return ""
@@ -103,11 +104,14 @@ Partial Public Class ThisAddIn
             ' compaction-eligible, regardless of recency: it is stored by reference and
             ' remains fully retrievable via context_expand, so keeping it "recent-full"
             ' would only bloat the payload. Smaller responses keep the recency exemption.
+            Dim replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind =
+                ResolveEffectiveReplayRetention(resp, currentIteration)
             Dim respIsLarge As Boolean =
                 resp IsNot Nothing AndAlso
                 Not String.IsNullOrEmpty(resp.Response) AndAlso
                 resp.Response.Length > SubAgentLargeToolResponseThresholdChars
             Dim isStaleForCompaction As Boolean =
+                replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical AndAlso
                 compactStaleLargeResponses AndAlso
                 (respIsLarge OrElse (respIndex < responseCount - keepRecentFullCount))
             If useCallParts Then
@@ -156,7 +160,12 @@ Partial Public Class ThisAddIn
                 effStaleThresholdChars = staleCompactionThresholdChars
                 effStalePreviewChars = staleCompactionPreviewChars
             End If
-            Dim responseContent As String = BuildToolResponseContentForModel(resp, compactForSubAgent OrElse isStaleForCompaction, effStaleThresholdChars, effStalePreviewChars)
+            Dim responseContent As String = BuildToolResponseContentForModel(
+                resp,
+                compactForSubAgent OrElse isStaleForCompaction,
+                effStaleThresholdChars,
+                effStalePreviewChars,
+                replayRetention)
 
             ' Model-agnostic handling:
             ' - If the response placeholder is quoted, emit an escaped string.
@@ -241,7 +250,8 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Function BuildToolResponsesForModelBudgeted(responses As List(Of ToolResponse),
                                                        toolingModel As ModelConfig,
-                                                       Optional compactForSubAgent As Boolean = False) As String
+                                                       Optional compactForSubAgent As Boolean = False,
+                                                       Optional currentIteration As Integer = -1) As String
         Dim keepRecentFullCount As Integer = 2
 
         Dim requestedKeep As Integer
@@ -255,7 +265,8 @@ Partial Public Class ThisAddIn
             toolingModel,
             compactForSubAgent:=compactForSubAgent,
             compactStaleLargeResponses:=True,
-            keepRecentFullCount:=keepRecentFullCount)
+            keepRecentFullCount:=keepRecentFullCount,
+            currentIteration:=currentIteration)
 
         Dim budget As Integer =
             If(ThisAddIn.INI_ToolResponsePayloadBudgetChars > 0,
@@ -274,10 +285,11 @@ Partial Public Class ThisAddIn
                ThisAddIn.INI_BudgetCompactionPreviewChars,
                SharedLibrary.Agents.ToolingConstants.BudgetCompactionPreviewChars)
         If budget <= 0 OrElse String.IsNullOrEmpty(payload) OrElse payload.Length <= budget Then
+            LogToolReplayRetentionDiagnostics(responses, currentIteration, payload.Length, budget)
             Return payload
         End If
 
-        ' Stage 1: shrink the recent-full window (down to 0). Lossless.
+        ' Stage 1: shrink the ordinary recent-full window. Current-turn and control-plane semantics are protected independently.
         While payload.Length > budget AndAlso keepRecentFullCount > 0
             keepRecentFullCount -= 1
             payload = BuildToolResponsesForModel(
@@ -285,10 +297,12 @@ Partial Public Class ThisAddIn
                 toolingModel,
                 compactForSubAgent:=compactForSubAgent,
                 compactStaleLargeResponses:=True,
-                keepRecentFullCount:=keepRecentFullCount)
+                keepRecentFullCount:=keepRecentFullCount,
+                currentIteration:=currentIteration)
         End While
 
         If payload.Length <= budget Then
+            LogToolReplayRetentionDiagnostics(responses, currentIteration, payload.Length, budget)
             Return payload
         End If
 
@@ -302,7 +316,8 @@ Partial Public Class ThisAddIn
                 compactStaleLargeResponses:=True,
                 keepRecentFullCount:=0,
                 staleCompactionThresholdChars:=mediumThresholdChars,
-                staleCompactionPreviewChars:=previewChars)
+                staleCompactionPreviewChars:=previewChars,
+                currentIteration:=currentIteration)
             If payload.Length <= budget Then
                 Exit For
             End If
@@ -314,13 +329,56 @@ Partial Public Class ThisAddIn
                 details:=$"payloadChars={payload.Length}; budgetChars={budget}")
         End If
 
+        LogToolReplayRetentionDiagnostics(responses, currentIteration, payload.Length, budget)
         Return payload
     End Function
 
+    Private Sub LogToolReplayRetentionDiagnostics(responses As List(Of ToolResponse),
+                                                   currentIteration As Integer,
+                                                   payloadChars As Integer,
+                                                   budgetChars As Integer)
+        If responses Is Nothing Then Return
+
+        For responseIndex As Integer = 0 To responses.Count - 1
+            Dim resp As ToolResponse = responses(responseIndex)
+            If resp Is Nothing Then Continue For
+
+            Dim retention As SharedLibrary.Agents.ToolReplayRetentionKind =
+                ResolveEffectiveReplayRetention(resp, currentIteration)
+
+            If retention = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical AndAlso
+               Not resp.WasCompactedForModelReplay Then
+                Continue For
+            End If
+
+            Dim originalChars As Integer = If(resp.Response, "").Length
+            Dim replayChars As Integer =
+                If(resp.WasCompactedForModelReplay,
+                   If(resp.ModelReplayContent, "").Length,
+                   originalChars)
+            Dim replayReference As String = ""
+
+            If resp.WasCompactedForModelReplay AndAlso Not String.IsNullOrWhiteSpace(resp.ModelReplayContent) Then
+                Try
+                    Dim replayObject As JObject = JObject.Parse(resp.ModelReplayContent)
+                    replayReference = If(replayObject.Value(Of String)("result_ref"), "")
+                    If String.IsNullOrWhiteSpace(replayReference) Then
+                        replayReference = If(replayObject.Value(Of String)("control_plane_key"), "")
+                    End If
+                Catch
+                End Try
+            End If
+
+            ToolingFileLogger.LogDiag(
+                $"Tool replay retention: index={responseIndex}; tool={If(resp.ToolName, "")}; retention={retention}; producedIteration={resp.ProducedIteration}; currentIteration={currentIteration}; compacted={If(resp.WasCompactedForModelReplay, "true", "false")}; originalChars={originalChars}; replayChars={replayChars}; replayRef={replayReference}; payloadChars={payloadChars}; budgetChars={budgetChars}")
+        Next
+    End Sub
+
     Private Function BuildToolResponseContentForModel(resp As ToolResponse,
-                                                   Optional compactForSubAgent As Boolean = False,
-                                                   Optional overrideThresholdChars As Integer = -1,
-                                                   Optional overridePreviewChars As Integer = -1) As String
+                                                  Optional compactForSubAgent As Boolean = False,
+                                                  Optional overrideThresholdChars As Integer = -1,
+                                                  Optional overridePreviewChars As Integer = -1,
+                                                  Optional replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical) As String
         If resp Is Nothing Then Return ""
 
         Dim rawContent As String
@@ -331,6 +389,23 @@ Partial Public Class ThisAddIn
             rawContent = If(resp.Response, "")
         Else
             rawContent = $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
+        End If
+
+        If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.ControlPlanePinned Then
+            Dim controlPlaneEnvelope As String = TryBuildControlPlaneReplayEnvelope(resp, rawContent)
+            If controlPlaneEnvelope IsNot Nothing Then
+                resp.ModelReplayContent = controlPlaneEnvelope
+                resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+                resp.WasCompactedForModelReplay = True
+                Return controlPlaneEnvelope
+            End If
+
+            ' Fail safe: if the host could not prove that the control payload is pinned
+            ' elsewhere, preserve the full response rather than silently degrading it.
+            resp.ModelReplayContent = rawContent
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = False
+            Return rawContent
         End If
 
         If Not compactForSubAgent Then
@@ -350,6 +425,55 @@ Partial Public Class ThisAddIn
         End If
 
         Return CompactToolResponseContentForSubAgent(resp, rawContent, overrideThresholdChars, overridePreviewChars)
+    End Function
+
+    Private Function ResolveEffectiveReplayRetention(resp As ToolResponse,
+                                                     currentIteration As Integer) As SharedLibrary.Agents.ToolReplayRetentionKind
+        If resp Is Nothing Then Return SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical
+        If resp.ReplayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.ControlPlanePinned Then
+            Return SharedLibrary.Agents.ToolReplayRetentionKind.ControlPlanePinned
+        End If
+        If currentIteration >= 0 AndAlso resp.ProducedIteration = currentIteration Then
+            Return SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical
+        End If
+        Return SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical
+    End Function
+
+    Private Function TryBuildControlPlaneReplayEnvelope(resp As ToolResponse,
+                                                        rawContent As String) As String
+        If resp Is Nothing OrElse String.IsNullOrWhiteSpace(resp.ControlPlanePayloadKey) Then Return Nothing
+
+        Dim envelope As New JObject(
+            New JProperty("ok", resp.Success),
+            New JProperty("tool", If(resp.ToolName, "")),
+            New JProperty("control_plane_pinned", True),
+            New JProperty("control_plane_key", resp.ControlPlanePayloadKey),
+            New JProperty("total_chars", If(rawContent, "").Length),
+            New JProperty("summary", "The full authoritative control payload is pinned by the host and replayed separately on every parent turn."))
+
+        Try
+            Dim source As JObject = JObject.Parse(If(rawContent, ""))
+            For Each fieldName As String In New String() {
+                "name",
+                "description",
+                "origin",
+                "network_allowed",
+                "allowed_tools",
+                "declared_deliverable_count",
+                "declared_deliverable_required_effects",
+                "declared_required_successful_tools",
+                "declared_required_successful_tools_before_final_mutation"
+            }
+                Dim token As JToken = source(fieldName)
+                If token IsNot Nothing AndAlso token.Type <> JTokenType.Null Then
+                    envelope(fieldName) = token.DeepClone()
+                End If
+            Next
+        Catch
+            ' The payload itself remains pinned losslessly. Envelope enrichment is optional.
+        End Try
+
+        Return envelope.ToString(Formatting.None)
     End Function
 
     ''' <summary>

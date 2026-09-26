@@ -47,16 +47,15 @@ Namespace Agents
                 """properties"":{" &
                 """name"":{""type"":""string"",""description"":""The skill name (matches the Skill listed above).""}," &
                 """input"":{""type"":""string"",""description"":""Optional input or sub-task description for the skill.""}," &
-                """expected_artifacts"":{""type"":""array"",""description"":""Exact expected-final-artifact contract when the selected skill declares deliverable-count > 0 in frontmatter. Use opaque logical_deliverable_id/output_slot_id pairs."",""items"":{""type"":""object"",""properties"":{" &
+                """expected_artifacts"":{""type"":""array"",""description"":""Optional slot-selection hints. For skills with deliverable-count > 0, the host owns and normalizes the exact opaque logical_deliverable_id/output_slot_id contract; callers may omit this field."",""items"":{""type"":""object"",""properties"":{" &
                 """logical_deliverable_id"":{""type"":""string""}," &
-                """output_slot_id"":{""type"":""string""}}," &
-                """required"":[""logical_deliverable_id"",""output_slot_id""]}}}," &
+                """output_slot_id"":{""type"":""string""}}}}," &
                 """required"":[""name""]}}"
 
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = ToolName,
                 .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolName & ": Load a Skill's instructions (lazy). Call this once per skill, then follow its directions in subsequent turns, using text_read for text resources and the appropriate file_* tools for binary reference assets when the skill allows them. If the selected skill declares deliverable-count > 0, expected_artifacts is mandatory and must contain exactly that many opaque logical_deliverable_id/output_slot_id pairs.",
+                .ToolInstructionsPrompt = ToolName & ": Load a Skill's instructions (lazy). Call this once per skill, then follow its directions in subsequent turns, using text_read for text resources and the appropriate file_* tools for binary reference assets when the skill allows them. If the selected skill declares deliverable-count > 0, the host creates and returns the exact opaque expected_artifacts slot contract; do not invent artifact or slot ids.",
                 .ModelDescription = "Skill loader",
                 .Tool = True,
                 .ToolPriority = 940,
@@ -110,6 +109,8 @@ Namespace Agents
                 Dim declaredDeliverableCount As System.Int32 =
                     GetDeclaredDeliverableCount(sk)
 
+                NormalizeHostOwnedDeclaredDeliverableContract(sk, arguments)
+
                 Dim deliverableContractFailure As System.String = System.String.Empty
                 If Not ValidateDeclaredDeliverableContract(
                     sk,
@@ -146,6 +147,16 @@ Namespace Agents
                                              New JArray(),
                                              JArray.FromObject(sk.AllowedTools))
                 result("declared_deliverable_count") = declaredDeliverableCount
+                Dim normalizedExpectedArtifacts As System.Object = Nothing
+                If arguments IsNot Nothing AndAlso arguments.TryGetValue("expected_artifacts", normalizedExpectedArtifacts) AndAlso normalizedExpectedArtifacts IsNot Nothing Then
+                    result("expected_artifacts") = Newtonsoft.Json.Linq.JToken.FromObject(normalizedExpectedArtifacts)
+                Else
+                    result("expected_artifacts") = New Newtonsoft.Json.Linq.JArray()
+                End If
+                If declaredDeliverableCount > 0 Then
+                    result("deliverable_contract_guidance") =
+                        "The host owns these opaque output slots. For every final producer call, copy exactly one logical_deliverable_id/output_slot_id pair from expected_artifacts while multiple slots remain unresolved. Do not invent, rename, infer from filenames, or substitute slot ids."
+                End If
                 result("declared_deliverable_required_effects") =
                     New Newtonsoft.Json.Linq.JArray(GetDeclaredDeliverableRequiredEffects(sk))
                 result("declared_required_successful_tools") =
@@ -389,6 +400,33 @@ Namespace Agents
         End Function
 
         ''' <summary>
+        ''' Creates the exact opaque final-artifact slot contract for a skill declaration.
+        ''' Slot identity is host-owned: the model may omit expected_artifacts entirely and
+        ''' any supplied ids are normalized away. This keeps deliverable identity deterministic
+        ''' and independent from filenames, extensions, templates, providers, or model behavior.
+        ''' </summary>
+        Private Shared Sub NormalizeHostOwnedDeclaredDeliverableContract(
+            skill As SkillDescriptor,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object))
+
+            If skill Is Nothing OrElse arguments Is Nothing Then Return
+
+            Dim requiredCount As System.Int32 = GetDeclaredDeliverableCount(skill)
+            If requiredCount <= 0 Then Return
+
+            Dim slots As New System.Collections.Generic.List(Of System.Collections.Generic.Dictionary(Of System.String, System.Object))()
+            For index As System.Int32 = 1 To requiredCount
+                slots.Add(
+                    New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.Ordinal) From {
+                        {"logical_deliverable_id", "deliverable-" & index.ToString("D3", System.Globalization.CultureInfo.InvariantCulture)},
+                        {"output_slot_id", "slot-" & index.ToString("D3", System.Globalization.CultureInfo.InvariantCulture)}
+                    })
+            Next
+
+            arguments("expected_artifacts") = slots
+        End Sub
+
+        ''' <summary>
         ''' Enforces a skill-declared final-deliverable count at skill invocation time.
         ''' This makes the expected-artifact contract authoritative before any producer runs,
         ''' so legacy staging files cannot later satisfy or widen the requested output set.
@@ -411,9 +449,8 @@ Namespace Agents
                raw Is Nothing Then
 
                 failureReason =
-                    "This skill declares deliverable-count=" &
-                    requiredCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                    ". Invoke it with expected_artifacts containing exactly that many opaque logical_deliverable_id/output_slot_id pairs."
+                    "The host-owned expected_artifacts contract was not initialized for deliverable-count=" &
+                    requiredCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & "."
                 Return False
             End If
 
