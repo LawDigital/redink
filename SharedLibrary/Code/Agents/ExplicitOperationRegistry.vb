@@ -159,6 +159,29 @@ Namespace Agents
             End SyncLock
         End Function
 
+        Public Function IsSucceeded(operationId As String) As Boolean
+            Dim id As String = If(operationId, "").Trim()
+            If id = "" Then Return False
+
+            SyncLock _syncRoot
+                Dim record As ExplicitOperationRecord = Nothing
+                If Not _records.TryGetValue(id, record) OrElse record Is Nothing Then Return False
+                Return record.Status = ExplicitOperationStatus.Succeeded
+            End SyncLock
+        End Function
+
+        Public Function TryGetFirstSucceededOperationId(arguments As System.Collections.Generic.IDictionary(Of String, Object),
+                                                        ByRef succeededOperationId As String) As Boolean
+            succeededOperationId = ""
+            For Each id As String In ExtractOperationIds(arguments)
+                If IsSucceeded(id) Then
+                    succeededOperationId = id
+                    Return True
+                End If
+            Next
+            Return False
+        End Function
+
         Public Function TryGetFirstTerminalOperationId(arguments As System.Collections.Generic.IDictionary(Of String, Object),
                                                        ByRef terminalOperationId As String) As Boolean
             terminalOperationId = ""

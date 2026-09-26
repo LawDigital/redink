@@ -11601,12 +11601,41 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            Dim markdownContent = GetArgString(toolCall.Arguments, "markdown_content")
-            If String.IsNullOrWhiteSpace(markdownContent) Then
+            ct.ThrowIfCancellationRequested()
+            Dim markdownContent As System.String = GetArgString(toolCall.Arguments, "markdown_content")
+            Dim markdownPath As System.String = GetArgString(toolCall.Arguments, "markdown_path")
+            Dim expectedSourceHash As System.String = GetArgString(toolCall.Arguments, "expected_source_sha256")
+            Dim sourceSnapshot As SharedLibrary.Agents.TextFileSnapshot = Nothing
+            If Not System.String.IsNullOrWhiteSpace(markdownPath) Then
+                If Not System.String.IsNullOrWhiteSpace(markdownContent) Then
+                    response.Success = False
+                    response.ErrorMessage = "ambiguous_content_source: Provide exactly one of markdown_content or markdown_path."
+                    response.Response = response.ErrorMessage
+                    Return response
+                End If
+                ' Read under the same path policy as other text tools. Do not inject the
+                ' large body into toolCall.Arguments, tool logs, retry state or tool results.
+                sourceSnapshot = SharedLibrary.Agents.TextFileSnapshot.Read(
+                    markdownPath, strictDecoding:=True, expectedSha256:=expectedSourceHash)
+                markdownContent = sourceSnapshot.Content
+                If context IsNot Nothing Then
+                    context.Log("Word file input: chars=" & markdownContent.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; bytes=" & sourceSnapshot.SizeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; source_sha256=" & sourceSnapshot.Sha256 & "; content_format=markdown")
+                End If
+            ElseIf Not System.String.IsNullOrWhiteSpace(expectedSourceHash) Then
                 response.Success = False
-                response.Response = "Missing required parameter: markdown_content"
+                response.ErrorMessage = "source_hash_requires_file: expected_source_sha256 requires markdown_path."
+                response.Response = response.ErrorMessage
                 Return response
             End If
+            If System.String.IsNullOrWhiteSpace(markdownContent) Then
+                response.Success = False
+                response.Response = "Missing document content: provide non-empty markdown_content or markdown_path."
+                response.ErrorMessage = response.Response
+                Return response
+            End If
+            ct.ThrowIfCancellationRequested()
 
             Dim design As AutoPilotDesignResolution = ResolveAutoPilotDocumentDesign(
                 toolCall.Arguments,
@@ -12061,6 +12090,20 @@ Partial Public Class ThisAddIn
                                             " field(s) in one final Word pass."
                 End If
                 response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{templateBindingSummary}{footnoteSummary}{visualSummary}{crossReferenceSummary}"
+                If sourceSnapshot IsNot Nothing Then
+                    ' Additive compact metadata; legacy inline responses remain unchanged.
+                    response.Response &= System.Environment.NewLine & Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+                        Key .content_source = "markdown_path",
+                        Key .source_path = sourceSnapshot.SourcePath,
+                        Key .source_sha256 = sourceSnapshot.Sha256,
+                        Key .source_char_count = sourceSnapshot.Content.Length,
+                        Key .source_byte_count = sourceSnapshot.SizeBytes,
+                        Key .source_fully_read = True,
+                        Key .source_truncated = False,
+                        Key .output_path = outputPath,
+                        Key .rendered_content_completeness_verified = False
+                    })
+                End If
                 ApDashboardLog($"✓ Word document created: {fileName}", "info")
             Else
                 response.Success = False
@@ -12068,7 +12111,11 @@ Partial Public Class ThisAddIn
                 response.Response = response.ErrorMessage
             End If
 
-        Catch ex As OperationCanceledException
+        Catch ex As SharedLibrary.Agents.TextFileInputException
+            response.Success = False
+            response.ErrorMessage = ex.ErrorCode & ": " & ex.Message
+            response.Response = response.ErrorMessage
+        Catch ex As System.OperationCanceledException
             response.Success = False
             response.ErrorMessage = "Operation was cancelled."
             response.Response = response.ErrorMessage
@@ -13370,9 +13417,28 @@ Partial Public Class ThisAddIn
             Dim defaultOutput = Path.GetFileNameWithoutExtension(att.OriginalFileName) & ".docx"
             Dim outputName = If(GetArgString(toolCall.Arguments, "output_filename"), defaultOutput)
             Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim conversionMode As System.String = NormalizePdfWordConversionMode(GetArgString(toolCall.Arguments, "conversion_mode"))
+            Dim requestedLayoutAdapterId As System.String = If(GetArgString(toolCall.Arguments, "layout_adapter_id"), System.String.Empty)
+
+            If conversionMode = "layout_ocr" Then
+                Dim layoutOnlyResult As SharedLibrary.Agents.PdfWordLayoutConversionResult =
+                    Await TryRunPdfWordLayoutAdapterAsync(att.TempFilePath, outputPath, requestedLayoutAdapterId, ct)
+                If layoutOnlyResult.Success AndAlso File.Exists(outputPath) Then
+                    att.OutputFiles.Add(outputPath)
+                    response.Success = True
+                    response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "layout_ocr", False, layoutOnlyResult.AdapterId, layoutOnlyResult.AdapterId, System.String.Empty, layoutOnlyResult.Message)
+                Else
+                    response.Success = False
+                    response.ErrorMessage = If(layoutOnlyResult.ErrorCode, "layout_ocr_adapter_unavailable")
+                    response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "none", False, layoutOnlyResult.AdapterId, layoutOnlyResult.AdapterId, response.ErrorMessage, layoutOnlyResult.Message)
+                End If
+                Return response
+            End If
 
             context.Log($"Converting PDF to Word: {fileName}")
             ApDashboardLog($"📄 Converting PDF to Word: {fileName}", "step")
+
+            Dim externalPdfConverterAdvertised As System.Boolean = False
 
             ' Use a timeout to prevent indefinite UI thread blocking
             Dim uiTask = SwitchToUi(Function()
@@ -13404,7 +13470,18 @@ Partial Public Class ThisAddIn
                                             wordApp.ScreenUpdating = False
                                             wordApp.AutomationSecurity = Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityForceDisable
 
-                                            ' Disable third-party file format converters to prevent modal dialogs
+                                            ' Word's COM API does not expose a dedicated WdOpenFormat value for
+                                            ' the built-in PDF reflow engine. A registered PDF FileConverter can
+                                            ' therefore participate in wdOpenFormatAuto. Detect that condition
+                                            ' provider-agnostically so explicit quality modes never label an
+                                            ' unverified external conversion as native Word reflow.
+                                            externalPdfConverterAdvertised = HasAdvertisedPdfFileConverter(wordApp)
+                                            If externalPdfConverterAdvertised AndAlso (conversionMode = "native" OrElse conversionMode = "layout_required") Then
+                                                Return False
+                                            End If
+
+                                            ' Disable conversion confirmation dialogs. This does NOT prove that
+                                            ' Word's native reflow path is used; provenance is classified below.
                                             ' from Adobe Acrobat, Foxit, Nuance, etc.
                                             Try
                                                 prevFileConverters = wordApp.Options.ConfirmConversions
@@ -13412,9 +13489,10 @@ Partial Public Class ThisAddIn
                                             Catch
                                             End Try
 
-                                            ' Word can open PDFs and convert them to editable .docx
-                                            ' Using Format:=wdOpenFormatAuto (0) lets Word use its BUILT-IN
-                                            ' PDF reflow engine rather than deferring to a third-party converter.
+                                            ' Word can open PDFs and convert them to editable .docx.
+                                            ' wdOpenFormatAuto is retained for legacy compatibility. Word does not
+                                            ' expose a dedicated PDF WdOpenFormat value, so registered FileConverters
+                                            ' are treated as provenance ambiguity in explicit quality modes.
                                             doc = wordApp.Documents.Open(
                                                 FileName:=att.TempFilePath,
                                                 [ReadOnly]:=False,
@@ -13478,12 +13556,68 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            If Not success AndAlso externalPdfConverterAdvertised AndAlso conversionMode <> "auto" Then
+                If conversionMode = "layout_required" OrElse conversionMode = "layout_ocr" Then
+                    Dim registeredLayoutResult As SharedLibrary.Agents.PdfWordLayoutConversionResult =
+                        Await TryRunPdfWordLayoutAdapterAsync(att.TempFilePath, outputPath, requestedLayoutAdapterId, ct)
+                    If registeredLayoutResult.Success AndAlso System.IO.File.Exists(outputPath) Then
+                        att.OutputFiles.Add(outputPath)
+                        response.Success = True
+                        response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "layout_ocr", False, registeredLayoutResult.AdapterId, registeredLayoutResult.AdapterId, System.String.Empty, registeredLayoutResult.Message)
+                        Return response
+                    End If
+                End If
+
+                response.Success = False
+                response.ErrorMessage = "external_pdf_converter_detected"
+                response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "none", True, System.String.Empty, System.String.Empty, response.ErrorMessage, "An external PDF file converter is registered in Word, so the host cannot verify that Word's built-in PDF reflow path would be used. Explicit layout/native modes fail closed instead of claiming native_reflow. Use conversion_mode=auto for legacy behavior or register a Red Ink layout adapter.")
+                Return response
+            End If
+
             If success AndAlso File.Exists(outputPath) Then
+                Dim extractedTextCharacters As System.Int32 = GetDocxTextCharacterCount(outputPath)
+                Dim nativeImageOnly As System.Boolean = extractedTextCharacters < 20
+
+                If nativeImageOnly AndAlso (conversionMode = "layout_preferred" OrElse conversionMode = "layout_required") Then
+                    Dim layoutResult As SharedLibrary.Agents.PdfWordLayoutConversionResult =
+                        Await TryRunPdfWordLayoutAdapterAsync(att.TempFilePath, outputPath, requestedLayoutAdapterId, ct)
+                    If layoutResult.Success AndAlso File.Exists(outputPath) Then
+                        att.OutputFiles.Add(outputPath)
+                        response.Success = True
+                        response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "layout_ocr", False, layoutResult.AdapterId, layoutResult.AdapterId, System.String.Empty, layoutResult.Message)
+                        ApDashboardLog($"✓ Converted scanned PDF with layout adapter: {outputName}", "info")
+                        Return response
+                    End If
+
+                    If conversionMode = "layout_required" Then
+                        Try
+                            If System.IO.File.Exists(outputPath) Then System.IO.File.Delete(outputPath)
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Could not remove degraded PDF-to-Word output: " & ex.Message)
+                        End Try
+                        response.Success = False
+                        response.ErrorMessage = If(layoutResult.ErrorCode, "layout_ocr_adapter_unavailable")
+                        response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "degraded_image_only", True, layoutResult.AdapterId, layoutResult.AdapterId, response.ErrorMessage, "Native Word conversion produced an image-only document and no usable layout OCR adapter completed successfully.")
+                        Return response
+                    End If
+
+                    att.OutputFiles.Add(outputPath)
+                    response.Success = True
+                    response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "degraded_image_only", True, layoutResult.AdapterId, layoutResult.AdapterId, If(layoutResult.ErrorCode, System.String.Empty), "Native Word conversion produced an image-only document. Layout OCR was preferred but unavailable; the returned DOCX preserves the page images but is not an editable OCR reconstruction.")
+                    Return response
+                End If
+
                 att.OutputFiles.Add(outputPath)
                 response.Success = True
-                response.Response = $"Converted '{fileName}' to Word: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). " &
-                    "This file can now be used with compare_word_documents. " &
-                    "Note: Word does NOT perform OCR — if the PDF is a scanned image, the resulting .docx will contain images without extracted text."
+                If conversionMode = "auto" Then
+                    response.Response = $"Converted '{fileName}' to Word: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). " &
+                        "This file can now be used with compare_word_documents. " &
+                        "Legacy auto mode does not make a converter-provenance or layout-quality claim."
+                ElseIf externalPdfConverterAdvertised Then
+                    response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "external_reflow_unverified", True, System.String.Empty, System.String.Empty, "external_pdf_converter_detected", "Editable text was produced, but Word advertises an external PDF file converter. The conversion path is therefore not verified as Word native reflow and must not be treated as layout-fidelity evidence.")
+                Else
+                    response.Response = BuildPdfWordConversionResponse(fileName, outputName, conversionMode, "native_reflow", False, System.String.Empty, System.String.Empty, System.String.Empty, "Word native PDF reflow produced editable text and no external PDF FileConverter was advertised by Word.")
+                End If
                 ApDashboardLog($"✓ Converted to Word: {outputName}", "info")
             Else
                 response.Success = False
@@ -13502,6 +13636,175 @@ Partial Public Class ThisAddIn
         End Try
 
         Return response
+    End Function
+
+    Private Shared Function HasAdvertisedPdfFileConverter(wordApp As Microsoft.Office.Interop.Word.Application) As System.Boolean
+        If wordApp Is Nothing Then Return False
+
+        Dim converters As Microsoft.Office.Interop.Word.FileConverters = Nothing
+        Try
+            converters = wordApp.FileConverters
+            If converters Is Nothing Then Return False
+
+            For index As System.Int32 = 1 To converters.Count
+                Dim converter As Microsoft.Office.Interop.Word.FileConverter = Nothing
+                Try
+                    converter = converters.Item(index)
+                    If converter Is Nothing Then Continue For
+                    If Not converter.CanOpen Then Continue For
+
+                    Dim extensions As System.String = If(converter.Extensions, System.String.Empty)
+                    For Each extensionToken As System.String In extensions.Split(New Char() {","c, ";"c, " "c, System.Convert.ToChar(9)}, System.StringSplitOptions.RemoveEmptyEntries)
+                        Dim normalized As System.String = extensionToken.Trim().TrimStart("*"c).TrimStart("."c)
+                        If System.String.Equals(normalized, "pdf", System.StringComparison.OrdinalIgnoreCase) Then
+                            Return True
+                        End If
+                    Next
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("PDF FileConverter inspection failed: " & ex.Message)
+                Finally
+                    If converter IsNot Nothing Then
+                        Try
+                            System.Runtime.InteropServices.Marshal.FinalReleaseComObject(converter)
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("PDF FileConverter release failed: " & ex.Message)
+                        End Try
+                    End If
+                End Try
+            Next
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("PDF FileConverter inventory failed: " & ex.Message)
+        Finally
+            If converters IsNot Nothing Then
+                Try
+                    System.Runtime.InteropServices.Marshal.FinalReleaseComObject(converters)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("PDF FileConverters release failed: " & ex.Message)
+                End Try
+            End If
+        End Try
+
+        Return False
+    End Function
+
+    Private Shared Function NormalizePdfWordConversionMode(value As System.String) As System.String
+        Dim normalized As System.String = If(value, System.String.Empty).Trim().ToLowerInvariant()
+        Select Case normalized
+            Case System.String.Empty, "auto"
+                Return "auto"
+            Case "native"
+                Return "native"
+            Case "layout_preferred"
+                Return "layout_preferred"
+            Case "layout_required"
+                Return "layout_required"
+            Case "layout_ocr"
+                Return "layout_ocr"
+            Case Else
+                Return "auto"
+        End Select
+    End Function
+
+    Private Shared Async Function TryRunPdfWordLayoutAdapterAsync(inputPath As System.String,
+                                                                  outputPath As System.String,
+                                                                  requestedAdapterId As System.String,
+                                                                  cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of SharedLibrary.Agents.PdfWordLayoutConversionResult)
+        Dim adapter As SharedLibrary.Agents.IPdfWordLayoutAdapter = Nothing
+        If Not SharedLibrary.Agents.PdfWordLayoutAdapterRegistry.TryResolve(requestedAdapterId, adapter) Then
+            Return New SharedLibrary.Agents.PdfWordLayoutConversionResult With {
+                .Success = False,
+                .AdapterId = If(requestedAdapterId, System.String.Empty),
+                .Quality = "none",
+                .ErrorCode = "layout_ocr_adapter_unavailable",
+                .Message = "No registered layout OCR adapter is available."
+            }
+        End If
+
+        Try
+            Dim request As New SharedLibrary.Agents.PdfWordLayoutConversionRequest With {
+                .InputPath = inputPath,
+                .OutputPath = outputPath,
+                .SourceSha256 = ComputeFileSha256(inputPath)
+            }
+            Dim result As SharedLibrary.Agents.PdfWordLayoutConversionResult = Await adapter.ConvertAsync(request, cancellationToken)
+            If result Is Nothing Then
+                Return New SharedLibrary.Agents.PdfWordLayoutConversionResult With {
+                    .Success = False,
+                    .AdapterId = adapter.AdapterId,
+                    .Quality = "none",
+                    .ErrorCode = "layout_ocr_adapter_invalid_result",
+                    .Message = "The registered layout OCR adapter returned no result."
+                }
+            End If
+            If System.String.IsNullOrWhiteSpace(result.AdapterId) Then result.AdapterId = adapter.AdapterId
+            Return result
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception
+            Return New SharedLibrary.Agents.PdfWordLayoutConversionResult With {
+                .Success = False,
+                .AdapterId = adapter.AdapterId,
+                .Quality = "none",
+                .ErrorCode = "layout_ocr_adapter_failed",
+                .Message = ex.Message
+            }
+        End Try
+    End Function
+
+    Private Shared Function GetDocxTextCharacterCount(path As System.String) As System.Int32
+        Try
+            Dim text As System.String = SharedMethods.DocxTextExtractor.ReadDocxSandboxed(path)
+            If text Is Nothing Then Return 0
+            Return text.Trim().Length
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("PDF-to-Word text quality check failed: " & ex.Message)
+            Return 0
+        End Try
+    End Function
+
+    Private Shared Function ComputeFileSha256(path As System.String) As System.String
+        Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+            Using stream As System.IO.FileStream = System.IO.File.OpenRead(path)
+                Dim hash As Byte() = sha.ComputeHash(stream)
+                Return System.BitConverter.ToString(hash).Replace("-", System.String.Empty).ToLowerInvariant()
+            End Using
+        End Using
+    End Function
+
+    Private Shared Function BuildPdfWordConversionResponse(sourceName As System.String,
+                                                            outputName As System.String,
+                                                            requestedMode As System.String,
+                                                            quality As System.String,
+                                                            qualityDegraded As System.Boolean,
+                                                            adapterId As System.String,
+                                                            selectedAdapterId As System.String,
+                                                            errorCode As System.String,
+                                                            message As System.String) As System.String
+        Dim nativePathVerified As System.Boolean = System.String.Equals(quality, "native_reflow", System.StringComparison.Ordinal)
+        Dim converterProvenance As System.String
+        If nativePathVerified Then
+            converterProvenance = "word_native_verified"
+        ElseIf System.String.Equals(quality, "layout_ocr", System.StringComparison.Ordinal) Then
+            converterProvenance = "registered_layout_adapter"
+        ElseIf System.String.Equals(quality, "external_reflow_unverified", System.StringComparison.Ordinal) Then
+            converterProvenance = "external_or_unverified"
+        Else
+            converterProvenance = "not_verified"
+        End If
+
+        Return Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+            .source = sourceName,
+            .output = outputName,
+            .requested_mode = requestedMode,
+            .quality = quality,
+            .quality_degraded = qualityDegraded,
+            .native_path_verified = nativePathVerified,
+            .converter_provenance = converterProvenance,
+            .layout_adapter_id = If(adapterId, System.String.Empty),
+            .selected_adapter_id = If(selectedAdapterId, System.String.Empty),
+            .error_code = If(errorCode, System.String.Empty),
+            .message = If(message, System.String.Empty)
+        })
     End Function
 
 

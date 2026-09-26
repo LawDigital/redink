@@ -499,8 +499,13 @@
     <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
     <Compile Include="Code\Agents\TextTools.Analyze.vb" />
     <Compile Include="Code\Agents\TextTools.SemanticAndExport.vb" />
+    <Compile Include="Code\Agents\TextFileSnapshot.vb" />
+    <Compile Include="Code\Agents\TextExtractionResourceRegistry.vb" />
+    <Compile Include="Code\Agents\TextFileSnapshotSelfTests.vb" />
     <Compile Include="Code\Agents\TextTools.vb" />
     <Compile Include="Code\Agents\ToolCallSequencing.vb" />
+    <Compile Include="Code\Agents\PdfWordLayoutAdapters.vb" />
+    <Compile Include="Code\Agents\ToolingPhaseTelemetry.vb" />
     <Compile Include="Code\Agents\ToolDescribeTool.vb" />
     <Compile Include="Code\Agents\ToolExecutorRegistry.vb" />
     <Compile Include="Code\Agents\ToolingConstants.vb" />
@@ -589,6 +594,7 @@
     <Compile Include="Code\Core\Clipboard\SharedMethods.ClipboardSnapshot.vb" />
     <Compile Include="Code\Core\Clipboard\SharedMethods.PutInClipboard.vb" />
     <Compile Include="Code\Core\Clipboard\SharedMethods.StoreAndRestoreClipboard.vb" />
+    <Compile Include="Code\Core\Config\ConfigurationResourceLoader.vb" />
     <Compile Include="Code\Core\Config\ConfigWizardEngine.vb" />
     <Compile Include="Code\Core\Config\ConfigWizardForm.Designer.vb">
       <DependentUpon>ConfigWizardForm.vb</DependentUpon>

@@ -123,27 +123,74 @@ Namespace Agents
         End Function
 
         Private Shared Function ExecuteRead(args As IDictionary(Of String, Object)) As String
-            Dim p = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Read)
-            If Not File.Exists(p) Then
-                Return JsonConvert.SerializeObject(New With {Key .error = "not_found", Key .path = p})
-            End If
-            Dim fi As New FileInfo(p)
-            If fi.Length > PathPolicy.MaxFileSizeBytes Then
-                Return JsonConvert.SerializeObject(New With {Key .error = "file_too_large", Key .path = p, Key .size = fi.Length, Key .max = PathPolicy.MaxFileSizeBytes})
-            End If
-            Dim text = File.ReadAllText(p, Encoding.UTF8)
-            Dim maxChars = GetInt(args, "max_chars", 0)
-            Dim truncated As Boolean = False
-            If maxChars > 0 AndAlso text.Length > maxChars Then
-                text = text.Substring(0, maxChars)
-                truncated = True
-            End If
-            Return JsonConvert.SerializeObject(New With {
-                Key .path = p,
-                Key .size = fi.Length,
-                Key .truncated = truncated,
-                Key .text = text
-            })
+            Dim p As System.String = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Read)
+            Try
+                Dim startChar As System.Int32 = 0
+                Dim explicitWindow As System.Boolean = args IsNot Nothing AndAlso
+                    (args.ContainsKey("start_char") OrElse args.ContainsKey("offset"))
+                Dim startValue As System.Int32 = 0
+                Dim offsetValue As System.Int32 = 0
+                If Not TryReadTextOffset(args, "start_char", startValue) OrElse
+                   Not TryReadTextOffset(args, "offset", offsetValue) Then
+                    Return JsonConvert.SerializeObject(New With {Key .error = "invalid_offset", Key .message = "Offsets must be non-negative integers in UTF-16 code units."})
+                End If
+                If args IsNot Nothing AndAlso args.ContainsKey("start_char") AndAlso args.ContainsKey("offset") AndAlso startValue <> offsetValue Then
+                    Return JsonConvert.SerializeObject(New With {Key .error = "conflicting_offsets", Key .message = "start_char and offset must agree."})
+                End If
+                startChar = If(args IsNot Nothing AndAlso args.ContainsKey("start_char"), startValue, offsetValue)
+
+                Dim snapshot As TextFileSnapshot = TextFileSnapshot.Read(p, expectedSha256:=GetStr(args, "expected_snapshot_sha256"))
+                Dim totalChars As System.Int32 = snapshot.Content.Length
+                If startChar > totalChars Then
+                    Return JsonConvert.SerializeObject(New With {Key .error = "offset_out_of_range", Key .total_chars = totalChars, Key .start_char = startChar})
+                End If
+                If explicitWindow AndAlso startChar > 0 AndAlso startChar < totalChars AndAlso
+                   System.Char.IsLowSurrogate(snapshot.Content(startChar)) AndAlso System.Char.IsHighSurrogate(snapshot.Content(startChar - 1)) Then
+                    Return JsonConvert.SerializeObject(New With {Key .error = "invalid_offset", Key .message = "Offset splits a Unicode surrogate pair. Use next_offset from the preceding window."})
+                End If
+
+                Dim maxChars As System.Int32 = GetInt(args, "max_chars", 0)
+                Dim count As System.Int32 = totalChars - startChar
+                If maxChars > 0 Then count = System.Math.Min(count, maxChars)
+                ' New paged calls never split a valid surrogate pair. A window may contain
+                ' max_chars + 1 code units for this purpose. Legacy prefix calls are unchanged.
+                If explicitWindow AndAlso count > 0 AndAlso startChar + count < totalChars AndAlso
+                   System.Char.IsHighSurrogate(snapshot.Content(startChar + count - 1)) AndAlso
+                   System.Char.IsLowSurrogate(snapshot.Content(startChar + count)) Then count += 1
+
+                Dim nextPosition As System.Int32 = startChar + count
+                Dim hasMore As System.Boolean = nextPosition < totalChars
+                Dim nextOffset As System.Nullable(Of System.Int32) = Nothing
+                If hasMore Then nextOffset = nextPosition
+                Return JsonConvert.SerializeObject(New With {
+                    Key .path = p,
+                    Key .size = snapshot.SizeBytes,
+                    Key .truncated = startChar > 0 OrElse hasMore,
+                    Key .text = snapshot.Content.Substring(startChar, count),
+                    Key .total_chars = totalChars,
+                    Key .returned_chars = count,
+                    Key .start_char = startChar,
+                    Key .next_offset = nextOffset,
+                    Key .has_more = hasMore,
+                    Key .offset_unit = "utf16_code_units",
+                    Key .snapshot_sha256 = snapshot.Sha256
+                })
+            Catch ex As TextFileInputException
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = ex.ErrorCode, Key .path = p, Key .message = ex.Message,
+                    Key .size = ex.SizeBytes, Key .max = PathPolicy.MaxFileSizeBytes
+                })
+            End Try
+        End Function
+
+        Private Shared Function TryReadTextOffset(args As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                                                   name As System.String, ByRef value As System.Int32) As System.Boolean
+            value = 0
+            If args Is Nothing OrElse Not args.ContainsKey(name) Then Return True
+            Dim raw As System.Object = args(name)
+            If raw Is Nothing OrElse TypeOf raw Is System.Boolean Then Return False
+            Return System.Int32.TryParse(System.Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture),
+                System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, value) AndAlso value >= 0
         End Function
 
         Private Shared Function ExecuteWrite(args As IDictionary(Of String, Object)) As String
@@ -281,16 +328,19 @@ Namespace Agents
         Private Shared Function BuildRead() As ModelConfig
             Dim def =
                 "{""name"":""" & ToolRead & """," &
-                """description"":""Read a UTF-8 text file. Capped at the configured maximum size; if larger, an error is returned. Set max_chars to limit returned length."",""parameters"":{" &
+                """description"":""Read a text file under PathPolicy. Legacy calls without offsets read a prefix. For paging supply start_char=0 and max_chars, then use next_offset while has_more=true. Offsets/char counts are UTF-16 code units; size remains bytes. snapshot_sha256 hashes exact file bytes including BOM. truncated means the response omits some file content, not that extraction failed."",""parameters"":{" &
                 """type"":""object""," &
                 """properties"":{" &
                 """path"":{""type"":""string"",""description"":""Absolute or workspace-relative path.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length (0 = no cap).""}}," &
+                """start_char"":{""type"":""integer"",""minimum"":0,""description"":""Zero-based UTF-16 offset. Omit for legacy prefix behavior; use 0 to begin safe paging.""}," &
+                """offset"":{""type"":""integer"",""minimum"":0,""description"":""Alias of start_char. If both are supplied they must agree.""}," &
+                """expected_snapshot_sha256"":{""type"":""string"",""description"":""Optional SHA-256 from the previous window/export. A changed file is rejected rather than splicing different snapshots.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Optional cap (0 or negative = no cap, legacy behavior). Explicit offset windows may add one UTF-16 unit to avoid splitting a surrogate pair. next_offset is null at EOF.""}}," &
                 """required"":[""path""]}}"
             Return New ModelConfig() With {
                 .ToolName = ToolRead,
                 .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolRead & ": Read a UTF-8 text file (sandboxed by path policy).",
+                .ToolInstructionsPrompt = ToolRead & ": Read a text file under PathPolicy. For large files use start_char/max_chars and chain next_offset with expected_snapshot_sha256. Do not retype an existing full source into another tool when a file input is exposed.",
                 .ModelDescription = "Text (read)",
                 .Tool = True,
                 .ToolPriority = 920,

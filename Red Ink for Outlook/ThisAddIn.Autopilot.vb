@@ -2329,6 +2329,13 @@ Partial Public Class ThisAddIn
                     Dim entryId As String = Nothing
                     If _apMailQueue.TryDequeue(entryId) Then
 
+                        Dim enqueueUtcForTiming As DateTime
+                        If _apQueueEnqueueTimes.TryGetValue(entryId, enqueueUtcForTiming) Then
+                            Dim queueWaitMs As System.Int64 = System.Math.Max(0L, System.Convert.ToInt64((DateTime.UtcNow - enqueueUtcForTiming).TotalMilliseconds))
+                            ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
+                                "queue_wait", "Outlook", queueWaitMs, "dequeued", "autopilot_mail", queueWaitMs))
+                        End If
+
                         'ApDashboardLog(
                         '    $"📤 Pump DEQUEUED EntryID={entryId.Substring(0, Math.Min(24, entryId.Length))}... " &
                         '    $"RemainingQueue={_apMailQueue.Count}",
@@ -7362,9 +7369,8 @@ Partial Public Class ThisAddIn
                         Continue For
                     End If
 
-                    iniPath = ExpandEnvironmentVariables(iniPath)
-                    If Not IO.File.Exists(iniPath) Then
-                        ApDashboardLog($"Model override '{requestedModel}' ignored — alternate model file not found: {iniPath}", "warn")
+                    If Not ConfigurationResourceLoader.CanResolve(iniPath) Then
+                        ApDashboardLog($"Model override '{requestedModel}' ignored — alternate model source is invalid or unsupported: {iniPath}", "warn")
                         Continue For
                     End If
 

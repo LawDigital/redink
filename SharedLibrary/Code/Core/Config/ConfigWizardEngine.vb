@@ -161,13 +161,25 @@ Namespace SharedLibrary
         ''' <param name="ownerForm">Optional owner form for the selection dialog.</param>
         ''' <returns>The selected INI file path, or Nothing if the user cancels.</returns>
         Public Shared Function ResolveWizardTargetPath(context As ISharedContext, Optional ownerForm As Form = Nothing) As String
-            Dim activePath As String = GetActiveConfigFilePath(context)
-            Dim localPath As String = GetDefaultINIPath(context.RDV)
+            Dim activeSource As String = GetActiveConfigSource(context)
+            Dim activePath As String = GetActiveConfigReadPath(context)
+            Dim localPath As String = GetWritableLocalConfigPath(context)
+
+            If ConfigurationResourceLoader.ClassifyConfigurationSource(activeSource) = ConfigurationSourceKind.Https Then
+                If context.INI_NoLocalConfig Then Return Nothing
+                If Not File.Exists(localPath) Then
+                    Dim localDirectory As String = Path.GetDirectoryName(localPath)
+                    If Not String.IsNullOrWhiteSpace(localDirectory) Then Directory.CreateDirectory(localDirectory)
+                    File.Copy(activePath, localPath, overwrite:=False)
+                End If
+                Return localPath
+            End If
 
             ' Determine the central path (registry-directed)
             Dim regPath As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
             Dim centralPath As String = ""
-            If Not String.IsNullOrWhiteSpace(regPath) Then
+            If Not String.IsNullOrWhiteSpace(regPath) AndAlso
+               ConfigurationResourceLoader.ClassifyConfigurationSource(regPath) = ConfigurationSourceKind.FileSystem Then
                 centralPath = Path.Combine(ExpandEnvironmentVariables(regPath), $"{AN2}.ini")
             End If
 
@@ -284,9 +296,12 @@ Namespace SharedLibrary
         ''' <returns>Dictionary of INI key/value pairs.</returns>
         Public Shared Function ReadIniValues(iniPath As String) As Dictionary(Of String, String)
             Dim result As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-            If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then Return result
+            If String.IsNullOrWhiteSpace(iniPath) Then Return result
 
-            For Each line In File.ReadAllLines(iniPath)
+            Dim readPath As String = ConfigurationResourceLoader.ResolveForRead(iniPath, "configuration wizard INI")
+            If Not File.Exists(readPath) Then Return result
+
+            For Each line In File.ReadAllLines(readPath)
                 Dim trimmed = line.Trim()
                 If String.IsNullOrEmpty(trimmed) OrElse trimmed.StartsWith(";") Then Continue For
                 Dim parts = trimmed.Split({"="c}, 2)
@@ -306,6 +321,9 @@ Namespace SharedLibrary
         ''' <param name="iniPath">Path to the INI file to update.</param>
         ''' <param name="editedValues">Only the changed key/value pairs to write.</param>
         Public Shared Sub WriteIniValues(iniPath As String, editedValues As Dictionary(Of String, String))
+            If ConfigurationResourceLoader.ClassifyConfigurationSource(iniPath) <> ConfigurationSourceKind.FileSystem Then
+                Throw New System.InvalidOperationException("Remote configuration sources are read-only and cannot be modified.")
+            End If
             If String.IsNullOrWhiteSpace(iniPath) Then
                 Throw New ArgumentNullException(NameOf(iniPath))
             End If
@@ -398,6 +416,9 @@ Namespace SharedLibrary
         ''' <param name="iniPath">Path to the INI file to update.</param>
         ''' <param name="keys">Keys to remove (case-insensitive).</param>
         Public Shared Sub RemoveIniValues(iniPath As String, keys As IEnumerable(Of String))
+            If ConfigurationResourceLoader.ClassifyConfigurationSource(iniPath) <> ConfigurationSourceKind.FileSystem Then
+                Throw New System.InvalidOperationException("Remote configuration sources are read-only and cannot be modified.")
+            End If
             If String.IsNullOrWhiteSpace(iniPath) Then
                 Throw New ArgumentNullException(NameOf(iniPath))
             End If
@@ -457,6 +478,9 @@ Namespace SharedLibrary
         ''' <param name="iniPath">Path to the INI file to back up.</param>
         ''' <returns>Full path of the backup file, or Nothing if it could not be created.</returns>
         Public Shared Function CreateWizardBackup(iniPath As String) As String
+            If ConfigurationResourceLoader.ClassifyConfigurationSource(iniPath) <> ConfigurationSourceKind.FileSystem Then
+                Throw New System.InvalidOperationException("Remote configuration sources are read-only and cannot be modified.")
+            End If
             Try
                 If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then
                     Return Nothing

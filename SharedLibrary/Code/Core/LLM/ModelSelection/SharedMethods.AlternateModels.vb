@@ -330,13 +330,16 @@ Namespace SharedLibrary
         Private Shared ReadOnly _alternativeModelIniCache As New Dictionary(Of String, AlternativeModelIniCacheEntry)(StringComparer.OrdinalIgnoreCase)
 
         Private Shared Function NormalizeAlternativeModelIniPath(ByVal iniFilePath As String) As String
-            Dim expanded As String = ExpandEnvironmentVariables(If(iniFilePath, ""))
-            If String.IsNullOrWhiteSpace(expanded) Then Return ""
+            Dim source As String = If(iniFilePath, "").Trim()
+            If String.IsNullOrWhiteSpace(source) Then Return ""
+
+            Dim resolved As String = ConfigurationResourceLoader.ResolveForRead(source, "alternate model configuration")
+            If String.IsNullOrWhiteSpace(resolved) Then Return ""
 
             Try
-                Return System.IO.Path.GetFullPath(expanded)
+                Return System.IO.Path.GetFullPath(resolved)
             Catch
-                Return expanded
+                Return resolved
             End Try
         End Function
 
@@ -508,12 +511,12 @@ Namespace SharedLibrary
                                                       Optional includeToolOnly As Boolean = False,
                                                       Optional toolsOnly As Boolean = False) As List(Of ModelConfig)
 
-            iniFilePath = NormalizeAlternativeModelIniPath(iniFilePath)
-
+            Dim sourceIdentifier As String = If(iniFilePath, "")
             Dim models As New List(Of ModelConfig)()
             Try
+                iniFilePath = NormalizeAlternativeModelIniPath(sourceIdentifier)
                 If String.IsNullOrWhiteSpace(iniFilePath) OrElse Not File.Exists(iniFilePath) Then
-                    ShowCustomMessageBox($"INI file for alternative models not found (update {AN2}.ini): " & iniFilePath)
+                    ShowCustomMessageBox($"INI file for alternative models not found (update {AN2}.ini): " & ConfigurationResourceLoader.GetSafeSourceIdentifier(sourceIdentifier))
                     Return models
                 End If
 
@@ -546,7 +549,7 @@ Namespace SharedLibrary
                     "; models=" & models.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
             Catch ex As System.Exception
-                ShowCustomMessageBox($"Error reading INI file for models {If(String.IsNullOrWhiteSpace(Title), " ", $"for '{Title}' ")}({iniFilePath}): " & ex.Message)
+                ShowCustomMessageBox($"Error reading INI file for models {If(String.IsNullOrWhiteSpace(Title), " ", $"for '{Title}' ")}({ConfigurationResourceLoader.GetSafeSourceIdentifier(sourceIdentifier)}): " & ex.Message)
             End Try
             Return models
         End Function
@@ -795,9 +798,9 @@ Namespace SharedLibrary
         Public Shared Function ShowMultipleModelSelection(context As ISharedContext,
                                                   modelPath As String) As Boolean
             Try
-                Dim iniPath As String = ExpandEnvironmentVariables(modelPath)
-                If String.IsNullOrWhiteSpace(iniPath) OrElse Not System.IO.File.Exists(iniPath) Then
-                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The configured alternate model path does not exist.", AN)
+                Dim iniPath As String = If(modelPath, "").Trim()
+                If String.IsNullOrWhiteSpace(iniPath) OrElse Not ConfigurationResourceLoader.CanResolve(iniPath) Then
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The configured alternate model source is invalid or unsupported.", AN)
                     Return False
                 End If
 
@@ -839,98 +842,59 @@ Namespace SharedLibrary
                                                ByVal iniFilePath As String,
                                                ByVal Task As String,
                                                Optional ByVal UseCase As Integer = 1) As Boolean
-
-            iniFilePath = ExpandEnvironmentVariables(iniFilePath)
-
             If String.IsNullOrWhiteSpace(Task) Then Return False
-            Try
-                If Not File.Exists(iniFilePath) Then
-                    ShowCustomMessageBox($"INI file for alternative models not found (update {AN2}.ini): " & iniFilePath)
-                    Return False
-                End If
 
-                ' Back up the current configuration into `originalConfig` (same pattern as ShowModelSelection).
+            Try
                 originalConfigLoaded = False
                 originalConfig = GetCurrentConfig(context)
                 originalConfigLoaded = True
 
+                Dim cacheHit As Boolean = False
+                Dim sections As List(Of AlternativeModelIniSection) = GetAlternativeModelIniSections(iniFilePath, cacheHit)
                 Dim normalizedTask As String = Task.Trim()
-                Dim truthy = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                    "true", "yes", "wahr", "ja", "on"
-                }
 
-                Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-                Dim description As String = ""
+                For Each section As AlternativeModelIniSection In sections
+                    If section Is Nothing OrElse section.Values Is Nothing Then Continue For
 
-                ' Applies the current section if it contains the task key set to a truthy value.
-                Dim applyIfMatch As Func(Of Boolean) =
-                    Function()
-                        If currentDict.Count = 0 Then Return False
-                        If currentDict.ContainsKey(normalizedTask) Then
-                            Dim raw As String = currentDict(normalizedTask)
-                            If raw Is Nothing Then raw = ""
+                    Dim raw As String = Nothing
+                    If Not section.Values.TryGetValue(normalizedTask, raw) Then Continue For
+                    If Not IsTruthyIniValue(raw) Then Continue For
+                    If Not IsModelAccessibleForCurrentUser(section.Values, context) Then Continue For
 
-                            ' Strip inline comments ';' or '#', then trim and remove surrounding quotes.
-                            Dim scIdx = raw.IndexOf(";"c)
-                            If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                            Dim hashIdx = raw.IndexOf("#"c)
-                            If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                            raw = raw.Trim()
+                    Dim model As ModelConfig = CreateModelConfigFromDict(section.Values, context, section.Description)
+                    If model Is Nothing Then Continue For
 
-                            If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                                raw = raw.Substring(1, raw.Length - 2).Trim()
-                            End If
-
-                            Dim lowered = raw.ToLowerInvariant()
-                            If truthy.Contains(lowered) OrElse lowered = "1" Then
-                                If Not IsModelAccessibleForCurrentUser(currentDict, context) Then
-                                    Return False
-                                End If
-
-                                Dim mc = CreateModelConfigFromDict(currentDict, context, description)
-                                ApplyModelConfig(context, mc)
-                                Return True
-                            End If
-                        End If
-                        Return False
-                    End Function
-
-                For Each rawLine In File.ReadAllLines(iniFilePath)
-                    Dim line = rawLine.Trim()
-                    If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then
-                        Continue For
-                    End If
-
-                    ' Section header.
-                    If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                        If applyIfMatch() Then
-                            Return True
-                        End If
-                        currentDict.Clear()
-                        description = line.Substring(1, line.Length - 2).Trim()
-                        Continue For
-                    End If
-
-                    ' Parse key=value.
-                    Dim tokens = line.Split(New Char() {"="c}, 2)
-                    If tokens.Length = 2 Then
-                        Dim key = tokens(0).Trim()
-                        Dim value = tokens(1).Trim()
-                        currentDict(key) = value
-                    End If
+                    ApplyModelConfig(context, model)
+                    Return True
                 Next
 
-                ' Final section.
-                If applyIfMatch() Then
-                    Return True
-                End If
-
                 Return False
-
-            Catch ex As Exception
-                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in GetSpecialTaskModel: " & ex.Message, "Error")
+            Catch ex As System.Exception
+                ShowCustomMessageBox($"Error reading INI file for alternative models ({ConfigurationResourceLoader.GetSafeSourceIdentifier(iniFilePath)}): " & ex.Message)
                 Return False
             End Try
+        End Function
+
+        Private Shared Function IsTruthyIniValue(ByVal rawValue As String) As Boolean
+            Dim raw As String = If(rawValue, "")
+            Dim semicolonIndex As Integer = raw.IndexOf(";"c)
+            If semicolonIndex >= 0 Then raw = raw.Substring(0, semicolonIndex)
+            Dim hashIndex As Integer = raw.IndexOf("#"c)
+            If hashIndex >= 0 Then raw = raw.Substring(0, hashIndex)
+            raw = raw.Trim()
+
+            If raw.Length >= 2 AndAlso
+               ((raw.StartsWith(System.Char.ConvertFromUtf32(34)) AndAlso raw.EndsWith(System.Char.ConvertFromUtf32(34))) OrElse
+                (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
+                raw = raw.Substring(1, raw.Length - 2).Trim()
+            End If
+
+            Select Case raw.ToLowerInvariant()
+                Case "true", "yes", "wahr", "ja", "on", "1"
+                    Return True
+                Case Else
+                    Return False
+            End Select
         End Function
 
         Public Structure ModelConfigScopeSnapshot

@@ -77,84 +77,27 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(iniFilePath) Then Return False
             If String.IsNullOrWhiteSpace(taskKey) Then Return False
 
-            iniFilePath = ExpandEnvironmentVariables(iniFilePath)
-            If Not File.Exists(iniFilePath) Then Return False
-
             Try
+                Dim cacheHit As Boolean = False
+                Dim sections As List(Of AlternativeModelIniSection) = GetAlternativeModelIniSections(iniFilePath, cacheHit)
                 Dim normalizedTaskKey As String = taskKey.Trim()
 
-                Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                    "true", "yes", "wahr", "ja", "on", "1"
-                }
+                For Each section As AlternativeModelIniSection In sections
+                    If section Is Nothing OrElse section.Values Is Nothing Then Continue For
 
-                Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-                Dim description As String = ""
-                Dim matchedModelConfig As ModelConfig = Nothing
+                    Dim raw As String = Nothing
+                    If Not section.Values.TryGetValue(normalizedTaskKey, raw) Then Continue For
+                    If Not IsTruthyIniValue(raw) Then Continue For
+                    If Not IsModelAccessibleForCurrentUser(section.Values, context) Then Continue For
 
-                Dim isTruthyValue As Func(Of String, Boolean) =
-                    Function(raw As String) As Boolean
-                        If raw Is Nothing Then Return False
+                    Dim matched As ModelConfig = CreateModelConfigFromDict(section.Values, context, section.Description)
+                    If matched Is Nothing Then Continue For
 
-                        Dim scIdx = raw.IndexOf(";"c)
-                        If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-
-                        Dim hashIdx = raw.IndexOf("#"c)
-                        If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-
-                        raw = raw.Trim()
-
-                        If raw.Length >= 2 AndAlso
-                           ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse
-                            (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                            raw = raw.Substring(1, raw.Length - 2).Trim()
-                        End If
-
-                        Return truthy.Contains(raw.ToLowerInvariant())
-                    End Function
-
-                Dim tryMatch As Func(Of Boolean) =
-                    Function() As Boolean
-                        matchedModelConfig = Nothing
-
-                        If currentDict.Count = 0 Then Return False
-                        If Not currentDict.ContainsKey(normalizedTaskKey) Then Return False
-                        If Not isTruthyValue(currentDict(normalizedTaskKey)) Then Return False
-
-                        matchedModelConfig = CreateModelConfigFromDict(currentDict, context, description)
-                        Return matchedModelConfig IsNot Nothing
-                    End Function
-
-                For Each rawLine In File.ReadAllLines(iniFilePath)
-                    Dim line = rawLine.Trim()
-
-                    If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then
-                        Continue For
-                    End If
-
-                    If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                        If tryMatch() Then
-                            modelConfig = matchedModelConfig
-                            Return True
-                        End If
-
-                        currentDict.Clear()
-                        description = line.Substring(1, line.Length - 2).Trim()
-                        Continue For
-                    End If
-
-                    Dim tokens = line.Split(New Char() {"="c}, 2)
-                    If tokens.Length = 2 Then
-                        currentDict(tokens(0).Trim()) = tokens(1).Trim()
-                    End If
+                    modelConfig = matched
+                    Return True
                 Next
 
-                If tryMatch() Then
-                    modelConfig = matchedModelConfig
-                    Return True
-                End If
-
                 Return False
-
             Catch
                 modelConfig = Nothing
                 Return False

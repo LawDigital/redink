@@ -51,6 +51,7 @@ Namespace Agents
         Public Const ToolFormat As String = "word_format"
         Public Const ToolApplyTemplate As String = "word_apply_template"
         Public Const ToolSaveAs As String = "word_save_as"
+        Public Const ToolVerifyRevisions As String = "word_verify_revisions"
 
         Public Shared Function IsWordTool(name As String) As Boolean
             If String.IsNullOrWhiteSpace(name) Then Return False
@@ -58,7 +59,7 @@ Namespace Agents
             Select Case name
                 Case ToolExtract, ToolSearch, ToolWrite, ToolMarkup,
                      ToolCommentAdd, ToolCommentList, ToolCommentRemove,
-                     ToolFormat, ToolApplyTemplate, ToolSaveAs
+                     ToolFormat, ToolApplyTemplate, ToolSaveAs, ToolVerifyRevisions
                     Return True
                 Case Else
                     Return False
@@ -69,7 +70,7 @@ Namespace Agents
             Dim tools As New List(Of ModelConfig) From {
                 BuildExtract(), BuildSearch(), BuildWrite(), BuildMarkup(),
                 BuildCommentAdd(), BuildCommentList(), BuildCommentRemove(),
-                BuildFormat(), BuildApplyTemplate(), BuildSaveAs()
+                BuildFormat(), BuildApplyTemplate(), BuildSaveAs(), BuildVerifyRevisions()
             }
 
             For Each tool As ModelConfig In tools
@@ -131,6 +132,8 @@ Namespace Agents
                         resultJson = ExecuteApplyTemplate(arguments)
                     Case ToolSaveAs
                         resultJson = ExecuteSaveAs(arguments)
+                    Case ToolVerifyRevisions
+                        resultJson = ExecuteVerifyRevisions(arguments)
                     Case Else
                         Return Err_("unknown_word_tool", "Unknown tool '" & toolName & "'.")
                 End Select
@@ -2482,7 +2485,202 @@ Namespace Agents
             End Try
         End Function
 
+
+        Private Shared Function ExecuteVerifyRevisions(args As IDictionary(Of String, Object)) As String
+            Dim baselinePath As String = PathPolicy.Resolve(GetStr(args, "baseline_path"), PathAccess.Read)
+            Dim redlinePath As String = PathPolicy.Resolve(GetStr(args, "redline_path"), PathAccess.Read)
+            Dim expectedTargetRaw As String = GetStr(args, "expected_target_path")
+            Dim expectedTargetPath As String = Nothing
+            If Not String.IsNullOrWhiteSpace(expectedTargetRaw) Then expectedTargetPath = PathPolicy.Resolve(expectedTargetRaw, PathAccess.Read)
+            Dim requireCleanBaseline As Boolean = GetBool(args, "require_clean_baseline", True)
+
+            If Not File.Exists(baselinePath) Then Return Err_("baseline_not_found", "Baseline file not found.")
+            If Not File.Exists(redlinePath) Then Return Err_("redline_not_found", "Redline file not found.")
+            If expectedTargetPath IsNot Nothing AndAlso Not File.Exists(expectedTargetPath) Then Return Err_("target_not_found", "Expected target file not found.")
+
+            Dim baselineRevisionCount As Integer = CountSupportedRevisionElements(baselinePath)
+            If requireCleanBaseline AndAlso baselineRevisionCount <> 0 Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = "not_applicable",
+                    Key .reason = "baseline_contains_revisions",
+                    Key .baseline_revision_count = baselineRevisionCount,
+                    Key .baseline_path = baselinePath,
+                    Key .redline_path = redlinePath
+                })
+            End If
+
+            Dim unsupported As List(Of String) = FindUnsupportedRevisionKinds(redlinePath)
+            If unsupported.Count > 0 Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = "not_applicable",
+                    Key .reason = "unsupported_revision_kinds",
+                    Key .unsupported_revision_kinds = unsupported,
+                    Key .baseline_path = baselinePath,
+                    Key .redline_path = redlinePath
+                })
+            End If
+
+            Dim redlineRevisionCount As Integer = CountSupportedRevisionElements(redlinePath)
+            If redlineRevisionCount = 0 Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = "failed",
+                    Key .reason = "no_revisions_found",
+                    Key .baseline_revision_count = baselineRevisionCount,
+                    Key .redline_revision_count = redlineRevisionCount
+                })
+            End If
+
+            Dim rejectPath As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "redink-reject-" & System.Guid.NewGuid().ToString("N") & ".docx")
+            Dim acceptPath As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "redink-accept-" & System.Guid.NewGuid().ToString("N") & ".docx")
+            Try
+                File.Copy(redlinePath, rejectPath, True)
+                File.Copy(redlinePath, acceptPath, True)
+                ApplyRevisionView(rejectPath, acceptChanges:=False)
+                ApplyRevisionView(acceptPath, acceptChanges:=True)
+
+                Dim baselineText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(baselinePath))
+                Dim rejectedText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(rejectPath))
+                Dim acceptedText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(acceptPath))
+                Dim rejectMatches As Boolean = String.Equals(baselineText, rejectedText, StringComparison.Ordinal)
+
+                Dim targetMatches As System.Nullable(Of Boolean) = Nothing
+                Dim expectedTargetHash As String = Nothing
+                If expectedTargetPath IsNot Nothing Then
+                    Dim targetText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(expectedTargetPath))
+                    targetMatches = String.Equals(targetText, acceptedText, StringComparison.Ordinal)
+                    expectedTargetHash = Sha256Text(targetText)
+                End If
+
+                Dim overall As Boolean = rejectMatches AndAlso (Not targetMatches.HasValue OrElse targetMatches.Value)
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = If(overall, "verified", "failed"),
+                    Key .baseline_path = baselinePath,
+                    Key .redline_path = redlinePath,
+                    Key .expected_target_path = expectedTargetPath,
+                    Key .baseline_revision_count = baselineRevisionCount,
+                    Key .redline_revision_count = redlineRevisionCount,
+                    Key .reject_matches_baseline = rejectMatches,
+                    Key .accept_matches_expected_target = targetMatches,
+                    Key .baseline_text_sha256 = Sha256Text(baselineText),
+                    Key .rejected_text_sha256 = Sha256Text(rejectedText),
+                    Key .accepted_text_sha256 = Sha256Text(acceptedText),
+                    Key .expected_target_text_sha256 = expectedTargetHash
+                })
+            Finally
+                Try
+                    If System.IO.File.Exists(rejectPath) Then
+                        System.IO.File.Delete(rejectPath)
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("word_verify_revisions cleanup failed for reject copy: " & ex.Message)
+                End Try
+                Try
+                    If System.IO.File.Exists(acceptPath) Then
+                        System.IO.File.Delete(acceptPath)
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("word_verify_revisions cleanup failed for accept copy: " & ex.Message)
+                End Try
+            End Try
+        End Function
+
+
+        Private Shared Sub SaveVerificationRoot(root As OpenXmlElement)
+            If TypeOf root Is W.Document Then
+                CType(root, W.Document).Save()
+            ElseIf TypeOf root Is W.Footnotes Then
+                CType(root, W.Footnotes).Save()
+            ElseIf TypeOf root Is W.Endnotes Then
+                CType(root, W.Endnotes).Save()
+            End If
+        End Sub
+
+        Private Shared Function NormalizeVerificationText(value As String) As String
+            If value Is Nothing Then Return String.Empty
+            Return value.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        End Function
+
+        Private Shared Function Sha256Text(value As String) As String
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Dim bytes As Byte() = System.Text.Encoding.UTF8.GetBytes(If(value, String.Empty))
+                Return String.Concat(sha.ComputeHash(bytes).Select(Function(b) b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)))
+            End Using
+        End Function
+
+        Private Shared Function CountSupportedRevisionElements(path As String) As Integer
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(path, False)
+                Return GetVerificationRoots(doc).Sum(Function(root) root.Descendants(Of W.InsertedRun)().Count() + root.Descendants(Of W.DeletedRun)().Count())
+            End Using
+        End Function
+
+        Private Shared Function FindUnsupportedRevisionKinds(path As String) As List(Of String)
+            Dim result As New HashSet(Of String)(StringComparer.Ordinal)
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(path, False)
+                For Each root As OpenXmlElement In GetVerificationRoots(doc)
+                    For Each el As OpenXmlElement In root.Descendants()
+                        Dim ln As String = el.LocalName
+                        If (ln = "del" AndAlso Not TypeOf el Is W.DeletedRun) OrElse ln.EndsWith("PrChange", StringComparison.Ordinal) OrElse ln = "moveFrom" OrElse ln = "moveTo" OrElse ln = "moveFromRangeStart" OrElse ln = "moveFromRangeEnd" OrElse ln = "moveToRangeStart" OrElse ln = "moveToRangeEnd" Then result.Add(ln)
+                    Next
+                Next
+            End Using
+            Return result.OrderBy(Function(x) x, StringComparer.Ordinal).ToList()
+        End Function
+
+        Private Shared Function GetVerificationRoots(doc As WordprocessingDocument) As List(Of OpenXmlElement)
+            Dim roots As New List(Of OpenXmlElement)()
+            If doc.MainDocumentPart IsNot Nothing AndAlso doc.MainDocumentPart.Document IsNot Nothing Then roots.Add(doc.MainDocumentPart.Document)
+            If doc.MainDocumentPart IsNot Nothing AndAlso doc.MainDocumentPart.FootnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.FootnotesPart.Footnotes IsNot Nothing Then roots.Add(doc.MainDocumentPart.FootnotesPart.Footnotes)
+            If doc.MainDocumentPart IsNot Nothing AndAlso doc.MainDocumentPart.EndnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.EndnotesPart.Endnotes IsNot Nothing Then roots.Add(doc.MainDocumentPart.EndnotesPart.Endnotes)
+            Return roots
+        End Function
+
+        Private Shared Sub ApplyRevisionView(path As String, acceptChanges As Boolean)
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(path, True)
+                For Each root As OpenXmlElement In GetVerificationRoots(doc)
+                    Dim inserted As List(Of W.InsertedRun) = root.Descendants(Of W.InsertedRun)().ToList()
+                    For Each ins As W.InsertedRun In inserted
+                        If acceptChanges Then
+                            For Each child As OpenXmlElement In ins.ChildElements.ToList()
+                                ins.InsertBeforeSelf(child.CloneNode(True))
+                            Next
+                        End If
+                        ins.Remove()
+                    Next
+                    Dim deleted As List(Of W.DeletedRun) = root.Descendants(Of W.DeletedRun)().ToList()
+                    For Each del As W.DeletedRun In deleted
+                        If Not acceptChanges Then
+                            For Each child As OpenXmlElement In del.ChildElements.ToList()
+                                Dim clone As OpenXmlElement = child.CloneNode(True)
+                                For Each dt As W.DeletedText In clone.Descendants(Of W.DeletedText)().ToList()
+                                    Dim t As New W.Text(dt.Text)
+                                    If dt.Space IsNot Nothing Then t.Space = dt.Space
+                                    dt.InsertBeforeSelf(t)
+                                    dt.Remove()
+                                Next
+                                del.InsertBeforeSelf(clone)
+                            Next
+                        End If
+                        del.Remove()
+                    Next
+                    SaveVerificationRoot(root)
+                Next
+            End Using
+        End Sub
+
         ' --------------------------------------------------------------- factories
+
+
+        Private Shared Function BuildVerifyRevisions() As ModelConfig
+            Return New ModelConfig() With {
+                .ToolName = ToolVerifyRevisions,
+                .Tool = True,
+                .ToolPriority = 891,
+                .ToolErrorHandling = "skip",
+                .ModelDescription = "Word (verify tracked-change roundtrip)",
+                .ToolDefinition = "{""name"":""" & ToolVerifyRevisions & """,""description"":""Read-only verification of a tracked-changes DOCX. Rejecting all supported new text revisions must reproduce the baseline; optionally accepting them must reproduce an expected target DOCX. The verifier never mutates caller files. A baseline with existing revisions or unsupported revision kinds returns not_applicable rather than silently changing semantics."",""parameters"":{""type"":""object"",""properties"":{""baseline_path"":{""type"":""string""},""redline_path"":{""type"":""string""},""expected_target_path"":{""type"":""string""},""require_clean_baseline"":{""type"":""boolean""}},""required"":[""baseline_path"",""redline_path""]}}",
+                .ToolInstructionsPrompt = ToolVerifyRevisions & ": Verify tracked changes without mutating the supplied files. Default require_clean_baseline=true. Treat status=not_applicable as an explicit boundary, never as success."
+            }
+        End Function
 
         Private Shared Function BuildExtract() As ModelConfig
             Return New ModelConfig() With {

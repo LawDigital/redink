@@ -75,6 +75,7 @@ Notes:
 | `word_search` | Searches a `.docx` file on disk for text or regex matches. | Yes | Yes | Yes |
 | `word_write` | Inserts, replaces, appends, or deletes a paragraph in a `.docx` file on disk while preserving footnotes, endnotes, fields, images, comments, existing revision content, and run formatting. Supports batch `tasks`; matching is resilient within a single paragraph and results report `complete` / `partial` / `none` plus unmatched-anchor suggestions. | Yes | Yes | Yes |
 | `word_markup` | Edits a `.docx` file on disk with tracked changes while preserving footnotes, endnotes, fields, images, comments, existing revision content, and run formatting. Uses word-level markup by default, collapses large rewrites, supports batch `tasks`, supports `delete_paragraph`, and reports `complete` / `partial` / `none` plus unmatched-anchor suggestions. | Yes | Yes | Yes |
+| `word_verify_revisions` | Read-only verification of a tracked-changes DOCX: reject supported new text revisions and compare with a clean baseline; optionally accept and compare with an expected target. Returns `not_applicable` for pre-existing/unsupported revisions rather than mutating semantics. | Yes | No | No |
 | `word_comment_add` | Adds one or more Word comments to matched spans in a `.docx` file on disk while preserving footnotes, endnotes, fields, images, existing revision content, and formatting. Supports batch `tasks`, resilient single-paragraph matching, and reports `complete` / `partial` / `none` plus unmatched-anchor suggestions. | Yes | Yes | Yes |
 | `word_comment_list` | Lists comments in a `.docx` file on disk. | Yes | Yes | Yes |
 | `word_comment_remove` | Removes comments from a `.docx` file on disk. | Yes | Yes | Yes |
@@ -140,7 +141,9 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `search_in_attachments` | Searches across attachment content for relevant matches. | No | Yes | Yes |
 | `summarize_thread` | Summarizes an email thread. | No | No | Yes |
 | `pdf_to_word` | Converts a PDF into a Word document. | No | Yes | Yes |
-| `create_word_document` | Creates a new Word document output. | No | Yes | Yes |
+
+`pdf_to_word` keeps legacy Word-automation behavior as `conversion_mode=auto`; this mode makes no converter-provenance claim because Word may have external PDF converters registered. Explicit modes inspect Word FileConverters provider-agnostically before reporting quality. `native_reflow` is only reported when no external PDF FileConverter is advertised. `layout_preferred` may report `external_reflow_unverified` with `quality_degraded=true`; `native`/`layout_required` fail closed when a verified native path is unavailable, unless a registered `IPdfWordLayoutAdapter` can satisfy the layout request. Text/OCR reconstruction remains a separately labelled fallback and is never reported as exact layout preservation.
+| `create_word_document` | Creates a Word output from inline `markdown_content` or existing `markdown_path`; optional `expected_source_sha256` pins the file input. Existing renderer/design contracts apply. | No | Yes | Yes |
 | `complete_word_tables` | Completes existing Word tables, placeholders, and form fields in place. | No | Yes | Yes |
 | `create_excel_spreadsheet` | Creates a new Excel workbook output. | No | Yes | Yes |
 | `create_powerpoint` | Creates a new PowerPoint presentation output. | No | Yes | Yes |
@@ -217,3 +220,7 @@ After that routing phase, several ordinary tool families may still overlap. Use 
 ## Online Sources
 
 The selected online sources must also be included as "allowed tools" if they shall be available to a skill or agent. Wildcards (for example `swiss-caselaw*`) can be used, as well as the universal placeholder `selected_online_sources`.
+
+### Additive file-backed text/Word contract (P1)
+
+`text_read` keeps `path`, `max_chars`, byte `size`, `text` and `truncated`; adds optional `start_char` (`offset` alias), `expected_snapshot_sha256`, and window/hash metadata. Explicit windows use UTF-16 offsets and avoid surrogate-pair splits; omitted offsets retain legacy prefix behavior. `text_export_to_text` keeps its existing arguments/statuses and adds observed size/hash/PDF/OCR metadata plus a session-scoped extraction resource id, secret-free adapter/config fingerprints and host-known processed ranges. Successful identical source/config requests reuse one immutable-source extraction (single-flight); failed/cancelled work is not cached. Existing unrelated outputs remain unverified, while an output published by the current session can be provenance-verified without rerunning OCR. `create_word_document` accepts exactly one of `markdown_content` or `markdown_path`; file contents use the same renderers and design contracts. It also supports the standard optional explicit single-artifact fields so a created basis file can satisfy one slot in a multi-file final contract. Capability availability remains as listed above; this does not register a new Word creator in hosts that did not expose one.

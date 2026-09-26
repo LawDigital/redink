@@ -157,7 +157,7 @@ Public NotInheritable Class IniImportManager
 
         Dim activeIniPath As System.String = Nothing
         Try
-            activeIniPath = GetActiveConfigFilePath(context)
+            activeIniPath = GetWritableLocalConfigPath(context)
         Catch ex As System.Exception
             ShowCustomMessageBox("Could not determine active configuration file path: " & ex.Message)
             Return False
@@ -426,7 +426,7 @@ Public NotInheritable Class IniImportManager
 
         Dim activeIniPath As System.String = Nothing
         Try
-            activeIniPath = GetActiveConfigFilePath(context)
+            activeIniPath = GetWritableLocalConfigPath(context)
         Catch ex As System.Exception
             ShowCustomMessageBox("Could not determine active configuration file path: " & ex.Message)
             Return False
@@ -1162,7 +1162,7 @@ Public NotInheritable Class IniImportManager
 
         Dim activeIniPath As System.String = Nothing
         Try
-            activeIniPath = GetActiveConfigFilePath(context)
+            activeIniPath = GetWritableLocalConfigPath(context)
         Catch ex As System.Exception
             ShowCustomMessageBox("Could not determine active configuration file path: " & ex.Message)
             Return False

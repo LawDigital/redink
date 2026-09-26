@@ -691,7 +691,7 @@ Partial Public Class ThisAddIn
             .CapabilityTags = "explicit_operation",
             .ModelDescription = "Convert PDF to Word (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF import. " &
+                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) through Word automation. In legacy auto mode Word may use any converter registered with Word; explicit quality modes verify whether an external PDF FileConverter is advertised before claiming native reflow. " &
                 "The resulting .docx can then be used with process_word_document, compare_word_documents, or other Word tools. " &
                 "When the user asks to create a Word document/template that preserves, copies, or closely follows the PDF's formatting/layout, treat the PDF as a format carrier: use pdf_to_word FIRST, then transform the converted DOCX instead of extracting text and rebuilding with create_word_document. " &
                 "This is the PREFERRED method for PDF-to-Word conversion — use it FIRST. It works well for most PDFs " &
@@ -702,19 +702,23 @@ Partial Public Class ThisAddIn
                 "ALTERNATIVE APPROACH — USER-REQUESTED OCR PIPELINE: If the user explicitly asks to OCR the PDF first, " &
                 "or asks to 'rasterize and OCR' the PDF before converting to Word, use this pipeline instead: " &
                 "(1) Call extract_pdf_text on the PDF — this will rasterize each page and run OCR via the LLM to extract text. " &
-                "(2) Call create_word_document with the OCR-extracted text to produce a .docx. " &
+                "(2) Prefer text_export_to_text once, then pass its actual output_path as create_word_document.markdown_path (and snapshot_sha256 as expected_source_sha256) to produce a .docx without retyping the full source. Reuse that same export across analysis and editing. " &
                 "This OCR pipeline is useful for scanned documents, image-heavy PDFs, or when Word's built-in conversion " &
                 "produces poor results. However, it does NOT preserve the original layout/formatting — it produces a " &
-                "clean text-based document. The standard Word-based conversion (this tool) remains the default. For a request where source formatting is binding, do not silently claim exact preservation after falling back to OCR/text reconstruction.",
+                "clean text-based document. The standard Word-based conversion (this tool) remains the default. For a request where source formatting is binding, do not silently claim exact preservation after falling back to OCR/text reconstruction. " &
+                "OPTIONAL LAYOUT ADAPTER: conversion_mode may be auto (legacy default), native, layout_preferred, layout_required, or layout_ocr. auto preserves legacy Word-automation behavior and does not make a converter-provenance claim. Explicit modes inspect Word's registered FileConverters provider-agnostically. If an external PDF FileConverter is advertised, the host must not label the result native_reflow. native/layout_required fail closed unless their required verified path or a registered Red Ink layout adapter is available. layout_preferred may report external_reflow_unverified with quality_degraded=true instead of pretending the path was native. layout_ocr requires a registered provider-agnostic layout adapter and skips Word reflow. layout_adapter_id optionally requests a specific registered adapter.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_PdfToWord & """," &
-                """description"":""Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF reflow. " &
+                """description"":""Converts a PDF attachment to a Word document (.docx) through Word automation. " &
                 "Use this as the PRIMARY method for PDF-to-Word conversion and whenever a PDF is the requested formatting/layout carrier for a Word deliverable; then transform the resulting DOCX instead of rebuilding it. Works well for text-based PDFs with layout preservation. " &
                 "If the result indicates the PDF is scanned/image-only, OCR + create_word_document is only a reconstruction fallback and cannot be treated as exact source-format preservation. " &
-                "ALTERNATIVE: If the user explicitly requests OCR-based conversion, use extract_pdf_text (rasterize+OCR) followed by create_word_document instead.""," &
+                "ALTERNATIVE: If the user explicitly requests OCR-based text reconstruction, use extract_pdf_text/text_export_to_text followed by create_word_document instead. " &
+                "For scanned PDFs that require layout preservation, use conversion_mode=layout_required or layout_ocr so the host either uses a registered layout adapter or fails explicitly instead of silently degrading quality.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to convert""}," &
-                """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}" &
+                """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}," &
+                """conversion_mode"":{""type"":""string"",""enum"":[""auto"",""native"",""layout_preferred"",""layout_required"",""layout_ocr""],""description"":""auto preserves legacy Word-automation behavior without a converter-provenance claim; explicit modes never report native_reflow when Word advertises an external PDF FileConverter""}," &
+                """layout_adapter_id"":{""type"":""string"",""description"":""Optional exact id of a registered provider-agnostic layout OCR adapter""}" &
                 "},""required"":[""attachment_name""]}}"
         })
 
@@ -725,6 +729,8 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Create Executive Word Document (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreateWordDoc & ": Creates a NEW polished Word document (.docx) from Markdown. " &
+                "Supply exactly one content source: markdown_content for inline content OR markdown_path for a complete existing UTF-8/BOM-Unicode Markdown file. File inputs use the SAME native renderer, design contracts and validations as inline content; never read/retype a large OCR export just to call this tool. Pass expected_source_sha256 from the export item snapshot_sha256 or text_read.snapshot_sha256 to pin the source bytes. The source must fit the existing PathPolicy text-file limit. This is content reconstruction, not proof of OCR accuracy, full rendered-content preservation or source-layout fidelity. " &
+                "When the user requests multiple final files and the host workflow uses an explicit expected_artifacts contract, this creator can bind its single DOCX directly to one exact opaque output slot via artifact_id/logical_deliverable_id/output_slot_id plus the COMPLETE expected_artifacts list. Do this for a requested basis/original file before creating a separate redline copy; do not leave a declared slot unresolved and do not shrink the declared slot set merely to permit finalization. Legacy calls may omit all artifact fields. " &
                 "Do NOT use this tool merely to translate, correct, proofread, genericize, turn into a template/boilerplate, replace text in, or otherwise transform an existing Word attachment when the user wants that source's structure/formatting retained; use process_word_document for that case. If a PDF is explicitly the formatting/layout model for the requested Word output, use pdf_to_word first and then transform the converted DOCX. " &
                 "Use create_word_document when the requested deliverable is genuinely a newly authored document assembled from Markdown/content rather than a transformed/reused source-format carrier. When a user-supplied artifact is the intended format authority but a creator is nevertheless necessary, set use_repository_default_design=false unless the user explicitly requested a repository design. " &
                 "Default to style_preset='consulting' and professional_layout=true unless the user explicitly requests a plain document. " &
@@ -741,6 +747,8 @@ Partial Public Class ThisAddIn
                 "{""name"":""" & AP_Tool_CreateWordDoc & """," &
                 """description"":""Creates a NEW polished Word document (.docx) from Markdown. Use only for genuinely new authoring, not to transform or genericize an existing Office source whose structure/formatting should be retained. For PDF-as-format-source Word requests, convert the PDF first and transform the DOCX.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
+                """markdown_path"":{""type"":""string"",""description"":""Existing UTF-8 or BOM-marked Unicode Markdown file, including a .txt OCR export explicitly interpreted as Markdown. Read host-side through PathPolicy; mutually exclusive with markdown_content. Content is not normalized or truncated before the existing renderer. No URL input.""}," &
+                """expected_source_sha256"":{""type"":""string"",""description"":""Optional 64-digit SHA-256 of exact markdown_path bytes (including BOM), obtained from an export or text_read result. Rejects a changed source. Requires markdown_path.""}," &
                 """markdown_content"":{""type"":""string"",""description"":""Full document content in Markdown. Use headings, concise bullets, emphasis, and Markdown tables where useful. For native cross-references, put [[anchor:ID]] alone on the line immediately before the target heading/paragraph and use inline [[ref:ID:number]], [[ref:ID:text]], or [[ref:ID:full]] markers; do not manually type the target's native number. When the selected Word design exposes a native body-style contract, use only the heading and list levels declared by that contract; unsupported levels are rejected.""}," &
                 """file_name"":{""type"":""string"",""description"":""Desired output filename without .docx. Defaults to Document.""}," &
                 """design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. Use this when the user explicitly named a particular design. Otherwise prefer document_type plus document_language so the host can enforce document-type-first routing.""}," &
@@ -779,8 +787,16 @@ Partial Public Class ThisAddIn
                 """series"":{ ""type"":""array"",""description"":""For charts: [{name, values:[numbers]}]."",""items"":{ ""type"":""object"",""properties"":{ ""name"":{ ""type"":""string""},""values"":{ ""type"":""array"",""items"":{ ""type"":""number""}}},""required"":[""values""]}}," &
                 """width_inches"":{ ""type"":""number"",""description"":""Optional display width. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}," &
                 """height_inches"":{ ""type"":""number"",""description"":""Optional display height. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}},""required"":[""id"",""type""]}}," &
-                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Renderer still applies professional header/banding treatment.""}" &
-                "},""required"":[""markdown_content""]}}"
+                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Renderer still applies professional header/banding treatment.""}," &
+                """artifact_id"":{""type"":""string"",""description"":""Optional opaque artifact id for this single created DOCX. Use together with the other explicit artifact fields when this file must satisfy a host output slot.""}," &
+                """logical_deliverable_id"":{""type"":""string"",""description"":""Optional opaque logical deliverable id supplied by the orchestration contract.""}," &
+                """output_slot_id"":{""type"":""string"",""description"":""Optional opaque output slot id supplied by the orchestration contract.""}," &
+                """supersedes_artifact_id"":{""type"":""string"",""description"":""Optional exact artifact id superseded by this output.""}," &
+                """artifact_state"":{""type"":""string"",""enum"":[""working"",""intermediate"",""final""]}," &
+                """artifact_delivery_intent"":{""type"":""string"",""enum"":[""none"",""deliver_to_user"",""persist_only"",""deliver_and_persist""]}," &
+                """storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]}," &
+                """expected_artifacts"":{""type"":""array"",""description"":""Optional complete explicit final-output slot contract. When this created DOCX is one of multiple requested final files, bind this call to its own exact slot so the remaining files can satisfy the other slots."",""items"":{""type"":""object"",""properties"":{""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}" &
+                "}}}"
         })
 
         tools.Add(New ModelConfig() With {

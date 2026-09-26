@@ -1148,6 +1148,7 @@ Partial Public Class ThisAddIn
 
                 Debug.WriteLine($"[WORD-TOOLING] BEFORE LLM subAgentMode={subAgentMode} iteration={iteration} sysLen={If(sysPromptForThisCall, "").Length} userLen={If(fullUserPrompt, "").Length} tools={If(selectedTools?.Count, 0)} gateBusy={SharedLibrary.Agents.AgentGate.IsBusy} thread={Threading.Thread.CurrentThread.ManagedThreadId}")
 
+                Dim modelPhaseStopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                 Try
                     cancellationToken.ThrowIfCancellationRequested()
 
@@ -1181,6 +1182,9 @@ Partial Public Class ThisAddIn
                         EnsureUI:=True)
 
                     cancellationToken.ThrowIfCancellationRequested()
+                    modelPhaseStopwatch.Stop()
+                    ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
+                        "model_request", context.HostKind, modelPhaseStopwatch.ElapsedMilliseconds, "success"))
 
                 Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
                     context.LogWarn(
@@ -1745,7 +1749,7 @@ Partial Public Class ThisAddIn
 
                             context.LogWarn(
                                 "Blocked tool call because arguments failed schema validation.",
-                                details:=$"host={context.HostKind}; tool={tc.ToolName}; validationError={toolArgumentValidationError}")
+                                details:=$"host={context.HostKind}; {SharedLibrary.Agents.ToolCallSequencing.BuildToolFailureDiagnostic(tc.ToolName, If(invalidArgsResponse.ErrorCode, "invalid_tool_arguments"), If(invalidArgsResponse.ErrorMessage, toolArgumentValidationError), recoveryScopeKey)}; validationError={toolArgumentValidationError}")
 
                             Exit For
                         End If
@@ -1850,6 +1854,38 @@ Partial Public Class ThisAddIn
                                     "; tool=" & tc.ToolName &
                                     "; operation_ids=" &
                                     System.String.Join(",", skippedTerminalOperationIds))
+                        End If
+
+                        Dim succeededExplicitOperationId As String = ""
+
+                        If context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.OperationRegistry IsNot Nothing AndAlso
+                           context.SequencingState.OperationRegistry.TryGetFirstSucceededOperationId(
+                               tc.Arguments,
+                               succeededExplicitOperationId) Then
+
+                            Dim syntheticAlreadyCompleted As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = True,
+                                .ResultKind = "success",
+                                .Response =
+                                    "{""status"":""already_completed"",""operation_id"":" &
+                                    JsonConvert.SerializeObject(succeededExplicitOperationId) &
+                                    ",""message"":""This logical operation already succeeded earlier in the same tooling run; no physical tool execution was repeated.""}",
+                                .OriginalCallJson = tc.RawJson,
+                                .NormalizedCallSignature = normalizedToolCallSignature
+                            }
+
+                            AddToolResponseToHistory(context, syntheticAlreadyCompleted)
+                            context.Log(
+                                "Skipped already-completed explicit logical operation without creating a new failure. " &
+                                "host=" & context.HostKind &
+                                "; tool=" & tc.ToolName &
+                                "; operation_id=" & succeededExplicitOperationId,
+                                "diag")
+
+                            Continue For
                         End If
 
                         Dim terminalExplicitOperationId As String = ""
@@ -2086,6 +2122,7 @@ Partial Public Class ThisAddIn
                             context.SequencingState.OperationRegistry.HasAnyNonTerminalOperationId(tc.Arguments)
 
                         If Not hasNonTerminalExplicitOperation AndAlso
+                           Not toolConfig.AllowRepeatedIdenticalCalls AndAlso
                            TryBuildDuplicateSuccessfulToolReplay(tc, normalizedToolCallSignature, context, toolResponse) Then
                             context.LogWarn(
                                 $"Skipped duplicate successful tool call for '{tc.ToolName}' and replayed the prior result.",
@@ -2113,7 +2150,15 @@ Partial Public Class ThisAddIn
                                 }
                             End If
 
+                            Dim toolPhaseStopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                             toolResponse = Await ExecuteToolCall(executionToolCall, toolConfig, context, cancellationToken)
+                            toolPhaseStopwatch.Stop()
+                            ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
+                                SharedLibrary.Agents.ToolingPhaseTelemetry.ResolveToolPhase(tc.ToolName),
+                                context.HostKind,
+                                toolPhaseStopwatch.ElapsedMilliseconds,
+                                If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "success", "failed"),
+                                tc.ToolName))
 
                             If toolResponse IsNot Nothing AndAlso
                                toolResponse.Success AndAlso
@@ -2331,6 +2376,14 @@ Partial Public Class ThisAddIn
                                 Else
                                     If context.SequencingState IsNot Nothing Then
                                         context.SequencingState.NoteSuccessfulProgress(tc.ToolName, recoveryScopeKey)
+
+                                        Dim recoveredFailureSummary As System.String =
+                                            SharedLibrary.Agents.ToolCallSequencing.ConsumeRecoveredFailureSummary(context.SequencingState)
+                                        If Not System.String.IsNullOrWhiteSpace(recoveredFailureSummary) Then
+                                            context.Log(
+                                                $"Recovered prior tool failure after successful logical replacement. host={context.HostKind}; {recoveredFailureSummary}",
+                                                "diag")
+                                        End If
 
                                         If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
                                             context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
@@ -2870,11 +2923,16 @@ Partial Public Class ThisAddIn
                         context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
                     End If
 
+                    Dim finalizationPhaseStopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                     Dim turnValidation = SharedLibrary.Agents.ToolCallSequencing.ValidateActiveToolingTurn(
                         currentResponse,
                         hasToolCalls:=False,
                         hasUnresolvedToolFailure:=SharedLibrary.Agents.ToolCallSequencing.HasBlockingUnresolvedToolFailure(context.SequencingState),
                         runState:=context.SequencingState)
+                    finalizationPhaseStopwatch.Stop()
+                    ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
+                        "finalization", context.HostKind, finalizationPhaseStopwatch.ElapsedMilliseconds,
+                        If(turnValidation.TurnKind = SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, "rejected", "evaluated")))
 
                     If context.SequencingState IsNot Nothing Then
                         context.SequencingState.LastDetectedTurnType = turnValidation.TurnKind.ToString()
@@ -3267,7 +3325,7 @@ Partial Public Class ThisAddIn
                                         "Your previous turn was rejected because it violated the active-tooling response contract.")
 
                                 context.LogWarn(
-                                    $"Invalid active-tooling turn rejected; invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                    $"Invalid active-tooling turn rejected; {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                                 Continue While
                             End If
@@ -3291,7 +3349,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             context.LogWarn(
-                                $"Active-tooling repair exhausted; returning host-generated blocked message. invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                $"Active-tooling repair exhausted; returning host-generated blocked message. {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                             Exit While
                     End Select

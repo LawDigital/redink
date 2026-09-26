@@ -162,6 +162,8 @@ Partial Public Class ThisAddIn
 
         sw.Stop()
         ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight LLM completed: elapsedMs={sw.ElapsedMilliseconds}; responseChars={If(raw, "").Length}.")
+        ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
+            "bootstrap_routing", context.HostKind, sw.ElapsedMilliseconds, "success"))
         context.Log($"Bootstrap preflight model step completed in {sw.ElapsedMilliseconds} ms.")
 
         Dim decision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision =

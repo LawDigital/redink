@@ -175,11 +175,21 @@ Namespace Agents
             NoAutomaticRecovery
         End Enum
 
+        Public Enum ToolFailureCategory
+            Validation
+            ArtifactContract
+            DocumentProcessing
+            Transport
+            Model
+            Unknown
+        End Enum
+
         Public NotInheritable Class ToolFailureRecord
             Public Property Sequence As Long
             Public Property ToolName As String = String.Empty
             Public Property ErrorCode As String = String.Empty
             Public Property ErrorMessage As String = String.Empty
+            Public Property Category As ToolFailureCategory = ToolFailureCategory.Unknown
             Public Property SkippedByPolicy As Boolean
             Public Property ReturnedToParent As Boolean
             Public Property Terminal As Boolean
@@ -320,6 +330,7 @@ Namespace Agents
             Public Property LastFailureHandledByBlockedFinal As Boolean
             Public Property LastFailureUltimatelyFatal As Boolean
             Public Property RecoveryToolName As String
+            Public Property LastRecoveredFailureSummary As String = String.Empty
             Public Property LastFailureTerminal As Boolean
             Public Property LastFailureRecoveryPolicy As ToolFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
             Public Property LastFailureToolClassification As ToolCallClassification = ToolCallClassification.Unknown
@@ -1652,6 +1663,7 @@ Namespace Agents
                 record.ToolName = normalizedToolName
                 record.ErrorCode = If(errorCode, "")
                 record.ErrorMessage = If(errorMessage, "")
+                record.Category = ClassifyToolFailureCategory(normalizedToolName, record.ErrorCode, record.ErrorMessage)
                 record.SkippedByPolicy = skippedByPolicy
                 record.ReturnedToParent = returnedToParent
                 record.Terminal = terminal
@@ -1813,6 +1825,7 @@ Namespace Agents
 
                 If recoveryIndex >= 0 Then
                     Dim recovered As ToolFailureRecord = UnresolvedToolFailures(recoveryIndex)
+                    LastRecoveredFailureSummary = BuildFailureRecoverySummary(recovered, normalizedToolName)
                     UnresolvedToolFailures.RemoveAt(recoveryIndex)
 
                     If recovered IsNot Nothing AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
@@ -1908,6 +1921,9 @@ Namespace Agents
 
                 For Each index As Integer In immediateRecoveryIndexes
                     Dim recovered As ToolFailureRecord = UnresolvedToolFailures(index)
+                    If recovered IsNot Nothing Then
+                        LastRecoveredFailureSummary = BuildFailureRecoverySummary(recovered, normalizedToolName)
+                    End If
                     If recovered IsNot Nothing AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
                         RetryInvariantPendingFailureTools.Remove(
                             BuildRetryInvariantKey(recovered.ToolName, recovered.RecoveryScopeKey))
@@ -3559,6 +3575,15 @@ Namespace Agents
             Select Case normalizedInvalidReason
                 Case "complete_with_unresolved_tool_failure"
                     Return BuildUnresolvedToolFailureRepairPrompt(runState)
+                Case RequestedDeliverableSlotsIncompleteCode
+                    Dim missingSlots As System.Collections.Generic.List(Of System.String) =
+                        GetMissingExpectedDeliverableSlotKeys(runState)
+                    Dim missingSummary As System.String =
+                        If(missingSlots.Count > 0, System.String.Join(", ", missingSlots), "one or more declared output slots")
+                    Return "REPAIR: The final response was rejected because these expected output slots are not yet satisfied: " &
+                           missingSummary & ". Keep the COMPLETE expected_artifacts contract unchanged. Create or correctly bind only the missing final artifacts, then finalize again. Do not shrink, replace, or invent slot identifiers merely to pass finalization."
+                Case RequestedDeliverableNotCreatedCode
+                    Return "REPAIR: The task requires a created user deliverable, but no completion-safe final artifact is registered. Produce the requested artifact through an authorized producer tool, then finalize again. Do not claim completion from a path string or inspection result alone."
                 Case "task_status_reason_too_long",
              "task_status_missing_reason",
              "malformed_task_status"
@@ -3939,6 +3964,113 @@ Namespace Agents
             End Try
         End Function
 
+
+        Public Shared Function ClassifyToolFailureCategory(toolName As System.String,
+                                                           errorCode As System.String,
+                                                           errorMessage As System.String) As ToolFailureCategory
+            Dim code As System.String = If(errorCode, System.String.Empty).Trim().ToLowerInvariant()
+            Dim message As System.String = If(errorMessage, System.String.Empty).Trim().ToLowerInvariant()
+            Dim tool As System.String = If(toolName, System.String.Empty).Trim().ToLowerInvariant()
+
+            If code.Contains("artifact") OrElse code.Contains("deliverable") OrElse code.Contains("slot") Then
+                Return ToolFailureCategory.ArtifactContract
+            End If
+
+            If code.Contains("schema") OrElse code.Contains("argument") OrElse code.Contains("validation") OrElse
+               code = "invalid_tool_arguments" OrElse code = "no_change_applied" Then
+                Return ToolFailureCategory.Validation
+            End If
+
+            If code.Contains("timeout") OrElse code.Contains("transport") OrElse code.Contains("http") OrElse
+               code.Contains("network") OrElse message.Contains("timed out") OrElse message.Contains("connection") Then
+                Return ToolFailureCategory.Transport
+            End If
+
+            If code.Contains("model") OrElse code.Contains("llm") OrElse code.Contains("empty_response") Then
+                Return ToolFailureCategory.Model
+            End If
+
+            If tool.StartsWith("word_", System.StringComparison.Ordinal) OrElse
+               code.Contains("openxml") OrElse code.Contains("document") OrElse message.Contains("word") Then
+                Return ToolFailureCategory.DocumentProcessing
+            End If
+
+            Return ToolFailureCategory.Unknown
+        End Function
+
+        Public Shared Function BuildToolFailureDiagnostic(toolName As System.String,
+                                                          errorCode As System.String,
+                                                          errorMessage As System.String,
+                                                          Optional recoveryScopeKey As System.String = "") As System.String
+            Dim category As ToolFailureCategory = ClassifyToolFailureCategory(toolName, errorCode, errorMessage)
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            parts.Add("category=" & category.ToString())
+            parts.Add("tool=" & If(toolName, System.String.Empty).Trim())
+            parts.Add("errorCode=" & If(errorCode, System.String.Empty).Trim())
+            If Not System.String.IsNullOrWhiteSpace(recoveryScopeKey) Then
+                parts.Add("recoveryScope=" & recoveryScopeKey.Trim())
+            End If
+            Return System.String.Join("; ", parts)
+        End Function
+
+        Private Shared Function BuildFailureRecoverySummary(failure As ToolFailureRecord,
+                                                            recoveryToolName As System.String) As System.String
+            If failure Is Nothing Then Return System.String.Empty
+
+            Return "category=" & failure.Category.ToString() &
+                   "; failedTool=" & If(failure.ToolName, System.String.Empty) &
+                   "; errorCode=" & If(failure.ErrorCode, System.String.Empty) &
+                   "; recoveryScope=" & If(failure.RecoveryScopeKey, System.String.Empty) &
+                   "; recoveredBy=" & If(recoveryToolName, System.String.Empty)
+        End Function
+
+        Public Shared Function ConsumeRecoveredFailureSummary(runState As ToolingRunState) As System.String
+            If runState Is Nothing Then Return System.String.Empty
+            Dim value As System.String = If(runState.LastRecoveredFailureSummary, System.String.Empty)
+            runState.LastRecoveredFailureSummary = System.String.Empty
+            Return value
+        End Function
+
+        Public Shared Function GetMissingExpectedDeliverableSlotKeys(runState As ToolingRunState) As System.Collections.Generic.List(Of System.String)
+            Dim result As New System.Collections.Generic.List(Of System.String)()
+            If runState Is Nothing OrElse runState.ExpectedDeliverableSlots Is Nothing Then Return result
+
+            For Each expected As ExpectedDeliverableSlot In runState.ExpectedDeliverableSlots
+                If expected Is Nothing Then Continue For
+                If runState.IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then Continue For
+                result.Add(If(expected.LogicalDeliverableId, System.String.Empty) & "/" & If(expected.OutputSlotId, System.String.Empty))
+            Next
+
+            Return result
+        End Function
+
+        Public Shared Function BuildFinalizationDiagnostic(runState As ToolingRunState, invalidReason As System.String) As System.String
+            Dim reason As System.String = If(invalidReason, System.String.Empty).Trim()
+            If runState Is Nothing Then Return "phase=finalization; invalidReason=" & reason
+
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            parts.Add("phase=finalization")
+            parts.Add("invalidReason=" & reason)
+
+            If System.String.Equals(reason, RequestedDeliverableSlotsIncompleteCode, System.StringComparison.OrdinalIgnoreCase) Then
+                Dim missing As System.Collections.Generic.List(Of System.String) = GetMissingExpectedDeliverableSlotKeys(runState)
+                If missing.Count > 0 Then parts.Add("missingSlots=" & System.String.Join(",", missing))
+            End If
+
+            If runState.HasUnresolvedToolFailure AndAlso runState.UnresolvedToolFailures IsNot Nothing Then
+                Dim latest As ToolFailureRecord = GetLatestUnresolvedToolFailure(runState)
+                If latest IsNot Nothing Then
+                    parts.Add("failureCategory=" & latest.Category.ToString())
+                    parts.Add("failedTool=" & If(latest.ToolName, System.String.Empty))
+                    parts.Add("errorCode=" & If(latest.ErrorCode, System.String.Empty))
+                    If Not System.String.IsNullOrWhiteSpace(latest.RecoveryScopeKey) Then
+                        parts.Add("recoveryScope=" & latest.RecoveryScopeKey)
+                    End If
+                End If
+            End If
+
+            Return System.String.Join("; ", parts)
+        End Function
 
         Public Shared Function HasProducedUserDeliverable(runState As ToolingRunState) As Boolean
             If runState Is Nothing Then

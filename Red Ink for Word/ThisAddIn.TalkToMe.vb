@@ -3438,9 +3438,9 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         _alternateGoogleApiKeyConfig = Nothing
 
         Try
-            Dim altPath As String = SharedMethods.ExpandEnvironmentVariables(_owner.INI_AlternateModelPath)
+            Dim altPath As String = _owner.INI_AlternateModelPath
 
-            If String.IsNullOrWhiteSpace(altPath) OrElse Not File.Exists(altPath) Then
+            If String.IsNullOrWhiteSpace(altPath) OrElse Not ConfigurationResourceLoader.CanResolve(altPath) Then
                 Return
             End If
 
