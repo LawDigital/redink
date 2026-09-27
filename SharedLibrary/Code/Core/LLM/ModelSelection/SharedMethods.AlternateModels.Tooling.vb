@@ -90,8 +90,14 @@ Namespace SharedLibrary
                     If Not IsTruthyIniValue(raw) Then Continue For
                     If Not IsModelAccessibleForCurrentUser(section.Values, context) Then Continue For
 
-                    Dim matched As ModelConfig = CreateModelConfigFromDict(section.Values, context, section.Description)
+                    ' Materialize the special-task model with the same display identity used by
+                    ' LoadAlternativeModels. Local Chat persists that display key, so divergent
+                    ' ModelNote/tooling-suffix handling would otherwise make a valid AgentDefaultModel
+                    ' look like a different or stale alternate-model selection.
+                    Dim displayDescription As System.String = BuildModelDescription(section.Description, section.Values)
+                    Dim matched As ModelConfig = CreateModelConfigFromDict(section.Values, context, displayDescription)
                     If matched Is Nothing Then Continue For
+                    matched.ModelDescription = GetModelDisplayWithToolingSuffix(matched)
 
                     modelConfig = matched
                     Return True

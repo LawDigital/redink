@@ -44,7 +44,7 @@
     <LoadBehavior>3</LoadBehavior>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.6.58.700</ApplicationVersion>
+    <ApplicationVersion>1.7.12.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/excel/</InstallUrl>
     <ProductName>Red Ink for Excel %28Develop%29</ProductName>

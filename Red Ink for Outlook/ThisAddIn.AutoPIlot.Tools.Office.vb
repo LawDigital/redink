@@ -8781,18 +8781,18 @@ Partial Public Class ThisAddIn
                 requestText &= vbLf & context.HostTaskSummary
             End If
         End If
-        Dim markdown As System.String = If(markdownContent, System.String.Empty)
-
+        ' Visual requirements are derived only from the actual user/task request. Source
+        ' document content is payload, not intent: a contract that merely mentions an
+        ' organigram, chart, diagram, timeline, etc. must never create a rendering
+        ' requirement by itself. This keeps conversion/transformation semantics separate
+        ' from authoring intent and prevents source text from becoming host instructions.
         Dim requiresOrgChart As Boolean =
             System.Text.RegularExpressions.Regex.IsMatch(requestText,
                 "\b(?:organigramm|org\s*chart|organi[sz]ation(?:al)?\s+chart|organi[sz]ational\s+chart)\b",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) OrElse
-            System.Text.RegularExpressions.Regex.IsMatch(markdown,
-                "(?im)^\s{0,3}(?:#{1,6}\s*)?.*\b(?:organigramm|org\s*chart|organi[sz]ation(?:al)?\s+chart|organi[sz]ational\s+chart)\b.*$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
 
         If requiresOrgChart AndAlso CountAutoPilotWordVisualsOfType(visuals, "org_chart", "hierarchy") = 0 Then
-            validationError = "The current request/document explicitly requires an organization chart, but create_word_document contains no editable org_chart/hierarchy visual. A table is not a substitute."
+            validationError = "The current request explicitly requires an organization chart, but create_word_document contains no editable org_chart/hierarchy visual. A table is not a substitute."
             Return False
         End If
 
@@ -8802,13 +8802,10 @@ Partial Public Class ThisAddIn
         Dim requiresQuantitativeChart As Boolean =
             System.Text.RegularExpressions.Regex.IsMatch(requestText,
                 chartIntentPattern,
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) OrElse
-            System.Text.RegularExpressions.Regex.IsMatch(markdown,
-                "(?im)^\s{0,3}(?:#{1,6}\s*)?.*(?:grafische\s+darstellung|visualisierung|visualization|umsatzdiagramm|revenue\s+chart|sales\s+chart|financial\s+chart).*$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
 
         If requiresQuantitativeChart AndAlso CountAutoPilotWordVisualsOfType(visuals, "bar_chart", "column_chart", "line_chart", "area_chart", "pie_chart", "doughnut_chart") = 0 Then
-            validationError = "The current request/document explicitly requires a quantitative chart, but create_word_document contains no editable native chart visual. Character bars and chart-like tables are not substitutes."
+            validationError = "The current request explicitly requires a quantitative chart, but create_word_document contains no editable native chart visual. Character bars and chart-like tables are not substitutes."
             Return False
         End If
 
@@ -13438,7 +13435,7 @@ Partial Public Class ThisAddIn
             End If
 
             If Not System.String.IsNullOrWhiteSpace(requestedLayoutAdapterId) Then
-                context.Log("pdf_to_word ignored legacy layout_adapter_id because the tool uses isolated Microsoft Word conversion only.")
+                context.Log("pdf_to_word ignored legacy layout_adapter_id because conversion is delegated to Word's configured PDF-open pipeline.")
             End If
 
             Try
@@ -13451,20 +13448,19 @@ Partial Public Class ThisAddIn
                 Return response
             End Try
 
-            context.Log($"Converting PDF to Word through dedicated Microsoft Word automation with connected COM add-ins suspended: {fileName}")
-            ApDashboardLog($"📄 Converting PDF to Word through dedicated Microsoft Word automation with connected COM add-ins suspended: {fileName}", "step")
+            context.Log($"Converting PDF to Word through Microsoft Word using the user's configured Word conversion environment: {fileName}")
+            ApDashboardLog($"📄 Converting PDF to Word through the configured Microsoft Word environment: {fileName}", "step")
 
             Dim wordAutomationErrorCode As System.String = System.String.Empty
             Dim wordAutomationError As System.String = System.String.Empty
 
             ' Primary path: create a dedicated Microsoft Word automation instance without using
-            ' diagnostic command-line modes. Temporarily disconnect only the COM/VSTO add-ins
-            ' that are connected in that dedicated instance, inspect Word's FileConverters
-            ' inventory, and only then open the PDF. This avoids Office Safe Mode first-run UI
-            ' while still preventing a connected third-party Word integration from taking over
-            ' File > Open PDF. Original add-in connection states are restored before Word exits.
+            ' diagnostic command-line modes, then let Word open and save the PDF using its normal
+            ' configured conversion environment. Connected COM/VSTO add-ins and Word's FileConverters
+            ' inventory are neither modified nor screened. If the user's Word configuration routes PDF
+            ' opening through an installed converter, that converter is intentionally allowed to run.
             Dim uiTask = SwitchToUi(Function()
-                                        Return TryConvertPdfWithWordAddInsSuspended(
+                                        Return TryConvertPdfWithWordAutomation(
                                             att.TempFilePath,
                                             outputPath,
                                             wordAutomationErrorCode,
@@ -13479,7 +13475,7 @@ Partial Public Class ThisAddIn
                 success = Await uiTask
             Else
                 response.Success = False
-                response.ErrorCode = "word_addin_isolated_conversion_timeout"
+                response.ErrorCode = "word_automation_conversion_timeout"
                 response.ErrorMessage = "Microsoft Word did not complete the PDF conversion within 120 seconds."
                 response.AllowCrossScopeAlternativeRecovery = True
                 response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
@@ -13491,15 +13487,15 @@ Partial Public Class ThisAddIn
                     True,
                     response.ErrorCode,
                     response.ErrorMessage & " Red Ink did not invoke a Windows file association or external PDF application directly; a controlled reconstruction fallback may be used by the workflow.")
-                ApDashboardLog($"⚠ PdfToWord dedicated Word conversion timed out: {fileName}", "warn")
+                ApDashboardLog($"⚠ PdfToWord Word conversion timed out: {fileName}", "warn")
                 Return response
             End If
 
             If Not success Then
                 response.Success = False
-                response.ErrorCode = If(System.String.IsNullOrWhiteSpace(wordAutomationErrorCode), "word_addin_isolated_conversion_failed", wordAutomationErrorCode)
+                response.ErrorCode = If(System.String.IsNullOrWhiteSpace(wordAutomationErrorCode), "word_automation_conversion_failed", wordAutomationErrorCode)
                 Dim conversionFailureDetail As System.String = If(wordAutomationError, System.String.Empty).Trim()
-                If conversionFailureDetail.Length = 0 Then conversionFailureDetail = "The dedicated Microsoft Word automation instance did not produce the requested DOCX."
+                If conversionFailureDetail.Length = 0 Then conversionFailureDetail = "Microsoft Word did not produce the requested DOCX through its configured conversion environment."
                 response.ErrorMessage = conversionFailureDetail
                 response.AllowCrossScopeAlternativeRecovery = True
                 response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
@@ -13516,7 +13512,7 @@ Partial Public Class ThisAddIn
 
             If Not System.IO.File.Exists(outputPath) Then
                 response.Success = False
-                response.ErrorCode = "word_addin_isolated_output_missing"
+                response.ErrorCode = "word_automation_output_missing"
                 response.ErrorMessage = "Microsoft Word reported completion but the DOCX output is missing."
                 response.AllowCrossScopeAlternativeRecovery = True
                 response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
@@ -13541,7 +13537,7 @@ Partial Public Class ThisAddIn
                     System.Diagnostics.Debug.WriteLine("Could not remove image-only PDF-to-Word output: " & ex.Message)
                 End Try
                 response.Success = False
-                response.ErrorCode = "word_addin_isolated_layout_requirement_not_met"
+                response.ErrorCode = "word_automation_layout_requirement_not_met"
                 response.ErrorMessage = "Microsoft Word produced an image-only or effectively non-editable DOCX."
                 response.AllowCrossScopeAlternativeRecovery = True
                 response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
@@ -13566,39 +13562,39 @@ Partial Public Class ThisAddIn
                     "degraded_image_only",
                     True,
                     System.String.Empty,
-                    "Microsoft Word produced the DOCX after connected COM/VSTO add-ins were suspended in the dedicated automation instance, but it contains little or no extracted text and may be image-only.")
+                    "Microsoft Word produced the DOCX through its configured conversion environment, but it contains little or no extracted text and may be image-only.")
             Else
                 response.Response = BuildPdfWordConversionResponse(
                     fileName,
                     outputName,
                     conversionMode,
-                    "native_reflow",
+                    "word_reflow",
                     False,
                     System.String.Empty,
-                    "The PDF was opened and saved by a dedicated Microsoft Word automation instance after its connected COM/VSTO add-ins were temporarily suspended and Word no longer advertised an open-capable PDF FileConverter.")
+                    "The PDF was opened and saved through Word.Documents.Open and Document.SaveAs2. Word was allowed to use the user's configured COM/VSTO add-ins and PDF converters; converter provenance was not restricted or inferred. This DOCX is now the authoritative baseline for source-preserving edits. For broad semantic revisions with tracked changes, use process_word_document on this DOCX and its compare output. OCR may assist analysis but must not silently replace this baseline.")
             End If
-            ApDashboardLog($"✓ Converted to Word through dedicated Microsoft Word automation with add-ins suspended: {outputName}", "info")
+            ApDashboardLog($"✓ Converted to Word through the configured Microsoft Word environment: {outputName}", "info")
 
         Catch ex As System.OperationCanceledException
             response.Success = False
-            response.ErrorCode = "word_addin_isolated_conversion_cancelled"
+            response.ErrorCode = "word_automation_conversion_cancelled"
             response.ErrorMessage = "Operation was cancelled."
             response.AllowCrossScopeAlternativeRecovery = True
             response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
             response.Response = response.ErrorMessage
         Catch ex As System.Exception
             response.Success = False
-            response.ErrorCode = "word_addin_isolated_conversion_exception"
+            response.ErrorCode = "word_automation_conversion_exception"
             response.ErrorMessage = ex.Message
             response.AllowCrossScopeAlternativeRecovery = True
             response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
-            response.Response = $"Error converting PDF to Word through dedicated Microsoft Word automation: {ex.Message}"
+            response.Response = $"Error converting PDF to Word through the configured Microsoft Word environment: {ex.Message}"
         End Try
 
         Return response
     End Function
 
-    Private Shared Function TryConvertPdfWithWordAddInsSuspended(
+    Private Shared Function TryConvertPdfWithWordAutomation(
             inputPath As System.String,
             outputPath As System.String,
             ByRef errorCode As System.String,
@@ -13609,14 +13605,13 @@ Partial Public Class ThisAddIn
 
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
         Dim convertedDoc As Microsoft.Office.Interop.Word.Document = Nothing
-        Dim suspendedAddInProgIds As System.Collections.Generic.List(Of System.String) = Nothing
 
         Try
             Dim wordType As System.Type = System.Type.GetTypeFromProgID("Word.Application", True)
             wordApp = DirectCast(System.Activator.CreateInstance(wordType), Microsoft.Office.Interop.Word.Application)
             If wordApp Is Nothing Then
                 errorCode = "word_automation_instance_missing"
-                errorMessage = "Microsoft Word automation could not create a dedicated Application instance."
+                errorMessage = "Microsoft Word automation could not create an Application instance."
                 Return False
             End If
 
@@ -13624,35 +13619,6 @@ Partial Public Class ThisAddIn
             wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
             wordApp.ScreenUpdating = False
             wordApp.AutomationSecurity = Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityForceDisable
-
-            Dim addInIsolationError As System.String = System.String.Empty
-            If Not TrySuspendConnectedWordComAddIns(wordApp, suspendedAddInProgIds, addInIsolationError) Then
-                errorCode = "word_com_addin_suspension_failed"
-                errorMessage = addInIsolationError
-                Return False
-            End If
-
-            Dim pdfConverterAdvertised As System.Boolean = False
-            Dim converterInspectionError As System.String = System.String.Empty
-            Dim converterDescription As System.String = System.String.Empty
-            If Not TryInspectPdfFileConverters(
-                wordApp,
-                pdfConverterAdvertised,
-                converterDescription,
-                converterInspectionError) Then
-
-                errorCode = "word_converter_inspection_failed"
-                errorMessage = converterInspectionError
-                Return False
-            End If
-
-            If pdfConverterAdvertised Then
-                errorCode = "word_external_pdf_converter_still_present"
-                errorMessage = "Microsoft Word still advertises an open-capable PDF FileConverter after connected COM/VSTO add-ins were suspended" &
-                    If(System.String.IsNullOrWhiteSpace(converterDescription), ".", ": " & converterDescription & ".") &
-                    " Red Ink therefore did not open the PDF in Word, avoiding interactive third-party conversion UI."
-                Return False
-            End If
 
             Try
                 wordApp.Options.ConfirmConversions = False
@@ -13675,9 +13641,9 @@ Partial Public Class ThisAddIn
             Return System.IO.File.Exists(outputPath)
 
         Catch ex As System.Exception
-            If System.String.IsNullOrWhiteSpace(errorCode) Then errorCode = "word_addin_isolated_conversion_failed"
+            If System.String.IsNullOrWhiteSpace(errorCode) Then errorCode = "word_automation_conversion_failed"
             errorMessage = ex.Message
-            System.Diagnostics.Debug.WriteLine("PdfToWord dedicated Word automation error: " & ex.Message)
+            System.Diagnostics.Debug.WriteLine("PdfToWord Word automation error: " & ex.Message)
             Return False
         Finally
             If convertedDoc IsNot Nothing Then
@@ -13694,9 +13660,6 @@ Partial Public Class ThisAddIn
                 convertedDoc = Nothing
             End If
 
-            RestoreSuspendedWordComAddIns(wordApp, suspendedAddInProgIds)
-            suspendedAddInProgIds = Nothing
-
             If wordApp IsNot Nothing Then
                 Try
                     wordApp.Quit(False)
@@ -13709,206 +13672,6 @@ Partial Public Class ThisAddIn
                     System.Diagnostics.Debug.WriteLine("PdfToWord Word release failed: " & ex.Message)
                 End Try
                 wordApp = Nothing
-            End If
-        End Try
-    End Function
-
-    Private Shared Function TrySuspendConnectedWordComAddIns(
-            wordApp As Microsoft.Office.Interop.Word.Application,
-            ByRef suspendedProgIds As System.Collections.Generic.List(Of System.String),
-            ByRef errorMessage As System.String) As System.Boolean
-
-        suspendedProgIds = New System.Collections.Generic.List(Of System.String)()
-        errorMessage = System.String.Empty
-
-        If wordApp Is Nothing Then
-            errorMessage = "Microsoft Word automation is not available for COM add-in isolation."
-            Return False
-        End If
-
-        Dim addIns As Microsoft.Office.Core.COMAddIns = Nothing
-        Try
-            addIns = wordApp.COMAddIns
-            If addIns Is Nothing Then Return True
-
-            Dim count As System.Int32 = addIns.Count
-            For index As System.Int32 = 1 To count
-                Dim addIn As Microsoft.Office.Core.COMAddIn = Nothing
-                Try
-                    addIn = addIns.Item(index)
-                    If addIn Is Nothing OrElse Not addIn.Connect Then Continue For
-
-                    Dim progId As System.String = System.String.Empty
-                    Try
-                        progId = If(addIn.ProgId, System.String.Empty).Trim()
-                    Catch ex As System.Exception
-                        errorMessage = "Could not identify connected Word COM add-in #" &
-                            index.ToString(System.Globalization.CultureInfo.InvariantCulture) & ": " & ex.Message
-                        Return False
-                    End Try
-
-                    If System.String.IsNullOrWhiteSpace(progId) Then
-                        errorMessage = "Connected Word COM add-in #" &
-                            index.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                            " has no ProgID, so Red Ink cannot restore its connection state safely."
-                        Return False
-                    End If
-
-                    addIn.Connect = False
-                    If addIn.Connect Then
-                        errorMessage = "Word COM add-in could not be disconnected: " & progId & "."
-                        Return False
-                    End If
-
-                    suspendedProgIds.Add(progId)
-                Catch ex As System.Exception
-                    errorMessage = "Could not suspend connected Word COM add-in #" &
-                        index.ToString(System.Globalization.CultureInfo.InvariantCulture) & ": " & ex.Message
-                    Return False
-                Finally
-                    If addIn IsNot Nothing Then
-                        Try
-                            System.Runtime.InteropServices.Marshal.FinalReleaseComObject(addIn)
-                        Catch releaseEx As System.Exception
-                            System.Diagnostics.Debug.WriteLine("Word COM add-in release failed: " & releaseEx.Message)
-                        End Try
-                    End If
-                End Try
-            Next
-
-            Return True
-        Catch ex As System.Exception
-            errorMessage = "Could not enumerate Word COM add-ins: " & ex.Message
-            Return False
-        Finally
-            If addIns IsNot Nothing Then
-                Try
-                    System.Runtime.InteropServices.Marshal.FinalReleaseComObject(addIns)
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("Word COMAddIns collection release failed: " & ex.Message)
-                End Try
-            End If
-        End Try
-    End Function
-
-    Private Shared Sub RestoreSuspendedWordComAddIns(
-            wordApp As Microsoft.Office.Interop.Word.Application,
-            suspendedProgIds As System.Collections.Generic.List(Of System.String))
-
-        If wordApp Is Nothing OrElse suspendedProgIds Is Nothing OrElse suspendedProgIds.Count = 0 Then Return
-
-        Dim addIns As Microsoft.Office.Core.COMAddIns = Nothing
-        Try
-            addIns = wordApp.COMAddIns
-            If addIns Is Nothing Then Return
-
-            For Each progId As System.String In suspendedProgIds
-                If System.String.IsNullOrWhiteSpace(progId) Then Continue For
-
-                Dim addIn As Microsoft.Office.Core.COMAddIn = Nothing
-                Try
-                    addIn = addIns.Item(progId)
-                    If addIn IsNot Nothing AndAlso Not addIn.Connect Then addIn.Connect = True
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("Could not restore Word COM add-in connection state for '" & progId & "': " & ex.Message)
-                Finally
-                    If addIn IsNot Nothing Then
-                        Try
-                            System.Runtime.InteropServices.Marshal.FinalReleaseComObject(addIn)
-                        Catch ex As System.Exception
-                            System.Diagnostics.Debug.WriteLine("Word COM add-in release after restore failed: " & ex.Message)
-                        End Try
-                    End If
-                End Try
-            Next
-        Catch ex As System.Exception
-            System.Diagnostics.Debug.WriteLine("Could not enumerate Word COM add-ins during restore: " & ex.Message)
-        Finally
-            If addIns IsNot Nothing Then
-                Try
-                    System.Runtime.InteropServices.Marshal.FinalReleaseComObject(addIns)
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("Word COMAddIns restore collection release failed: " & ex.Message)
-                End Try
-            End If
-            suspendedProgIds.Clear()
-        End Try
-    End Sub
-
-    Private Shared Function TryInspectPdfFileConverters(
-            wordApp As Microsoft.Office.Interop.Word.Application,
-            ByRef pdfConverterAdvertised As System.Boolean,
-            ByRef converterDescription As System.String,
-            ByRef inspectionError As System.String) As System.Boolean
-
-        pdfConverterAdvertised = False
-        converterDescription = System.String.Empty
-        inspectionError = System.String.Empty
-        If wordApp Is Nothing Then
-            inspectionError = "Microsoft Word automation is not available."
-            Return False
-        End If
-
-        Dim converters As Microsoft.Office.Interop.Word.FileConverters = Nothing
-        Try
-            converters = wordApp.FileConverters
-            If converters Is Nothing Then Return True
-
-            Dim converterCount As System.Int32 = converters.Count
-            For index As System.Int32 = 1 To converterCount
-                Dim converter As Microsoft.Office.Interop.Word.FileConverter = Nothing
-                Try
-                    converter = converters.Item(index)
-                    If converter Is Nothing OrElse Not converter.CanOpen Then Continue For
-
-                    Dim extensions As System.String = If(converter.Extensions, System.String.Empty)
-                    For Each extensionToken As System.String In extensions.Split(
-                        New Char() {","c, ";"c, " "c, System.Convert.ToChar(9)},
-                        System.StringSplitOptions.RemoveEmptyEntries)
-
-                        Dim normalized As System.String = extensionToken.Trim().TrimStart("*"c).TrimStart("."c)
-                        If System.String.Equals(normalized, "pdf", System.StringComparison.OrdinalIgnoreCase) Then
-                            pdfConverterAdvertised = True
-                            Dim className As System.String = System.String.Empty
-                            Dim formatName As System.String = System.String.Empty
-                            Try
-                                className = If(converter.ClassName, System.String.Empty)
-                            Catch
-                            End Try
-                            Try
-                                formatName = If(converter.FormatName, System.String.Empty)
-                            Catch
-                            End Try
-                            converterDescription = (formatName & " " & className).Trim()
-                            Return True
-                        End If
-                    Next
-                Catch ex As System.Exception
-                    inspectionError = "Could not inspect Word FileConverter #" &
-                        index.ToString(System.Globalization.CultureInfo.InvariantCulture) & ": " & ex.Message
-                    Return False
-                Finally
-                    If converter IsNot Nothing Then
-                        Try
-                            System.Runtime.InteropServices.Marshal.FinalReleaseComObject(converter)
-                        Catch ex As System.Exception
-                            System.Diagnostics.Debug.WriteLine("PDF FileConverter release failed: " & ex.Message)
-                        End Try
-                    End If
-                End Try
-            Next
-
-            Return True
-        Catch ex As System.Exception
-            inspectionError = "Could not inspect Word's FileConverters inventory: " & ex.Message
-            Return False
-        Finally
-            If converters IsNot Nothing Then
-                Try
-                    System.Runtime.InteropServices.Marshal.FinalReleaseComObject(converters)
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("PDF FileConverters release failed: " & ex.Message)
-                End Try
             End If
         End Try
     End Function
@@ -13949,8 +13712,12 @@ Partial Public Class ThisAddIn
                                                             qualityDegraded As System.Boolean,
                                                             errorCode As System.String,
                                                             message As System.String) As System.String
-        Dim nativePathVerified As System.Boolean = System.String.Equals(quality, "native_reflow", System.StringComparison.Ordinal)
-        Dim converterProvenance As System.String = If(nativePathVerified, "word_documents_open_saveas2_com_addins_suspended", "not_verified")
+        Dim wordOpenSaveAsVerified As System.Boolean = System.String.Equals(quality, "word_reflow", System.StringComparison.Ordinal) OrElse
+                                                         System.String.Equals(quality, "degraded_image_only", System.StringComparison.Ordinal)
+
+        Dim usableConvertedBaseline As System.Boolean =
+            wordOpenSaveAsVerified AndAlso
+            System.String.Equals(quality, "word_reflow", System.StringComparison.Ordinal)
 
         Return Newtonsoft.Json.JsonConvert.SerializeObject(New With {
             .source = sourceName,
@@ -13958,9 +13725,15 @@ Partial Public Class ThisAddIn
             .requested_mode = requestedMode,
             .quality = quality,
             .quality_degraded = qualityDegraded,
-            .native_path_verified = nativePathVerified,
-            .converter_provenance = converterProvenance,
-            .converter_policy = "word_com_addins_suspended_first",
+            .native_path_verified = False,
+            .word_open_saveas_verified = wordOpenSaveAsVerified,
+            .converter_provenance = "word_configured_environment",
+            .converter_policy = "respect_word_configuration",
+            .converted_docx_is_authoritative_baseline = usableConvertedBaseline,
+            .recommended_semantic_revision_tool = If(usableConvertedBaseline, "process_word_document", System.String.Empty),
+            .recommended_exact_anchor_revision_tool = If(usableConvertedBaseline, "word_markup", System.String.Empty),
+            .ocr_role_after_successful_conversion = If(usableConvertedBaseline, "analysis_only", System.String.Empty),
+            .reconstruction_fallback_allowed = Not usableConvertedBaseline,
             .layout_adapter_id = System.String.Empty,
             .selected_adapter_id = System.String.Empty,
             .error_code = If(errorCode, System.String.Empty),

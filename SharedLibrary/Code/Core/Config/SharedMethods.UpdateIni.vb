@@ -15,7 +15,7 @@
 '
 ' It follows a "detect → filter → decide → apply" pipeline:
 '   1) Detect differences between local INI files and configured update sources.
-'   2) Collect signature/download diagnostics and track failed sources.
+'   2) Collect signature-validation and source-access diagnostics and track unusable sources.
 '   3) Filter out ignored changes (with override rules).
 '   4) Resolve placeholders in remote values using local definitions.
 '   5) Decide which changes may be applied (silent security level or interactive UI).
@@ -24,7 +24,7 @@
 '
 ' Primary Entry Point (startup integration)
 ' ----------------------------------------
-' - `Public Shared Function CheckForIniUpdates(ByRef context As ISharedContext) As Boolean`
+' - `Public Shared Function CheckForIniUpdates(...) As Boolean` - automatic or explicit user-requested update check
 '
 ' Placeholder Preservation System
 ' -------------------------------
@@ -233,6 +233,41 @@ Namespace SharedLibrary
 #Region "Main Entry Point"
 
         ''' <summary>
+        ''' Executes an INI-update UI action on the Office UI thread when a host control is available.
+        ''' Non-UI discovery and network work may therefore remain on a background thread.
+        ''' </summary>
+        Private Shared Sub InvokeIniUpdateUi(action As System.Action)
+            If action Is Nothing Then Return
+
+            Dim uiControl As System.Windows.Forms.Control = UpdateHandler.MainControl
+            If uiControl IsNot Nothing AndAlso Not uiControl.IsDisposed AndAlso uiControl.InvokeRequired Then
+                uiControl.Invoke(New System.Windows.Forms.MethodInvoker(Sub() action.Invoke()))
+            Else
+                action.Invoke()
+            End If
+        End Sub
+
+        ''' <summary>
+        ''' Executes an INI-update UI function on the Office UI thread and returns its result.
+        ''' </summary>
+        Private Shared Function InvokeIniUpdateUi(Of TResult)(callback As System.Func(Of TResult)) As TResult
+            If callback Is Nothing Then Return Nothing
+
+            Dim uiControl As System.Windows.Forms.Control = UpdateHandler.MainControl
+            If uiControl IsNot Nothing AndAlso Not uiControl.IsDisposed AndAlso uiControl.InvokeRequired Then
+                Dim result As TResult = Nothing
+                uiControl.Invoke(
+                    New System.Windows.Forms.MethodInvoker(
+                        Sub()
+                            result = callback.Invoke()
+                        End Sub))
+                Return result
+            End If
+
+            Return callback.Invoke()
+        End Function
+
+        ''' <summary>
         ''' Determines whether an INI-governed update workflow may run for the current context.
         ''' Uses the same master switch, client allow-list and NoLocalConfig session override as the
         ''' INI update flow so related update checks stay aligned.
@@ -255,11 +290,14 @@ Namespace SharedLibrary
             End If
 
             If NoLocalConfigSessionUnlocked Then
-                Dim overrideAnswer As Integer = ShowCustomYesNoBox(
-                    $"Your client is not allowed to check for or apply {updateDisplayName} updates. " &
-                    "However, because you unlocked the expert configuration with the central configuration password, " &
-                    $"you may still check for {updateDisplayName} updates now. Do you want to check for updates?",
-                    $"Yes, check for {updateDisplayName} updates", "No")
+                Dim overrideAnswer As Integer = InvokeIniUpdateUi(
+                    Function()
+                        Return ShowCustomYesNoBox(
+                            $"Your client is not allowed to check for or apply {updateDisplayName} updates. " &
+                            "However, because you unlocked the expert configuration with the central configuration password, " &
+                            $"you may still check for {updateDisplayName} updates now. Do you want to check for updates?",
+                            $"Yes, check for {updateDisplayName} updates", "No")
+                    End Function)
                 If overrideAnswer <> 1 Then
                     Debug.WriteLine($"{updateDisplayName} Update: Client not authorized; user declined the override check")
                     Return False
@@ -278,12 +316,24 @@ Namespace SharedLibrary
         ''' Main entry point for INI update checking. Called from UpdateHandler at startup.
         ''' </summary>
         ''' <param name="context">The shared context containing configuration.</param>
+        ''' <param name="skipAuthorizationGate">If <c>True</c>, assumes authorization was already checked by the caller.</param>
+        ''' <param name="userInitiated">If <c>True</c>, source-access failures may be reported to the user; automatic checks keep them silent.</param>
+        ''' <param name="hadSourceAccessErrors">Returns <c>True</c> when one or more sources could not be accessed and signature validity therefore could not be determined.</param>
         ''' <returns>True if updates were applied, False otherwise.</returns>
         Public Shared Function CheckForIniUpdates(ByRef context As ISharedContext,
-                                                  Optional skipAuthorizationGate As Boolean = False) As Boolean
+                                                  Optional skipAuthorizationGate As Boolean = False,
+                                                  Optional userInitiated As Boolean = False,
+                                                  Optional ByRef hadSourceAccessErrors As System.Boolean = False) As Boolean
+
+            hadSourceAccessErrors = False
 
             ' Store context for use by helper methods
             _iniUpdateContext = context
+
+            Dim totalPerformanceStopwatch As System.Diagnostics.Stopwatch = Nothing
+            If PerformanceLogger.IsEnabled(_iniUpdateContext) Then
+                totalPerformanceStopwatch = System.Diagnostics.Stopwatch.StartNew()
+            End If
 
             Try
                 If Not skipAuthorizationGate AndAlso Not CanRunIniGovernedUpdate(context, "INI configuration") Then
@@ -310,6 +360,7 @@ Namespace SharedLibrary
                 ' Collect all changes from all three INI files
                 Dim allChanges As New List(Of IniParameterChange)()
                 Dim signatureErrors As New List(Of String)()
+                Dim sourceAccessErrors As New List(Of String)()
                 Dim failedSources As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
                 Dim updateSources As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
@@ -320,7 +371,21 @@ Namespace SharedLibrary
                     Dim mainFileName = Path.GetFileName(mainIniPath)
                     Dim sourceInfo = ParseGlobalUpdateSource(_iniUpdateContext.INI_UpdateSource)
                     updateSources(mainFileName) = sourceInfo.UpdatePath
-                    Dim mainChanges = CheckSingleIniFile(mainIniPath, mainFileName, _iniUpdateContext.INI_UpdateSource, Nothing, signatureErrors, failedSources)
+                    Dim mainChanges As System.Collections.Generic.List(Of IniParameterChange) =
+                        PerformanceLogger.Measure(
+                            _iniUpdateContext,
+                            "INIUpdate",
+                            "MainConfig",
+                            Function()
+                                Return CheckSingleIniFile(
+                                    mainIniPath,
+                                    mainFileName,
+                                    _iniUpdateContext.INI_UpdateSource,
+                                    Nothing,
+                                    signatureErrors,
+                                    failedSources,
+                                    sourceAccessErrors)
+                            End Function)
                     If mainChanges IsNot Nothing Then allChanges.AddRange(mainChanges)
                 End If
 
@@ -329,7 +394,20 @@ Namespace SharedLibrary
                     Dim altPath = ExpandEnvironmentVariables(context.INI_AlternateModelPath)
                     If File.Exists(altPath) Then
                         Dim altFileName = Path.GetFileName(altPath)
-                        Dim altChanges = CheckSegmentedIniFile(altPath, altFileName, signatureErrors, updateSources, failedSources)
+                        Dim altChanges As System.Collections.Generic.List(Of IniParameterChange) =
+                            PerformanceLogger.Measure(
+                                _iniUpdateContext,
+                                "INIUpdate",
+                                "AlternateModels",
+                                Function()
+                                    Return CheckSegmentedIniFile(
+                                        altPath,
+                                        altFileName,
+                                        signatureErrors,
+                                        updateSources,
+                                        failedSources,
+                                        sourceAccessErrors)
+                                End Function)
                         If altChanges IsNot Nothing Then allChanges.AddRange(altChanges)
                     End If
                 End If
@@ -339,8 +417,38 @@ Namespace SharedLibrary
                     Dim svcPath = ExpandEnvironmentVariables(context.INI_SpecialServicePath)
                     If File.Exists(svcPath) Then
                         Dim svcFileName = Path.GetFileName(svcPath)
-                        Dim svcChanges = CheckSegmentedIniFile(svcPath, svcFileName, signatureErrors, updateSources, failedSources)
+                        Dim svcChanges As System.Collections.Generic.List(Of IniParameterChange) =
+                            PerformanceLogger.Measure(
+                                _iniUpdateContext,
+                                "INIUpdate",
+                                "SpecialServices",
+                                Function()
+                                    Return CheckSegmentedIniFile(
+                                        svcPath,
+                                        svcFileName,
+                                        signatureErrors,
+                                        updateSources,
+                                        failedSources,
+                                        sourceAccessErrors)
+                                End Function)
                         If svcChanges IsNot Nothing Then allChanges.AddRange(svcChanges)
+                    End If
+                End If
+
+                ' Source-access failures are not signature failures. A remote source or its signature
+                ' may simply be unreachable, in which case no signature conclusion can be made.
+                If sourceAccessErrors.Count > 0 Then
+                    hadSourceAccessErrors = True
+                    LogIniUpdateEvent(
+                        "Source Access Failed",
+                        $"{sourceAccessErrors.Count} update source access error(s):" & vbCrLf &
+                        String.Join(vbCrLf, sourceAccessErrors),
+                        alwaysLog:=userInitiated)
+
+                    ' Automatic checks remain silent for connectivity/source-access failures.
+                    ' A user-requested check reports the access problem explicitly.
+                    If userInitiated Then
+                        InvokeIniUpdateUi(Sub() ShowIniUpdateSourceAccessErrorDialog(sourceAccessErrors))
                     End If
                 End If
 
@@ -351,7 +459,7 @@ Namespace SharedLibrary
                         String.Join(vbCrLf, signatureErrors), alwaysLog:=True)
 
                     If _iniUpdateContext.INI_UpdateIniSilentMode = SilentUpdateSecurityLevel.Disabled Then
-                        ShowSignatureErrorDialog(signatureErrors)
+                        InvokeIniUpdateUi(Sub() ShowSignatureErrorDialog(signatureErrors))
                     End If
                 End If
 
@@ -437,7 +545,7 @@ Namespace SharedLibrary
                             alwaysLog:=True)
                     Else
                         ' INTERACTIVE MODE: Prompt user for placeholder values
-                        If ShowPlaceholderInputDialog(missingPlaceholderInfos) Then
+                        If InvokeIniUpdateUi(Function() ShowPlaceholderInputDialog(missingPlaceholderInfos)) Then
                             ' User provided values - apply them
                             ' Group by file and segment to write definitions
                             Dim byFileAndSegment = missingPlaceholderInfos.GroupBy(
@@ -504,10 +612,10 @@ Namespace SharedLibrary
 
                 ' === INTERACTIVE MODE (existing behavior) ===
                 ' Show approval dialog
-                Dim approvalResult = ShowUpdateApprovalDialog(allChanges)
+                Dim approvalResult As UpdateApprovalResult = InvokeIniUpdateUi(Function() ShowUpdateApprovalDialog(allChanges))
                 If approvalResult = UpdateApprovalResult.Reject Then
                     LogIniUpdateEvent("User Action", "User rejected all changes")
-                    ShowIgnoreConfirmationDialog(allChanges)
+                    InvokeIniUpdateUi(Sub() ShowIgnoreConfirmationDialog(allChanges))
                     Return False
                 ElseIf approvalResult = UpdateApprovalResult.Cancel Then
                     LogIniUpdateEvent("User Action", "User cancelled update dialog")
@@ -526,7 +634,7 @@ Namespace SharedLibrary
 
                 ' Show ignore dialog for rejected items
                 If rejectedChanges.Count > 0 Then
-                    ShowIgnoreConfirmationDialog(rejectedChanges)
+                    InvokeIniUpdateUi(Sub() ShowIgnoreConfirmationDialog(rejectedChanges))
                 End If
 
                 ' Apply approved changes
@@ -535,16 +643,26 @@ Namespace SharedLibrary
                     LogIniUpdateEvent("Updates Applied",
                         String.Join(vbCrLf, approvedChanges.Select(Function(c) $"{c.ToString()}: {c.OldValue} → {c.NewValue}")),
                         alwaysLog:=True)
-                    ShowCustomMessageBox($"{approvedChanges.Count} configuration parameter(s) have been updated. Changes will be active upon next reload.")
+                    InvokeIniUpdateUi(Sub() ShowCustomMessageBox($"{approvedChanges.Count} configuration parameter(s) have been updated. Changes will be active upon next reload."))
                     Return True
                 End If
 
                 Return False
 
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Debug.WriteLine($"INI Update Error: {ex.Message}")
                 LogIniUpdateEvent("ERROR", $"Unexpected error: {ex.Message}", alwaysLog:=True)
                 Return False
+            Finally
+                If totalPerformanceStopwatch IsNot Nothing Then
+                    totalPerformanceStopwatch.Stop()
+                    PerformanceLogger.LogDuration(
+                        _iniUpdateContext,
+                        "INIUpdate",
+                        "CheckForIniUpdates.total",
+                        totalPerformanceStopwatch.ElapsedMilliseconds,
+                        "userInitiated=" & userInitiated.ToString())
+                End If
             End Try
         End Function
 
@@ -606,7 +724,7 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="changes">The detected parameter changes.</param>
         ''' <param name="context">The shared context used to resolve local INI file locations.</param>
-        ''' <param name="failedSources">Update sources that failed signature validation or required verification data.</param>
+        ''' <param name="failedSources">Update sources that could not be loaded or could not satisfy required signature validation.</param>
         ''' <param name="updateSources">Mapping of INI file or INI file/segment identifiers to their update source path.</param>
         ''' <returns><c>True</c> if at least one change was applied; otherwise <c>False</c>.</returns>
         Private Shared Function ProcessSilentUpdates(changes As List(Of IniParameterChange),
@@ -638,7 +756,7 @@ Namespace SharedLibrary
                             updateSources.TryGetValue(change.IniFile, sourcePath)
                         End If
 
-                        ' Only add if source didn't fail signature validation
+                        ' Only add if the source was successfully loaded and satisfied required validation
                         If String.IsNullOrWhiteSpace(sourcePath) OrElse Not failedSources.Contains(sourcePath) Then
                             changesToApply.Add(change)
                         End If
@@ -647,7 +765,7 @@ Namespace SharedLibrary
                     Dim skippedCount = changes.Count - changesToApply.Count
                     If skippedCount > 0 Then
                         LogIniUpdateEvent("SignedOnly mode",
-                    $"Applying {changesToApply.Count} changes from valid sources, skipping {skippedCount} from sources with signature errors",
+                    $"Applying {changesToApply.Count} changes from valid sources, skipping {skippedCount} from unavailable or invalid sources",
                     alwaysLog:=True)
                     Else
                         LogIniUpdateEvent("SignedOnly mode", $"All signatures valid - applying {changesToApply.Count} changes")
@@ -904,6 +1022,22 @@ Namespace SharedLibrary
             Else
                 form.ShowDialog()
             End If
+        End Sub
+
+        ''' <summary>
+        ''' Reports update-source access failures for an explicitly user-requested INI update check.
+        ''' Connectivity/access failures are intentionally kept separate from signature validation failures.
+        ''' </summary>
+        Private Shared Sub ShowIniUpdateSourceAccessErrorDialog(errors As List(Of String))
+            If errors Is Nothing OrElse errors.Count = 0 Then Return
+
+            Dim message As String =
+                "The INI update check could not access one or more configured update sources." & vbCrLf & vbCrLf &
+                "The affected source or signature file could not be retrieved, so its signature could not be checked. " &
+                "This does not mean that the signature is invalid." & vbCrLf & vbCrLf &
+                String.Join(vbCrLf & vbCrLf, errors)
+
+            ShowCustomMessageBox(message, $"{AN} - INI Update")
         End Sub
 
 #End Region
@@ -1523,18 +1657,24 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="sourcePath">Path or URL to the update source.</param>
         ''' <param name="publicKey">Base64-encoded Ed25519 public key used for signature verification.</param>
-        ''' <param name="signatureErrors">Collector for formatted signature and download errors.</param>
-        ''' <param name="failedSources">Collector for sources that failed signature validation or required verification inputs.</param>
+        ''' <param name="signatureErrors">Collector for genuine signature-validation errors and missing/invalid signature material.</param>
+        ''' <param name="failedSources">Collector for sources that could not be used for the current update check.</param>
+        ''' <param name="sourceAccessErrors">Collector for source/signature retrieval failures where signature validity could not be determined.</param>
         ''' <returns>The loaded content text, or <c>Nothing</c> if loading or required signature verification fails.</returns>
-        Private Shared Function LoadUpdateSourceContent(sourcePath As String, publicKey As String, signatureErrors As List(Of String), Optional failedSources As HashSet(Of String) = Nothing) As String
+        Private Shared Function LoadUpdateSourceContent(sourcePath As String,
+                                                       publicKey As String,
+                                                       signatureErrors As List(Of String),
+                                                       Optional failedSources As HashSet(Of String) = Nothing,
+                                                       Optional sourceAccessErrors As List(Of String) = Nothing) As String
 
             If String.IsNullOrWhiteSpace(sourcePath) Then Return Nothing
 
             Try
-                Dim isRemote = sourcePath.StartsWith("https://", StringComparison.OrdinalIgnoreCase) OrElse
-                       sourcePath.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                Dim isRemote As Boolean =
+                    sourcePath.StartsWith("https://", StringComparison.OrdinalIgnoreCase) OrElse
+                    sourcePath.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
 
-                ' Check if remote sources are allowed
+                ' Check if remote sources are allowed.
                 If isRemote AndAlso Not _iniUpdateContext.INI_UpdateIniAllowRemote Then
                     Debug.WriteLine($"Remote update source blocked by policy: {sourcePath}")
                     Return Nothing
@@ -1545,93 +1685,152 @@ Namespace SharedLibrary
                 Dim expandedPath As String = Nothing
 
                 If isRemote Then
-                    ' Enable TLS 1.2 for HTTPS
                     ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol Or SecurityProtocolType.Tls12
 
-                    Using client As New HttpClient()
-                        client.Timeout = TimeSpan.FromSeconds(30)
+                    Using client As New System.Net.Http.HttpClient()
+                        client.Timeout = System.TimeSpan.FromSeconds(30)
 
-                        ' Download main content as exact bytes
+                        ' Download the update source. Connectivity/HTTP failures are source-access
+                        ' failures; no statement about the signature can be made in that case.
                         Try
-                            Dim contentTask = client.GetByteArrayAsync(sourcePath)
-                            contentTask.Wait()
-                            contentBytes = contentTask.Result
-                        Catch ex As Exception
-                            signatureErrors?.Add($"SOURCE: {sourcePath}" & vbCrLf &
-                                         $"ERROR: Failed to download update source" & vbCrLf &
-                                         $"DETAILS: {ex.Message}")
+                            Using response As System.Net.Http.HttpResponseMessage =
+                                client.GetAsync(sourcePath).GetAwaiter().GetResult()
+
+                                If Not response.IsSuccessStatusCode Then
+                                    sourceAccessErrors?.Add(
+                                        $"SOURCE: {sourcePath}" & vbCrLf &
+                                        $"ERROR: Update source could not be retrieved (HTTP {CInt(response.StatusCode)} {response.ReasonPhrase})" & vbCrLf &
+                                        "NOTE: Signature validation was not performed because the source content was unavailable.")
+                                    failedSources?.Add(sourcePath)
+                                    Return Nothing
+                                End If
+
+                                contentBytes = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+                            End Using
+                        Catch ex As System.Exception
+                            sourceAccessErrors?.Add(
+                                $"SOURCE: {sourcePath}" & vbCrLf &
+                                "ERROR: Update source could not be retrieved" & vbCrLf &
+                                $"DETAILS: {ex.Message}" & vbCrLf &
+                                "NOTE: Signature validation was not performed because the source content was unavailable.")
                             failedSources?.Add(sourcePath)
                             Return Nothing
                         End Try
 
-                        ' Download signature file (.sig) - only if signature verification is required AND public key exists
+                        ' Download the .sig file only when signature verification is required and a key exists.
                         If Not _iniUpdateContext.INI_UpdateIniNoSignature AndAlso Not String.IsNullOrWhiteSpace(publicKey) Then
+                            Dim signatureUrl As String = sourcePath & ".sig"
                             Try
-                                Dim sigTask = client.GetStringAsync(sourcePath & ".sig")
-                                sigTask.Wait()
-                                signatureContent = sigTask.Result?.Trim()
-                            Catch ex As Exception
-                                signatureErrors?.Add($"SOURCE: {sourcePath}" & vbCrLf &
-                                             $"ERROR: Signature file not found or inaccessible" & vbCrLf &
-                                             $"EXPECTED: {sourcePath}.sig" & vbCrLf &
-                                             $"DETAILS: {ex.Message}" & vbCrLf &
-                                             $"ACTION: Ensure the .sig file exists alongside the update file, or contact your administrator.")
+                                Using response As System.Net.Http.HttpResponseMessage =
+                                    client.GetAsync(signatureUrl).GetAwaiter().GetResult()
+
+                                    If response.StatusCode = System.Net.HttpStatusCode.NotFound Then
+                                        signatureErrors?.Add(
+                                            $"SOURCE: {sourcePath}" & vbCrLf &
+                                            "ERROR: Signature file not found" & vbCrLf &
+                                            $"EXPECTED: {signatureUrl}" & vbCrLf &
+                                            "ACTION: Ensure the .sig file exists alongside the update file, or contact your administrator.")
+                                        failedSources?.Add(sourcePath)
+                                    ElseIf Not response.IsSuccessStatusCode Then
+                                        sourceAccessErrors?.Add(
+                                            $"SOURCE: {sourcePath}" & vbCrLf &
+                                            $"ERROR: Signature file could not be retrieved (HTTP {CInt(response.StatusCode)} {response.ReasonPhrase})" & vbCrLf &
+                                            $"SIGNATURE FILE: {signatureUrl}" & vbCrLf &
+                                            "NOTE: Signature validation was not performed because the signature file was unavailable.")
+                                        failedSources?.Add(sourcePath)
+                                    Else
+                                        signatureContent = response.Content.ReadAsStringAsync().GetAwaiter().GetResult()?.Trim()
+                                        If String.IsNullOrWhiteSpace(signatureContent) Then
+                                            signatureErrors?.Add(
+                                                $"SOURCE: {sourcePath}" & vbCrLf &
+                                                "ERROR: Signature file is empty" & vbCrLf &
+                                                $"SIGNATURE FILE: {signatureUrl}" & vbCrLf &
+                                                "ACTION: Recreate the .sig file or contact your administrator.")
+                                            failedSources?.Add(sourcePath)
+                                        End If
+                                    End If
+                                End Using
+                            Catch ex As System.Exception
+                                sourceAccessErrors?.Add(
+                                    $"SOURCE: {sourcePath}" & vbCrLf &
+                                    "ERROR: Signature file could not be retrieved" & vbCrLf &
+                                    $"SIGNATURE FILE: {signatureUrl}" & vbCrLf &
+                                    $"DETAILS: {ex.Message}" & vbCrLf &
+                                    "NOTE: Signature validation was not performed because the signature file was unavailable.")
                                 failedSources?.Add(sourcePath)
                             End Try
                         End If
                     End Using
                 Else
-                    ' Local or network path - expand environment variables
+                    ' Local or network path - expand environment variables.
                     expandedPath = ExpandEnvironmentVariables(sourcePath)
                     If Not File.Exists(expandedPath) Then
-                        Debug.WriteLine($"Update source file not found: {expandedPath}")
+                        sourceAccessErrors?.Add(
+                            $"SOURCE: {expandedPath}" & vbCrLf &
+                            "ERROR: Update source file was not found" & vbCrLf &
+                            "NOTE: Signature validation was not performed because the source content was unavailable.")
+                        failedSources?.Add(sourcePath)
                         Return Nothing
                     End If
 
                     Try
                         contentBytes = File.ReadAllBytes(expandedPath)
-                    Catch ex As Exception
-                        signatureErrors?.Add($"SOURCE: {expandedPath}" & vbCrLf &
-                                     $"ERROR: Failed to read update source file" & vbCrLf &
-                                     $"DETAILS: {ex.Message}")
+                    Catch ex As System.Exception
+                        sourceAccessErrors?.Add(
+                            $"SOURCE: {expandedPath}" & vbCrLf &
+                            "ERROR: Update source file could not be read" & vbCrLf &
+                            $"DETAILS: {ex.Message}" & vbCrLf &
+                            "NOTE: Signature validation was not performed because the source content was unavailable.")
                         failedSources?.Add(sourcePath)
                         Return Nothing
                     End Try
 
-                    ' Check for signature file - only if signature verification is required AND public key exists
+                    ' Check for a local signature file only if signature verification is required and a key exists.
                     If Not _iniUpdateContext.INI_UpdateIniNoSignature AndAlso Not String.IsNullOrWhiteSpace(publicKey) Then
-                        Dim sigPath = expandedPath & ".sig"
+                        Dim sigPath As String = expandedPath & ".sig"
                         If File.Exists(sigPath) Then
                             Try
                                 signatureContent = File.ReadAllText(sigPath, Encoding.UTF8)?.Trim()
-                            Catch ex As Exception
-                                signatureErrors?.Add($"SOURCE: {expandedPath}" & vbCrLf &
-                                             $"ERROR: Failed to read signature file" & vbCrLf &
-                                             $"SIGNATURE FILE: {sigPath}" & vbCrLf &
-                                             $"DETAILS: {ex.Message}")
+                                If String.IsNullOrWhiteSpace(signatureContent) Then
+                                    signatureErrors?.Add(
+                                        $"SOURCE: {expandedPath}" & vbCrLf &
+                                        "ERROR: Signature file is empty" & vbCrLf &
+                                        $"SIGNATURE FILE: {sigPath}" & vbCrLf &
+                                        "ACTION: Recreate the .sig file or contact your administrator.")
+                                    failedSources?.Add(sourcePath)
+                                End If
+                            Catch ex As System.Exception
+                                sourceAccessErrors?.Add(
+                                    $"SOURCE: {expandedPath}" & vbCrLf &
+                                    "ERROR: Signature file could not be read" & vbCrLf &
+                                    $"SIGNATURE FILE: {sigPath}" & vbCrLf &
+                                    $"DETAILS: {ex.Message}" & vbCrLf &
+                                    "NOTE: Signature validation was not performed because the signature file was unavailable.")
                                 failedSources?.Add(sourcePath)
                             End Try
                         Else
-                            signatureErrors?.Add($"SOURCE: {expandedPath}" & vbCrLf &
-                                         $"ERROR: Signature file not found" & vbCrLf &
-                                         $"EXPECTED: {sigPath}" & vbCrLf &
-                                         $"ACTION: Create a .sig file using the Signature Management tool, or contact your administrator.")
+                            signatureErrors?.Add(
+                                $"SOURCE: {expandedPath}" & vbCrLf &
+                                "ERROR: Signature file not found" & vbCrLf &
+                                $"EXPECTED: {sigPath}" & vbCrLf &
+                                "ACTION: Create a .sig file using the Signature Management tool, or contact your administrator.")
                             failedSources?.Add(sourcePath)
                         End If
                     End If
                 End If
 
-                ' Verify signature if required
+                ' Verify signature if required.
                 If Not _iniUpdateContext.INI_UpdateIniNoSignature Then
-                    Dim displayPath = If(expandedPath, sourcePath)
+                    Dim displayPath As String = If(expandedPath, sourcePath)
 
-                    ' If no public key is configured, skip signature verification but add warning
+                    ' If no public key is configured, preserve the existing warning/allow behavior.
                     If String.IsNullOrWhiteSpace(publicKey) Then
-                        signatureErrors?.Add($"SOURCE: {displayPath}" & vbCrLf &
-                                     $"WARNING: No public key configured - signature verification skipped" & vbCrLf &
-                                     $"NOTE: Updates will proceed without cryptographic verification." & vbCrLf &
-                                     $"ACTION: For better security, add a public key as the third parameter in UpdateSource:" & vbCrLf &
-                                     $"        UpdateSource = path; keys; PUBLIC_KEY_HERE")
+                        signatureErrors?.Add(
+                            $"SOURCE: {displayPath}" & vbCrLf &
+                            "WARNING: No public key configured - signature verification skipped" & vbCrLf &
+                            "NOTE: Updates will proceed without cryptographic verification." & vbCrLf &
+                            "ACTION: For better security, add a public key as the third parameter in UpdateSource:" & vbCrLf &
+                            "        UpdateSource = path; keys; PUBLIC_KEY_HERE")
                         failedSources?.Add(sourcePath)
                         Return DecodeContentText(contentBytes)
                     End If
@@ -1641,14 +1840,15 @@ Namespace SharedLibrary
                     End If
 
                     If Not VerifyEd25519SignatureCompatible(contentBytes, signatureContent, publicKey) Then
-                        signatureErrors?.Add($"SOURCE: {displayPath}" & vbCrLf &
-                                     $"ERROR: SIGNATURE VERIFICATION FAILED" & vbCrLf &
-                                     $"⚠ This may indicate the file has been tampered with!" & vbCrLf &
-                                     $"POSSIBLE CAUSES:" & vbCrLf &
-                                     $"  - File was modified after signing" & vbCrLf &
-                                     $"  - Wrong public key configured" & vbCrLf &
-                                     $"  - Signature file corrupted or for different file" & vbCrLf &
-                                     $"ACTION: Contact your administrator immediately.")
+                        signatureErrors?.Add(
+                            $"SOURCE: {displayPath}" & vbCrLf &
+                            "ERROR: SIGNATURE VERIFICATION FAILED" & vbCrLf &
+                            "⚠ This may indicate the file has been tampered with!" & vbCrLf &
+                            "POSSIBLE CAUSES:" & vbCrLf &
+                            "  - File was modified after signing" & vbCrLf &
+                            "  - Wrong public key configured" & vbCrLf &
+                            "  - Signature file corrupted or for different file" & vbCrLf &
+                            "ACTION: Contact your administrator immediately.")
                         failedSources?.Add(sourcePath)
                         Return Nothing
                     End If
@@ -1656,10 +1856,12 @@ Namespace SharedLibrary
 
                 Return DecodeContentText(contentBytes)
 
-            Catch ex As Exception
-                signatureErrors?.Add($"SOURCE: {sourcePath}" & vbCrLf &
-                             $"ERROR: Unexpected error during update check" & vbCrLf &
-                             $"DETAILS: {ex.Message}")
+            Catch ex As System.Exception
+                sourceAccessErrors?.Add(
+                    $"SOURCE: {sourcePath}" & vbCrLf &
+                    "ERROR: Unexpected error while accessing the update source" & vbCrLf &
+                    $"DETAILS: {ex.Message}" & vbCrLf &
+                    "NOTE: Signature validation could not be completed.")
                 failedSources?.Add(sourcePath)
                 Return Nothing
             End Try
@@ -1687,12 +1889,14 @@ Namespace SharedLibrary
         ''' <param name="updateSource">Update source definition string (<c>path; keys; publicKey</c>).</param>
         ''' <param name="segmentName">Segment name used for reporting; empty for global scope.</param>
         ''' <param name="signatureErrors">Collector for signature-related diagnostics.</param>
-        ''' <param name="failedSources">Collector for sources that failed signature validation or required verification inputs.</param>
+        ''' <param name="failedSources">Collector for sources that could not be used for the current update check.</param>
+        ''' <param name="sourceAccessErrors">Collector for source/signature retrieval failures where signature validity could not be determined.</param>
         ''' <returns>List of detected changes; empty if none are found or update content cannot be loaded.</returns>
         Private Shared Function CheckSingleIniFile(localPath As String, fileName As String,
                                                    updateSource As String, segmentName As String,
                                                    signatureErrors As List(Of String),
-                                                   Optional failedSources As HashSet(Of String) = Nothing) As List(Of IniParameterChange)
+                                                   Optional failedSources As HashSet(Of String) = Nothing,
+                                                   Optional sourceAccessErrors As List(Of String) = Nothing) As List(Of IniParameterChange)
 
             Dim changes As New List(Of IniParameterChange)()
 
@@ -1710,7 +1914,12 @@ Namespace SharedLibrary
                 End If
 
                 ' Load remote content (with signature validation)
-                Dim remoteContent = LoadUpdateSourceContent(sourceInfo.UpdatePath, sourceInfo.PublicKey, signatureErrors, failedSources)
+                Dim remoteContent = LoadUpdateSourceContent(
+                    sourceInfo.UpdatePath,
+                    sourceInfo.PublicKey,
+                    signatureErrors,
+                    failedSources,
+                    sourceAccessErrors)
                 If String.IsNullOrWhiteSpace(remoteContent) Then Return changes
 
                 ' Parse local and remote files
@@ -1823,12 +2032,14 @@ Namespace SharedLibrary
         ''' <param name="fileName">INI file name used for reporting.</param>
         ''' <param name="signatureErrors">Collector for signature-related diagnostics.</param>
         ''' <param name="updateSources">Optional map updated with resolved update source paths per file/segment.</param>
-        ''' <param name="failedSources">Collector for sources that failed signature validation or required verification inputs.</param>
+        ''' <param name="failedSources">Collector for sources that could not be used for the current update check.</param>
+        ''' <param name="sourceAccessErrors">Collector for source/signature retrieval failures where signature validity could not be determined.</param>
         ''' <returns>List of detected changes; empty if none are found.</returns>
         Private Shared Function CheckSegmentedIniFile(localPath As String, fileName As String,
                                               signatureErrors As List(Of String),
                                               Optional updateSources As Dictionary(Of String, String) = Nothing,
-                                              Optional failedSources As HashSet(Of String) = Nothing) As List(Of IniParameterChange)
+                                              Optional failedSources As HashSet(Of String) = Nothing,
+                                              Optional sourceAccessErrors As List(Of String) = Nothing) As List(Of IniParameterChange)
 
             Dim changes As New List(Of IniParameterChange)()
 
@@ -1855,7 +2066,12 @@ Namespace SharedLibrary
                     End If
 
                     ' Load remote content for this segment (with signature validation)
-                    Dim remoteContent As String = LoadUpdateSourceContent(segment.UpdatePath, segment.PublicKey, signatureErrors, failedSources)
+                    Dim remoteContent As String = LoadUpdateSourceContent(
+                        segment.UpdatePath,
+                        segment.PublicKey,
+                        signatureErrors,
+                        failedSources,
+                        sourceAccessErrors)
                     If String.IsNullOrWhiteSpace(remoteContent) Then Continue For
 
                     ' Parse remote content - look for matching segment
@@ -2957,8 +3173,9 @@ Namespace SharedLibrary
             Dim byFile = changes.GroupBy(Function(c) c.IniFile)
 
             For Each fileGroup In byFile
-                Dim filePath As String = Nothing
-                Dim fileName = fileGroup.Key
+                Dim filePath As System.String = Nothing
+                Dim fileName As System.String = fileGroup.Key
+                Dim isAlternateModelFile As System.Boolean = False
 
                 ' Determine the actual file path based on the filename
                 Dim mainIniPath = GetDefaultINIPath(context.RDV)
@@ -2970,10 +3187,11 @@ Namespace SharedLibrary
                 End If
 
                 ' Check AlternateModelPath (independent check, not ElseIf)
-                If filePath Is Nothing AndAlso Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                    Dim altPath = ExpandEnvironmentVariables(context.INI_AlternateModelPath)
-                    If Path.GetFileName(altPath).Equals(fileName, StringComparison.OrdinalIgnoreCase) Then
+                If filePath Is Nothing AndAlso Not System.String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                    Dim altPath As System.String = ExpandEnvironmentVariables(context.INI_AlternateModelPath)
+                    If System.IO.Path.GetFileName(altPath).Equals(fileName, System.StringComparison.OrdinalIgnoreCase) Then
                         filePath = altPath
+                        isAlternateModelFile = True
                     End If
                 End If
 
@@ -3116,12 +3334,28 @@ Namespace SharedLibrary
                         End If
                     Next
 
-                    ' Write updated content
-                    File.WriteAllLines(filePath, updatedLines, Encoding.UTF8)
+                    ' Write updated content. The alternate-model reader uses the same short local-file
+                    ' lock, preventing the now-background INI updater from exposing a partially rewritten
+                    ' model file to Local Chat/model-selection code. Network work is never done under this lock.
+                    If isAlternateModelFile Then
+                        SyncLock _alternativeModelIniCacheSync
+                            System.IO.File.WriteAllLines(filePath, updatedLines, System.Text.Encoding.UTF8)
 
-                Catch ex As Exception
+                            Try
+                                Dim normalizedAlternatePath As System.String = System.IO.Path.GetFullPath(filePath)
+                                _alternativeModelIniCache.Remove(normalizedAlternatePath)
+                            Catch
+                                ' Metadata validation will invalidate the entry on the next read if path
+                                ' normalization is unavailable for any reason.
+                            End Try
+                        End SyncLock
+                    Else
+                        System.IO.File.WriteAllLines(filePath, updatedLines, System.Text.Encoding.UTF8)
+                    End If
+
+                Catch ex As System.Exception
                     Debug.WriteLine($"Error applying updates to {filePath}: {ex.Message}")
-                    ShowCustomMessageBox($"Failed to update {fileName}: {ex.Message}")
+                    InvokeIniUpdateUi(Sub() ShowCustomMessageBox($"Failed to update {fileName}: {ex.Message}"))
                 End Try
             Next
         End Sub

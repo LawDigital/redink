@@ -524,6 +524,7 @@
     <Compile Include="Code\Agents\WorkspaceState.vb" />
     <Compile Include="Code\Agents\WorkspaceTools.vb" />
     <Compile Include="Code\CommonFeatures\FactExtractionService.vb" />
+    <Compile Include="Code\CommonFeatures\PerformanceLogger.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeEmbeddingService.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeIndexer.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeQueryService.vb" />

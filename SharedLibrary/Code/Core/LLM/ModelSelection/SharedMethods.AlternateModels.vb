@@ -390,15 +390,23 @@ Namespace SharedLibrary
                                                                ByRef cacheHit As Boolean) As List(Of AlternativeModelIniSection)
             cacheHit = False
             Dim normalizedPath As String = NormalizeAlternativeModelIniPath(iniFilePath)
-            If String.IsNullOrWhiteSpace(normalizedPath) OrElse Not File.Exists(normalizedPath) Then
+            If String.IsNullOrWhiteSpace(normalizedPath) Then
                 Return New List(Of AlternativeModelIniSection)()
             End If
 
-            Dim beforeInfo As New FileInfo(normalizedPath)
-            Dim beforeLength As Long = beforeInfo.Length
-            Dim beforeTicks As Long = beforeInfo.LastWriteTimeUtc.Ticks
-
+            ' The automatic INI updater may update the local alternate-model file from a background
+            ' thread. Serialize the short local file read with that write so callers can only ever
+            ' observe a complete pre-update or post-update file, never a partially rewritten file.
+            ' Network/source resolution happens before this lock and is therefore not serialized here.
             SyncLock _alternativeModelIniCacheSync
+                If Not File.Exists(normalizedPath) Then
+                    Return New List(Of AlternativeModelIniSection)()
+                End If
+
+                Dim beforeInfo As New FileInfo(normalizedPath)
+                Dim beforeLength As Long = beforeInfo.Length
+                Dim beforeTicks As Long = beforeInfo.LastWriteTimeUtc.Ticks
+
                 Dim cached As AlternativeModelIniCacheEntry = Nothing
                 If _alternativeModelIniCache.TryGetValue(normalizedPath, cached) AndAlso
                    cached IsNot Nothing AndAlso
@@ -408,28 +416,24 @@ Namespace SharedLibrary
                     cacheHit = True
                     Return cached.Sections
                 End If
-            End SyncLock
 
-            ' Parse outside the cache lock so a background warm-up can never block the UI
-            ' behind file I/O. A concurrent miss may parse the same small INI twice, which is safe.
-            Dim parsed As List(Of AlternativeModelIniSection) =
-                ParseAlternativeModelIniSections(File.ReadAllLines(normalizedPath))
+                Dim parsed As List(Of AlternativeModelIniSection) =
+                    ParseAlternativeModelIniSections(File.ReadAllLines(normalizedPath))
 
-            Dim afterInfo As New FileInfo(normalizedPath)
-            Dim afterLength As Long = afterInfo.Length
-            Dim afterTicks As Long = afterInfo.LastWriteTimeUtc.Ticks
+                Dim afterInfo As New FileInfo(normalizedPath)
+                Dim afterLength As Long = afterInfo.Length
+                Dim afterTicks As Long = afterInfo.LastWriteTimeUtc.Ticks
 
-            If beforeLength = afterLength AndAlso beforeTicks = afterTicks Then
-                SyncLock _alternativeModelIniCacheSync
+                If beforeLength = afterLength AndAlso beforeTicks = afterTicks Then
                     _alternativeModelIniCache(normalizedPath) = New AlternativeModelIniCacheEntry With {
                         .FileLength = afterLength,
                         .LastWriteUtcTicks = afterTicks,
                         .Sections = parsed
                     }
-                End SyncLock
-            End If
+                End If
 
-            Return parsed
+                Return parsed
+            End SyncLock
         End Function
 
         ''' <summary>

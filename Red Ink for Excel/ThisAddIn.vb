@@ -247,12 +247,14 @@ Partial Public Class ThisAddIn
             InitializeAddInFeatures(startupTimings)
         Finally
             totalStartupStopwatch.Stop()
-            startupTimings.Add(
-                "ThisAddIn_Startup.total=" &
-                totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.SynchronizationContext.Current Is _uiContext).ToString())
-            QueueExcelStartupTimingSnapshot(startupTimings)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                startupTimings.Add(
+                    "ThisAddIn_Startup.total=" &
+                    totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.SynchronizationContext.Current Is _uiContext).ToString())
+                QueueExcelStartupTimingSnapshot(startupTimings)
+            End If
         End Try
     End Sub
 
@@ -359,10 +361,12 @@ Partial Public Class ThisAddIn
                         System.Diagnostics.Debug.WriteLine("[PERF] Excel startup warm-up failed: " & ex.Message)
                     Finally
                         stopwatch.Stop()
-                        System.Diagnostics.Debug.WriteLine(
-                            "[PERF] Excel model warm-up: " &
-                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                            " ms")
+                        PerformanceLogger.LogDuration(
+                            _context,
+                            "Warmup",
+                            "ModelDecrypt",
+                            stopwatch.ElapsedMilliseconds,
+                            hostName:="Excel")
                     End Try
                 End Sub)
         Catch ex As System.Exception
@@ -380,41 +384,19 @@ Partial Public Class ThisAddIn
             action.Invoke()
         Finally
             stopwatch.Stop()
-            Dim entry As String =
-                label & "=" &
-                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.SynchronizationContext.Current Is _uiContext).ToString()
-            System.Diagnostics.Debug.WriteLine("[PERF] Excel startup " & entry)
-            If timings IsNot Nothing Then timings.Add(entry)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                Dim entry As String =
+                    label & "=" &
+                    stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.SynchronizationContext.Current Is _uiContext).ToString()
+                If timings IsNot Nothing Then timings.Add(entry)
+            End If
         End Try
     End Sub
 
     Private Sub QueueExcelStartupTimingSnapshot(timings As System.Collections.Generic.List(Of String))
-        If timings Is Nothing OrElse timings.Count = 0 Then Return
-
-        Dim snapshot As String() = timings.ToArray()
-        Dim versionSnapshot As String = Version
-
-        System.Threading.Tasks.Task.Run(
-            Sub()
-                Try
-                    Dim basePath As String =
-                        System.IO.Path.Combine(
-                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-                            "redink")
-                    System.IO.Directory.CreateDirectory(basePath)
-                    Dim outputPath As String = System.IO.Path.Combine(basePath, "RI_Excel_Startup_Perf.txt")
-                    Dim lines As New System.Collections.Generic.List(Of String)()
-                    lines.Add("Red Ink Excel Startup Performance")
-                    lines.Add("Created=" & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
-                    lines.Add("Version=" & If(versionSnapshot, ""))
-                    lines.AddRange(snapshot)
-                    System.IO.File.WriteAllLines(outputPath, lines, System.Text.Encoding.UTF8)
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("[PERF] Excel startup timing snapshot failed: " & ex.Message)
-                End Try
-            End Sub)
+        PerformanceLogger.LogStartupSnapshot(_context, "Excel", Version, timings)
     End Sub
 
     ' Bridge to SharedLibrary

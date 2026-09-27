@@ -198,6 +198,16 @@ Namespace Agents
             Public Property ToolErrorHandling As String = String.Empty
             Public Property ToolClassification As ToolCallClassification = ToolCallClassification.Unknown
             Public Property RecoveryScopeKey As String = String.Empty
+            ' Logical operation / concrete step / physical attempt are tracked separately.
+            ' RecoveryScopeKey remains the compatibility-facing opaque scope; LogicalOperationKey
+            ' groups related steps, while StepKey identifies the exact retry unit. Attempt ids are
+            ' host-generated and never supplied by the model.
+            Public Property LogicalOperationKey As String = String.Empty
+            Public Property StepKey As String = String.Empty
+            Public Property FirstAttemptSequence As Long
+            Public Property LastAttemptSequence As Long
+            Public Property AttemptCount As Integer
+            Public Property RecoveryEvidenceStepKey As String = String.Empty
             Public Property RecoveryPolicy As ToolFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
             ' An alternative-path success is not always cleared immediately. When causal identity
             ' cannot be proven by an explicit scope (or the failure was delegated to the parent),
@@ -342,6 +352,7 @@ Namespace Agents
             Public Property LastFailureToolErrorHandling As String = String.Empty
             Public Property UnresolvedToolFailures As New List(Of ToolFailureRecord)()
             Private _failureSequence As Long
+            Private _attemptSequence As Long
             Private _substantiveProgressEpoch As Long
             Private _artifactRevisionSequence As Long
 
@@ -1633,6 +1644,8 @@ Namespace Agents
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedHandling As String = If(toolErrorHandling, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
+                Dim logicalOperationKey As String = ResolveLogicalOperationKey(normalizedRecoveryScopeKey)
+                Dim stepKey As String = BuildFailureStepKey(normalizedToolName, normalizedRecoveryScopeKey)
                 Dim failurePolicy As ToolFailureRecoveryPolicy = ResolveFailureRecoveryPolicy(
                     normalizedHandling,
                     terminal,
@@ -1640,27 +1653,30 @@ Namespace Agents
                     returnedToParent)
 
                 _failureSequence += 1
+                _attemptSequence += 1
 
                 If UnresolvedToolFailures Is Nothing Then
                     UnresolvedToolFailures = New List(Of ToolFailureRecord)()
                 End If
 
-                ' A failed retry of the same tool updates its existing unresolved record instead
-                ' of creating duplicate stale failures. A failure of a different tool is retained
-                ' independently so later success cannot accidentally erase an older unresolved step.
+                ' Only the exact same concrete step is a retry. A different step inside the
+                ' same logical operation, or the same tool under a new operation/step scope,
+                ' is retained independently and may later provide replacement evidence.
                 Dim record As ToolFailureRecord = Nothing
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
-                    If System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) AndAlso
-                       RecoveryScopeKeysMatch(candidate.RecoveryScopeKey, normalizedRecoveryScopeKey) Then
+                    If System.String.Equals(If(candidate.StepKey, ""), stepKey, System.StringComparison.Ordinal) Then
                         record = candidate
                         Exit For
                     End If
                 Next
 
                 If record Is Nothing Then
-                    record = New ToolFailureRecord()
+                    record = New ToolFailureRecord With {
+                        .FirstAttemptSequence = _attemptSequence,
+                        .AttemptCount = 0
+                    }
                     UnresolvedToolFailures.Add(record)
                 End If
 
@@ -1675,11 +1691,15 @@ Namespace Agents
                 record.ToolErrorHandling = normalizedHandling
                 record.ToolClassification = ToolCallSequencing.ClassifyToolNameForRecovery(normalizedToolName)
                 record.RecoveryScopeKey = normalizedRecoveryScopeKey
+                record.LogicalOperationKey = logicalOperationKey
+                record.StepKey = stepKey
+                record.LastAttemptSequence = _attemptSequence
+                record.AttemptCount += 1
                 record.RecoveryPolicy = failurePolicy
-                ' A new/failed retry invalidates any prior candidate recovery evidence for this
-                ' exact unresolved failure.
+                ' A new/failed retry invalidates prior replacement evidence for this exact step.
                 record.RecoveryEvidenceObserved = False
                 record.RecoveryEvidenceToolName = String.Empty
+                record.RecoveryEvidenceStepKey = String.Empty
                 record.CrossScopeAlternativeRecoveryAllowed = False
                 record.CrossScopeAlternativeRecoveryRequiredArtifactExtension = System.String.Empty
                 record.ProgressEpoch = _substantiveProgressEpoch
@@ -1767,6 +1787,7 @@ Namespace Agents
                     candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension = normalizedRequiredExtension
                     candidate.RecoveryEvidenceObserved = False
                     candidate.RecoveryEvidenceToolName = String.Empty
+                    candidate.RecoveryEvidenceStepKey = String.Empty
                     RecoveryToolName = If(recoveryLabel, System.String.Empty)
                     Exit For
                 Next
@@ -1775,18 +1796,23 @@ Namespace Agents
             End Sub
 
             Public Sub BeginBoundedAlternativeRecovery(failedToolName As String,
-                                                       Optional recoveryLabel As String = "full_tool_path_recovery")
+                                                       Optional recoveryLabel As String = "full_tool_path_recovery",
+                                                       Optional recoveryScopeKey As String = "")
                 If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
                     Return
                 End If
 
                 Dim normalizedToolName As String = If(failedToolName, String.Empty).Trim()
+                Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, String.Empty).Trim()
                 If normalizedToolName = String.Empty Then Return
 
+                Dim matchedFailure As Boolean = False
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
                     If Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If normalizedRecoveryScopeKey <> String.Empty AndAlso
+                       Not RecoveryScopeKeysMatch(candidate.RecoveryScopeKey, normalizedRecoveryScopeKey) Then Continue For
 
                     ' The local retry/circuit-breaker is exhausted, but the host has explicitly
                     ' opened one bounded whole-workflow recovery pass. The failed tool itself
@@ -1796,10 +1822,14 @@ Namespace Agents
                     candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
                     candidate.RecoveryEvidenceObserved = False
                     candidate.RecoveryEvidenceToolName = String.Empty
+                    candidate.RecoveryEvidenceStepKey = String.Empty
                     candidate.CrossScopeAlternativeRecoveryAllowed = True
                     candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension = System.String.Empty
                     candidate.ProgressEpoch = _substantiveProgressEpoch
+                    matchedFailure = True
                 Next
+
+                If Not matchedFailure Then Return
 
                 LastFailureUltimatelyFatal = False
                 LastFailureTerminal = False
@@ -1825,25 +1855,26 @@ Namespace Agents
             End Sub
 
             ''' <summary>
-            ''' Records successful substantive progress. An exact retry resolves only its matching
-            ''' failure. A different successful fallback may provide recovery evidence for the
-            ''' compatible unresolved failures created in the same substantive-progress epoch;
-            ''' failures from older epochs, retry-only/terminal barriers, and incompatible explicit
-            ''' scopes remain unresolved and continue to block false COMPLETE finalization.
+            ''' Records successful substantive progress using Operation -> Step -> Attempt semantics.
+            ''' An exact successful retry resolves only the matching failed StepKey immediately.
+            ''' A successful different step is never treated as a retry; it may only record
+            ''' replacement/alternative recovery evidence, which is committed after an accepted
+            ''' final turn. Multiple successful executions of distinct step_ids inside the same
+            ''' operation therefore remain valid continuations rather than accidental retries.
             ''' </summary>
             Public Sub NoteSuccessfulProgress(Optional toolName As String = "",
                                               Optional recoveryScopeKey As String = "")
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
 
-                ' Administrative/control-plane calls are intentionally not substantive progress.
-                ' In particular, tool_loader/report_progress/routing/context/memory calls must not
-                ' split a fallback chain or provide recovery evidence for a failed substantive step.
                 If IsRecoveryNeutralAdministrativeTool(normalizedToolName) Then
                     Return
                 End If
 
+                _attemptSequence += 1
                 Dim currentProgressEpoch As Long = _substantiveProgressEpoch
+                Dim successfulStepKey As String = BuildFailureStepKey(normalizedToolName, normalizedRecoveryScopeKey)
+                Dim successfulLogicalOperationKey As String = ResolveLogicalOperationKey(normalizedRecoveryScopeKey)
 
                 If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
                     _substantiveProgressEpoch += 1
@@ -1852,17 +1883,17 @@ Namespace Agents
 
                 Dim recoveryIndex As Integer = -1
 
-                ' Prefer an exact successful retry. This is deterministic and must not be confused
-                ' with merely issuing the same tool again; this method is called only after success.
+                ' Exact retry: same concrete StepKey. A different step_id or operation_id is
+                ' deliberately not a retry, even if it calls the same tool. Explicit sub-agent
+                ' task recovery retains its historical cross-agent special case.
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
-                    Dim sameTool As System.Boolean =
-                        System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase)
+                    Dim sameStep As System.Boolean =
+                        System.String.Equals(If(candidate.StepKey, ""), successfulStepKey, System.StringComparison.Ordinal)
                     Dim sameExplicitSubAgentTask As System.Boolean =
                         IsSameExplicitSubAgentTaskRecovery(candidate, normalizedToolName, normalizedRecoveryScopeKey)
-                    If Not sameTool AndAlso Not sameExplicitSubAgentTask Then Continue For
-                    If Not SuccessfulCallMatchesFailureScope(candidate, normalizedRecoveryScopeKey) Then Continue For
+                    If Not sameStep AndAlso Not sameExplicitSubAgentTask Then Continue For
 
                     If candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly OrElse
                        candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
@@ -1904,121 +1935,122 @@ Namespace Agents
                     Return
                 End If
 
-                ' Alternative-path recovery is phase-aware. Every compatible unresolved failure
-                ' created since the previous substantive success belongs to the same fallback chain.
-                ' A later successful substantive path may therefore supersede the whole compatible
-                ' chain, but it may not cross a prior substantive-success boundary, a terminal/retry
-                ' barrier, or an incompatible explicit recovery scope.
-                Dim immediateRecoveryIndexes As New System.Collections.Generic.List(Of Integer)()
+                ' Different successful steps are alternative/replacement candidates, not retries.
+                ' Record evidence only. HasBlockingUnresolvedToolFailure will permit finalization
+                ' when that evidence is sufficient, and FinalizeObservedAlternativeRecoveries
+                ' commits it only after the final turn is actually accepted.
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
 
-                    ' Explicit recovery scopes are stronger than the coarse progress epoch. A
-                    ' preparatory success (for example copying/staging the same workbook) must not
-                    ' make a later successful fallback on the SAME logical operation/artifact slot
-                    ' unable to recover the earlier failure. Legacy unscoped failures keep the epoch
-                    ' boundary to avoid unrelated late successes being treated as recovery evidence.
                     If System.String.IsNullOrWhiteSpace(candidate.RecoveryScopeKey) AndAlso
                        candidate.ProgressEpoch <> currentProgressEpoch Then
                         Exit For
                     End If
 
-                    If candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
-                       candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
-                        Exit For
-                    End If
-
-                    If Not IsCompatibleAlternativeRecoveryTool(candidate, normalizedToolName, normalizedRecoveryScopeKey) Then
-                        Exit For
-                    End If
-
-                    ' A host-opened cross-scope recovery is deliberately broader than normal
-                    ' operation-id matching, but it still requires outcome evidence. For tasks
-                    ' that require a created deliverable, a successful read/preparation call can
-                    ' never recover a failed producer. The alternative must itself be deliverable-
-                    ' capable and the shared registry/compatibility layer must already validate a
-                    ' current output. This keeps recovery model-, tool-, provider- and host-agnostic.
-                    If candidate.CrossScopeAlternativeRecoveryAllowed AndAlso
-                       RequestRequiresCreatedDeliverable Then
-                        If Not IsDeliverableCapableTool(normalizedToolName) OrElse
-                           Not HasValidatedDeliverableForCompletion Then
-                            Continue For
-                        End If
-
-                        If Not HasValidatedDeliverableForRecoveryExtension(
-                            candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension) Then
-                            Continue For
-                        End If
-                    End If
-
-                    ' For an explicit artifact-scoped failure, a different producer is recovery
-                    ' only when the artifact contract for the run is actually qualified. This
-                    ' prevents preparatory copy/staging operations on the same logical slot from
-                    ' erasing a failed transformation before the required verified effects exist.
-                    If candidate.RecoveryScopeKey.StartsWith("artifact:", System.StringComparison.Ordinal) AndAlso
-                       HasExpectedDeliverableContract AndAlso
-                       Not HasAllExpectedDeliverableSlots Then
+                    If Not CanSuccessfulStepProvideReplacementEvidence(
+                        candidate,
+                        normalizedToolName,
+                        normalizedRecoveryScopeKey,
+                        successfulLogicalOperationKey,
+                        successfulStepKey) Then
                         Continue For
                     End If
 
-                    Dim alternativeNeedsFinalCommit As Boolean =
-                        candidate.ReturnedToParent OrElse System.String.IsNullOrWhiteSpace(candidate.RecoveryScopeKey)
-
-                    If alternativeNeedsFinalCommit Then
-                        candidate.RecoveryEvidenceObserved = True
-                        candidate.RecoveryEvidenceToolName = normalizedToolName
-                    Else
-                        immediateRecoveryIndexes.Add(i)
-                    End If
-                Next
-
-                For Each index As Integer In immediateRecoveryIndexes
-                    Dim recovered As ToolFailureRecord = UnresolvedToolFailures(index)
-                    If recovered IsNot Nothing Then
-                        LastRecoveredFailureSummary = BuildFailureRecoverySummary(recovered, normalizedToolName)
-                    End If
-                    If recovered IsNot Nothing AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
-                        RetryInvariantPendingFailureTools.Remove(
-                            BuildRetryInvariantKey(recovered.ToolName, recovered.RecoveryScopeKey))
-                    End If
-                    UnresolvedToolFailures.RemoveAt(index)
+                    candidate.RecoveryEvidenceObserved = True
+                    candidate.RecoveryEvidenceToolName = normalizedToolName
+                    candidate.RecoveryEvidenceStepKey = successfulStepKey
                 Next
 
                 If UnresolvedToolFailures.Count > 0 Then
                     ProjectLatestUnresolvedFailure()
 
-                    ' During an explicitly opened whole-workflow alternative recovery, successful
-                    ' preparatory reads/inspection steps are useful but must not advance the
-                    ' recovery epoch. Otherwise the later compatible mutation/producer call would
-                    ' be prevented from resolving the very failure this recovery pass was opened for.
                     Dim boundedAlternativeStillPending As Boolean =
                         UnresolvedToolFailures.Any(
                             Function(candidate As ToolFailureRecord)
                                 Return candidate IsNot Nothing AndAlso
                                        candidate.ProgressEpoch = currentProgressEpoch AndAlso
-                                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
+                                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly AndAlso
+                                       Not candidate.RecoveryEvidenceObserved
                             End Function)
                     If boundedAlternativeStillPending Then Return
-                Else
-                    HasUnresolvedToolFailure = False
-                    LastToolName = ""
-                    LastErrorCode = ""
-                    LastErrorMessage = ""
-                    LastFailureSkippedByPolicy = False
-                    LastFailureReturnedToParent = False
-                    LastFailureTerminal = False
-                    LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
-                    LastFailureToolClassification = ToolCallClassification.Unknown
-                    LastFailureToolErrorHandling = ""
-                    LastFailureRecoveredByToolCall = True
-                    LastFailureHandledByBlockedFinal = False
-                    LastFailureUltimatelyFatal = False
-                    RecoveryToolName = normalizedToolName
                 End If
 
+                ' Evidence does not clear the failure here. It only means a later accepted final
+                ' turn may commit the replacement. Progress still advances so unrelated earlier
+                ' unscoped failures cannot be accidentally recovered by much later work.
                 _substantiveProgressEpoch += 1
             End Sub
+
+            Private Function CanSuccessfulStepProvideReplacementEvidence(
+                failure As ToolFailureRecord,
+                successfulToolName As String,
+                successfulRecoveryScopeKey As String,
+                successfulLogicalOperationKey As String,
+                successfulStepKey As String) As Boolean
+
+                If failure Is Nothing Then Return False
+                If failure.Terminal AndAlso Not failure.ReturnedToParent Then Return False
+                If IsRecoveryNeutralAdministrativeTool(successfulToolName) Then Return False
+                If System.String.Equals(If(failure.StepKey, ""), If(successfulStepKey, ""), System.StringComparison.Ordinal) Then Return False
+
+                If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
+                   failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
+                    Return False
+                End If
+
+                If failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly AndAlso
+                   System.String.Equals(If(failure.ToolName, ""), If(successfulToolName, ""), System.StringComparison.OrdinalIgnoreCase) Then
+                    Return False
+                End If
+
+                If failure.ReturnedToParent Then Return True
+
+                Dim sameLogicalOperation As Boolean =
+                    Not System.String.IsNullOrWhiteSpace(failure.LogicalOperationKey) AndAlso
+                    System.String.Equals(
+                        failure.LogicalOperationKey,
+                        If(successfulLogicalOperationKey, ""),
+                        System.StringComparison.Ordinal)
+
+                ' A different step in the same logical operation is a continuation, not
+                ' recovery. It must not hide a failed sibling step unless the host explicitly
+                ' opened an alternative-recovery path for that failure.
+                If sameLogicalOperation AndAlso Not failure.CrossScopeAlternativeRecoveryAllowed Then
+                    Return False
+                End If
+
+                If failure.CrossScopeAlternativeRecoveryAllowed Then
+                    If RequestRequiresCreatedDeliverable Then
+                        If Not IsDeliverableCapableTool(successfulToolName) OrElse
+                           Not HasValidatedDeliverableForCompletion Then
+                            Return False
+                        End If
+                        Return HasValidatedDeliverableForRecoveryExtension(
+                            failure.CrossScopeAlternativeRecoveryRequiredArtifactExtension)
+                    End If
+                    Return True
+                End If
+
+                ' A different logical operation can supersede an earlier skipped producer only
+                ' when the host has concrete outcome evidence: both steps are deliverable-capable
+                ' and a validated current deliverable exists. This is the generic replacement
+                ' case that fixes stale producer failures without relabeling the later call as a retry.
+                If RequestRequiresCreatedDeliverable AndAlso
+                   IsDeliverableCapableTool(failure.ToolName) AndAlso
+                   IsDeliverableCapableTool(successfulToolName) AndAlso
+                   HasValidatedDeliverableForCompletion Then
+                    Return True
+                End If
+
+                ' Legacy unscoped skip failures retain the prior bounded-epoch behavior.
+                If System.String.IsNullOrWhiteSpace(failure.RecoveryScopeKey) AndAlso
+                   System.String.IsNullOrWhiteSpace(successfulRecoveryScopeKey) Then
+                    Return True
+                End If
+
+                Return False
+            End Function
 
             Private Function HasValidatedDeliverableForRecoveryExtension(requiredExtension As System.String) As System.Boolean
                 Dim normalizedExtension As System.String = If(requiredExtension, System.String.Empty).Trim()
@@ -2080,6 +2112,9 @@ Namespace Agents
                         Continue For
                     End If
 
+                    LastRecoveredFailureSummary = BuildFailureRecoverySummary(
+                        candidate,
+                        candidate.RecoveryEvidenceToolName)
                     If RetryInvariantPendingFailureTools IsNot Nothing Then
                         RetryInvariantPendingFailureTools.Remove(
                             BuildRetryInvariantKey(candidate.ToolName, candidate.RecoveryScopeKey))
@@ -2144,75 +2179,23 @@ Namespace Agents
                 Return False
             End Function
 
-            Private Function IsCompatibleAlternativeRecoveryTool(failure As ToolFailureRecord,
-                                                                  toolName As String,
-                                                                  recoveryScopeKey As String) As Boolean
-                If failure Is Nothing Then
-                    Return False
+            Private Shared Function ResolveLogicalOperationKey(recoveryScopeKey As String) As String
+                Dim normalized As String = If(recoveryScopeKey, "").Trim()
+                If normalized = "" Then Return ""
+
+                Const stepMarker As String = "|step:"
+                If normalized.StartsWith("operation:", System.StringComparison.Ordinal) Then
+                    Dim stepIndex As Integer = normalized.IndexOf(stepMarker, System.StringComparison.Ordinal)
+                    If stepIndex > 0 Then Return normalized.Substring(0, stepIndex)
                 End If
 
-                Dim normalizedToolName As String = If(toolName, "").Trim()
-                Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
-                If normalizedToolName = "" Then
-                    Return False
-                End If
-
-                If System.String.Equals(failure.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then
-                    Return failure.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
-                           SuccessfulCallMatchesFailureScope(failure, normalizedRecoveryScopeKey)
-                End If
-
-                If IsRecoveryNeutralAdministrativeTool(normalizedToolName) Then
-                    Return False
-                End If
-
-                ' A delegated failure explicitly returned to the parent establishes a host-owned
-                ' hand-off. Any later *different substantive* successful capability may recover that
-                ' delegated path. Administrative calls never qualify, and a terminal delegated
-                ' failure cannot be "recovered" merely by invoking the same failed agent again.
-                If failure.ReturnedToParent Then
-                    Return True
-                End If
-
-                ' For direct tool failures, ToolErrorHandling=skip is the generic opt-in that permits
-                ' an alternative path. If the caller supplied an opaque operation/task/artifact scope,
-                ' the alternative must carry that exact same scope. Unscoped skip failures may be
-                ' recovered by the next different substantive success; retry/abort failures never use
-                ' this branch because their recovery policy does not permit alternatives.
-                If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
-                   failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
-                    Return False
-                End If
-
-                If String.IsNullOrWhiteSpace(failure.RecoveryScopeKey) Then
-                    Return True
-                End If
-
-                If failure.CrossScopeAlternativeRecoveryAllowed AndAlso
-                   (failure.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed OrElse
-                    failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly) Then
-                    Return True
-                End If
-
-                Return RecoveryScopeKeysMatch(failure.RecoveryScopeKey, normalizedRecoveryScopeKey)
+                Return normalized
             End Function
 
-            Private Shared Function SuccessfulCallMatchesFailureScope(failure As ToolFailureRecord,
-                                                                     recoveryScopeKey As String) As Boolean
-                If failure Is Nothing Then
-                    Return False
-                End If
-
-                Dim failureScopeKey As String = If(failure.RecoveryScopeKey, "").Trim()
-                Dim successScopeKey As String = If(recoveryScopeKey, "").Trim()
-
-                ' Legacy/unscoped tools remain recoverable by an exact successful retry of the
-                ' same tool. Once an explicit opaque scope exists, it must match exactly.
-                If failureScopeKey = "" Then
-                    Return True
-                End If
-
-                Return RecoveryScopeKeysMatch(failureScopeKey, successScopeKey)
+            Private Shared Function BuildFailureStepKey(toolName As String, recoveryScopeKey As String) As String
+                Dim normalizedTool As String = If(toolName, "").Trim().ToLowerInvariant()
+                Dim normalizedScope As String = If(recoveryScopeKey, "").Trim()
+                Return "tool:" & normalizedTool & "|scope:" & normalizedScope
             End Function
 
             Private Shared Function IsSameExplicitSubAgentTaskRecovery(failure As ToolFailureRecord,
@@ -2611,7 +2594,13 @@ Namespace Agents
             If arguments.TryGetValue("operation_id", value) AndAlso value IsNot Nothing Then
                 operationId = If(System.Convert.ToString(value), "").Trim()
                 If operationId <> "" Then
-                    Return "operation:" & operationId
+                    Dim stepId As String = ""
+                    value = Nothing
+                    If arguments.TryGetValue("step_id", value) AndAlso value IsNot Nothing Then
+                        stepId = If(System.Convert.ToString(value), "").Trim()
+                    End If
+                    If stepId = "" Then stepId = "__default__"
+                    Return "operation:" & operationId & "|step:" & stepId
                 End If
             End If
 
@@ -3649,9 +3638,9 @@ Namespace Agents
 
             Select Case failure.RecoveryPolicy
                 Case ToolFailureRecoveryPolicy.SameToolSuccessOnly
-                    prompt &= " This failure is resolved automatically only by a later successful execution of the same tool with a matching recovery scope. Do not switch tools merely to clear this failure."
+                    prompt &= " This failure is resolved automatically only by a later successful retry of the exact same operation step. Reuse the same operation_id and step_id when present; a new step_id is a continuation and does not clear this failure. Do not switch tools merely to clear this failure."
                 Case ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed
-                    prompt &= " A later successful execution of the same tool or a host-recognized compatible alternative with matching recovery scope may resolve this failure."
+                    prompt &= " A later successful retry of the exact same operation step may resolve this failure immediately. A different step is a continuation, not a retry; only a host-recognized replacement path with verified outcome evidence may supersede the failed step."
                 Case ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
                     prompt &= " The failed tool itself is not the permitted automatic recovery path; use only a materially different host-recognized compatible alternative if one is available."
                 Case ToolFailureRecoveryPolicy.NoAutomaticRecovery
@@ -4119,6 +4108,10 @@ Namespace Agents
             Return "category=" & failure.Category.ToString() &
                    "; failedTool=" & If(failure.ToolName, System.String.Empty) &
                    "; errorCode=" & If(failure.ErrorCode, System.String.Empty) &
+                   "; operation=" & If(failure.LogicalOperationKey, System.String.Empty) &
+                   "; step=" & If(failure.StepKey, System.String.Empty) &
+                   "; attempts=" & failure.AttemptCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                   "; lastAttempt=" & failure.LastAttemptSequence.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                    "; recoveryScope=" & If(failure.RecoveryScopeKey, System.String.Empty) &
                    "; recoveredBy=" & If(recoveryToolName, System.String.Empty)
         End Function
@@ -4162,6 +4155,16 @@ Namespace Agents
                     parts.Add("failureCategory=" & latest.Category.ToString())
                     parts.Add("failedTool=" & If(latest.ToolName, System.String.Empty))
                     parts.Add("errorCode=" & If(latest.ErrorCode, System.String.Empty))
+                    If Not System.String.IsNullOrWhiteSpace(latest.LogicalOperationKey) Then
+                        parts.Add("operation=" & latest.LogicalOperationKey)
+                    End If
+                    If Not System.String.IsNullOrWhiteSpace(latest.StepKey) Then
+                        parts.Add("step=" & latest.StepKey)
+                    End If
+                    If latest.AttemptCount > 0 Then
+                        parts.Add("attempts=" & latest.AttemptCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                        parts.Add("lastAttempt=" & latest.LastAttemptSequence.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
                     If Not System.String.IsNullOrWhiteSpace(latest.RecoveryScopeKey) Then
                         parts.Add("recoveryScope=" & latest.RecoveryScopeKey)
                     End If

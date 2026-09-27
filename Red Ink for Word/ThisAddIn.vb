@@ -703,15 +703,19 @@ Partial Public Class ThisAddIn
             ' re-probes if this warm-up is skipped or the cache is cold.
             MeasureWordStartupStep("PythonAgentWarmup.schedule", Sub() PrimePythonAgentVersionCache(), startupTimings)
         Catch ex As System.Exception
-            startupTimings.Add("DelayedStartupTasks.ERROR=" & ex.GetType().FullName & ": " & ex.Message)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                startupTimings.Add("DelayedStartupTasks.ERROR=" & ex.GetType().FullName & ": " & ex.Message)
+            End If
         Finally
             totalStartupStopwatch.Stop()
-            startupTimings.Add(
-                "DelayedStartupTasks.total=" &
-                totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString())
-            QueueWordStartupTimingSnapshot(startupTimings)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                startupTimings.Add(
+                    "DelayedStartupTasks.total=" &
+                    totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString())
+                QueueWordStartupTimingSnapshot(startupTimings)
+            End If
         End Try
     End Sub
 
@@ -742,10 +746,12 @@ Partial Public Class ThisAddIn
                         System.Diagnostics.Debug.WriteLine("[PERF] Word startup warm-up failed: " & ex.Message)
                     Finally
                         stopwatch.Stop()
-                        System.Diagnostics.Debug.WriteLine(
-                            "[PERF] Word model/tool/resource warm-up: " &
-                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                            " ms")
+                        PerformanceLogger.LogDuration(
+                            _context,
+                            "Warmup",
+                            "ModelToolResource",
+                            stopwatch.ElapsedMilliseconds,
+                            hostName:="Word")
                     End Try
                 End Sub)
         Catch ex As System.Exception
@@ -872,48 +878,19 @@ Partial Public Class ThisAddIn
             action.Invoke()
         Finally
             stopwatch.Stop()
-            Dim entry As String =
-                label & "=" &
-                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString()
-
-            System.Diagnostics.Debug.WriteLine("[PERF] Word startup " & entry)
-            If timings IsNot Nothing Then timings.Add(entry)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                Dim entry As String =
+                    label & "=" &
+                    stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString()
+                If timings IsNot Nothing Then timings.Add(entry)
+            End If
         End Try
     End Sub
 
     Private Sub QueueWordStartupTimingSnapshot(timings As System.Collections.Generic.List(Of String))
-        If timings Is Nothing OrElse timings.Count = 0 Then Return
-
-        Dim snapshot As String() = timings.ToArray()
-        Dim versionSnapshot As String = Version
-        Dim uiThreadIdSnapshot As Integer = UiThreadId
-
-        System.Threading.Tasks.Task.Run(
-            Sub()
-                Try
-                    Dim basePath As String =
-                        System.IO.Path.Combine(
-                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-                            "redink")
-                    System.IO.Directory.CreateDirectory(basePath)
-
-                    Dim outputPath As String =
-                        System.IO.Path.Combine(basePath, "RI_Word_Startup_Perf.txt")
-
-                    Dim lines As New System.Collections.Generic.List(Of String)()
-                    lines.Add("Red Ink Word Startup Performance")
-                    lines.Add("Created=" & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
-                    lines.Add("Version=" & If(versionSnapshot, ""))
-                    lines.Add("UIThreadId=" & uiThreadIdSnapshot.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                    lines.AddRange(snapshot)
-
-                    System.IO.File.WriteAllLines(outputPath, lines, System.Text.Encoding.UTF8)
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("[PERF] Word startup timing snapshot failed: " & ex.Message)
-                End Try
-            End Sub)
+        PerformanceLogger.LogStartupSnapshot(_context, "Word", Version, timings)
     End Sub
 
 

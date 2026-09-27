@@ -14,8 +14,11 @@
 '   independent operations to continue.
 '
 ' Operation identity:
-'   Logical operations are identified ONLY by an explicit caller-supplied
-'   `operation_id`.
+'   Logical operations are identified by an explicit caller-supplied `operation_id`.
+'   A logical operation may contain multiple concrete steps identified by optional
+'   `step_id`. Retries reuse the same operation_id + step_id. Distinct continuations
+'   inside the same logical operation use the same operation_id and a new step_id.
+'   If step_id is omitted, the operation is treated as one legacy single step.
 '
 '   The registry MUST NOT infer that two calls represent the same operation from:
 '
@@ -42,14 +45,12 @@
 '       +---- explicit non-recoverable block --> TerminalBlocked
 '
 ' Terminal behavior:
-'   Once an exact operation_id is terminal, the same operation_id must not be
-'   executed again in the same shared run state.
+'   Terminal state belongs to one exact operation_id + step_id pair. A terminal
+'   step may not be executed again, but another step_id in the same operation remains
+'   executable. A changed anchor or reformulation used only to retry the same failed
+'   step must reuse both ids; it must not manufacture a new step_id to bypass the guard.
 '
-'   A changed anchor does NOT create a new logical operation when it is merely a
-'   recovery attempt for the same requested edit. The caller must reuse the same
-'   operation_id.
-'
-'   A genuinely new requested operation must receive a different explicit id.
+'   A genuinely new logical operation receives a new operation_id.
 '
 ' Shared-run behavior:
 '   Parent and nested sub-agent tooling loops should reference the same
@@ -58,13 +59,13 @@
 '   the parent or when another nested invocation is attempted.
 '
 ' Tool contract:
-'   Tools that participate SHOULD accept `operation_id`:
+'   Tools that participate SHOULD accept `operation_id` and may accept `step_id`:
 '
 '     - at top level for a single operation; and/or
 '     - inside each item of a batched `tasks` array.
 '
 '   Structured tool results SHOULD return the same operation_id unchanged for
-'   each per-task result.
+'   each per-task result and, when they expose step_id, return that unchanged as well.
 '
 '   Example input:
 '
@@ -92,12 +93,12 @@
 '     }
 '
 ' Retry semantics:
-'   - The registry counts attempts only for explicit operation ids.
-'   - Successful application marks that exact operation as Succeeded.
-'   - Repeated structured no-progress may mark it TerminalUnresolved once the
+'   - The registry counts attempts per explicit operation_id + step_id.
+'   - Successful application marks that exact step as Succeeded.
+'   - Repeated structured no-progress may mark that step TerminalUnresolved once the
 '     configured attempt limit is reached.
-'   - A terminal operation is rejected before physical tool execution.
-'   - Independent operation ids remain executable.
+'   - A terminal step is rejected before physical tool execution.
+'   - Other step_ids in the same operation and independent operation ids remain executable.
 '
 ' Relationship to legacy circuit breakers:
 '   This class supplements, rather than replaces, existing path-/call-based
@@ -138,34 +139,41 @@ Namespace Agents
 
     Public NotInheritable Class ExplicitOperationRecord
         Public Property OperationId As String = ""
+        Public Property StepId As String = ""
         Public Property AttemptCount As Integer
         Public Property Status As ExplicitOperationStatus = ExplicitOperationStatus.Pending
         Public Property TerminalReason As String = ""
         Public Property UpdatedUtc As DateTime = DateTime.UtcNow
     End Class
 
+
+    Public NotInheritable Class ExplicitOperationIdentity
+        Public Property OperationId As String = ""
+        Public Property StepId As String = ""
+    End Class
+
     Public NotInheritable Class ExplicitOperationRegistry
         Private ReadOnly _records As New System.Collections.Generic.Dictionary(Of String, ExplicitOperationRecord)(System.StringComparer.Ordinal)
         Private ReadOnly _syncRoot As New Object()
 
-        Public Function IsTerminal(operationId As String) As Boolean
+        Public Function IsTerminal(operationId As String, Optional stepId As String = "") As Boolean
             Dim id As String = If(operationId, "").Trim()
             If id = "" Then Return False
 
             SyncLock _syncRoot
                 Dim record As ExplicitOperationRecord = Nothing
-                If Not _records.TryGetValue(id, record) OrElse record Is Nothing Then Return False
+                If Not _records.TryGetValue(BuildRecordKey(id, stepId), record) OrElse record Is Nothing Then Return False
                 Return IsTerminalStatus(record.Status)
             End SyncLock
         End Function
 
-        Public Function IsSucceeded(operationId As String) As Boolean
+        Public Function IsSucceeded(operationId As String, Optional stepId As String = "") As Boolean
             Dim id As String = If(operationId, "").Trim()
             If id = "" Then Return False
 
             SyncLock _syncRoot
                 Dim record As ExplicitOperationRecord = Nothing
-                If Not _records.TryGetValue(id, record) OrElse record Is Nothing Then Return False
+                If Not _records.TryGetValue(BuildRecordKey(id, stepId), record) OrElse record Is Nothing Then Return False
                 Return record.Status = ExplicitOperationStatus.Succeeded
             End SyncLock
         End Function
@@ -173,9 +181,10 @@ Namespace Agents
         Public Function TryGetFirstSucceededOperationId(arguments As System.Collections.Generic.IDictionary(Of String, Object),
                                                         ByRef succeededOperationId As String) As Boolean
             succeededOperationId = ""
-            For Each id As String In ExtractOperationIds(arguments)
-                If IsSucceeded(id) Then
-                    succeededOperationId = id
+            For Each identity As ExplicitOperationIdentity In ExtractOperationIdentities(arguments)
+                If identity Is Nothing Then Continue For
+                If IsSucceeded(identity.OperationId, identity.StepId) Then
+                    succeededOperationId = identity.OperationId
                     Return True
                 End If
             Next
@@ -185,9 +194,10 @@ Namespace Agents
         Public Function TryGetFirstTerminalOperationId(arguments As System.Collections.Generic.IDictionary(Of String, Object),
                                                        ByRef terminalOperationId As String) As Boolean
             terminalOperationId = ""
-            For Each id As String In ExtractOperationIds(arguments)
-                If IsTerminal(id) Then
-                    terminalOperationId = id
+            For Each identity As ExplicitOperationIdentity In ExtractOperationIdentities(arguments)
+                If identity Is Nothing Then Continue For
+                If IsTerminal(identity.OperationId, identity.StepId) Then
+                    terminalOperationId = identity.OperationId
                     Return True
                 End If
             Next
@@ -195,15 +205,16 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Returns True when at least one explicit operation id in the current call is not
-        ''' terminal. Exact explicit operation lifecycle then takes precedence over the
-        ''' generic duplicate-success replay guard.
+        ''' Returns True when at least one explicit operation step in the current call is not
+        ''' terminal. An operation may contain multiple independently identified steps; a
+        ''' successful/terminal step therefore does not make the whole operation terminal.
         ''' </summary>
         Public Function HasAnyNonTerminalOperationId(
             arguments As System.Collections.Generic.IDictionary(Of String, Object)) As Boolean
 
-            For Each id As String In ExtractOperationIds(arguments)
-                If Not IsTerminal(id) Then
+            For Each identity As ExplicitOperationIdentity In ExtractOperationIdentities(arguments)
+                If identity Is Nothing Then Continue For
+                If Not IsTerminal(identity.OperationId, identity.StepId) Then
                     Return True
                 End If
             Next
@@ -268,8 +279,10 @@ Namespace Agents
 
                 Dim operationId As String =
                     If(taskObject.Value(Of String)("operation_id"), "").Trim()
+                Dim stepId As String =
+                    If(taskObject.Value(Of String)("step_id"), "").Trim()
 
-                If operationId <> "" AndAlso IsTerminal(operationId) Then
+                If operationId <> "" AndAlso IsTerminal(operationId, stepId) Then
                     AddDistinct(skippedTerminalOperationIds, operationId)
                     Continue For
                 End If
@@ -332,37 +345,36 @@ Namespace Agents
             End Try
         End Function
 
-        Public Sub NoteAttempt(operationId As String)
+        Public Sub NoteAttempt(operationId As String, Optional stepId As String = "")
             Dim id As String = If(operationId, "").Trim()
             If id = "" Then Return
 
             SyncLock _syncRoot
-                Dim record As ExplicitOperationRecord = GetOrCreateLocked(id)
+                Dim record As ExplicitOperationRecord = GetOrCreateLocked(id, stepId)
                 If record Is Nothing OrElse IsTerminalStatus(record.Status) Then Return
                 record.AttemptCount += 1
                 record.UpdatedUtc = System.DateTime.UtcNow
             End SyncLock
         End Sub
 
-        Public Sub MarkSucceeded(operationId As String)
-            SetStatus(operationId, ExplicitOperationStatus.Succeeded, "")
+        Public Sub MarkSucceeded(operationId As String, Optional stepId As String = "")
+            SetStatus(operationId, stepId, ExplicitOperationStatus.Succeeded, "")
         End Sub
 
-        Public Sub MarkTerminalUnresolved(operationId As String, reason As String)
-            SetStatus(operationId, ExplicitOperationStatus.TerminalUnresolved, If(reason, ""))
+        Public Sub MarkTerminalUnresolved(operationId As String, reason As String, Optional stepId As String = "")
+            SetStatus(operationId, stepId, ExplicitOperationStatus.TerminalUnresolved, If(reason, ""))
         End Sub
 
-        Public Sub MarkTerminalBlocked(operationId As String, reason As String)
-            SetStatus(operationId, ExplicitOperationStatus.TerminalBlocked, If(reason, ""))
+        Public Sub MarkTerminalBlocked(operationId As String, reason As String, Optional stepId As String = "")
+            SetStatus(operationId, stepId, ExplicitOperationStatus.TerminalBlocked, If(reason, ""))
         End Sub
 
         Public Sub ApplyToolResult(arguments As System.Collections.Generic.IDictionary(Of String, Object),
                                    responseText As String,
                                    maxAttempts As Integer)
-            Dim inputIds As System.Collections.Generic.List(Of String) = ExtractOperationIds(arguments)
-            If inputIds.Count = 0 Then Return
+            Dim inputIdentities As System.Collections.Generic.List(Of ExplicitOperationIdentity) = ExtractOperationIdentities(arguments)
+            If inputIdentities.Count = 0 Then Return
 
-            Dim allowedIds As New System.Collections.Generic.HashSet(Of String)(inputIds, System.StringComparer.Ordinal)
             Dim handledAnyPerTask As Boolean = False
 
             Try
@@ -375,10 +387,14 @@ Namespace Agents
                             If obj Is Nothing Then Continue For
 
                             Dim id As String = If(obj.Value(Of String)("operation_id"), "").Trim()
-                            If id = "" OrElse Not allowedIds.Contains(id) Then Continue For
+                            If id = "" Then Continue For
+
+                            Dim resultStepId As String = If(obj.Value(Of String)("step_id"), "").Trim()
+                            Dim identity As ExplicitOperationIdentity = ResolveInputIdentity(inputIdentities, id, resultStepId)
+                            If identity Is Nothing Then Continue For
 
                             handledAnyPerTask = True
-                            NoteAttempt(id)
+                            NoteAttempt(identity.OperationId, identity.StepId)
 
                             Dim applied As Boolean = False
                             Dim appliedToken As Newtonsoft.Json.Linq.JToken = obj("applied")
@@ -388,12 +404,12 @@ Namespace Agents
                                 Boolean.TryParse(appliedToken.ToString(), applied)
 
                             If hasApplied AndAlso applied Then
-                                MarkSucceeded(id)
+                                MarkSucceeded(identity.OperationId, identity.StepId)
                             Else
-                                Dim attemptCount As Integer = GetAttemptCount(id)
+                                Dim attemptCount As Integer = GetAttemptCount(identity.OperationId, identity.StepId)
                                 If attemptCount >= System.Math.Max(1, maxAttempts) Then
                                     Dim reason As String = If(obj.Value(Of String)("reason"), obj.Value(Of String)("error"))
-                                    MarkTerminalUnresolved(id, If(reason, "explicit_operation_no_progress"))
+                                    MarkTerminalUnresolved(identity.OperationId, If(reason, "explicit_operation_no_progress"), identity.StepId)
                                 End If
                             End If
                         Next
@@ -405,10 +421,11 @@ Namespace Agents
             If handledAnyPerTask Then Return
 
             If ToolCallSequencing.IsZeroChangeOperationResult(responseText) Then
-                For Each id As String In inputIds
-                    NoteAttempt(id)
-                    If GetAttemptCount(id) >= System.Math.Max(1, maxAttempts) Then
-                        MarkTerminalUnresolved(id, "explicit_operation_no_progress")
+                For Each identity As ExplicitOperationIdentity In inputIdentities
+                    If identity Is Nothing Then Continue For
+                    NoteAttempt(identity.OperationId, identity.StepId)
+                    If GetAttemptCount(identity.OperationId, identity.StepId) >= System.Math.Max(1, maxAttempts) Then
+                        MarkTerminalUnresolved(identity.OperationId, "explicit_operation_no_progress", identity.StepId)
                     End If
                 Next
             End If
@@ -416,11 +433,28 @@ Namespace Agents
 
         Public Shared Function ExtractOperationIds(arguments As System.Collections.Generic.IDictionary(Of String, Object)) As System.Collections.Generic.List(Of String)
             Dim result As New System.Collections.Generic.List(Of String)()
+            For Each identity As ExplicitOperationIdentity In ExtractOperationIdentities(arguments)
+                If identity Is Nothing Then Continue For
+                AddDistinct(result, identity.OperationId)
+            Next
+            Return result
+        End Function
+
+        Public Shared Function ExtractOperationIdentities(arguments As System.Collections.Generic.IDictionary(Of String, Object)) As System.Collections.Generic.List(Of ExplicitOperationIdentity)
+            Dim result As New System.Collections.Generic.List(Of ExplicitOperationIdentity)()
             If arguments Is Nothing Then Return result
 
             Dim direct As Object = Nothing
             If arguments.TryGetValue("operation_id", direct) AndAlso direct IsNot Nothing Then
-                AddDistinct(result, direct.ToString())
+                Dim operationId As String = direct.ToString().Trim()
+                If operationId <> "" Then
+                    Dim stepValue As Object = Nothing
+                    Dim stepId As String = ""
+                    If arguments.TryGetValue("step_id", stepValue) AndAlso stepValue IsNot Nothing Then
+                        stepId = stepValue.ToString().Trim()
+                    End If
+                    AddIdentityDistinct(result, operationId, stepId)
+                End If
             End If
 
             Dim tasksValue As Object = Nothing
@@ -431,7 +465,10 @@ Namespace Agents
                         For Each token As Newtonsoft.Json.Linq.JToken In arr
                             Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
                             If obj Is Nothing Then Continue For
-                            AddDistinct(result, If(obj.Value(Of String)("operation_id"), ""))
+                            AddIdentityDistinct(
+                                result,
+                                If(obj.Value(Of String)("operation_id"), ""),
+                                If(obj.Value(Of String)("step_id"), ""))
                         Next
                     End If
                 Catch ex As System.Exception
@@ -441,15 +478,20 @@ Namespace Agents
             Return result
         End Function
 
-        Private Sub SetStatus(operationId As String, status As ExplicitOperationStatus, reason As String)
+        Private Sub SetStatus(operationId As String,
+                              stepId As String,
+                              status As ExplicitOperationStatus,
+                              reason As String)
             Dim id As String = If(operationId, "").Trim()
             If id = "" Then Return
 
             SyncLock _syncRoot
-                Dim record As ExplicitOperationRecord = GetOrCreateLocked(id)
+                Dim record As ExplicitOperationRecord = GetOrCreateLocked(id, stepId)
                 If record Is Nothing Then Return
 
-                ' Terminal status is monotonic. A later result may not reopen or replace it.
+                ' A concrete step is monotonic once it succeeds or becomes terminal. A
+                ' different step_id remains independently executable inside the same
+                ' logical operation_id.
                 If IsTerminalStatus(record.Status) Then Return
 
                 record.Status = status
@@ -458,25 +500,30 @@ Namespace Agents
             End SyncLock
         End Sub
 
-        Private Function GetAttemptCount(operationId As String) As Integer
+        Private Function GetAttemptCount(operationId As String, Optional stepId As String = "") As Integer
             Dim id As String = If(operationId, "").Trim()
             If id = "" Then Return 0
 
             SyncLock _syncRoot
                 Dim record As ExplicitOperationRecord = Nothing
-                If Not _records.TryGetValue(id, record) OrElse record Is Nothing Then Return 0
+                If Not _records.TryGetValue(BuildRecordKey(id, stepId), record) OrElse record Is Nothing Then Return 0
                 Return record.AttemptCount
             End SyncLock
         End Function
 
-        Private Function GetOrCreateLocked(operationId As String) As ExplicitOperationRecord
+        Private Function GetOrCreateLocked(operationId As String, Optional stepId As String = "") As ExplicitOperationRecord
             Dim id As String = If(operationId, "").Trim()
             If id = "" Then Return Nothing
+            Dim normalizedStepId As String = NormalizeStepId(stepId)
+            Dim recordKey As String = BuildRecordKey(id, normalizedStepId)
 
             Dim record As ExplicitOperationRecord = Nothing
-            If Not _records.TryGetValue(id, record) OrElse record Is Nothing Then
-                record = New ExplicitOperationRecord With {.OperationId = id}
-                _records(id) = record
+            If Not _records.TryGetValue(recordKey, record) OrElse record Is Nothing Then
+                record = New ExplicitOperationRecord With {
+                    .OperationId = id,
+                    .StepId = normalizedStepId
+                }
+                _records(recordKey) = record
             End If
             Return record
         End Function
@@ -486,6 +533,74 @@ Namespace Agents
                    status = ExplicitOperationStatus.TerminalUnresolved OrElse
                    status = ExplicitOperationStatus.TerminalBlocked
         End Function
+
+        Private Shared Function NormalizeStepId(stepId As String) As String
+            Dim normalized As String = If(stepId, "").Trim()
+            If normalized = "" Then Return "__default__"
+            Return normalized
+        End Function
+
+        Private Shared Function BuildRecordKey(operationId As String, Optional stepId As String = "") As String
+            Return If(operationId, "").Trim() & ChrW(31) & NormalizeStepId(stepId)
+        End Function
+
+        Private Shared Function ResolveInputIdentity(inputIdentities As System.Collections.Generic.IEnumerable(Of ExplicitOperationIdentity),
+                                                     operationId As String,
+                                                     resultStepId As String) As ExplicitOperationIdentity
+            Dim id As String = If(operationId, "").Trim()
+            Dim stepId As String = If(resultStepId, "").Trim()
+            If id = "" OrElse inputIdentities Is Nothing Then Return Nothing
+
+            Dim candidates As System.Collections.Generic.List(Of ExplicitOperationIdentity) =
+                inputIdentities.Where(
+                    Function(item As ExplicitOperationIdentity)
+                        Return item IsNot Nothing AndAlso
+                               System.String.Equals(If(item.OperationId, ""), id, System.StringComparison.Ordinal)
+                    End Function).ToList()
+
+            If stepId <> "" Then
+                For Each candidate As ExplicitOperationIdentity In candidates
+                    If System.String.Equals(NormalizeStepId(candidate.StepId), NormalizeStepId(stepId), System.StringComparison.Ordinal) Then
+                        Return candidate
+                    End If
+                Next
+                Return Nothing
+            End If
+
+            If candidates.Count = 1 Then Return candidates(0)
+
+            For Each candidate As ExplicitOperationIdentity In candidates
+                If NormalizeStepId(candidate.StepId) = "__default__" Then Return candidate
+            Next
+
+            Return Nothing
+        End Function
+
+        Private Shared Sub AddIdentityDistinct(target As System.Collections.Generic.List(Of ExplicitOperationIdentity),
+                                               operationId As String,
+                                               stepId As String)
+            If target Is Nothing Then Return
+            Dim id As String = If(operationId, "").Trim()
+            If id = "" Then Return
+            Dim normalizedStepId As String = If(stepId, "").Trim()
+            Dim recordKey As String = BuildRecordKey(id, normalizedStepId)
+
+            If target.Any(
+                Function(existing As ExplicitOperationIdentity)
+                    Return existing IsNot Nothing AndAlso
+                           System.String.Equals(
+                               BuildRecordKey(existing.OperationId, existing.StepId),
+                               recordKey,
+                               System.StringComparison.Ordinal)
+                End Function) Then
+                Return
+            End If
+
+            target.Add(New ExplicitOperationIdentity With {
+                .OperationId = id,
+                .StepId = normalizedStepId
+            })
+        End Sub
 
         Private Shared Sub AddDistinct(target As System.Collections.Generic.List(Of String), value As String)
             Dim id As String = If(value, "").Trim()
@@ -498,9 +613,9 @@ Namespace Agents
     ''' Capability-driven orchestration contract for tools whose successful physical
     ''' execution completes one explicitly identified logical operation.
     '''
-    ''' The operation id is model/host orchestration metadata only. It is injected into
-    ''' the model-facing schema for tools carrying <see cref="CapabilityTag"/>, but is
-    ''' removed again before the underlying tool implementation is called. This keeps
+    ''' operation_id and optional step_id are model/host orchestration metadata only. They are
+    ''' injected into the model-facing schema for tools carrying <see cref="CapabilityTag"/>,
+    ''' but are removed again before the underlying tool implementation is called. This keeps
     ''' existing tool transports and implementations unchanged.
     ''' </summary>
     Public NotInheritable Class ExplicitOperationToolContract
@@ -532,7 +647,7 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Adds the orchestration-only operation_id to the model-facing canonical schema.
+        ''' Adds orchestration-only operation_id and optional step_id to the model-facing canonical schema.
         ''' Idempotent and intentionally driven only by CapabilityTags.
         ''' </summary>
         Public Shared Function ApplyToModelConfig(tool As SharedLibrary.ModelConfig) As SharedLibrary.ModelConfig
@@ -560,7 +675,16 @@ Namespace Agents
                             New Newtonsoft.Json.Linq.JProperty("type", "string"),
                             New Newtonsoft.Json.Linq.JProperty(
                                 "description",
-                                "Opaque stable id for this logical operation. Reuse exactly for retries or reformulations of the same operation; use a new id only for a genuinely distinct operation."))
+                                "Opaque stable id for the logical operation. Keep it stable across related steps; use a new id only for a genuinely distinct logical operation."))
+                End If
+
+                If properties("step_id") Is Nothing Then
+                    properties("step_id") =
+                        New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                            New Newtonsoft.Json.Linq.JProperty(
+                                "description",
+                                "Optional opaque id for one concrete step inside operation_id. Reuse the same step_id for retries of that step; use a new step_id for a distinct continuation/step within the same operation. Omit only for a single-step operation."))
                 End If
 
                 Dim required As Newtonsoft.Json.Linq.JArray = TryCast(parameters("required"), Newtonsoft.Json.Linq.JArray)
@@ -587,9 +711,10 @@ Namespace Agents
                 Dim guidance As System.String =
                     " " & GuidanceMarker &
                     " operation_id is required and identifies one logical operation, not a tool type or file type. " &
-                    "Reuse the same operation_id for retries or reformulations of that same operation. " &
-                    "Use a new operation_id only for a genuinely distinct operation, even when it uses the same tool. " &
-                    "After that operation succeeds, do not call it again merely to recreate another version unless the user requested a distinct additional operation."
+                    "A logical operation may contain multiple concrete steps. Use optional step_id to distinguish those steps: " &
+                    "reuse the same operation_id+step_id for retries/reformulations of the same failed step, and use a new step_id for a distinct continuation within the same operation. " &
+                    "If step_id is omitted, the operation is treated as one legacy single step. " &
+                    "Never change operation_id or step_id merely to bypass a failed-step retry or terminal-step guard."
 
                 If System.String.IsNullOrWhiteSpace(tool.ToolInstructionsPrompt) Then
                     tool.ToolInstructionsPrompt = If(tool.ToolName, "") & ":" & guidance
@@ -622,27 +747,45 @@ Namespace Agents
 
             If HasCapability(tool) Then
                 result.Remove("operation_id")
+                result.Remove("step_id")
             End If
 
             Return result
         End Function
 
-        Public Shared Function TryGetTopLevelOperationId(
+        Public Shared Function TryGetTopLevelOperationIdentity(
             arguments As System.Collections.Generic.IDictionary(Of System.String, Object),
-            ByRef operationId As System.String) As Boolean
+            ByRef operationId As System.String,
+            ByRef stepId As System.String) As Boolean
 
             operationId = ""
+            stepId = ""
             If arguments Is Nothing Then Return False
 
             Dim raw As Object = Nothing
             If Not arguments.TryGetValue("operation_id", raw) OrElse raw Is Nothing Then Return False
 
             operationId = raw.ToString().Trim()
-            Return operationId <> ""
+            If operationId = "" Then Return False
+
+            raw = Nothing
+            If arguments.TryGetValue("step_id", raw) AndAlso raw IsNot Nothing Then
+                stepId = raw.ToString().Trim()
+            End If
+
+            Return True
+        End Function
+
+        Public Shared Function TryGetTopLevelOperationId(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, Object),
+            ByRef operationId As System.String) As Boolean
+
+            Dim stepId As System.String = ""
+            Return TryGetTopLevelOperationIdentity(arguments, operationId, stepId)
         End Function
 
         ''' <summary>
-        ''' Marks a capability-tagged top-level operation as succeeded after the host has
+        ''' Marks a capability-tagged top-level operation step as succeeded after the host has
         ''' received a successful non-zero-change tool result. Structured mutation tools
         ''' that already use per-task applied semantics remain governed by ApplyToolResult.
         ''' </summary>
@@ -656,8 +799,9 @@ Namespace Agents
             If ToolCallSequencing.IsZeroChangeOperationResult(responseText) Then Return
 
             Dim operationId As System.String = ""
-            If TryGetTopLevelOperationId(arguments, operationId) Then
-                registry.MarkSucceeded(operationId)
+            Dim stepId As System.String = ""
+            If TryGetTopLevelOperationIdentity(arguments, operationId, stepId) Then
+                registry.MarkSucceeded(operationId, stepId)
             End If
         End Sub
     End Class

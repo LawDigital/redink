@@ -2735,7 +2735,8 @@ Namespace Agents
                     ToolWrite & ": Edit a .docx without revision marks. Same behavior as word_markup but without tracked changes. " &
                     "Batch related edits in one call via 'tasks'. Every logical operation MUST have an explicit opaque operation_id; each batched task needs its own operation_id. Preserve it unchanged, including retries. " &
                     "The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. " &
-                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. " &
+                    "Every find anchor MUST come from the CURRENT DOCX being edited. Do not use text copied only from a source PDF, OCR export, earlier document version, or external reconstruction as a find anchor unless the same text was verified in the current DOCX. " &
+                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. For broad semantic rewrites where exact current-document anchors are not the right abstraction, prefer process_word_document instead of reconstructing the document. " &
                     "Prefer the Outlook and Autopilot tools (like process_word_document) when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
@@ -2770,7 +2771,8 @@ Namespace Agents
                     ToolMarkup & ": Edit a .docx with revision marks (tracked changes). " &
                     "Batch related edits in one call via 'tasks'. Every logical operation MUST have an explicit opaque operation_id; each batched task needs its own operation_id. Preserve it unchanged, including retries. " &
                     "The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. " &
-                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. " &
+                    "Every find anchor MUST come from the CURRENT DOCX being edited. Do not use text copied only from a source PDF, OCR export, earlier document version, or external reconstruction as a find anchor unless the same text was verified in the current DOCX. " &
+                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. For broad semantic rewrites where exact current-document anchors are not the right abstraction, prefer process_word_document instead of reconstructing the document. " &
                     "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function

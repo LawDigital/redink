@@ -4696,8 +4696,15 @@ Partial Public Class ThisAddIn
                 exists = False
             End If
             If Not exists Then
-                st.SelectedModelKey = ""
-                SaveInkyState(st)
+                ' An active AgentDefaultModel selection is explicit state, not a stale-selection
+                ' candidate. A transient alternate-model list miss (for example while the automatic
+                ' INI updater replaces the local file) must not silently clear the model while leaving
+                ' AgentModeEnabled/AgentModelActive set. The next list build can reconcile once the
+                ' source is available again.
+                If Not st.AgentModelActive Then
+                    st.SelectedModelKey = ""
+                    SaveInkyState(st)
+                End If
             End If
         End If
 

@@ -2569,6 +2569,7 @@ Partial Public Class ThisAddIn
                         Dim explicitArtifactIdentityFailureReason As String = ""
 
                         If context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.IsDeliverableCapableTool(tc.ToolName) AndAlso
                            Not context.SequencingState.ValidateExplicitArtifactIdentityArguments(
                                tc.Arguments,
                                explicitArtifactIdentityFailureReason) Then
@@ -3237,7 +3238,8 @@ Partial Public Class ThisAddIn
                                     If context.SequencingState IsNot Nothing Then
                                         context.SequencingState.BeginBoundedAlternativeRecovery(
                                             tc.ToolName,
-                                            "host_full_tool_path_recovery")
+                                            "host_full_tool_path_recovery",
+                                            recoveryScopeKey)
                                     End If
                                     context.LogWarn(
                                         "Terminal tool repair budget exhausted; starting bounded full tool-path recovery instead of forced no-tool finalization.",
