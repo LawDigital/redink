@@ -215,11 +215,20 @@ Namespace Agents
                     allowedTools = ApplyCanonicalSourceHandlePolicy(allowedTools)
                     optionalTools = ApplyCanonicalSourceHandlePolicy(optionalTools)
                 End If
-                optionalTools = EnsureToolName(optionalTools, "context_expand")
             End If
+
+            ' context_expand is a host runtime primitive, not a domain/helper capability.
+            ' Any isolated tooling scope can receive a lossless result_ref when one of its
+            ' own tool results is reference-compacted, so the corresponding reader must be
+            ' available independently of the agent's declared substantive helper list.
+            ' Apply this after any canonical-source narrowing so infrastructure cannot be
+            ' removed by a substantive helper filter.
+            optionalTools = EnsureToolName(optionalTools, ContextExpandTool.ToolName)
 
             Dim retryCount As Integer = 0
             Dim userMessageForRun As String = baseUserMessage.ToString()
+            Dim previousDiscardedResponseExcerpt As String = ""
+            Dim previousDiscardedResponseLength As Integer = 0
 
             Await AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
             AgentGate.MarkCurrentFlowAsOwner()
@@ -238,6 +247,8 @@ Namespace Agents
                 .WorkflowId = effectiveWorkflowId,
                 .SubAgentTaskId = normalizedSubAgentTaskId,
                 .RunnerRetryIndex = retryCount,
+                .PreviousDiscardedResponseExcerpt = previousDiscardedResponseExcerpt,
+                .PreviousDiscardedResponseLength = previousDiscardedResponseLength,
                 .ExpectedArtifactsJson = lockedExpectedArtifactsJson,
                 .RequiredSuccessfulToolNames = If(HasCanonicalSourceResultRefs(canonicalSourceResultRefs),
                                                   CType(New String() {"context_expand"}, IReadOnlyList(Of String)),
@@ -334,6 +345,16 @@ Namespace Agents
                     End If
 
                     If retryCount = 0 AndAlso retryableErrorCodes.Contains(effectiveErrorCode) Then
+                        previousDiscardedResponseLength = If(finalText, "").Length
+                        previousDiscardedResponseExcerpt =
+                            System.Text.RegularExpressions.Regex.Replace(
+                                If(finalText, ""),
+                                "\s+",
+                                " ").Trim()
+                        If previousDiscardedResponseExcerpt.Length > 200 Then
+                            previousDiscardedResponseExcerpt = previousDiscardedResponseExcerpt.Substring(0, 200)
+                        End If
+
                         retryCount += 1
                         userMessageForRun = BuildRetryUserMessage(baseUserMessage.ToString(), normalized, allowedTools)
                         Continue Do

@@ -319,7 +319,15 @@ Namespace SharedLibrary
             Dim saveConfigToolTip As New System.Windows.Forms.ToolTip()
             saveConfigToolTip.SetToolTip(saveConfigButton, $"Will save the current configuration to a local copy of '{AN2}.ini' (overwriting any existing such file).")
 
-            Dim CentralConfigAvailable As Boolean = System.IO.File.Exists(System.IO.Path.Combine(ExpandEnvironmentVariables(GetFromRegistry(RegPath_Base, RegPath_IniPath, True)), $"{AN2}.ini"))
+            Dim centralRegistrySource As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+            Dim CentralConfigAvailable As Boolean = False
+            If Not String.IsNullOrWhiteSpace(centralRegistrySource) Then
+                If ConfigurationResourceLoader.ClassifyConfigurationSource(centralRegistrySource) = ConfigurationSourceKind.Https Then
+                    CentralConfigAvailable = True
+                Else
+                    CentralConfigAvailable = System.IO.File.Exists(System.IO.Path.Combine(ExpandEnvironmentVariables(centralRegistrySource), $"{AN2}.ini"))
+                End If
+            End If
             Dim delLocalConfigButton As New System.Windows.Forms.Button()
             Dim LocalConfigAvailable As Boolean = System.IO.File.Exists(GetDefaultINIPath(context.RDV))
             If CentralConfigAvailable Then
@@ -1263,10 +1271,7 @@ Namespace SharedLibrary
         ''' </summary>
         Private Shared Sub WritePythonAgentPathToIni(context As ISharedContext, value As String)
             Try
-                Dim iniPath As String = GetActiveConfigFilePath(context)
-                If String.IsNullOrWhiteSpace(iniPath) OrElse Not System.IO.File.Exists(iniPath) Then
-                    iniPath = GetDefaultINIPath(context.RDV)
-                End If
+                Dim iniPath As String = GetWritableLocalConfigPath(context)
 
                 If String.IsNullOrEmpty(value) Then
                     ConfigWizardEngine.RemoveIniValues(iniPath, New String() {"PythonAgentPath"})
@@ -2680,27 +2685,31 @@ Namespace SharedLibrary
                 Dim DefaultPath2 As String = ""
                 Dim TempIniFilePath As String = ""
 
-                ' Determine the configuration file path
-
+                ' Resolve the write target without ever mutating a remote active source.
                 RegFilePath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
                 DefaultPath = GetDefaultINIPath(context.RDV)
                 DefaultPath2 = GetDefaultINIPath("Word")
 
-                If Not String.IsNullOrWhiteSpace(RegFilePath) AndAlso RegPath_IniPrio Then
-                    IniFilePath = System.IO.Path.Combine(ExpandEnvironmentVariables(RegFilePath), $"{AN2}.ini")
-                ElseIf System.IO.File.Exists(DefaultPath) Then
-                    IniFilePath = DefaultPath
-                ElseIf System.IO.File.Exists(DefaultPath2) Then
-                    IniFilePath = DefaultPath2
-                ElseIf Not String.IsNullOrWhiteSpace(RegFilePath) Then
-                    IniFilePath = System.IO.Path.Combine(ExpandEnvironmentVariables(RegFilePath), $"{AN2}.ini")
+                Dim activeSource As String = GetActiveConfigSource(context)
+                If ConfigurationResourceLoader.ClassifyConfigurationSource(activeSource) = ConfigurationSourceKind.Https Then
+                    If context.INI_NoLocalConfig Then
+                        ShowCustomMessageBox("Local configuration changes are disabled by NoLocalConfig=True.")
+                        Return
+                    End If
+
+                    IniFilePath = GetWritableLocalConfigPath(context)
+                    If Not System.IO.File.Exists(IniFilePath) Then
+                        Dim remoteReadPath As String = ConfigurationResourceLoader.ResolveForRead(activeSource, "redink.ini")
+                        Dim localDirectory As String = System.IO.Path.GetDirectoryName(IniFilePath)
+                        If Not String.IsNullOrWhiteSpace(localDirectory) Then System.IO.Directory.CreateDirectory(localDirectory)
+                        System.IO.File.Copy(remoteReadPath, IniFilePath, overwrite:=False)
+                    End If
                 Else
-                    IniFilePath = DefaultPath
+                    IniFilePath = activeSource
                 End If
 
                 IniFilePath = RemoveCR(IniFilePath)
 
-                ' Validate IniFilePath
                 If Not System.IO.File.Exists(IniFilePath) Then
                     ShowCustomMessageBox($"The configuration file '{IniFilePath}' was not found.")
                     Return
@@ -3644,24 +3653,56 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="context">Shared context providing the current application identifier (<c>RDV</c>).</param>
         ''' <returns>The active configuration file path with CR characters removed.</returns>
-        Public Shared Function GetActiveConfigFilePath(context As ISharedContext) As String
+        Public Shared Function GetActiveConfigSource(context As ISharedContext) As String
             Dim regPath As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
             Dim defaultPathApp As String = GetDefaultINIPath(context.RDV)
             Dim defaultPathWord As String = GetDefaultINIPath("Word")
             Dim candidate As String
 
             If Not String.IsNullOrWhiteSpace(regPath) AndAlso RegPath_IniPrio Then
-                candidate = System.IO.Path.Combine(ExpandEnvironmentVariables(regPath), $"{AN2}.ini")
+                candidate = ResolveRegistryConfigurationSource(regPath)
             ElseIf System.IO.File.Exists(defaultPathApp) Then
                 candidate = defaultPathApp
             ElseIf System.IO.File.Exists(defaultPathWord) Then
                 candidate = defaultPathWord
             ElseIf Not String.IsNullOrWhiteSpace(regPath) Then
-                candidate = System.IO.Path.Combine(ExpandEnvironmentVariables(regPath), $"{AN2}.ini")
+                candidate = ResolveRegistryConfigurationSource(regPath)
             Else
                 candidate = defaultPathApp
             End If
+
             Return RemoveCR(candidate)
+        End Function
+
+        Private Shared Function ResolveRegistryConfigurationSource(ByVal registryValue As String) As String
+            Dim raw As String = RemoveCR(If(registryValue, "").Trim())
+            If String.IsNullOrWhiteSpace(raw) Then Return ""
+
+            Select Case ConfigurationResourceLoader.ClassifyConfigurationSource(raw)
+                Case ConfigurationSourceKind.Https
+                    Return raw
+                Case ConfigurationSourceKind.UnsupportedUri
+                    Return raw
+                Case Else
+                    Return System.IO.Path.Combine(ExpandEnvironmentVariables(raw), $"{AN2}.ini")
+            End Select
+        End Function
+
+        Public Shared Function GetActiveConfigReadPath(context As ISharedContext) As String
+            Return ConfigurationResourceLoader.ResolveForRead(GetActiveConfigSource(context), "redink.ini")
+        End Function
+
+        Public Shared Function GetWritableLocalConfigPath(context As ISharedContext) As String
+            If context Is Nothing Then Return ""
+            Return GetDefaultINIPath(context.RDV)
+        End Function
+
+        ''' <summary>
+        ''' Compatibility reader returning the local read path of the active configuration.
+        ''' Writers must use GetWritableLocalConfigPath instead.
+        ''' </summary>
+        Public Shared Function GetActiveConfigFilePath(context As ISharedContext) As String
+            Return GetActiveConfigReadPath(context)
         End Function
 
 

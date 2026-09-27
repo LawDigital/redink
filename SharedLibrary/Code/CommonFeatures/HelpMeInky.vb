@@ -949,85 +949,76 @@ Namespace SharedLibrary
                 Dim sb As New StringBuilder()
                 sb.AppendLine("<Configuration Files>")
 
-                ' Get main config file
-                Dim mainPath As String = Nothing
+                Dim mainSource As String = ""
+                Dim mainReadPath As String = ""
                 Try
-                    mainPath = GetActiveConfigFilePath(_context)
-                Catch
+                    mainSource = GetActiveConfigSource(_context)
+                    mainReadPath = ConfigurationResourceLoader.ResolveForRead(mainSource, "redink.ini")
+                Catch ex As System.Exception
+                    sb.AppendLine("<Main Configuration>")
+                    sb.AppendLine("Source: " & ConfigurationResourceLoader.GetSafeSourceIdentifier(mainSource))
+                    sb.AppendLine("Error reading configuration: " & ex.Message)
+                    sb.AppendLine("</Main Configuration>")
                 End Try
 
-                If Not String.IsNullOrWhiteSpace(mainPath) AndAlso File.Exists(mainPath) Then
+                If Not String.IsNullOrWhiteSpace(mainReadPath) AndAlso File.Exists(mainReadPath) Then
                     sb.AppendLine($"<Main Configuration ({AN2}.ini)>")
-                    sb.AppendLine($"Path: {mainPath}")
+                    sb.AppendLine("Source: " & ConfigurationResourceLoader.GetSafeSourceIdentifier(mainSource))
                     Try
-                        Dim content = File.ReadAllText(mainPath)
-                        sb.AppendLine(SanitizeConfigContent(content))
-                    Catch ex As Exception
+                        sb.AppendLine(SanitizeConfigContent(File.ReadAllText(mainReadPath)))
+                    Catch ex As System.Exception
                         sb.AppendLine($"Error reading file: {ex.Message}")
                     End Try
-                    sb.AppendLine($"</Main Configuration>")
+                    sb.AppendLine("</Main Configuration>")
                 End If
 
-                ' Get default INI paths if available (assuming DefaultINIPaths exists in SharedMethods)
                 Try
                     Dim defaultPaths = SharedMethods.DefaultINIPaths
                     For Each kvp In defaultPaths
                         Dim p = ExpandEnvironmentVariables(kvp.Value)
-                        If File.Exists(p) AndAlso Not String.Equals(p, mainPath, StringComparison.OrdinalIgnoreCase) Then
+                        If File.Exists(p) AndAlso Not String.Equals(p, mainReadPath, StringComparison.OrdinalIgnoreCase) Then
                             sb.AppendLine($"<{kvp.Key} Configuration>")
-                            sb.AppendLine($"Path: {p}")
+                            sb.AppendLine($"Source: {p}")
                             Try
-                                Dim content = File.ReadAllText(p)
-                                sb.AppendLine(SanitizeConfigContent(content))
-                            Catch ex As Exception
+                                sb.AppendLine(SanitizeConfigContent(File.ReadAllText(p)))
+                            Catch ex As System.Exception
                                 sb.AppendLine($"Error reading file: {ex.Message}")
                             End Try
                             sb.AppendLine($"</{kvp.Key} Configuration>")
                         End If
                     Next
                 Catch
-                    ' DefaultINIPaths might not be accessible
                 End Try
 
-                ' Alternate model path
-                If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
-                    Dim alt = ExpandEnvironmentVariables(_context.INI_AlternateModelPath)
-                    If File.Exists(alt) AndAlso Not String.Equals(alt, mainPath, StringComparison.OrdinalIgnoreCase) Then
-                        sb.AppendLine("<Alternate Model Configuration>")
-                        sb.AppendLine($"Path: {alt}")
-                        Try
-                            Dim content = File.ReadAllText(alt)
-                            sb.AppendLine(SanitizeConfigContent(content))
-                        Catch ex As Exception
-                            sb.AppendLine($"Error reading file: {ex.Message}")
-                        End Try
-                        sb.AppendLine("</Alternate Model Configuration>")
-                    End If
-                End If
-
-                ' Special service path
-                If Not String.IsNullOrWhiteSpace(_context.INI_SpecialServicePath) Then
-                    Dim sp = ExpandEnvironmentVariables(_context.INI_SpecialServicePath)
-                    If File.Exists(sp) AndAlso Not String.Equals(sp, mainPath, StringComparison.OrdinalIgnoreCase) Then
-                        sb.AppendLine("<Special Service Configuration>")
-                        sb.AppendLine($"Path: {sp}")
-                        Try
-                            Dim content = File.ReadAllText(sp)
-                            sb.AppendLine(SanitizeConfigContent(content))
-                        Catch ex As Exception
-                            sb.AppendLine($"Error reading file: {ex.Message}")
-                        End Try
-                        sb.AppendLine("</Special Service Configuration>")
-                    End If
-                End If
+                AppendConfigurationResource(sb, "Alternate Model Configuration", _context.INI_AlternateModelPath, mainReadPath)
+                AppendConfigurationResource(sb, "Special Service Configuration", _context.INI_SpecialServicePath, mainReadPath)
 
                 sb.AppendLine("</Configuration Files>")
                 Return sb.ToString()
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Dbg($"GetConfigurationContent error: {ex.Message}")
                 Return $"<Configuration Files>Error retrieving configuration: {ex.Message}</Configuration Files>"
             End Try
         End Function
+
+        Private Sub AppendConfigurationResource(ByVal sb As StringBuilder,
+                                                ByVal label As String,
+                                                ByVal source As String,
+                                                ByVal mainReadPath As String)
+            If String.IsNullOrWhiteSpace(source) Then Return
+
+            sb.AppendLine("<" & label & ">")
+            sb.AppendLine("Source: " & ConfigurationResourceLoader.GetSafeSourceIdentifier(source))
+            Try
+                Dim readPath As String = ConfigurationResourceLoader.ResolveForRead(source, label)
+                If Not String.Equals(readPath, mainReadPath, StringComparison.OrdinalIgnoreCase) Then
+                    sb.AppendLine(SanitizeConfigContent(File.ReadAllText(readPath)))
+                End If
+            Catch ex As System.Exception
+                sb.AppendLine("Error reading configuration: " & ex.Message)
+            End Try
+            sb.AppendLine("</" & label & ">")
+        End Sub
 
         ''' <summary>
         ''' Redacts API keys and removes comment lines from INI-like configuration text before sending it to the LLM.

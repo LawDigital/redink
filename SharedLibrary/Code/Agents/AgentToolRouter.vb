@@ -255,7 +255,10 @@ Namespace Agents
                 If value = "" Then Return Nothing
 
                 Dim stored As ToolResultStore.StoredResult = Nothing
-                If Not ToolResultStore.TryGet(value, stored) OrElse stored Is Nothing Then
+                If Not ToolResultStore.TryGetForWorkflow(
+                    value,
+                    WorkflowContinuity.CurrentWorkflowId,
+                    stored) OrElse stored Is Nothing Then
                     Return Nothing
                 End If
 

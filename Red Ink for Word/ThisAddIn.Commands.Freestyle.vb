@@ -3142,10 +3142,14 @@ SkipPromptInput:
 
             ' Check for INI updates and apply if available
             If String.Equals(OtherPrompt.Trim(), "iniupdate", StringComparison.OrdinalIgnoreCase) Then
-                Dim answer As Boolean = CheckForIniUpdates(_context)
+                Dim hadSourceAccessErrors As System.Boolean = False
+                Dim answer As Boolean = CheckForIniUpdates(
+                    _context,
+                    userInitiated:=True,
+                    hadSourceAccessErrors:=hadSourceAccessErrors)
                 If answer Then
                     ShowCustomMessageBox("Updates to the .ini file(s) have been applied.")
-                Else
+                ElseIf Not hadSourceAccessErrors Then
                     ShowCustomMessageBox("No updates were applied. Either no updates were found or you chose not to apply them.")
                 End If
                 Return

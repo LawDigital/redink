@@ -385,7 +385,7 @@ Namespace SharedLibrary
 
                     Dim updateAvailable As Boolean = False
                     Dim hasUpdateInfo As Boolean = False
-                    Dim lastEx As Exception = Nothing
+                    Dim lastEx As System.Exception = Nothing
                     Const MaxRetries As Integer = 3
 
                     For attempt As Integer = 1 To MaxRetries
@@ -394,7 +394,7 @@ Namespace SharedLibrary
                             hasUpdateInfo = True
                             lastEx = Nothing
                             Exit For
-                        Catch ex As Exception
+                        Catch ex As System.Exception
                             lastEx = ex
                             WriteUpdateLog($"[CheckAndInstallUpdates] CheckForUpdate attempt {attempt}/{MaxRetries} failed", ex)
                             If attempt < MaxRetries Then
@@ -537,7 +537,13 @@ Namespace SharedLibrary
                             MainControl.Invoke(
                                 Sub()
                                     If SharedMethods.CanRunIniGovernedUpdate(context, "INI configuration") Then
-                                        If Not SharedMethods.CheckForIniUpdates(context, skipAuthorizationGate:=True) Then
+                                        Dim hadSourceAccessErrors As System.Boolean = False
+                                        If Not SharedMethods.CheckForIniUpdates(
+                                                context,
+                                                skipAuthorizationGate:=True,
+                                                userInitiated:=True,
+                                                hadSourceAccessErrors:=hadSourceAccessErrors) AndAlso
+                                           Not hadSourceAccessErrors Then
                                             UIInvokeMessage(
                                                 "No configuration updates available or made",
                                                 $"{SharedMethods.AN} INI Updater")
@@ -550,7 +556,13 @@ Namespace SharedLibrary
                                 End Sub)
                         Else
                             If SharedMethods.CanRunIniGovernedUpdate(context, "INI configuration") Then
-                                If Not SharedMethods.CheckForIniUpdates(context, skipAuthorizationGate:=True) Then
+                                Dim hadSourceAccessErrors As System.Boolean = False
+                                If Not SharedMethods.CheckForIniUpdates(
+                                        context,
+                                        skipAuthorizationGate:=True,
+                                        userInitiated:=True,
+                                        hadSourceAccessErrors:=hadSourceAccessErrors) AndAlso
+                                   Not hadSourceAccessErrors Then
                                     UIInvokeMessage(
                                         "No configuration updates available or made",
                                         $"{SharedMethods.AN} INI Updater")
@@ -842,15 +854,20 @@ Namespace SharedLibrary
                     ' --- Synchronous check with retry + exponential backoff ---
                     Dim updateAvailable As Boolean = False
                     Dim checkSucceeded As Boolean = False
-                    Dim lastEx As Exception = Nothing
+                    Dim lastEx As System.Exception = Nothing
 
                     For attempt As Integer = 1 To MaxPeriodicRetries
                         Try
-                            updateAvailable = dep.CheckForUpdate()
+                            updateAvailable = PerformanceLogger.Measure(
+                                _context,
+                                "Update",
+                                "ClickOnce.CheckForUpdate",
+                                Function() dep.CheckForUpdate(),
+                                details:="attempt=" & attempt.ToString(System.Globalization.CultureInfo.InvariantCulture))
                             checkSucceeded = True
                             lastEx = Nothing
                             Exit For
-                        Catch ex As Exception
+                        Catch ex As System.Exception
                             lastEx = ex
                             WriteUpdateLog($"[PeriodicCheck] CheckForUpdate attempt {attempt}/{MaxPeriodicRetries} failed", ex)
                             If attempt < MaxPeriodicRetries Then
@@ -1035,15 +1052,18 @@ Namespace SharedLibrary
                 End If
 
                 ' === INI Configuration Updates ===
-                ' Only run after a confirmed successful network/local check
+                ' Only run after a confirmed successful network/local check.
+                ' PeriodicCheckForUpdatesCore already runs on a background thread. Keep the potentially
+                ' blocking INI/network work there; CheckForIniUpdates marshals only actual UI interactions.
                 If _context IsNot Nothing Then
+                    Dim contextSnapshot As ISharedContext = _context
                     Try
-                        If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
-                            MainControl.Invoke(Sub() SharedMethods.CheckForIniUpdates(_context))
-                        Else
-                            SharedMethods.CheckForIniUpdates(_context)
-                        End If
-                    Catch iniEx As Exception
+                        PerformanceLogger.Measure(
+                            contextSnapshot,
+                            "Update",
+                            "INIRefresh",
+                            Sub() SharedMethods.CheckForIniUpdates(contextSnapshot))
+                    Catch iniEx As System.Exception
                         WriteUpdateLog("[PeriodicCheck] INI update check failed", iniEx)
                     End Try
                 End If
@@ -1167,16 +1187,22 @@ Namespace SharedLibrary
                 SetUpdateFailureCount(0)
 
                 ' === INI Configuration Updates (async network path) ===
+                ' Keep INI source access off the Office UI thread. CheckForIniUpdates marshals only
+                ' genuine dialogs back to MainControl.
                 If _context IsNot Nothing Then
-                    Try
-                        If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
-                            MainControl.Invoke(Sub() SharedMethods.CheckForIniUpdates(_context))
-                        Else
-                            SharedMethods.CheckForIniUpdates(_context)
-                        End If
-                    Catch iniEx As Exception
-                        WriteUpdateLog("[OnCheck] INI update check failed", iniEx)
-                    End Try
+                    Dim contextSnapshot As ISharedContext = _context
+                    System.Threading.Tasks.Task.Run(
+                        Sub()
+                            Try
+                                PerformanceLogger.Measure(
+                                    contextSnapshot,
+                                    "Update",
+                                    "INIRefresh.Async",
+                                    Sub() SharedMethods.CheckForIniUpdates(contextSnapshot))
+                            Catch iniEx As System.Exception
+                                WriteUpdateLog("[OnCheck] INI update check failed", iniEx)
+                            End Try
+                        End Sub)
                 End If
 
             Catch dex As DeploymentException

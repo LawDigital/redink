@@ -1101,13 +1101,15 @@ Partial Public Class ThisAddIn
                         cancellationToken:=ct, binaryOutputDirectory:=tempDir,
                         toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
                             task.CreatedBy,
-                            If(String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject)))
+                            If(String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject)),
+                        transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 Else
                     response = Await LLM(systemPrompt, userPrompt.ToString(),
                                          UseSecondAPI:=executionUseSecondApi,
                                          HideSplash:=True, EnsureUI:=False,
                                          cancellationToken:=ct,
-                                         binaryOutputDirectory:=tempDir)
+                                         binaryOutputDirectory:=tempDir,
+                                         transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 End If
             Else
                 Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -1115,7 +1117,8 @@ Partial Public Class ThisAddIn
                                      UseSecondAPI:=executionUseSecondApi,
                                      HideSplash:=True, EnsureUI:=False,
                                      cancellationToken:=ct,
-                                     binaryOutputDirectory:=tempDir)
+                                     binaryOutputDirectory:=tempDir,
+                                     transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
             End If
 
             If String.IsNullOrWhiteSpace(response) Then

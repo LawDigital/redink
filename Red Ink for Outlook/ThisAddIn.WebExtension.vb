@@ -1624,93 +1624,14 @@ Partial Public Class ThisAddIn
         Try
             If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then Return Nothing
 
-            Dim alts As List(Of ModelConfig) = Nothing
-            Try
-                alts = LoadAlternativeModels(INI_AlternateModelPath, _context, includeToolOnly:=False, toolsOnly:=False)
-            Catch
+            Dim modelConfig As ModelConfig = Nothing
+            If Not TryGetSpecialTaskModelConfig(_context, INI_AlternateModelPath, "AgentDefaultModel", modelConfig) Then
                 Return Nothing
-            End Try
-            If alts Is Nothing OrElse alts.Count = 0 Then Return Nothing
-
-            ' GetSpecialTaskModel searches for a key with a truthy value.
-            ' We replicate the search here WITHOUT applying to context.
-            Dim iniPath As String = ExpandEnvironmentVariables(INI_AlternateModelPath)
-            If Not IO.File.Exists(iniPath) Then Return Nothing
-
-            Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                "true", "yes", "wahr", "ja", "on", "1"
-            }
-
-            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-            Dim sectionName As String = ""
-
-            Dim checkSection As Func(Of String) =
-                Function()
-                    If currentDict.Count = 0 Then Return Nothing
-                    If Not currentDict.ContainsKey("AgentDefaultModel") Then Return Nothing
-                    Dim raw As String = currentDict("AgentDefaultModel")
-                    If raw Is Nothing Then Return Nothing
-
-                    ' Strip inline comments, quotes
-                    Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                    Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                    raw = raw.Trim()
-                    If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse
-                                                (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                        raw = raw.Substring(1, raw.Length - 2).Trim()
-                    End If
-                    If truthy.Contains(raw.ToLowerInvariant()) Then Return sectionName
-                    Return Nothing
-                End Function
-
-            ' Helper: match a raw INI section name to a loaded ModelConfig.
-            ' ModelDescription may be decorated with ModelNote and/or ToolingSuffix,
-            ' so we use StartsWith for ModelDescription and Equals for Model.
-            Dim matchToConfig As Func(Of String, ModelConfig) =
-                Function(section As String)
-                    Return alts.FirstOrDefault(Function(m)
-                                                   If m Is Nothing Then Return False
-                                                   If Not String.IsNullOrWhiteSpace(m.ModelDescription) AndAlso
-                                                      m.ModelDescription.StartsWith(section, StringComparison.OrdinalIgnoreCase) Then Return True
-                                                   If Not String.IsNullOrWhiteSpace(m.Model) AndAlso
-                                                      String.Equals(m.Model, section, StringComparison.OrdinalIgnoreCase) Then Return True
-                                                   Return False
-                                               End Function)
-                End Function
-
-            For Each rawLine In IO.File.ReadAllLines(iniPath)
-                Dim line = rawLine.Trim()
-                If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then Continue For
-
-                If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                    Dim matchedSection = checkSection()
-                    If matchedSection IsNot Nothing Then
-                        Dim mc = matchToConfig(matchedSection)
-                        If mc IsNot Nothing Then
-                            displayKey = If(Not String.IsNullOrWhiteSpace(mc.ModelDescription), mc.ModelDescription, mc.Model)
-                            Return mc
-                        End If
-                    End If
-                    currentDict.Clear()
-                    sectionName = line.Substring(1, line.Length - 2).Trim()
-                    Continue For
-                End If
-
-                Dim tokens = line.Split(New Char() {"="c}, 2)
-                If tokens.Length = 2 Then currentDict(tokens(0).Trim()) = tokens(1).Trim()
-            Next
-
-            ' Check final section
-            Dim finalMatch = checkSection()
-            If finalMatch IsNot Nothing Then
-                Dim mc = matchToConfig(finalMatch)
-                If mc IsNot Nothing Then
-                    displayKey = If(Not String.IsNullOrWhiteSpace(mc.ModelDescription), mc.ModelDescription, mc.Model)
-                    Return mc
-                End If
             End If
 
-            Return Nothing
+            If modelConfig Is Nothing Then Return Nothing
+            displayKey = If(Not String.IsNullOrWhiteSpace(modelConfig.ModelDescription), modelConfig.ModelDescription, modelConfig.Model)
+            Return modelConfig
         Catch
             Return Nothing
         End Try
@@ -4775,8 +4696,15 @@ Partial Public Class ThisAddIn
                 exists = False
             End If
             If Not exists Then
-                st.SelectedModelKey = ""
-                SaveInkyState(st)
+                ' An active AgentDefaultModel selection is explicit state, not a stale-selection
+                ' candidate. A transient alternate-model list miss (for example while the automatic
+                ' INI updater replaces the local file) must not silently clear the model while leaving
+                ' AgentModeEnabled/AgentModelActive set. The next list build can reconcile once the
+                ' source is available again.
+                If Not st.AgentModelActive Then
+                    st.SelectedModelKey = ""
+                    SaveInkyState(st)
+                End If
             End If
         End If
 

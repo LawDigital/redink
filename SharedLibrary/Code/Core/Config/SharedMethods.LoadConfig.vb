@@ -64,29 +64,20 @@ Namespace SharedLibrary
 
             Try
 
-                ' Determine the configuration file path.
-
+                ' Resolve the active source without changing the historic priority rules.
                 RegFilePath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
                 DefaultPath = GetDefaultINIPath(context.RDV)
                 DefaultPath2 = GetDefaultINIPath("Word")
 
-                If Not String.IsNullOrWhiteSpace(RegFilePath) AndAlso RegPath_IniPrio Then
-                    IniFilePath = System.IO.Path.Combine(ExpandEnvironmentVariables(RegFilePath), $"{AN2}.ini")
-                ElseIf System.IO.File.Exists(DefaultPath) Then
-                    IniFilePath = DefaultPath
-                ElseIf System.IO.File.Exists(DefaultPath2) Then
-                    IniFilePath = DefaultPath2
-                ElseIf Not String.IsNullOrWhiteSpace(RegFilePath) Then
-                    IniFilePath = System.IO.Path.Combine(ExpandEnvironmentVariables(RegFilePath), $"{AN2}.ini")
-                Else
-                    IniFilePath = DefaultPath
+                Dim configSource As String = GetActiveConfigSource(context)
+                Dim sourceKind As ConfigurationSourceKind = ConfigurationResourceLoader.ClassifyConfigurationSource(configSource)
+
+                If sourceKind = ConfigurationSourceKind.UnsupportedUri Then
+                    ShowCustomMessageBox("The configured main configuration source uses an unsupported URI scheme. Only HTTPS URLs and file-system paths are supported.")
+                    Return
                 End If
 
-                IniFilePath = RemoveCR(IniFilePath)
-
-                ' Check if the configuration file exists.
-
-                If Not System.IO.File.Exists(IniFilePath) Then
+                If sourceKind = ConfigurationSourceKind.FileSystem AndAlso Not System.IO.File.Exists(ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")) Then
                     If FirstTime Then
                         Using frm As New InitialConfig(context)
                             Dim __safeDialogOwner92 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
@@ -96,20 +87,27 @@ Namespace SharedLibrary
                                 frm.ShowDialog()
                             End If
                         End Using
-                        IniFilePath = DefaultPath
-                        If context.InitialConfigFailed AndAlso Not System.IO.File.Exists(IniFilePath) Then
-                            ShowCustomMessageBox($"You have aborted the setup wizard and no configuration file has been found ('{IniFilePath}'). You will have to retry or configure it manually to use {AN}, even if you see the menus (they will disappear once {AN} has been de-installed or de-activated).")
+                        configSource = DefaultPath
+                        If context.InitialConfigFailed AndAlso Not System.IO.File.Exists(configSource) Then
+                            ShowCustomMessageBox($"You have aborted the setup wizard and no configuration file has been found ('{configSource}'). You will have to retry or configure it manually to use {AN}, even if you see the menus (they will disappear once {AN} has been de-installed or de-activated).")
                             Return
                         End If
-                        If Not System.IO.File.Exists(IniFilePath) Then
-                            ShowCustomMessageBox($"The configuration file is (still) not found ('{IniFilePath}'). There may be an error in the setup assistant. Please configure the configuration file manually.")
+                        If Not System.IO.File.Exists(configSource) Then
+                            ShowCustomMessageBox($"The configuration file is (still) not found ('{configSource}'). There may be an error in the setup assistant. Please configure the configuration file manually.")
                             Return
                         End If
                     Else
-                        ShowCustomMessageBox($"The configuration file has not been found ('{IniFilePath}').")
+                        ShowCustomMessageBox($"The configuration file has not been found ('{configSource}').")
                         Return
                     End If
                 End If
+
+                Try
+                    IniFilePath = ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")
+                Catch ex As System.Exception
+                    ShowCustomMessageBox("The configuration could not be loaded from '" & ConfigurationResourceLoader.GetSafeSourceIdentifier(configSource) & "': " & ex.Message)
+                    Return
+                End Try
 
                 Dim iniContent As String = ""
                 Dim configDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)

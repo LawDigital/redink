@@ -736,14 +736,6 @@ Namespace Agents
                 ToList()
         End Function
 
-#If DEBUG Then
-        Friend Shared Sub ResetForTests()
-            SyncLock _sync
-                _states.Clear()
-            End SyncLock
-        End Sub
-#End If
-
         Private Shared Function GetOrLoadUnlocked(workflowId As String, hostPipeline As String) As WorkflowRuntimeState
             Dim state As WorkflowRuntimeState = Nothing
 

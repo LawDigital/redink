@@ -499,8 +499,12 @@
     <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
     <Compile Include="Code\Agents\TextTools.Analyze.vb" />
     <Compile Include="Code\Agents\TextTools.SemanticAndExport.vb" />
+    <Compile Include="Code\Agents\TextFileSnapshot.vb" />
+    <Compile Include="Code\Agents\TextExtractionResourceRegistry.vb" />
     <Compile Include="Code\Agents\TextTools.vb" />
     <Compile Include="Code\Agents\ToolCallSequencing.vb" />
+    <Compile Include="Code\Agents\PdfWordLayoutAdapters.vb" />
+    <Compile Include="Code\Agents\ToolingPhaseTelemetry.vb" />
     <Compile Include="Code\Agents\ToolDescribeTool.vb" />
     <Compile Include="Code\Agents\ToolExecutorRegistry.vb" />
     <Compile Include="Code\Agents\ToolingConstants.vb" />
@@ -509,7 +513,9 @@
     <Compile Include="Code\Agents\ToolLoaderTool.vb" />
     <Compile Include="Code\Agents\ToolRegistry.vb" />
     <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />
+    <Compile Include="Code\Agents\ToolReplayRuntimePolicy.vb" />
     <Compile Include="Code\Agents\ToolResultStore.vb" />
+    <Compile Include="Code\Agents\ToolingControlPlaneStore.vb" />
     <Compile Include="Code\Agents\WebGroundingTool.vb" />
     <Compile Include="Code\Agents\WebView2JsSandbox.vb" />
     <Compile Include="Code\Agents\WordDocTools.vb" />
@@ -518,6 +524,7 @@
     <Compile Include="Code\Agents\WorkspaceState.vb" />
     <Compile Include="Code\Agents\WorkspaceTools.vb" />
     <Compile Include="Code\CommonFeatures\FactExtractionService.vb" />
+    <Compile Include="Code\CommonFeatures\PerformanceLogger.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeEmbeddingService.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeIndexer.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeQueryService.vb" />
@@ -587,6 +594,7 @@
     <Compile Include="Code\Core\Clipboard\SharedMethods.ClipboardSnapshot.vb" />
     <Compile Include="Code\Core\Clipboard\SharedMethods.PutInClipboard.vb" />
     <Compile Include="Code\Core\Clipboard\SharedMethods.StoreAndRestoreClipboard.vb" />
+    <Compile Include="Code\Core\Config\ConfigurationResourceLoader.vb" />
     <Compile Include="Code\Core\Config\ConfigWizardEngine.vb" />
     <Compile Include="Code\Core\Config\ConfigWizardForm.Designer.vb">
       <DependentUpon>ConfigWizardForm.vb</DependentUpon>
@@ -622,6 +630,7 @@
     <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.PrimaryModelManager.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.GoogleOAuthHelper.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.Http.vb" />
+    <Compile Include="Code\Core\LLM\LlmTransportRetryPolicy.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MainLLM.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCP.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCPOAuth.vb" />

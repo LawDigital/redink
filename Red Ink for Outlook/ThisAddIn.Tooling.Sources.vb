@@ -248,6 +248,7 @@ Partial Public Class ThisAddIn
 
         Return New ModelConfig() With {
             .ToolName = BuildInternalKnowledgeToolName(store),
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = BuildInternalKnowledgeToolInstructionsPrompt(store),
             .ToolDefinition = BuildInternalKnowledgeToolDefinition(store),
             .ModelDescription = $"Knowledge Store: {displayLabel}{InternalToolSuffix}",
@@ -523,6 +524,7 @@ Partial Public Class ThisAddIn
     Public Function GetInternalKnowledgeTool() As ModelConfig
         Return New ModelConfig() With {
         .ToolName = InternalKnowledgeToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolInstructionsPrompt = BuildInternalKnowledgeToolInstructionsPrompt(),
         .ToolDefinition = BuildInternalKnowledgeToolDefinition(),
         .ModelDescription = "Knowledge Store Search" & InternalToolSuffix,

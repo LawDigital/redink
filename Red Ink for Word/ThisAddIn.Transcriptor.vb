@@ -489,9 +489,9 @@ Partial Public Class ThisAddIn
             _alternateGoogleApiKeyConfig = Nothing
 
             Try
-                Dim altPath As String = ExpandEnvironmentVariables(Globals.ThisAddIn.INI_AlternateModelPath)
+                Dim altPath As String = Globals.ThisAddIn.INI_AlternateModelPath
 
-                If String.IsNullOrWhiteSpace(altPath) OrElse Not File.Exists(altPath) Then
+                If String.IsNullOrWhiteSpace(altPath) OrElse Not ConfigurationResourceLoader.CanResolve(altPath) Then
                     Return
                 End If
 

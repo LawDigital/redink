@@ -36,3 +36,4 @@ setup.exe
 /Red Ink Installer/Build/Release-Both.ps1
 
 /Red Ink Installer/Build/Verify-MsiSignatures.ps1
+/Tasks.md

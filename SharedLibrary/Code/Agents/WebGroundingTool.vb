@@ -115,6 +115,7 @@ Namespace Agents
                 .ToolOnly = True,
                 .Tool = True,
                 .ToolName = ToolName,
+                .CapabilityTags = "source_retrieval",
                 .ToolPriority = toolPriority,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Web Grounding / Deep Research" & If(displaySuffix, ""),

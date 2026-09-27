@@ -20,7 +20,8 @@
 '     - Detects the special offline-domain key format.
 '     - Verifies the Ed25519 signature using a hardcoded public key.
 '     - Verifies Product ID, expiry date, and whether at least one local network
-'       identifier matches one identifier embedded in the license.
+'       identifier matches an embedded identifier exactly or, for DNS-style
+'       domains, is a true child domain of that identifier.
 '     - Returns a synthetic `LicenseApiResponse` so the existing Pro-license
 '       pipeline can continue to work with minimal changes.
 '  - Generator UI:
@@ -280,7 +281,7 @@ Namespace SharedLibrary
 
                 For Each candidate In currentCandidates
                     For Each allowedDomain In allowedDomains
-                        If candidate.Equals(allowedDomain, StringComparison.OrdinalIgnoreCase) Then
+                        If IsOfflineDomainIdentifierMatch(candidate, allowedDomain) Then
                             matchedDomain = candidate
                             Exit For
                         End If
@@ -390,17 +391,46 @@ Namespace SharedLibrary
         End Sub
 
         Private Shared Function NormalizeOfflineDomainIdentifier(value As String) As String
-            If String.IsNullOrWhiteSpace(value) Then
+            If System.String.IsNullOrWhiteSpace(value) Then
                 Return ""
             End If
 
-            Dim normalized = value.Trim().Trim("."c).ToLowerInvariant()
+            Dim normalized As System.String = value.Trim().ToLowerInvariant()
 
-            If String.IsNullOrWhiteSpace(normalized) Then
+            ' Accept the common wildcard notation as input, but store and compare
+            ' the canonical DNS suffix.  The match boundary is enforced separately.
+            If normalized.StartsWith("*.", System.StringComparison.Ordinal) Then
+                normalized = normalized.Substring(2)
+            End If
+
+            normalized = normalized.Trim("."c)
+
+            If System.String.IsNullOrWhiteSpace(normalized) OrElse normalized.IndexOf("*"c) >= 0 Then
                 Return ""
             End If
 
             Return normalized
+        End Function
+
+        Private Shared Function IsOfflineDomainIdentifierMatch(candidate As System.String,
+                                                                 allowedDomain As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(candidate) OrElse System.String.IsNullOrWhiteSpace(allowedDomain) Then
+                Return False
+            End If
+
+            If candidate.Equals(allowedDomain, System.StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+
+            ' Single-label network identifiers (for example an AD/NetBIOS domain name)
+            ' remain exact matches for backwards compatibility. DNS-style identifiers
+            ' cover their own domain plus true child domains only. The leading dot in
+            ' the suffix check prevents values such as "notfirma.ch" matching "firma.ch".
+            If allowedDomain.IndexOf("."c) < 0 Then
+                Return False
+            End If
+
+            Return candidate.EndsWith("." & allowedDomain, System.StringComparison.OrdinalIgnoreCase)
         End Function
 
         Private Shared Function IsOfflineDomainLicensePublicKeyConfigured() As Boolean
@@ -551,7 +581,7 @@ Namespace SharedLibrary
                 mainLayout.SetColumnSpan(lblTitle, 2)
 
                 Dim lblDescription As New Label() With {
-                    .Text = "Creates a signed offline-domain license key. Enter one or more allowed network identifiers (one per line). A local machine is accepted when at least one identifier matches exactly.",
+                    .Text = "Creates a signed offline-domain license key. Enter one allowed domain or network ID per line. DNS domains such as firma.ch also cover all true subdomains (for example abteilung1.firma.ch). A leading *. is accepted and normalized to the same canonical domain. Single-label network IDs continue to match exactly.",
                     .AutoSize = True,
                     .MaximumSize = New Size(820, 0),
                     .Margin = New Padding(0, 0, 0, 15)
@@ -762,9 +792,12 @@ Namespace SharedLibrary
                 AddHandler btnGenerate.Click,
                     Sub()
                         Try
-                            txtLicenseKey.Text = GenerateOfflineDomainLicenseKey(
+                            Dim normalizedAllowedDomains As System.Collections.Generic.List(Of System.String) = ParseOfflineDomainList(txtDomains.Text)
+                            txtDomains.Text = System.String.Join(vbCrLf, normalizedAllowedDomains)
+
+                            txtLicenseKey.Text = GenerateOfflineDomainLicenseKeyInternal(
                                 txtProductId.Text.Trim(),
-                                txtDomains.Text,
+                                normalizedAllowedDomains,
                                 dtpValidUntil.Value.Date,
                                 txtPrivateKey.Text.Trim())
 

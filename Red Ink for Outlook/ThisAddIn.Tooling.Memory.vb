@@ -157,7 +157,7 @@ Partial Public Class ThisAddIn
         End If
 
         toolResponse.OriginalCallJson = toolCall.RawJson
-        context.AllToolResponses.Add(toolResponse)
+        AddToolResponseToHistory(context, toolResponse)
 
         SharedLibrary.Agents.ToolCallSequencing.NoteToolExecutionMetadata(
             context.SequencingState,
@@ -471,7 +471,11 @@ Partial Public Class ThisAddIn
                 cancellationToken,
                 True,
                 False)
-        Catch ex As Exception
+        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+            Throw
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception
             context.LogWarn("Memory grounding classifier failed; defaulting to none.",
                             details:=$"host={context.HostKind}; error={ex.Message}")
         End Try
