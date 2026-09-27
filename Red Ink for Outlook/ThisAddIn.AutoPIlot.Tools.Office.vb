@@ -1175,6 +1175,9 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
+    Private Const AutoPilotPowerPointProcessRichMaxItems As Integer = 5
+    Private Const AutoPilotPowerPointTimelineRichMaxItems As Integer = 6
+
     Private Shared Sub NormalizeAutoPilotPowerPointSlidePlan(slidesArray As JArray,
                                                               allowTextHeavy As Boolean,
                                                               allowVisualHeavy As Boolean,
@@ -1220,9 +1223,9 @@ Partial Public Class ThisAddIn
                 End If
             ElseIf layout = "process" AndAlso TryCast(slideObj("steps"), JArray) Is Nothing Then
                 Dim processLines As List(Of String) = SplitAutoPilotPowerPointBulletLines(slideObj.Value(Of String)("body"))
-                If processLines.Count >= 2 AndAlso processLines.Count <= 6 Then
+                If processLines.Count >= 2 AndAlso processLines.Count <= AutoPilotPowerPointProcessRichMaxItems Then
                     Dim steps As New JArray()
-                    For Each processLine As String In processLines.Take(5)
+                    For Each processLine As String In processLines
                         Dim stepTitle As String = processLine
                         Dim stepBody As String = processLine
                         Dim colon As Integer = processLine.IndexOf(":"c)
@@ -1241,6 +1244,36 @@ Partial Public Class ThisAddIn
                 Else
                     slideObj("layout") = "bullets"
                     layout = "bullets"
+                    If context IsNot Nothing AndAlso processLines.Count > AutoPilotPowerPointProcessRichMaxItems Then
+                        context.Log($"PowerPoint plan normalizer demoted oversized process slide '{If(slideObj.Value(Of String)("title"), "")}' to native bullets: items={processLines.Count}; richCapacity={AutoPilotPowerPointProcessRichMaxItems}. No content was discarded.", "diag")
+                    End If
+                End If
+            ElseIf layout = "process" Then
+                Dim processSteps As JArray = TryCast(slideObj("steps"), JArray)
+                If processSteps IsNot Nothing AndAlso processSteps.Count > AutoPilotPowerPointProcessRichMaxItems Then
+                    Dim fallbackBody As String = BuildPowerPointFallbackBody(slideObj)
+                    slideObj("layout") = "bullets"
+                    slideObj("body") = fallbackBody
+                    layout = "bullets"
+                    If context IsNot Nothing Then
+                        context.Log($"PowerPoint plan normalizer demoted oversized process slide '{If(slideObj.Value(Of String)("title"), "")}' to native bullets: items={processSteps.Count}; richCapacity={AutoPilotPowerPointProcessRichMaxItems}. No content was discarded.", "diag")
+                    End If
+                End If
+            ElseIf layout = "timeline" Then
+                Dim timelineEvents As JArray = TryCast(slideObj("events"), JArray)
+                If timelineEvents Is Nothing Then timelineEvents = TryCast(slideObj("timeline"), JArray)
+                If timelineEvents Is Nothing Then
+                    Dim timelineObject As JObject = TryCast(slideObj("timeline"), JObject)
+                    If timelineObject IsNot Nothing Then timelineEvents = TryCast(timelineObject("events"), JArray)
+                End If
+                If timelineEvents IsNot Nothing AndAlso timelineEvents.Count > AutoPilotPowerPointTimelineRichMaxItems Then
+                    Dim fallbackBody As String = BuildPowerPointFallbackBody(slideObj)
+                    slideObj("layout") = "bullets"
+                    slideObj("body") = fallbackBody
+                    layout = "bullets"
+                    If context IsNot Nothing Then
+                        context.Log($"PowerPoint plan normalizer demoted oversized timeline slide '{If(slideObj.Value(Of String)("title"), "")}' to native bullets: items={timelineEvents.Count}; richCapacity={AutoPilotPowerPointTimelineRichMaxItems}. No content was discarded.", "diag")
+                    End If
                 End If
             ElseIf richLayouts.Contains(layout) AndAlso Not HasAutoPilotPowerPointStructuredPayload(slideObj, layout) Then
                 slideObj("layout") = "bullets"
@@ -2302,7 +2335,7 @@ Partial Public Class ThisAddIn
                         End If
                         If steps Is Nothing OrElse steps.Count = 0 Then Continue For
 
-                        Dim count As Integer = Math.Min(GetPowerPointGuidanceSettingInteger(settings, "rich.process_max_items", 4), steps.Count)
+                        Dim count As Integer = steps.Count
                         Dim processRect As AutoPilotPowerPointVisualRect = FitPowerPointVisualRectHeight(canvas, GetPowerPointGuidanceSettingDouble(settings, "rich.process_height_pct", 80.0R))
                         Dim segmentW As Int64 = processRect.W \ count
                         Dim lineY As Int64 = processRect.Y + CLng(processRect.H * 0.24R)
@@ -5549,7 +5582,7 @@ Partial Public Class ThisAddIn
                                         secondary As Integer)
         If steps Is Nothing OrElse steps.Count = 0 Then Exit Sub
 
-        Dim count As Integer = Math.Min(5, steps.Count)
+        Dim count As Integer = steps.Count
         Dim left As Single = 48.0F
         Dim top As Single = 165.0F
         Dim gap As Single = 28.0F
@@ -5804,7 +5837,7 @@ Partial Public Class ThisAddIn
                                          accent As Integer,
                                          secondary As Integer)
         If events Is Nothing OrElse events.Count = 0 Then Exit Sub
-        Dim count As Integer = Math.Min(6, events.Count)
+        Dim count As Integer = events.Count
         Dim left As Single = 75.0F
         Dim right As Single = slideW - 75.0F
         ' Keep the timeline axis in a stable vertical band across arbitrary 16:9-style
@@ -8748,18 +8781,18 @@ Partial Public Class ThisAddIn
                 requestText &= vbLf & context.HostTaskSummary
             End If
         End If
-        Dim markdown As System.String = If(markdownContent, System.String.Empty)
-
+        ' Visual requirements are derived only from the actual user/task request. Source
+        ' document content is payload, not intent: a contract that merely mentions an
+        ' organigram, chart, diagram, timeline, etc. must never create a rendering
+        ' requirement by itself. This keeps conversion/transformation semantics separate
+        ' from authoring intent and prevents source text from becoming host instructions.
         Dim requiresOrgChart As Boolean =
             System.Text.RegularExpressions.Regex.IsMatch(requestText,
                 "\b(?:organigramm|org\s*chart|organi[sz]ation(?:al)?\s+chart|organi[sz]ational\s+chart)\b",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) OrElse
-            System.Text.RegularExpressions.Regex.IsMatch(markdown,
-                "(?im)^\s{0,3}(?:#{1,6}\s*)?.*\b(?:organigramm|org\s*chart|organi[sz]ation(?:al)?\s+chart|organi[sz]ational\s+chart)\b.*$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
 
         If requiresOrgChart AndAlso CountAutoPilotWordVisualsOfType(visuals, "org_chart", "hierarchy") = 0 Then
-            validationError = "The current request/document explicitly requires an organization chart, but create_word_document contains no editable org_chart/hierarchy visual. A table is not a substitute."
+            validationError = "The current request explicitly requires an organization chart, but create_word_document contains no editable org_chart/hierarchy visual. A table is not a substitute."
             Return False
         End If
 
@@ -8769,13 +8802,10 @@ Partial Public Class ThisAddIn
         Dim requiresQuantitativeChart As Boolean =
             System.Text.RegularExpressions.Regex.IsMatch(requestText,
                 chartIntentPattern,
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) OrElse
-            System.Text.RegularExpressions.Regex.IsMatch(markdown,
-                "(?im)^\s{0,3}(?:#{1,6}\s*)?.*(?:grafische\s+darstellung|visualisierung|visualization|umsatzdiagramm|revenue\s+chart|sales\s+chart|financial\s+chart).*$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
 
         If requiresQuantitativeChart AndAlso CountAutoPilotWordVisualsOfType(visuals, "bar_chart", "column_chart", "line_chart", "area_chart", "pie_chart", "doughnut_chart") = 0 Then
-            validationError = "The current request/document explicitly requires a quantitative chart, but create_word_document contains no editable native chart visual. Character bars and chart-like tables are not substitutes."
+            validationError = "The current request explicitly requires a quantitative chart, but create_word_document contains no editable native chart visual. Character bars and chart-like tables are not substitutes."
             Return False
         End If
 
@@ -11568,12 +11598,41 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            Dim markdownContent = GetArgString(toolCall.Arguments, "markdown_content")
-            If String.IsNullOrWhiteSpace(markdownContent) Then
+            ct.ThrowIfCancellationRequested()
+            Dim markdownContent As System.String = GetArgString(toolCall.Arguments, "markdown_content")
+            Dim markdownPath As System.String = GetArgString(toolCall.Arguments, "markdown_path")
+            Dim expectedSourceHash As System.String = GetArgString(toolCall.Arguments, "expected_source_sha256")
+            Dim sourceSnapshot As SharedLibrary.Agents.TextFileSnapshot = Nothing
+            If Not System.String.IsNullOrWhiteSpace(markdownPath) Then
+                If Not System.String.IsNullOrWhiteSpace(markdownContent) Then
+                    response.Success = False
+                    response.ErrorMessage = "ambiguous_content_source: Provide exactly one of markdown_content or markdown_path."
+                    response.Response = response.ErrorMessage
+                    Return response
+                End If
+                ' Read under the same path policy as other text tools. Do not inject the
+                ' large body into toolCall.Arguments, tool logs, retry state or tool results.
+                sourceSnapshot = SharedLibrary.Agents.TextFileSnapshot.Read(
+                    markdownPath, strictDecoding:=True, expectedSha256:=expectedSourceHash)
+                markdownContent = sourceSnapshot.Content
+                If context IsNot Nothing Then
+                    context.Log("Word file input: chars=" & markdownContent.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; bytes=" & sourceSnapshot.SizeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; source_sha256=" & sourceSnapshot.Sha256 & "; content_format=markdown")
+                End If
+            ElseIf Not System.String.IsNullOrWhiteSpace(expectedSourceHash) Then
                 response.Success = False
-                response.Response = "Missing required parameter: markdown_content"
+                response.ErrorMessage = "source_hash_requires_file: expected_source_sha256 requires markdown_path."
+                response.Response = response.ErrorMessage
                 Return response
             End If
+            If System.String.IsNullOrWhiteSpace(markdownContent) Then
+                response.Success = False
+                response.Response = "Missing document content: provide non-empty markdown_content or markdown_path."
+                response.ErrorMessage = response.Response
+                Return response
+            End If
+            ct.ThrowIfCancellationRequested()
 
             Dim design As AutoPilotDesignResolution = ResolveAutoPilotDocumentDesign(
                 toolCall.Arguments,
@@ -12028,6 +12087,20 @@ Partial Public Class ThisAddIn
                                             " field(s) in one final Word pass."
                 End If
                 response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{templateBindingSummary}{footnoteSummary}{visualSummary}{crossReferenceSummary}"
+                If sourceSnapshot IsNot Nothing Then
+                    ' Additive compact metadata; legacy inline responses remain unchanged.
+                    response.Response &= System.Environment.NewLine & Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+                        Key .content_source = "markdown_path",
+                        Key .source_path = sourceSnapshot.SourcePath,
+                        Key .source_sha256 = sourceSnapshot.Sha256,
+                        Key .source_char_count = sourceSnapshot.Content.Length,
+                        Key .source_byte_count = sourceSnapshot.SizeBytes,
+                        Key .source_fully_read = True,
+                        Key .source_truncated = False,
+                        Key .output_path = outputPath,
+                        Key .rendered_content_completeness_verified = False
+                    })
+                End If
                 ApDashboardLog($"✓ Word document created: {fileName}", "info")
             Else
                 response.Success = False
@@ -12035,7 +12108,11 @@ Partial Public Class ThisAddIn
                 response.Response = response.ErrorMessage
             End If
 
-        Catch ex As OperationCanceledException
+        Catch ex As SharedLibrary.Agents.TextFileInputException
+            response.Success = False
+            response.ErrorMessage = ex.ErrorCode & ": " & ex.Message
+            response.Response = response.ErrorMessage
+        Catch ex As System.OperationCanceledException
             response.Success = False
             response.ErrorMessage = "Operation was cancelled."
             response.Response = response.ErrorMessage
@@ -13337,138 +13414,331 @@ Partial Public Class ThisAddIn
             Dim defaultOutput = Path.GetFileNameWithoutExtension(att.OriginalFileName) & ".docx"
             Dim outputName = If(GetArgString(toolCall.Arguments, "output_filename"), defaultOutput)
             Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim conversionMode As System.String = NormalizePdfWordConversionMode(GetArgString(toolCall.Arguments, "conversion_mode"))
+            Dim requestedLayoutAdapterId As System.String = If(GetArgString(toolCall.Arguments, "layout_adapter_id"), System.String.Empty)
 
-            context.Log($"Converting PDF to Word: {fileName}")
-            ApDashboardLog($"📄 Converting PDF to Word: {fileName}", "step")
-
-            ' Use a timeout to prevent indefinite UI thread blocking
-            Dim uiTask = SwitchToUi(Function()
-                                        Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
-                                        Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
-                                        Dim weCreated As Boolean = False
-                                        Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel =
-                                            Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
-                                        Dim prevAutoSec As Microsoft.Office.Core.MsoAutomationSecurity =
-                                            Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityByUI
-                                        Dim prevFileConverters As Object = Nothing
-                                        Dim prevScreenUpdating As Boolean = True
-                                        Try
-                                            Try
-                                                wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
-                                            Catch
-                                                wordApp = New Microsoft.Office.Interop.Word.Application()
-                                                wordApp.Visible = False
-                                                weCreated = True
-                                            End Try
-
-                                            ' Capture current state BEFORE modifying
-                                            prevAlerts = wordApp.DisplayAlerts
-                                            prevAutoSec = wordApp.AutomationSecurity
-                                            Try : prevScreenUpdating = wordApp.ScreenUpdating : Catch : End Try
-
-                                            ' Suppress all alerts and macro execution
-                                            wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
-                                            wordApp.ScreenUpdating = False
-                                            wordApp.AutomationSecurity = Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityForceDisable
-
-                                            ' Disable third-party file format converters to prevent modal dialogs
-                                            ' from Adobe Acrobat, Foxit, Nuance, etc.
-                                            Try
-                                                prevFileConverters = wordApp.Options.ConfirmConversions
-                                                wordApp.Options.ConfirmConversions = False
-                                            Catch
-                                            End Try
-
-                                            ' Word can open PDFs and convert them to editable .docx
-                                            ' Using Format:=wdOpenFormatAuto (0) lets Word use its BUILT-IN
-                                            ' PDF reflow engine rather than deferring to a third-party converter.
-                                            doc = wordApp.Documents.Open(
-                                                FileName:=att.TempFilePath,
-                                                [ReadOnly]:=False,
-                                                Visible:=False,
-                                                AddToRecentFiles:=False,
-                                                ConfirmConversions:=False,
-                                                OpenAndRepair:=False,
-                                                Format:=0) ' wdOpenFormatAuto = 0
-
-                                            doc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
-                                            Return True
-                                        Catch ex As System.Exception
-                                            Debug.WriteLine($"PdfToWord error: {ex.Message}")
-                                            Return False
-                                        Finally
-                                            ' Close the document and release its COM reference
-                                            Try
-                                                If doc IsNot Nothing Then
-                                                    Try : doc.Close(False) : Catch : End Try
-                                                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
-                                                    doc = Nothing
-                                                End If
-                                            Catch : End Try
-                                            ' Restore Word application state
-                                            Try
-                                                If wordApp IsNot Nothing Then
-                                                    wordApp.DisplayAlerts = prevAlerts
-                                                    wordApp.ScreenUpdating = prevScreenUpdating
-                                                    wordApp.AutomationSecurity = prevAutoSec
-                                                    Try
-                                                        If prevFileConverters IsNot Nothing Then
-                                                            wordApp.Options.ConfirmConversions = CBool(prevFileConverters)
-                                                        End If
-                                                    Catch
-                                                    End Try
-                                                End If
-                                            Catch : End Try
-                                            ' Quit only if we created this instance, then release COM reference
-                                            If weCreated AndAlso wordApp IsNot Nothing Then
-                                                Try : wordApp.Quit(False) : Catch : End Try
-                                            End If
-                                            If wordApp IsNot Nothing Then
-                                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
-                                                wordApp = Nothing
-                                            End If
-                                        End Try
-                                    End Function)
-
-            ' Apply a 120-second timeout to prevent indefinite UI thread blocking
-            Dim timeoutTask = System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(120), ct)
-            Dim completedTask = Await System.Threading.Tasks.Task.WhenAny(uiTask, timeoutTask)
-
-            Dim success As Boolean = False
-            If completedTask Is uiTask Then
-                success = Await uiTask
-            Else
-                ' Timeout or cancellation
+            If conversionMode = "layout_ocr" Then
                 response.Success = False
-                response.Response = $"PDF to Word conversion timed out for '{fileName}'. The PDF may be too large, corrupted, or a third-party converter dialog may be blocking. Check if any dialog is open in Word."
-                ApDashboardLog($"⚠ PdfToWord timed out: {fileName}", "warn")
+                response.ErrorCode = "word_direct_layout_ocr_not_supported"
+                response.ErrorMessage = "pdf_to_word does not execute OCR/layout adapters internally."
+                response.AllowCrossScopeAlternativeRecovery = True
+                response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
+                response.Response = BuildPdfWordConversionResponse(
+                    fileName,
+                    outputName,
+                    conversionMode,
+                    "none",
+                    True,
+                    response.ErrorCode,
+                    response.ErrorMessage & " Use the explicit OCR/text reconstruction workflow as the controlled fallback.")
                 Return response
             End If
 
-            If success AndAlso File.Exists(outputPath) Then
-                att.OutputFiles.Add(outputPath)
-                response.Success = True
-                response.Response = $"Converted '{fileName}' to Word: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). " &
-                    "This file can now be used with compare_word_documents. " &
-                    "Note: Word does NOT perform OCR — if the PDF is a scanned image, the resulting .docx will contain images without extracted text."
-                ApDashboardLog($"✓ Converted to Word: {outputName}", "info")
-            Else
-                response.Success = False
-                response.Response = $"Failed to convert '{fileName}' to Word. The PDF may be image-only, corrupted, or a third-party PDF converter add-in may have interfered. " &
-                    "Ensure no PDF add-ins (Adobe Acrobat, Foxit, etc.) are registered as Word file converters."
+            If Not System.String.IsNullOrWhiteSpace(requestedLayoutAdapterId) Then
+                context.Log("pdf_to_word ignored legacy layout_adapter_id because conversion is delegated to Word's configured PDF-open pipeline.")
             End If
 
-        Catch ex As OperationCanceledException
+            Try
+                If System.IO.File.Exists(outputPath) Then System.IO.File.Delete(outputPath)
+            Catch ex As System.Exception
+                response.Success = False
+                response.ErrorCode = "pdf_to_word_output_prepare_failed"
+                response.ErrorMessage = ex.Message
+                response.Response = $"Cannot prepare PDF-to-Word output '{outputName}': {ex.Message}"
+                Return response
+            End Try
+
+            context.Log($"Converting PDF to Word through Microsoft Word using the user's configured Word conversion environment: {fileName}")
+            ApDashboardLog($"📄 Converting PDF to Word through the configured Microsoft Word environment: {fileName}", "step")
+
+            Dim wordAutomationErrorCode As System.String = System.String.Empty
+            Dim wordAutomationError As System.String = System.String.Empty
+
+            ' Primary path: create a dedicated Microsoft Word automation instance without using
+            ' diagnostic command-line modes, then let Word open and save the PDF using its normal
+            ' configured conversion environment. Connected COM/VSTO add-ins and Word's FileConverters
+            ' inventory are neither modified nor screened. If the user's Word configuration routes PDF
+            ' opening through an installed converter, that converter is intentionally allowed to run.
+            Dim uiTask = SwitchToUi(Function()
+                                        Return TryConvertPdfWithWordAutomation(
+                                            att.TempFilePath,
+                                            outputPath,
+                                            wordAutomationErrorCode,
+                                            wordAutomationError)
+                                    End Function)
+
+            Dim timeoutTask = System.Threading.Tasks.Task.Delay(System.TimeSpan.FromSeconds(120), ct)
+            Dim completedTask = Await System.Threading.Tasks.Task.WhenAny(uiTask, timeoutTask)
+
+            Dim success As System.Boolean = False
+            If completedTask Is uiTask Then
+                success = Await uiTask
+            Else
+                response.Success = False
+                response.ErrorCode = "word_automation_conversion_timeout"
+                response.ErrorMessage = "Microsoft Word did not complete the PDF conversion within 120 seconds."
+                response.AllowCrossScopeAlternativeRecovery = True
+                response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
+                response.Response = BuildPdfWordConversionResponse(
+                    fileName,
+                    outputName,
+                    conversionMode,
+                    "none",
+                    True,
+                    response.ErrorCode,
+                    response.ErrorMessage & " Red Ink did not invoke a Windows file association or external PDF application directly; a controlled reconstruction fallback may be used by the workflow.")
+                ApDashboardLog($"⚠ PdfToWord Word conversion timed out: {fileName}", "warn")
+                Return response
+            End If
+
+            If Not success Then
+                response.Success = False
+                response.ErrorCode = If(System.String.IsNullOrWhiteSpace(wordAutomationErrorCode), "word_automation_conversion_failed", wordAutomationErrorCode)
+                Dim conversionFailureDetail As System.String = If(wordAutomationError, System.String.Empty).Trim()
+                If conversionFailureDetail.Length = 0 Then conversionFailureDetail = "Microsoft Word did not produce the requested DOCX through its configured conversion environment."
+                response.ErrorMessage = conversionFailureDetail
+                response.AllowCrossScopeAlternativeRecovery = True
+                response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
+                response.Response = BuildPdfWordConversionResponse(
+                    fileName,
+                    outputName,
+                    conversionMode,
+                    "none",
+                    True,
+                    response.ErrorCode,
+                    conversionFailureDetail & " The workflow may continue with an explicit reconstruction fallback.")
+                Return response
+            End If
+
+            If Not System.IO.File.Exists(outputPath) Then
+                response.Success = False
+                response.ErrorCode = "word_automation_output_missing"
+                response.ErrorMessage = "Microsoft Word reported completion but the DOCX output is missing."
+                response.AllowCrossScopeAlternativeRecovery = True
+                response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
+                response.Response = BuildPdfWordConversionResponse(
+                    fileName,
+                    outputName,
+                    conversionMode,
+                    "none",
+                    True,
+                    response.ErrorCode,
+                    response.ErrorMessage & " A controlled reconstruction fallback may be used by the workflow.")
+                Return response
+            End If
+
+            Dim extractedTextCharacters As System.Int32 = GetDocxTextCharacterCount(outputPath)
+            Dim nativeImageOnly As System.Boolean = extractedTextCharacters < 20
+
+            If nativeImageOnly AndAlso conversionMode = "layout_required" Then
+                Try
+                    System.IO.File.Delete(outputPath)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Could not remove image-only PDF-to-Word output: " & ex.Message)
+                End Try
+                response.Success = False
+                response.ErrorCode = "word_automation_layout_requirement_not_met"
+                response.ErrorMessage = "Microsoft Word produced an image-only or effectively non-editable DOCX."
+                response.AllowCrossScopeAlternativeRecovery = True
+                response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
+                response.Response = BuildPdfWordConversionResponse(
+                    fileName,
+                    outputName,
+                    conversionMode,
+                    "degraded_image_only",
+                    True,
+                    response.ErrorCode,
+                    response.ErrorMessage & " layout_required therefore did not accept that output; a controlled reconstruction fallback may be used by the workflow.")
+                Return response
+            End If
+
+            att.OutputFiles.Add(outputPath)
+            response.Success = True
+            If nativeImageOnly Then
+                response.Response = BuildPdfWordConversionResponse(
+                    fileName,
+                    outputName,
+                    conversionMode,
+                    "degraded_image_only",
+                    True,
+                    System.String.Empty,
+                    "Microsoft Word produced the DOCX through its configured conversion environment, but it contains little or no extracted text and may be image-only.")
+            Else
+                response.Response = BuildPdfWordConversionResponse(
+                    fileName,
+                    outputName,
+                    conversionMode,
+                    "word_reflow",
+                    False,
+                    System.String.Empty,
+                    "The PDF was opened and saved through Word.Documents.Open and Document.SaveAs2. Word was allowed to use the user's configured COM/VSTO add-ins and PDF converters; converter provenance was not restricted or inferred. This DOCX is now the authoritative baseline for source-preserving edits. For broad semantic revisions with tracked changes, use process_word_document on this DOCX and its compare output. OCR may assist analysis but must not silently replace this baseline.")
+            End If
+            ApDashboardLog($"✓ Converted to Word through the configured Microsoft Word environment: {outputName}", "info")
+
+        Catch ex As System.OperationCanceledException
             response.Success = False
+            response.ErrorCode = "word_automation_conversion_cancelled"
             response.ErrorMessage = "Operation was cancelled."
+            response.AllowCrossScopeAlternativeRecovery = True
+            response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
             response.Response = response.ErrorMessage
         Catch ex As System.Exception
             response.Success = False
+            response.ErrorCode = "word_automation_conversion_exception"
             response.ErrorMessage = ex.Message
-            response.Response = $"Error converting PDF to Word: {ex.Message}"
+            response.AllowCrossScopeAlternativeRecovery = True
+            response.AlternativeRecoveryRequiredArtifactExtension = ".docx"
+            response.Response = $"Error converting PDF to Word through the configured Microsoft Word environment: {ex.Message}"
         End Try
 
         Return response
+    End Function
+
+    Private Shared Function TryConvertPdfWithWordAutomation(
+            inputPath As System.String,
+            outputPath As System.String,
+            ByRef errorCode As System.String,
+            ByRef errorMessage As System.String) As System.Boolean
+
+        errorCode = System.String.Empty
+        errorMessage = System.String.Empty
+
+        Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
+        Dim convertedDoc As Microsoft.Office.Interop.Word.Document = Nothing
+
+        Try
+            Dim wordType As System.Type = System.Type.GetTypeFromProgID("Word.Application", True)
+            wordApp = DirectCast(System.Activator.CreateInstance(wordType), Microsoft.Office.Interop.Word.Application)
+            If wordApp Is Nothing Then
+                errorCode = "word_automation_instance_missing"
+                errorMessage = "Microsoft Word automation could not create an Application instance."
+                Return False
+            End If
+
+            wordApp.Visible = False
+            wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+            wordApp.ScreenUpdating = False
+            wordApp.AutomationSecurity = Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityForceDisable
+
+            Try
+                wordApp.Options.ConfirmConversions = False
+            Catch ex As System.Exception
+                errorCode = "word_confirm_conversions_setting_failed"
+                errorMessage = "Could not disable Word conversion confirmation: " & ex.Message
+                Return False
+            End Try
+
+            convertedDoc = wordApp.Documents.Open(
+                FileName:=inputPath,
+                [ReadOnly]:=False,
+                Visible:=False,
+                AddToRecentFiles:=False,
+                ConfirmConversions:=False,
+                OpenAndRepair:=False,
+                Format:=Microsoft.Office.Interop.Word.WdOpenFormat.wdOpenFormatAuto)
+
+            convertedDoc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+            Return System.IO.File.Exists(outputPath)
+
+        Catch ex As System.Exception
+            If System.String.IsNullOrWhiteSpace(errorCode) Then errorCode = "word_automation_conversion_failed"
+            errorMessage = ex.Message
+            System.Diagnostics.Debug.WriteLine("PdfToWord Word automation error: " & ex.Message)
+            Return False
+        Finally
+            If convertedDoc IsNot Nothing Then
+                Try
+                    convertedDoc.Close(False)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("PdfToWord document close failed: " & ex.Message)
+                End Try
+                Try
+                    System.Runtime.InteropServices.Marshal.FinalReleaseComObject(convertedDoc)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("PdfToWord document release failed: " & ex.Message)
+                End Try
+                convertedDoc = Nothing
+            End If
+
+            If wordApp IsNot Nothing Then
+                Try
+                    wordApp.Quit(False)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("PdfToWord Word quit failed: " & ex.Message)
+                End Try
+                Try
+                    System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("PdfToWord Word release failed: " & ex.Message)
+                End Try
+                wordApp = Nothing
+            End If
+        End Try
+    End Function
+
+    Private Shared Function NormalizePdfWordConversionMode(value As System.String) As System.String
+        Dim normalized As System.String = If(value, System.String.Empty).Trim().ToLowerInvariant()
+        Select Case normalized
+            Case System.String.Empty, "auto"
+                Return "auto"
+            Case "native"
+                Return "native"
+            Case "layout_preferred"
+                Return "layout_preferred"
+            Case "layout_required"
+                Return "layout_required"
+            Case "layout_ocr"
+                Return "layout_ocr"
+            Case Else
+                Return "auto"
+        End Select
+    End Function
+
+    Private Shared Function GetDocxTextCharacterCount(path As System.String) As System.Int32
+        Try
+            Dim text As System.String = SharedMethods.DocxTextExtractor.ReadDocxSandboxed(path)
+            If text Is Nothing Then Return 0
+            Return text.Trim().Length
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("PDF-to-Word text quality check failed: " & ex.Message)
+            Return 0
+        End Try
+    End Function
+
+    Private Shared Function BuildPdfWordConversionResponse(sourceName As System.String,
+                                                            outputName As System.String,
+                                                            requestedMode As System.String,
+                                                            quality As System.String,
+                                                            qualityDegraded As System.Boolean,
+                                                            errorCode As System.String,
+                                                            message As System.String) As System.String
+        Dim wordOpenSaveAsVerified As System.Boolean = System.String.Equals(quality, "word_reflow", System.StringComparison.Ordinal) OrElse
+                                                         System.String.Equals(quality, "degraded_image_only", System.StringComparison.Ordinal)
+
+        Dim usableConvertedBaseline As System.Boolean =
+            wordOpenSaveAsVerified AndAlso
+            System.String.Equals(quality, "word_reflow", System.StringComparison.Ordinal)
+
+        Return Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+            .source = sourceName,
+            .output = outputName,
+            .requested_mode = requestedMode,
+            .quality = quality,
+            .quality_degraded = qualityDegraded,
+            .native_path_verified = False,
+            .word_open_saveas_verified = wordOpenSaveAsVerified,
+            .converter_provenance = "word_configured_environment",
+            .converter_policy = "respect_word_configuration",
+            .converted_docx_is_authoritative_baseline = usableConvertedBaseline,
+            .recommended_semantic_revision_tool = If(usableConvertedBaseline, "process_word_document", System.String.Empty),
+            .recommended_exact_anchor_revision_tool = If(usableConvertedBaseline, "word_markup", System.String.Empty),
+            .ocr_role_after_successful_conversion = If(usableConvertedBaseline, "analysis_only", System.String.Empty),
+            .reconstruction_fallback_allowed = Not usableConvertedBaseline,
+            .layout_adapter_id = System.String.Empty,
+            .selected_adapter_id = System.String.Empty,
+            .error_code = If(errorCode, System.String.Empty),
+            .message = If(message, System.String.Empty)
+        })
     End Function
 
 

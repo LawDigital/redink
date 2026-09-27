@@ -86,6 +86,10 @@ Partial Public Class ThisAddIn
             Catch
                 Return raw.Trim().Trim(""""c)
             End Try
+        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+            Throw
+        Catch ex As System.OperationCanceledException
+            Throw
         Catch
             Return ""
         End Try
@@ -134,6 +138,11 @@ Partial Public Class ThisAddIn
                 ToolExecution:=False,
                 cancellationToken:=cancellationToken,
                 EnsureUI:=True)
+        Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
+            sw.Stop()
+            ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight transport retry exhausted: elapsedMs={sw.ElapsedMilliseconds}; status={ex.StatusCode}; attempts={ex.AttemptCount}/{ex.MaxAttempts}; profile={ex.RetryProfile}.")
+            context.LogWarn("Bootstrap preflight stopped after transient LLM transport retry exhaustion.", details:=$"host={context.HostKind}; status={ex.StatusCode}; attempts={ex.AttemptCount}/{ex.MaxAttempts}; profile={ex.RetryProfile}")
+            Throw
         Catch ex As System.TimeoutException
             sw.Stop()
             ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight timed out: elapsedMs={sw.ElapsedMilliseconds}.")
@@ -153,6 +162,8 @@ Partial Public Class ThisAddIn
 
         sw.Stop()
         ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight LLM completed: elapsedMs={sw.ElapsedMilliseconds}; responseChars={If(raw, "").Length}.")
+        ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
+            "bootstrap_routing", context.HostKind, sw.ElapsedMilliseconds, "success"))
         context.Log($"Bootstrap preflight model step completed in {sw.ElapsedMilliseconds} ms.")
 
         Dim decision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision =

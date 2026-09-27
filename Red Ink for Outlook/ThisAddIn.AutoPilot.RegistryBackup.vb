@@ -184,6 +184,42 @@ Partial Public Class ThisAddIn
 
 #Region "Registry Low-Level Helpers"
 
+    Private Const RegistrySourcesFooterModeValueName As String = "SourcesFooterMode"
+
+    Private Shared Sub SaveAutoPilotSourcesFooterMode(mode As String)
+        Try
+            Dim normalized As String = If(mode, "external").Trim().ToLowerInvariant()
+            If normalized <> "off" Then normalized = "external"
+
+            Dim fullPath As String = RegistryAutoPilotFullPath
+            Dim hiveName As String = fullPath.Split("\"c)(0)
+            Dim subKeyPath As String = fullPath.Substring(hiveName.Length + 1)
+            Using subKey As RegistryKey = Registry.CurrentUser.CreateSubKey(subKeyPath, True)
+                If subKey IsNot Nothing Then
+                    subKey.SetValue(RegistrySourcesFooterModeValueName, normalized, RegistryValueKind.String)
+                End If
+            End Using
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to save SourcesFooterMode: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Shared Function LoadAutoPilotSourcesFooterMode() As String
+        Try
+            Dim fullPath As String = RegistryAutoPilotFullPath
+            Dim hiveName As String = fullPath.Split("\"c)(0)
+            Dim subKeyPath As String = fullPath.Substring(hiveName.Length + 1)
+            Using subKey As RegistryKey = Registry.CurrentUser.OpenSubKey(subKeyPath)
+                If subKey Is Nothing Then Return "external"
+                Dim raw As String = If(subKey.GetValue(RegistrySourcesFooterModeValueName, "external")?.ToString(), "external").Trim()
+                If String.Equals(raw, "off", StringComparison.OrdinalIgnoreCase) Then Return "off"
+            End Using
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to load SourcesFooterMode: {ex.Message}")
+        End Try
+        Return "external"
+    End Function
+
     ''' <summary>
     ''' Writes a string to the registry AutoPilot backup location (default value).
     ''' Uses direct registry access to avoid UI side effects.

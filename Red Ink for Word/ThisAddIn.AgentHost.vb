@@ -183,6 +183,13 @@ Partial Public Class ThisAddIn
                 _activeToolingContext.SubAgentInvocationCount += 1
                 invocationIndex = _activeToolingContext.SubAgentInvocationCount
 
+                If request.RunnerRetryIndex > 0 Then
+                    _activeToolingContext.SubAgentInternalRetryCount += 1
+                    ToolingFileLogger.LogWarn(
+                        $"[subagent-host] agent_empty_result: re-invoking {request.AgentName} (attempt {request.RunnerRetryIndex + 1}); subagent_task_id={subAgentTaskId}.",
+                        details:=$"discardedRawChars={request.PreviousDiscardedResponseLength}; discardedExcerpt={If(request.PreviousDiscardedResponseExcerpt, "")}")
+                End If
+
                 Dim existingAgentInvocationCount As Integer = 0
 
                 If _activeToolingContext.SubAgentInvocationCountsByAgent.TryGetValue(request.AgentName, existingAgentInvocationCount) Then

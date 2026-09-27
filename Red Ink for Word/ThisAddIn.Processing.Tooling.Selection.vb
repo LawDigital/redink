@@ -68,9 +68,7 @@ Partial Public Class ThisAddIn
         ' Register host-internal tool names in the executor registry (idempotent).
         Agents.HostToolRegistration.RegisterWordInternals()
 
-        iniPath = ExpandEnvironmentVariables(iniPath)
-
-        If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then
+        If String.IsNullOrWhiteSpace(iniPath) OrElse Not ConfigurationResourceLoader.CanResolve(iniPath) Then
             Return tools
         End If
 

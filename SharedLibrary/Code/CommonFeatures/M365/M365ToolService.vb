@@ -83,6 +83,27 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Returns True only for the current read/search M365 tools. Keep this
+        ''' explicit instead of treating every future m365_* action as evidence:
+        ''' later mutation/send tools must not become user-facing sources merely
+        ''' because they share the namespace prefix.
+        ''' </summary>
+        Public Function IsSourceRetrievalToolName(toolName As String) As Boolean
+            Dim name As String = If(toolName, "").Trim().ToLowerInvariant()
+            Select Case name
+                Case SearchToolName,
+                     GetMailToolName,
+                     GetMailThreadToolName,
+                     GetFileToolName,
+                     GetEventToolName,
+                     GetChatThreadToolName,
+                     GetOneNotePageToolName
+                    Return True
+            End Select
+            Return False
+        End Function
+
+        ''' <summary>
         ''' Returns the M365 tools as ready-to-register <see cref="ModelConfig"/> items.
         ''' Returns an empty list when <paramref name="context"/>.INI_M365ClientId is empty.
         ''' </summary>
@@ -205,6 +226,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = SearchToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_search: Cross-source search of the signed-in user's Microsoft 365 content. " &
@@ -269,6 +291,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetMailToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_event: Returns calendar event details. Provide event_id. " &
@@ -319,6 +342,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetMailThreadToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_mail_thread: Returns every message in a mail conversation as one transcript. " &
@@ -367,6 +391,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
                 .ToolName = GetFileToolName,
+        .CapabilityTags = "source_retrieval",
                 .ToolDefinition = def.ToString(Formatting.None),
                 .ToolInstructionsPrompt =
                     "m365_get_file: Returns plain text for a OneDrive/SharePoint file. " &
@@ -400,6 +425,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetEventToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_event: Returns calendar event details. Provide event_id. " &
@@ -445,6 +471,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetChatThreadToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_chat_thread: Returns a Teams conversation as a transcript. Provide either chat_id " &
@@ -477,6 +504,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
                 .ToolName = GetOneNotePageToolName,
+        .CapabilityTags = "source_retrieval",
                 .ToolDefinition = def.ToString(Formatting.None),
                 .ToolInstructionsPrompt = "m365_get_onenote_page: Returns OneNote page text. Provide page_id.",
                 .ModelDescription = "M365: Read OneNote page" & suffix,

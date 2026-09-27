@@ -46,7 +46,177 @@ Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
 
+    ''' <summary>
+    ''' Represents an LLM transport failure that remained transient (for example
+    ''' HTTP 429/503) but could not be recovered within the bounded transport
+    ''' retry budget. Tooling hosts use this type to stop cleanly without
+    ''' consuming model-turn repair budgets or entering forced-finalization loops.
+    ''' </summary>
+    Public NotInheritable Class LlmTransientTransportException
+        Inherits System.Exception
+
+        Public ReadOnly Property StatusCode As Integer
+        Public ReadOnly Property AttemptCount As Integer
+        Public ReadOnly Property MaxAttempts As Integer
+        Public ReadOnly Property RetryProfile As LlmTransportRetryProfile
+
+        Public Sub New(statusCode As Integer,
+                       attemptCount As Integer,
+                       maxAttempts As Integer,
+                       retryProfile As LlmTransportRetryProfile,
+                       message As String)
+            MyBase.New(message)
+            Me.StatusCode = statusCode
+            Me.AttemptCount = attemptCount
+            Me.MaxAttempts = maxAttempts
+            Me.RetryProfile = retryProfile
+        End Sub
+    End Class
+
     Partial Public Class SharedMethods
+
+        Private Shared Function IsTransientTransportStatusCode(statusCode As Integer) As Boolean
+            Select Case statusCode
+                Case 408, 425, 429, 502, 503, 504
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function ClampTransientRetryDelayMilliseconds(requestedMilliseconds As Long,
+                                                                     cumulativeDelayMilliseconds As Integer,
+                                                                     retryPolicy As LlmTransportRetryPolicy,
+                                                                     isServerDirectedDelay As Boolean) As Integer
+            If retryPolicy Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(retryPolicy))
+            End If
+
+            Dim remainingBudget As Integer =
+                System.Math.Max(0, retryPolicy.MaxCumulativeDelayMilliseconds - cumulativeDelayMilliseconds)
+
+            If retryPolicy.Profile = LlmTransportRetryProfile.Unattended Then
+                remainingBudget = System.Math.Min(
+                    remainingBudget,
+                    LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                        retryPolicy.MaxTransientFailureWallClockMilliseconds))
+            End If
+
+            If remainingBudget <= 0 Then Return 0
+
+            Dim bounded As Long = System.Math.Max(0L, requestedMilliseconds)
+            Dim perDelayLimit As Integer =
+                If(isServerDirectedDelay,
+                   retryPolicy.MaxRetryAfterDelayMilliseconds,
+                   retryPolicy.MaxFallbackDelayMilliseconds)
+            bounded = System.Math.Min(bounded, CLng(perDelayLimit))
+            bounded = System.Math.Min(bounded, CLng(remainingBudget))
+            Return CInt(bounded)
+        End Function
+
+        Private Shared Function GetBoundedTransientRetryDelayMilliseconds(retryAfterMilliseconds As Integer,
+                                                                          retryIndex As Integer,
+                                                                          cumulativeDelayMilliseconds As Integer,
+                                                                          retryPolicy As LlmTransportRetryPolicy) As Integer
+            If retryPolicy Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(retryPolicy))
+            End If
+
+            Dim hasRetryAfter As Boolean = retryAfterMilliseconds > 0
+            Dim requested As Long = retryAfterMilliseconds
+            If Not hasRetryAfter Then
+                requested = retryPolicy.GetFallbackDelayMilliseconds(retryIndex)
+            End If
+
+            Return ClampTransientRetryDelayMilliseconds(
+                requested,
+                cumulativeDelayMilliseconds,
+                retryPolicy,
+                isServerDirectedDelay:=hasRetryAfter)
+        End Function
+
+        Private Shared Function ClampRawRetryAfterMilliseconds(requestedMilliseconds As Long) As Integer
+            If requestedMilliseconds <= 0L Then Return 0
+            If requestedMilliseconds >= System.Int32.MaxValue Then Return System.Int32.MaxValue
+            Return CInt(requestedMilliseconds)
+        End Function
+
+        Private Shared Function GetRetryAfterMilliseconds(headers As System.Net.Http.Headers.HttpResponseHeaders) As Integer
+            If headers Is Nothing OrElse headers.RetryAfter Is Nothing Then Return 0
+
+            Try
+                If headers.RetryAfter.Delta.HasValue Then
+                    Return ClampRawRetryAfterMilliseconds(
+                        CLng(System.Math.Ceiling(headers.RetryAfter.Delta.Value.TotalMilliseconds)))
+                End If
+
+                If headers.RetryAfter.Date.HasValue Then
+                    Dim delta As System.TimeSpan = headers.RetryAfter.Date.Value - System.DateTimeOffset.UtcNow
+                    Return ClampRawRetryAfterMilliseconds(
+                        CLng(System.Math.Ceiling(System.Math.Max(0.0R, delta.TotalMilliseconds))))
+                End If
+            Catch
+            End Try
+
+            Return 0
+        End Function
+
+        Private Shared Function ParseRetryAfterMilliseconds(value As String) As Integer
+            Dim raw As String = If(value, "").Trim()
+            If raw = "" Then Return 0
+
+            Dim seconds As Integer
+            If System.Int32.TryParse(raw, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, seconds) Then
+                Return ClampRawRetryAfterMilliseconds(CLng(System.Math.Max(0, seconds)) * 1000L)
+            End If
+
+            Dim retryDate As System.DateTimeOffset
+            If System.DateTimeOffset.TryParse(raw,
+                                              System.Globalization.CultureInfo.InvariantCulture,
+                                              System.Globalization.DateTimeStyles.AssumeUniversal Or System.Globalization.DateTimeStyles.AdjustToUniversal,
+                                              retryDate) Then
+                Dim delta As System.TimeSpan = retryDate - System.DateTimeOffset.UtcNow
+                Return ClampRawRetryAfterMilliseconds(
+                    CLng(System.Math.Ceiling(System.Math.Max(0.0R, delta.TotalMilliseconds))))
+            End If
+
+            Return 0
+        End Function
+
+        Private Shared Function BuildTransientTransportExhaustedMessage(statusCode As Integer,
+                                                                        attemptCount As Integer,
+                                                                        maxAttempts As Integer) As String
+            Return $"HTTP Error {statusCode} when accessing the LLM endpoint. The provider remained temporarily unavailable after {attemptCount} bounded attempt(s) (maximum {maxAttempts}); automatic transport retries have stopped."
+        End Function
+
+        Private Shared Function ThrowOrReportTransientTransportExhausted(context As ISharedContext,
+                                                                          statusCode As Integer,
+                                                                          attemptCount As Integer,
+                                                                          maxAttempts As Integer,
+                                                                          endpoint As String,
+                                                                          requestBody As String,
+                                                                          hideSplash As Boolean,
+                                                                          toolExecution As Boolean,
+                                                                          retryProfile As LlmTransportRetryProfile) As String
+            Dim errMsg As String = BuildTransientTransportExhaustedMessage(statusCode, attemptCount, maxAttempts)
+            System.Diagnostics.Debug.WriteLine(
+                "[LLM TRANSIENT TRANSPORT EXHAUSTED] profile=" & retryProfile.ToString() & "; " & errMsg)
+            If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                WriteDebugError(errMsg, endpoint, requestBody)
+            End If
+
+            ' Never surface a transport failure as model content. Hidden/headless and
+            ' tooling callers receive a typed exception so orchestration can distinguish
+            ' infrastructure failure from an assistant response. Visible interactive
+            ' callers retain the historic dialog + empty-result behavior.
+            If toolExecution OrElse hideSplash OrElse retryProfile = LlmTransportRetryProfile.Unattended Then
+                Throw New LlmTransientTransportException(
+                    statusCode, attemptCount, maxAttempts, retryProfile, errMsg)
+            End If
+
+            ShowCustomMessageBox(errMsg)
+            Return ""
+        End Function
 
         ''' <summary>
         ''' Optionally performs a post-processing LLM call as configured by <paramref name="context"/> and returns the resulting text.
@@ -84,9 +254,13 @@ Namespace SharedLibrary
         ''' <param name="FileObject">Optional file/clipboard object reference used for object upload features.</param>
         ''' <param name="cancellationToken">Cancellation token propagated to network calls and linked to splash cancellation.</param>
         ''' <param name="ToolExecution">If <c>True</c> then LLM expects to be in the tooling execution mode when calling an LLM (necessary for building APICall).</c>.</param>
+        ''' <param name="transportRetryProfile">Provider-agnostic transport retry profile. Inherit uses the current async-flow scope and otherwise falls back to Interactive.</param>
         ''' <returns>Extracted text from the JSON response. Caller cancellation is propagated; request timeout is surfaced as System.TimeoutException.</returns>
-        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
+        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing, Optional transportRetryProfile As LlmTransportRetryProfile = LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
             cancellationToken.ThrowIfCancellationRequested()
+
+            Dim transportRetryPolicy As LlmTransportRetryPolicy =
+                LlmTransportRetryPolicy.ForProfile(transportRetryProfile)
 
             Await Agents.AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
             Try
@@ -347,14 +521,52 @@ Namespace SharedLibrary
 
                     Dim restartCountdownAndTimeout As Action(Of String) =
                             Sub(newBaseText As String)
-                                cts.CancelAfter(TimeSpan.FromMilliseconds(TimeoutValue))
+                                Dim effectiveTimeoutMilliseconds As System.Int32 =
+                                    System.Convert.ToInt32(
+                                        System.Math.Min(
+                                            TimeoutValue,
+                                            System.Convert.ToInt64(System.Int32.MaxValue)))
+
+                                If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended Then
+                                    Dim remainingFailureBudgetMilliseconds As System.Int32 =
+                                        LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                            transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+
+                                    effectiveTimeoutMilliseconds =
+                                        System.Math.Max(
+                                            1,
+                                            System.Math.Min(
+                                                effectiveTimeoutMilliseconds,
+                                                remainingFailureBudgetMilliseconds))
+                                End If
+
+                                cts.CancelAfter(System.TimeSpan.FromMilliseconds(effectiveTimeoutMilliseconds))
 
                                 If Not Hidesplash Then
+                                    Dim effectiveTimeoutSeconds As System.Int32 =
+                                        System.Math.Max(
+                                            1,
+                                            CInt(System.Math.Ceiling(effectiveTimeoutMilliseconds / 1000.0R)))
                                     If newBaseText Is Nothing Then
-                                        splash.RestartCountdown(timeoutSeconds)
+                                        splash.RestartCountdown(effectiveTimeoutSeconds)
                                     Else
-                                        splash.RestartCountdown(timeoutSeconds, newBaseText)
+                                        splash.RestartCountdown(effectiveTimeoutSeconds, newBaseText)
                                     End If
+                                End If
+                            End Sub
+
+                    Dim prepareForTransientRetryDelay As Action(Of Integer) =
+                            Sub(delayMilliseconds As Integer)
+                                ' A retry delay is not a network request timeout. Disable the local
+                                ' per-attempt timer while backing off; caller cancellation remains
+                                ' active through the linked token. The request timer is restarted
+                                ' immediately before the next transport attempt.
+                                cts.CancelAfter(System.Threading.Timeout.Infinite)
+
+                                If Not Hidesplash Then
+                                    Dim delaySeconds As Integer =
+                                        System.Math.Max(1, CInt(System.Math.Ceiling(System.Math.Max(0, delayMilliseconds) / 1000.0R)))
+                                    splash.RestartCountdown(delaySeconds, "Slowing down due to AI...")
                                 End If
                             End Sub
 
@@ -610,15 +822,35 @@ Namespace SharedLibrary
                                     client.Timeout = TimeSpan.FromMilliseconds(TimeoutValue)
 
                                     Try
-                                        Dim maxRetries As Integer = 3
-                                        Dim delayIntervals As Integer() = {5000, 10000, 30000}
+                                        Dim maxRetries As Integer = transportRetryPolicy.MaxRetries
                                         Dim responseText As String = ""
                                         Dim lastContentType As String = Nothing
+                                        Dim pendingRetryDelayMs As Integer = 0
+                                        Dim cumulativeRetryDelayMs As Integer = 0
+                                        Dim lastTransientStatusCode As System.Int32 = 0
 
                                         For attempt As Integer = 0 To maxRetries
                                             If attempt > 0 Then
-                                                restartCountdownAndTimeout("Slowing down due to AI...")
-                                                Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
+                                                prepareForTransientRetryDelay(pendingRetryDelayMs)
+                                                If pendingRetryDelayMs > 0 Then
+                                                    Await System.Threading.Tasks.Task.Delay(pendingRetryDelayMs, ct)
+                                                    cumulativeRetryDelayMs += pendingRetryDelayMs
+                                                End If
+
+                                                If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                                   LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                                       transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0 Then
+                                                    Return ThrowOrReportTransientTransportExhausted(
+                                                        context,
+                                                        lastTransientStatusCode,
+                                                        attempt,
+                                                        maxRetries + 1,
+                                                        Endpoint,
+                                                        requestBody,
+                                                        Hidesplash,
+                                                        ToolExecution,
+                                                        transportRetryPolicy.Profile)
+                                                End If
                                             End If
 
                                             ' Recreate MultipartFormDataContent on each attempt to avoid duplicate parts.
@@ -686,13 +918,35 @@ Namespace SharedLibrary
                                             If response.IsSuccessStatusCode Then
                                                 responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
                                                 Exit For
-                                            ElseIf response.StatusCode = 429 Then
-                                                If attempt = maxRetries Then
-                                                    Dim errMsg As String = $"HTTP Error {response.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
-                                                    If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody)
-                                                    If Not Hidesplash Then ShowCustomMessageBox(errMsg) Else Return errMsg
-                                                    Return ""
+                                            ElseIf IsTransientTransportStatusCode(CInt(response.StatusCode)) Then
+                                                lastTransientStatusCode = CInt(response.StatusCode)
+                                                LlmTransportRetryPolicyScope.NoteTransientFailure(
+                                                    transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+
+                                                If attempt = maxRetries OrElse
+                                                   (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                                    LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                                        transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0) Then
+                                                    Return ThrowOrReportTransientTransportExhausted(
+                                                        context,
+                                                        CInt(response.StatusCode),
+                                                        attempt + 1,
+                                                        maxRetries + 1,
+                                                        Endpoint,
+                                                        requestBody,
+                                                        Hidesplash,
+                                                        ToolExecution,
+                                                        transportRetryPolicy.Profile)
                                                 End If
+
+                                                Dim retryAfterMs As Integer = GetRetryAfterMilliseconds(response.Headers)
+                                                pendingRetryDelayMs = GetBoundedTransientRetryDelayMilliseconds(
+                                                    retryAfterMs,
+                                                    attempt,
+                                                    cumulativeRetryDelayMs,
+                                                    transportRetryPolicy)
+                                                System.Diagnostics.Debug.WriteLine(
+                                                    $"[LLM TRANSIENT TRANSPORT] profile={transportRetryPolicy.Profile}; status={CInt(response.StatusCode)}; attempt={attempt + 1}/{maxRetries + 1}; nextDelayMs={pendingRetryDelayMs}; cumulativeDelayMs={cumulativeRetryDelayMs}.")
                                                 Continue For
                                             Else
                                                 Dim errorContent As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
@@ -779,6 +1033,8 @@ Namespace SharedLibrary
                                         If context.INI_APIDebug Then WriteDebugError("Request to the endpoint timed out.", Endpoint, requestBody, "", ex)
                                         If Not Hidesplash Then splash.Close()
                                         If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
+                                    Catch ex As LlmTransientTransportException
+                                        Throw
                                     Catch ex As System.Exception When Not ct.IsCancellationRequested
                                         If context.INI_APIDebug Then WriteDebugError("Response from the endpoint resulted in an error.", Endpoint, requestBody, "", ex)
                                         If Not Hidesplash Then splash.Close()
@@ -809,16 +1065,36 @@ Namespace SharedLibrary
                         ' Send the request.
                         Try
 
-                            Dim maxRetries As Integer = 3
-                            Dim delayIntervals As Integer() = {5000, 10000, 30000} ' delays in milliseconds
+                            Dim maxRetries As Integer = transportRetryPolicy.MaxRetries
                             Dim responseText As String = ""
                             Dim lastContentType As String = Nothing
+                            Dim pendingRetryDelayMs As Integer = 0
+                            Dim cumulativeRetryDelayMs As Integer = 0
+                            Dim lastTransientStatusCode As System.Int32 = 0
 
                             For attempt As Integer = 0 To maxRetries
                                 ' On retries, wait the specified delay before sending a new request.
                                 If attempt > 0 Then
-                                    restartCountdownAndTimeout("Slowing down due to AI...")
-                                    Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
+                                    prepareForTransientRetryDelay(pendingRetryDelayMs)
+                                    If pendingRetryDelayMs > 0 Then
+                                        Await System.Threading.Tasks.Task.Delay(pendingRetryDelayMs, ct)
+                                        cumulativeRetryDelayMs += pendingRetryDelayMs
+                                    End If
+
+                                    If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                       LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                           transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0 Then
+                                        Return ThrowOrReportTransientTransportExhausted(
+                                            context,
+                                            lastTransientStatusCode,
+                                            attempt,
+                                            maxRetries + 1,
+                                            Endpoint,
+                                            requestBody,
+                                            Hidesplash,
+                                            ToolExecution,
+                                            transportRetryPolicy.Profile)
+                                    End If
                                 End If
 
                                 restartCountdownAndTimeout(Nothing)
@@ -853,14 +1129,34 @@ Namespace SharedLibrary
                                     responseText = result.Body
                                     Exit For
 
-                                ElseIf result.StatusCode = 429 Then
-                                    If attempt = maxRetries Then
-                                        Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
-                                        System.Diagnostics.Debug.WriteLine($"[LLM FATAL] " & errMsg)
-                                        If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody)
-                                        If Not Hidesplash Then ShowCustomMessageBox(errMsg) Else Return errMsg
-                                        Return ""
+                                ElseIf IsTransientTransportStatusCode(result.StatusCode) Then
+                                    lastTransientStatusCode = result.StatusCode
+                                    LlmTransportRetryPolicyScope.NoteTransientFailure(
+                                        transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+
+                                    If attempt = maxRetries OrElse
+                                       (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                        LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                            transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0) Then
+                                        Return ThrowOrReportTransientTransportExhausted(
+                                            context,
+                                            result.StatusCode,
+                                            attempt + 1,
+                                            maxRetries + 1,
+                                            Endpoint,
+                                            requestBody,
+                                            Hidesplash,
+                                            ToolExecution,
+                                            transportRetryPolicy.Profile)
                                     End If
+
+                                    pendingRetryDelayMs = GetBoundedTransientRetryDelayMilliseconds(
+                                        result.RetryAfterMilliseconds,
+                                        attempt,
+                                        cumulativeRetryDelayMs,
+                                        transportRetryPolicy)
+                                    System.Diagnostics.Debug.WriteLine(
+                                        $"[LLM TRANSIENT TRANSPORT] profile={transportRetryPolicy.Profile}; status={result.StatusCode}; attempt={attempt + 1}/{maxRetries + 1}; nextDelayMs={pendingRetryDelayMs}; cumulativeDelayMs={cumulativeRetryDelayMs}.")
                                     Continue For
                                 Else
                                     Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: {result.Body}"
@@ -984,16 +1280,76 @@ Namespace SharedLibrary
                                 restartCountdownAndTimeout(Nothing)
 
                                 ' 4) Send GET request via WebRequest.
-                                Dim getResult = Await SendViaWebRequestAsync(
-                                    rawGetEndpoint, "GET", HeaderA, HeaderB,
-                                    rawGetBody, TimeoutValue, ct).ConfigureAwait(False)
+                                Dim getResponseText As String = ""
+                                Dim getPendingRetryDelayMs As Integer = 0
+                                Dim getCumulativeRetryDelayMs As Integer = 0
+                                Dim getLastTransientStatusCode As System.Int32 = 0
 
-                                Dim getResponseText As String
-                                If getResult.StatusCode >= 200 AndAlso getResult.StatusCode < 300 Then
-                                    getResponseText = getResult.Body
-                                Else
+                                For getAttempt As Integer = 0 To transportRetryPolicy.MaxRetries
+                                    If getAttempt > 0 AndAlso getPendingRetryDelayMs > 0 Then
+                                        prepareForTransientRetryDelay(getPendingRetryDelayMs)
+                                        Await System.Threading.Tasks.Task.Delay(getPendingRetryDelayMs, ct)
+                                        getCumulativeRetryDelayMs += getPendingRetryDelayMs
+                                    End If
+
+                                    If getAttempt > 0 AndAlso
+                                       transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                       LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                           transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0 Then
+                                        Return ThrowOrReportTransientTransportExhausted(
+                                            context,
+                                            getLastTransientStatusCode,
+                                            getAttempt,
+                                            transportRetryPolicy.MaxRetries + 1,
+                                            rawGetEndpoint,
+                                            rawGetBody,
+                                            Hidesplash,
+                                            ToolExecution,
+                                            transportRetryPolicy.Profile)
+                                    End If
+
+                                    restartCountdownAndTimeout(Nothing)
+
+                                    Dim getResult = Await SendViaWebRequestAsync(
+                                        rawGetEndpoint, "GET", HeaderA, HeaderB,
+                                        rawGetBody, TimeoutValue, ct).ConfigureAwait(False)
+
+                                    If getResult.StatusCode >= 200 AndAlso getResult.StatusCode < 300 Then
+                                        getResponseText = getResult.Body
+                                        Exit For
+                                    End If
+
+                                    If IsTransientTransportStatusCode(getResult.StatusCode) Then
+                                        getLastTransientStatusCode = getResult.StatusCode
+                                        LlmTransportRetryPolicyScope.NoteTransientFailure(
+                                            transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+
+                                        If getAttempt = transportRetryPolicy.MaxRetries OrElse
+                                           (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                            LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                                transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0) Then
+                                            Return ThrowOrReportTransientTransportExhausted(
+                                                context,
+                                                getResult.StatusCode,
+                                                getAttempt + 1,
+                                                transportRetryPolicy.MaxRetries + 1,
+                                                rawGetEndpoint,
+                                                rawGetBody,
+                                                Hidesplash,
+                                                ToolExecution,
+                                                transportRetryPolicy.Profile)
+                                        End If
+
+                                        getPendingRetryDelayMs = GetBoundedTransientRetryDelayMilliseconds(
+                                            getResult.RetryAfterMilliseconds,
+                                            getAttempt,
+                                            getCumulativeRetryDelayMs,
+                                            transportRetryPolicy)
+                                        Continue For
+                                    End If
+
                                     Throw New System.Exception($"HTTP GET Error {getResult.StatusCode}: {getResult.Body}")
-                                End If
+                                Next
 
                                 If context.INI_APIDebug Then
                                     Debug.WriteLine($"RECEIVED FROM API (GET):{Environment.NewLine}{getResponseText}")
@@ -1096,6 +1452,8 @@ Namespace SharedLibrary
                                         If Not Hidesplash Then ShowCustomMessageBox(errMsg)
                                 End Select
                             End If
+                        Catch ex As LlmTransientTransportException
+                            Throw
                         Catch ex As System.Net.WebException When Not ct.IsCancellationRequested
                             If context.INI_APIDebug Then WriteDebugError("HTTP request exception when accessing the LLM endpoint (2).", Endpoint, requestBody, "", ex)
                             If Not Hidesplash Then ShowCustomMessageBox($"An HTTP request exception occurred: {ex.Message} when accessing the LLM endpoint (2).")
@@ -1173,6 +1531,9 @@ PostProcess:
                 Catch ex As System.OperationCanceledException
                     Throw
 
+                Catch ex As LlmTransientTransportException
+                    Throw
+
                 Catch ex As System.Exception
 
 #If DEBUG Then
@@ -1208,7 +1569,7 @@ PostProcess:
         headerB As String,
         requestBody As String,
         timeoutMs As Long,
-        ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of (StatusCode As Integer, Body As String, ContentType As String))
+        ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of (StatusCode As Integer, Body As String, ContentType As String, RetryAfterMilliseconds As Integer))
 
             Dim req As System.Net.HttpWebRequest = DirectCast(System.Net.WebRequest.Create(endpoint), System.Net.HttpWebRequest)
 
@@ -1305,7 +1666,11 @@ PostProcess:
 
                         ct.ThrowIfCancellationRequested()
 
-                        Return (CInt(resp.StatusCode), responseBody, resp.ContentType)
+                        Return (
+                            CInt(resp.StatusCode),
+                            responseBody,
+                            resp.ContentType,
+                            ParseRetryAfterMilliseconds(resp.Headers("Retry-After")))
                     End Using
 
                 Catch webEx As System.Net.WebException When IsCancellationWebException(webEx, ct)
@@ -1346,7 +1711,11 @@ PostProcess:
 
                             ct.ThrowIfCancellationRequested()
 
-                            Return (CInt(errResp.StatusCode), errBody, errResp.ContentType)
+                            Return (
+                                CInt(errResp.StatusCode),
+                                errBody,
+                                errResp.ContentType,
+                                ParseRetryAfterMilliseconds(errResp.Headers("Retry-After")))
                         End Using
                     End If
 

@@ -1796,6 +1796,7 @@ Partial Public Class ThisAddIn
 
         Return New ModelConfig() With {
             .ToolName = InternalSearchToolName,
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = instructions,
             .ToolDefinition = definition,
             .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
@@ -1822,6 +1823,7 @@ Partial Public Class ThisAddIn
     Public Function GetInternalWebTool() As ModelConfig
         Return New ModelConfig() With {
             .ToolName = InternalWebToolName,
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = InternalWebToolInstructionsPrompt,
             .ToolDefinition = InternalWebToolDefinition,
             .ModelDescription = "Web Content Retriever" & InternalToolSuffix,

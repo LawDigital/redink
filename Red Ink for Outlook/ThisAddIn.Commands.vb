@@ -412,6 +412,176 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+    Private Shared Function IsOutlookWordRangeOutOfRangeException(
+        ex As System.Exception) As System.Boolean
+
+        Dim current As System.Exception = ex
+        Do While current IsNot Nothing
+            If TypeOf current Is System.ArgumentOutOfRangeException Then Return True
+
+            Dim message As System.String = If(current.Message, System.String.Empty)
+            If message.IndexOf("value out of range", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               message.IndexOf("out of range", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return True
+            End If
+
+            current = current.InnerException
+        Loop
+
+        Return False
+    End Function
+
+    Private Shared Sub SetOutlookSelectionRangeSafe(
+        selection As Microsoft.Office.Interop.Word.Selection,
+        requestedStart As System.Int32,
+        requestedEnd As System.Int32)
+
+        If selection Is Nothing OrElse selection.Document Is Nothing Then
+            Throw New System.ArgumentNullException(NameOf(selection))
+        End If
+
+        Try
+            selection.SetRange(requestedStart, requestedEnd)
+            Return
+        Catch ex As System.Exception When IsOutlookWordRangeOutOfRangeException(ex)
+            ' Outlook's WordEditor can reject an otherwise plausible end position when the
+            ' selection touches the terminal story paragraph. Recover at the actual COM call
+            ' boundary, against the document's CURRENT Content range, rather than trusting a
+            ' range that may have become stale after markdown/HTML transformations.
+            Dim document As Microsoft.Office.Interop.Word.Document = selection.Document
+            Dim documentStart As System.Int32 = document.Content.Start
+            Dim documentEnd As System.Int32 = document.Content.End
+            Dim maximumWritablePosition As System.Int32 =
+                If(documentEnd > documentStart, documentEnd - 1, documentStart)
+
+            Dim safeStart As System.Int32 =
+                System.Math.Max(documentStart, System.Math.Min(requestedStart, maximumWritablePosition))
+            Dim safeEnd As System.Int32 =
+                System.Math.Max(safeStart, System.Math.Min(requestedEnd, maximumWritablePosition))
+
+            Dim safeRange As Microsoft.Office.Interop.Word.Range =
+                document.Range(safeStart, safeEnd)
+            safeRange.Select()
+
+            System.Diagnostics.Debug.WriteLine(
+                "Outlook SetRange recovered terminal story boundary: requested=" &
+                requestedStart.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" &
+                requestedEnd.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; applied=" &
+                safeStart.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" &
+                safeEnd.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End Try
+    End Sub
+
+    Private Shared Sub NormalizeOutlookSelectionTerminalBoundary(
+        selection As Microsoft.Office.Interop.Word.Selection)
+
+        If selection Is Nothing OrElse selection.Document Is Nothing Then Return
+
+        Dim document As Microsoft.Office.Interop.Word.Document = selection.Document
+        Dim currentRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate()
+        Dim documentStart As System.Int32 = document.Content.Start
+        Dim documentEnd As System.Int32 = document.Content.End
+
+        If documentEnd <= documentStart Then Return
+        If currentRange.End < documentEnd Then Return
+
+        ' Ctrl+A / whole-mail selections include Outlook WordEditor's terminal paragraph mark.
+        ' That mark is structural, not user content. Remove only that terminal boundary at the
+        ' command entry point so every downstream pipeline receives a writable source range.
+        Dim safeEnd As System.Int32 = System.Math.Max(currentRange.Start, documentEnd - 1)
+        SetOutlookSelectionRangeSafe(selection, currentRange.Start, safeEnd)
+    End Sub
+
+    Private Shared Sub InsertTextWithMarkdownOutlookInsertAfterSafe(
+        selection As Microsoft.Office.Interop.Word.Selection,
+        text As System.String,
+        trailingCR As System.Boolean,
+        useHostDefaultFontColor As System.Boolean,
+        formattingSourceRange As Microsoft.Office.Interop.Word.Range)
+
+        Try
+            SLib.InsertTextWithMarkdown(
+                selection,
+                text,
+                trailingCR,
+                useHostDefaultFontColor,
+                FormattingSourceRange:=formattingSourceRange)
+        Catch ex As System.Exception When IsOutlookWordRangeOutOfRangeException(ex)
+            ' Last-resort host recovery at the invocation itself. The shared renderer remains
+            ' host-agnostic; Outlook alone knows that its WordEditor terminal story mark is not
+            ' a valid InsertAfter destination. Re-resolve from the live document and retry once.
+            Dim retryRange As Microsoft.Office.Interop.Word.Range =
+                ResolveSafeInsertAfterRange(selection.Range)
+            If retryRange Is Nothing Then Throw
+
+            SetOutlookSelectionRangeSafe(selection, retryRange.Start, retryRange.End)
+
+            System.Diagnostics.Debug.WriteLine(
+                "Outlook InsertTextWithMarkdown recovered Value out of range at terminal story boundary.")
+
+            SLib.InsertTextWithMarkdown(
+                selection,
+                text,
+                trailingCR,
+                useHostDefaultFontColor,
+                FormattingSourceRange:=formattingSourceRange)
+        End Try
+    End Sub
+
+    Private Shared Sub InsertTextWithFormatOutlookInsertAfterSafe(
+        formattedText As System.String,
+        ByRef range As Microsoft.Office.Interop.Word.Range,
+        noTrailingCR As System.Boolean,
+        useHostDefaultFontColor As System.Boolean)
+
+        Try
+            SLib.InsertTextWithFormat(
+                formattedText,
+                range,
+                False,
+                noTrailingCR,
+                useHostDefaultFontColor)
+        Catch ex As System.Exception When IsOutlookWordRangeOutOfRangeException(ex)
+            Dim retryRange As Microsoft.Office.Interop.Word.Range = ResolveSafeInsertAfterRange(range)
+            If retryRange Is Nothing Then Throw
+
+            range = retryRange
+            System.Diagnostics.Debug.WriteLine(
+                "Outlook InsertTextWithFormat recovered Value out of range at terminal story boundary.")
+
+            SLib.InsertTextWithFormat(
+                formattedText,
+                range,
+                False,
+                noTrailingCR,
+                useHostDefaultFontColor)
+        End Try
+    End Sub
+
+    Private Shared Function ResolveSafeInsertAfterRange(
+        sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
+
+        If sourceRange Is Nothing OrElse sourceRange.Document Is Nothing Then Return Nothing
+
+        Dim document As Microsoft.Office.Interop.Word.Document = sourceRange.Document
+        Dim documentStart As System.Int32 = document.Content.Start
+        Dim documentEnd As System.Int32 = document.Content.End
+        Dim insertionPosition As System.Int32 = sourceRange.End
+
+        ' Outlook's WordEditor selection can include the terminal story paragraph mark when
+        ' the whole mail is selected. Collapsing that selection to End yields document.Content.End,
+        ' which is outside the writable character range for subsequent Range.Text/InsertAfter
+        ' operations and raises COM "Value out of range". Insert immediately before the terminal
+        ' paragraph mark instead. Normal partial selections keep their exact end position.
+        If documentEnd > documentStart AndAlso insertionPosition >= documentEnd Then
+            insertionPosition = documentEnd - 1
+        End If
+
+        insertionPosition = System.Math.Max(documentStart, System.Math.Min(insertionPosition, documentEnd))
+        Return document.Range(insertionPosition, insertionPosition)
+    End Function
+
     Private Shared Function ResolveInsertionFormattingSourceBeforePosition(
         sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
 
@@ -445,7 +615,10 @@ Partial Public Class ThisAddIn
 
         ' Empty/new message fallback: use the insertion point itself only when there is no
         ' preceding concrete text from which Outlook can inherit the destination formatting.
-        Dim fallback As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate()
+        Dim fallback As Microsoft.Office.Interop.Word.Range = ResolveSafeInsertAfterRange(sourceRange)
+        If fallback IsNot Nothing Then Return fallback
+
+        fallback = sourceRange.Duplicate()
         fallback.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
         Return fallback
     End Function
@@ -1725,6 +1898,7 @@ Partial Public Class ThisAddIn
 
             ' Get the selected text and range
             Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
+            NormalizeOutlookSelectionTerminalBoundary(selection)
             Dim range As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate ' Duplicate to preserve original
 
             ' Capture both authorities BEFORE ConvertRangeToMarkdown or any review/selection
@@ -1847,7 +2021,15 @@ Partial Public Class ThisAddIn
                     Dim Plaintext As String = ""
 
                     SelectedText = selection.Text
-                    SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR, INI_UseHostColorOutlook)
+                    If Inplace Then
+                        SLib.InsertTextWithFormat(LLMResult, range, True, Not trailingCR, INI_UseHostColorOutlook)
+                    Else
+                        InsertTextWithFormatOutlookInsertAfterSafe(
+                            LLMResult,
+                            range,
+                            Not trailingCR,
+                            INI_UseHostColorOutlook)
+                    End If
 
                     If Inplace AndAlso restoreReviewTrailingSpaces Then
                         RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
@@ -1910,28 +2092,31 @@ Partial Public Class ThisAddIn
                         Dim sourceFormatting As System.Collections.Generic.List(Of ParagraphFormattingSnapshot) =
                             CaptureInsertionPointFormatting(insertionFormattingSource)
 
-                        Dim selRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
-                        selRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
-                        selRange.Text = vbCrLf & vbCrLf
+                        Dim selRange As Microsoft.Office.Interop.Word.Range =
+                            ResolveSafeInsertAfterRange(range)
+                        If selRange Is Nothing Then
+                            Throw New System.InvalidOperationException("Unable to resolve a writable insertion point after the current mail selection.")
+                        End If
 
-                        Dim newStart As Integer = selRange.End - 2
-                        Dim newEnd As Integer = selRange.End
-                        selection.SetRange(newStart, newEnd)
+                        Dim newStart As System.Int32 = selRange.Start
+                        selRange.Text = vbCrLf & vbCrLf
+                        Dim newEnd As System.Int32 = selRange.End
+                        SetOutlookSelectionRangeSafe(selection, newStart, newEnd)
 
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(
+                            InsertTextWithMarkdownOutlookInsertAfterSafe(
                                 selection,
                                 LLMResult & "<p>MARKUP:</p>" & vbCrLf,
                                 trailingCR,
                                 INI_UseHostColorOutlook,
-                                FormattingSourceRange:=insertionFormattingSource)
+                                insertionFormattingSource)
                         Else
-                            SLib.InsertTextWithMarkdown(
+                            InsertTextWithMarkdownOutlookInsertAfterSafe(
                                 selection,
                                 LLMResult,
                                 trailingCR,
                                 INI_UseHostColorOutlook,
-                                FormattingSourceRange:=insertionFormattingSource)
+                                insertionFormattingSource)
                         End If
 
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range =
@@ -2086,6 +2271,7 @@ Partial Public Class ThisAddIn
 
             ' Get the selected text
             Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
+            NormalizeOutlookSelectionTerminalBoundary(selection)
             Dim selectedText As String = selection.Text
             If String.IsNullOrWhiteSpace(selectedText) Then
                 NoText = True
@@ -2781,7 +2967,12 @@ SkipPromptWin:
             Else
                 ' Collapse selection to end if not in-place
                 If Not DoInplace Then
-                    selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                    Dim freestyleInsertRange As Microsoft.Office.Interop.Word.Range =
+                        ResolveSafeInsertAfterRange(selection.Range)
+                    If freestyleInsertRange Is Nothing Then
+                        Throw New System.InvalidOperationException("Unable to resolve a writable insertion point after the current mail selection.")
+                    End If
+                    SetOutlookSelectionRangeSafe(selection, freestyleInsertRange.Start, freestyleInsertRange.End)
                 Else
                     If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                     If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
@@ -2789,7 +2980,22 @@ SkipPromptWin:
 
                 ' Insert result
                 If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:</p>", trailingCR, INI_UseHostColorOutlook)
+                    If DoInplace Then
+                        SLib.InsertTextWithMarkdown(
+                            selection,
+                            vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:</p>",
+                            trailingCR,
+                            INI_UseHostColorOutlook)
+                    Else
+                        Dim freestyleMarkupFormattingSource As Microsoft.Office.Interop.Word.Range =
+                            selection.Range.Duplicate()
+                        InsertTextWithMarkdownOutlookInsertAfterSafe(
+                            selection,
+                            vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:</p>",
+                            trailingCR,
+                            INI_UseHostColorOutlook,
+                            freestyleMarkupFormattingSource)
+                    End If
                 Else
                     If DoInplace Then
                         Dim insertText As String = LLMResult
@@ -2808,12 +3014,12 @@ SkipPromptWin:
                         ' search forward into unrelated later text.
                         Dim freestyleFormattingSource As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate()
 
-                        SLib.InsertTextWithMarkdown(
+                        InsertTextWithMarkdownOutlookInsertAfterSafe(
                             selection,
                             vbCrLf & LLMResult & vbCrLf,
                             trailingCR,
                             INI_UseHostColorOutlook,
-                            FormattingSourceRange:=freestyleFormattingSource)
+                            freestyleFormattingSource)
                     End If
                 End If
 

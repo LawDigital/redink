@@ -1888,9 +1888,9 @@ Public Class DiscussInky
             End If
 
             ' Pre-check: verify the alternate model file exists and has content
-            Dim altPath = ExpandEnvironmentVariables(_context.INI_AlternateModelPath)
-            If String.IsNullOrWhiteSpace(altPath) OrElse Not File.Exists(altPath) Then
-                AppendSystemMessage("Alternate model configuration file not found.")
+            Dim altPath = _context.INI_AlternateModelPath
+            If String.IsNullOrWhiteSpace(altPath) OrElse Not ConfigurationResourceLoader.CanResolve(altPath) Then
+                AppendSystemMessage("Alternate model configuration source is invalid or unsupported.")
                 Return
             End If
 

@@ -222,6 +222,12 @@ Namespace Agents
         Public Property HostOperation As System.String
         Public Property Limit As System.Nullable(Of System.Int64)
         Public Property Observed As System.Nullable(Of System.Int64)
+        ' Optional additive diagnostics emitted by newer compatible PythonAgent builds.
+        ' They are bounded/sanitized by the client before entering host/model-facing payloads.
+        Public Property ExceptionType As System.String
+        Public Property ObjectType As System.String
+        Public Property MissingAttribute As System.String
+        Public Property Message As System.String
         Public Property Stack As System.Collections.Generic.List(Of RedInkPythonAgentSafeStackFrame) = New System.Collections.Generic.List(Of RedInkPythonAgentSafeStackFrame)()
     End Class
 
@@ -457,7 +463,7 @@ Namespace Agents
                 Dim requestInformation As New System.IO.FileInfo(path)
                 If requestInformation.Length < 1L OrElse requestInformation.Length > System.Convert.ToInt64(limits.MaximumRequestBytes) + 4096L Then Throw New RedInkPythonAgentExecutionException("HOST_CALL_REQUEST_INVALID")
                 Dim obj As Newtonsoft.Json.Linq.JObject = ParseStrictObject(System.IO.File.ReadAllText(path, New System.Text.UTF8Encoding(False, True)))
-                RequireFields(obj, New System.String() {"protocolVersion", "sessionId", "nonce", "requestId", "operation", "timeoutSeconds", "arguments"})
+                RequireExactFields(obj, New System.String() {"protocolVersion", "sessionId", "nonce", "requestId", "operation", "timeoutSeconds", "arguments"})
                 If CInt(obj("protocolVersion")) <> 2 OrElse Not System.String.Equals(CStr(obj("sessionId")), sessionId.ToString("D"), System.StringComparison.Ordinal) OrElse Not FixedTimeEquals(CStr(obj("nonce")), nonce) Then Throw New RedInkPythonAgentExecutionException("HOST_CALL_REQUEST_INVALID")
                 requestId = System.Guid.ParseExact(CStr(obj("requestId")), "D")
                 operationText = CStr(obj("operation"))
@@ -470,15 +476,15 @@ Namespace Agents
                 Dim request As New RedInkPythonAgentHostCallRequest() With {.RequestId = requestId, .Timeout = System.TimeSpan.FromSeconds(timeoutSeconds)}
                 Select Case operationText
                     Case "llm.complete"
-                        RequireFields(arguments, New System.String() {"systemPrompt", "userPrompt"})
+                        RequireExactFields(arguments, New System.String() {"systemPrompt", "userPrompt"})
                         request.Operation = RedInkPythonAgentHostOperation.LlmComplete
                         request.Arguments = New RedInkPythonAgentLlmRequest() With {.SystemPrompt = CStr(arguments("systemPrompt")), .UserPrompt = CStr(arguments("userPrompt"))}
                     Case "web.get"
-                        RequireFields(arguments, New System.String() {"url", "maximumCharacters"})
+                        RequireExactFields(arguments, New System.String() {"url", "maximumCharacters"})
                         request.Operation = RedInkPythonAgentHostOperation.WebGet
                         request.Arguments = New RedInkPythonAgentWebGetRequest() With {.Url = CStr(arguments("url")), .MaximumCharacters = CInt(arguments("maximumCharacters"))}
                     Case "web.search"
-                        RequireFields(arguments, New System.String() {"query", "maximumResults"})
+                        RequireExactFields(arguments, New System.String() {"query", "maximumResults"})
                         request.Operation = RedInkPythonAgentHostOperation.WebSearch
                         request.Arguments = New RedInkPythonAgentWebSearchRequest() With {.Query = CStr(arguments("query")), .MaximumResults = CInt(arguments("maximumResults"))}
                     Case Else
@@ -585,7 +591,7 @@ Namespace Agents
             If Not System.IO.File.Exists(path) Then Return previous
             Try
                 Dim obj As Newtonsoft.Json.Linq.JObject = ParseStrictObject(System.IO.File.ReadAllText(path, New System.Text.UTF8Encoding(False, True)))
-                RequireFields(obj, New System.String() {"protocolVersion", "sessionId", "nonce", "sequence", "phase", "writtenUtc", "mainActivityAgeMilliseconds"})
+                RequireExactFields(obj, New System.String() {"protocolVersion", "sessionId", "nonce", "sequence", "phase", "writtenUtc", "mainActivityAgeMilliseconds"})
                 If CInt(obj("protocolVersion")) <> 2 OrElse CStr(obj("sessionId")) <> sessionId.ToString("D") OrElse Not FixedTimeEquals(CStr(obj("nonce")), nonce) Then Return previous
                 Dim written As System.DateTimeOffset
                 If System.DateTimeOffset.TryParse(CStr(obj("writtenUtc")), written) Then Return written.ToUniversalTime()
@@ -622,7 +628,7 @@ Namespace Agents
             Dim obj As Newtonsoft.Json.Linq.JObject = ParseStrictObject(
             System.IO.File.ReadAllText(path, New System.Text.UTF8Encoding(False, True)),
             System.Math.Min(256, limits.MaxResultJsonDepth + 8))
-            RequireFields(obj, New System.String() {"protocolVersion", "sessionId", "nonce", "status", "exitCode", "completedUtc", "durationMilliseconds", "diagnosticId", "humanLogAvailable", "outputs", "result", "error"})
+            RequireRequiredFields(obj, New System.String() {"protocolVersion", "sessionId", "nonce", "status", "exitCode", "completedUtc", "durationMilliseconds", "diagnosticId", "humanLogAvailable", "outputs", "result", "error"})
             Dim result As New RedInkPythonAgentRunResult() With {
             .ProtocolVersion = CInt(obj("protocolVersion")),
             .SessionId = System.Guid.Parse(CStr(obj("sessionId"))),
@@ -644,7 +650,7 @@ Namespace Agents
             For Each token As Newtonsoft.Json.Linq.JToken In outputs
                 Dim item As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
                 If item Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
-                RequireFields(item, New System.String() {"relativePath", "mediaType", "size", "sha256"})
+                RequireRequiredFields(item, New System.String() {"relativePath", "mediaType", "size", "sha256"})
                 Dim relative As System.String = CStr(item("relativePath"))
                 result.Outputs.Add(New RedInkPythonAgentOutput() With {
                 .RelativePath = relative,
@@ -658,7 +664,7 @@ Namespace Agents
             If publishedToken IsNot Nothing AndAlso publishedToken.Type <> Newtonsoft.Json.Linq.JTokenType.Null Then
                 Dim publishedObject As Newtonsoft.Json.Linq.JObject = TryCast(publishedToken, Newtonsoft.Json.Linq.JObject)
                 If publishedObject Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
-                RequireFields(publishedObject, New System.String() {"kind", "value"})
+                RequireRequiredFields(publishedObject, New System.String() {"kind", "value"})
                 Dim kind As System.String = CStr(publishedObject("kind"))
                 If Not System.String.Equals(kind, "json", System.StringComparison.Ordinal) AndAlso Not System.String.Equals(kind, "text", System.StringComparison.Ordinal) Then
                     Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
@@ -704,7 +710,7 @@ Namespace Agents
         Private Shared Function ParseSafeError(token As Newtonsoft.Json.Linq.JToken) As RedInkPythonAgentSafeError
             Dim value As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
             If value Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
-            RequireFields(value, New System.String() {"code", "phase", "retryable", "source", "hostOperation", "limit", "observed", "stack"})
+            RequireRequiredFields(value, New System.String() {"code", "phase", "retryable", "source", "hostOperation", "limit", "observed", "stack"})
             Dim code As System.String = CStr(value("code"))
             Dim phase As System.String = CStr(value("phase"))
             If Not IsSafeErrorCode(code) OrElse Not IsSafePhase(phase) Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
@@ -714,7 +720,11 @@ Namespace Agents
             .Retryable = CBool(value("retryable")),
             .HostOperation = If(value("hostOperation").Type = Newtonsoft.Json.Linq.JTokenType.Null, Nothing, CStr(value("hostOperation"))),
             .Limit = ReadOptionalInt64(value("limit")),
-            .Observed = ReadOptionalInt64(value("observed"))
+            .Observed = ReadOptionalInt64(value("observed")),
+            .ExceptionType = ReadOptionalSafeDiagnostic(value("exceptionType"), 256),
+            .ObjectType = FirstOptionalSafeDiagnostic(value("objectType"), value("object_type"), 256),
+            .MissingAttribute = FirstOptionalSafeDiagnostic(value("missingAttribute"), value("missing_symbol"), 128),
+            .Message = ReadOptionalSafeMessage(value("message"), 1000)
         }
             If result.HostOperation IsNot Nothing AndAlso result.HostOperation <> "llm.complete" AndAlso result.HostOperation <> "web.get" AndAlso result.HostOperation <> "web.search" Then
                 Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
@@ -722,7 +732,7 @@ Namespace Agents
             If value("source").Type <> Newtonsoft.Json.Linq.JTokenType.Null Then
                 Dim source As Newtonsoft.Json.Linq.JObject = TryCast(value("source"), Newtonsoft.Json.Linq.JObject)
                 If source Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
-                RequireFields(source, New System.String() {"file", "line", "column", "function", "symbol"})
+                RequireRequiredFields(source, New System.String() {"file", "line", "column", "function", "symbol"})
                 If CStr(source("file")) <> "code.py" Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
                 result.Source = New RedInkPythonAgentSafeSource() With {
                 .File = "code.py",
@@ -738,7 +748,7 @@ Namespace Agents
             For Each frameToken As Newtonsoft.Json.Linq.JToken In stack
                 Dim frame As Newtonsoft.Json.Linq.JObject = TryCast(frameToken, Newtonsoft.Json.Linq.JObject)
                 If frame Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
-                RequireFields(frame, New System.String() {"file", "line", "function"})
+                RequireRequiredFields(frame, New System.String() {"file", "line", "function"})
                 If CStr(frame("file")) <> "code.py" OrElse CInt(frame("line")) < 1 Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
                 result.Stack.Add(New RedInkPythonAgentSafeStackFrame() With {
                 .File = "code.py",
@@ -767,6 +777,33 @@ Namespace Agents
             If Not System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z_][A-Za-z0-9_]{0,127}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
                 Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
             End If
+            Return value
+        End Function
+
+        Private Shared Function ReadOptionalSafeDiagnostic(token As Newtonsoft.Json.Linq.JToken, maximumLength As System.Int32) As System.String
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return Nothing
+            If token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID: optional diagnostic field must be a string or null.")
+            End If
+            Dim value As System.String = CStr(token)
+            If value.Length > maximumLength OrElse System.Text.RegularExpressions.Regex.IsMatch(value, "[\x00-\x08\x0B\x0C\x0E-\x1F]", System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+                Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID: optional diagnostic field is outside the supported bounds.")
+            End If
+            Return value
+        End Function
+
+        Private Shared Function FirstOptionalSafeDiagnostic(primary As Newtonsoft.Json.Linq.JToken, alternate As Newtonsoft.Json.Linq.JToken, maximumLength As System.Int32) As System.String
+            Dim value As System.String = ReadOptionalSafeDiagnostic(primary, maximumLength)
+            If value IsNot Nothing Then Return value
+            Return ReadOptionalSafeDiagnostic(alternate, maximumLength)
+        End Function
+
+        Private Shared Function ReadOptionalSafeMessage(token As Newtonsoft.Json.Linq.JToken, maximumLength As System.Int32) As System.String
+            Dim value As System.String = ReadOptionalSafeDiagnostic(token, maximumLength)
+            If value Is Nothing Then Return Nothing
+            value = System.Text.RegularExpressions.Regex.Replace(value, "[A-Za-z]:\\[^\s""']*", "<redacted-path>", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\\\[^\s""']+", "<redacted-path>", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            value = System.Text.RegularExpressions.Regex.Replace(value, "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "<redacted-id>", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
             Return value
         End Function
 
@@ -924,12 +961,28 @@ Namespace Agents
             Loop
         End Sub
 
-        Private Shared Sub RequireFields(obj As Newtonsoft.Json.Linq.JObject, expected As System.Collections.Generic.IEnumerable(Of System.String))
+        Private Shared Sub RequireRequiredFields(obj As Newtonsoft.Json.Linq.JObject, required As System.Collections.Generic.IEnumerable(Of System.String))
+            If obj Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID: expected JSON object.")
+            For Each fieldName As System.String In required
+                If obj.Property(fieldName) Is Nothing Then
+                    Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID: missing required field '" & fieldName & "'.")
+                End If
+            Next
+        End Sub
+
+        Private Shared Sub RequireExactFields(obj As Newtonsoft.Json.Linq.JObject, expected As System.Collections.Generic.IEnumerable(Of System.String))
+            If obj Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID: expected JSON object.")
             Dim setValue As New System.Collections.Generic.HashSet(Of System.String)(expected, System.StringComparer.Ordinal)
             For Each propertyValue As Newtonsoft.Json.Linq.JProperty In obj.Properties()
-                If Not setValue.Remove(propertyValue.Name) Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
+                If Not setValue.Remove(propertyValue.Name) Then
+                    Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID: unexpected field '" & propertyValue.Name & "'.")
+                End If
             Next
-            If setValue.Count <> 0 Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
+            If setValue.Count <> 0 Then
+                For Each missingField As System.String In setValue
+                    Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID: missing required field '" & missingField & "'.")
+                Next
+            End If
         End Sub
         Private Shared Function FixedTimeEquals(left As System.String, right As System.String) As System.Boolean
             If left Is Nothing OrElse right Is Nothing OrElse left.Length <> right.Length Then Return False

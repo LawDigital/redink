@@ -78,6 +78,10 @@ Namespace SharedLibrary
         ' uses this to discourage repeated, expensive re-invocations for work that could have been consolidated.
         Public Property PrefersSingleInvocation As Boolean = False
 
+        ' Capability-driven flag: identical successful calls must still reach the tool implementation.
+        ' Use this when repeat execution has observable contract semantics (for example session-cache verification).
+        Public Property AllowRepeatedIdenticalCalls As Boolean = False
+
         ' Project preference: capability-driven flag (not tool-specific) marking a tool that is a general-purpose
         ' fallback strategy rather than a specialized tool. When a fallback tool fails on its first attempt and a
         ' capable non-fallback alternative (sharing a CapabilityTags entry) is available in the same session, the

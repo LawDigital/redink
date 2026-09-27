@@ -1401,6 +1401,10 @@ Namespace Agents
             New Newtonsoft.Json.Linq.JProperty("host_operation", If(errorValue.HostOperation Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.HostOperation))),
             New Newtonsoft.Json.Linq.JProperty("limit", If(errorValue.Limit.HasValue, New Newtonsoft.Json.Linq.JValue(errorValue.Limit.Value), Newtonsoft.Json.Linq.JValue.CreateNull())),
             New Newtonsoft.Json.Linq.JProperty("observed", If(errorValue.Observed.HasValue, New Newtonsoft.Json.Linq.JValue(errorValue.Observed.Value), Newtonsoft.Json.Linq.JValue.CreateNull())),
+            New Newtonsoft.Json.Linq.JProperty("exceptionType", If(errorValue.ExceptionType Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.ExceptionType))),
+            New Newtonsoft.Json.Linq.JProperty("objectType", If(errorValue.ObjectType Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.ObjectType))),
+            New Newtonsoft.Json.Linq.JProperty("missingAttribute", If(errorValue.MissingAttribute Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.MissingAttribute))),
+            New Newtonsoft.Json.Linq.JProperty("message", If(errorValue.Message Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.Message))),
             New Newtonsoft.Json.Linq.JProperty("stack", stack))
         End Function
 

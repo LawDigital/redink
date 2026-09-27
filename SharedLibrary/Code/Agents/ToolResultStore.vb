@@ -59,14 +59,80 @@ Namespace Agents
             Return _entries.TryGetValue(ref.Trim(), stored)
         End Function
 
+        ''' <summary>
+        ''' Resolves a stored result while enforcing workflow ownership whenever the
+        ''' caller is workflow-scoped. Empty caller workflow ids retain the legacy
+        ''' unscoped behavior for non-tooling callers.
+        ''' </summary>
+        Public Shared Function TryGetForWorkflow(ref As System.String,
+                                                workflowId As System.String,
+                                                ByRef stored As StoredResult) As System.Boolean
+            stored = Nothing
+
+            Dim candidate As StoredResult = Nothing
+            If Not TryGet(ref, candidate) OrElse candidate Is Nothing Then Return False
+
+            Dim requestedWorkflowId As System.String = If(workflowId, System.String.Empty).Trim()
+            Dim storedWorkflowId As System.String = If(candidate.WorkflowId, System.String.Empty).Trim()
+
+            If requestedWorkflowId <> System.String.Empty Then
+                If storedWorkflowId = System.String.Empty OrElse
+                   Not System.String.Equals(requestedWorkflowId, storedWorkflowId, System.StringComparison.Ordinal) Then
+                    Return False
+                End If
+            End If
+
+            stored = candidate
+            Return True
+        End Function
+
+        ''' <summary>
+        ''' Reuses an existing response-owned reference only when it still points to the
+        ''' exact immutable result body for the same workflow and producing tool. This is
+        ''' deliberately not global/content deduplication.
+        ''' </summary>
+        Public Shared Function TryReuseReference(ref As System.String,
+                                                 workflowId As System.String,
+                                                 toolName As System.String,
+                                                 fullContent As System.String,
+                                                 ByRef stored As StoredResult) As System.Boolean
+            stored = Nothing
+
+            Dim candidate As StoredResult = Nothing
+            If Not TryGetForWorkflow(ref, workflowId, candidate) OrElse candidate Is Nothing Then Return False
+
+            If Not System.String.Equals(
+                If(candidate.ToolName, System.String.Empty),
+                If(toolName, System.String.Empty),
+                System.StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Dim body As System.String = If(fullContent, System.String.Empty)
+            If candidate.TotalChars <> body.Length Then Return False
+
+            Dim storedBody As System.String = If(candidate.FullContent, System.String.Empty)
+            If Not System.Object.ReferenceEquals(storedBody, body) AndAlso
+               Not System.String.Equals(storedBody, body, System.StringComparison.Ordinal) Then
+                Return False
+            End If
+
+            stored = candidate
+            Return True
+        End Function
+
         ''' <summary>Returns a character window from a stored body.</summary>
         Public Shared Function GetWindow(ref As String, startChar As Integer, maxChars As Integer) As String
             Dim stored As StoredResult = Nothing
             If Not TryGet(ref, stored) Then Return ""
 
-            Dim body As String = If(stored.FullContent, "")
-            Dim start As Integer = Math.Max(0, Math.Min(startChar, body.Length))
-            Dim take As Integer = Math.Max(1, Math.Min(maxChars, body.Length - start))
+            Dim body As System.String = If(stored.FullContent, System.String.Empty)
+            Dim start As System.Int32 = System.Math.Max(0, System.Math.Min(startChar, body.Length))
+            Dim remaining As System.Int32 = body.Length - start
+            If remaining = 0 Then Return System.String.Empty
+
+            ' Preserve the established minimum of one character only while content remains.
+            Dim take As System.Int32 = System.Math.Min(System.Math.Max(1, maxChars), remaining)
             Return body.Substring(start, take)
         End Function
 

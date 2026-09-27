@@ -55,6 +55,15 @@ Namespace Agents
         Public Property RunnerRetryIndex As Integer
 
         ''' <summary>
+        ''' Diagnostic-only excerpt from the unusable response that caused the
+        ''' immediately preceding internal runner retry. Never changes task identity.
+        ''' </summary>
+        Public Property PreviousDiscardedResponseExcerpt As String
+
+        ''' <summary>Original character count of the discarded response.</summary>
+        Public Property PreviousDiscardedResponseLength As Integer
+
+        ''' <summary>
         ''' Exact JSON array supplied by the parent agent_<name> invocation.
         ''' [] means the delegated task is explicitly non-file-producing.
         ''' The nested tooling run locks this contract and may not broaden it.

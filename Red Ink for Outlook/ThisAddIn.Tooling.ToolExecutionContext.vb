@@ -165,6 +165,7 @@ Partial Public Class ThisAddIn
 
         Public Property RunId As String
         Public Property SubAgentInvocationCount As Integer
+        Public Property SubAgentInternalRetryCount As Integer
         Public Property SubAgentInvocationCountsByAgent As Dictionary(Of String, Integer)
 
         Public Property AuthoritativeToolRegistrySnapshot As SharedLibrary.Agents.ToolRegistry
@@ -214,6 +215,7 @@ Partial Public Class ThisAddIn
             FinalizationBlockedReason = ""
             RunId = Guid.NewGuid().ToString("N")
             SubAgentInvocationCount = 0
+            SubAgentInternalRetryCount = 0
             SubAgentInvocationCountsByAgent = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
             AuthoritativeToolRegistry = Nothing
             AuthoritativeToolRegistrySnapshot = Nothing
