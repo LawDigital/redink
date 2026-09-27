@@ -391,6 +391,17 @@ Partial Public Class ThisAddIn
             rawContent = $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
         End If
 
+        If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical AndAlso
+           SharedLibrary.Agents.ToolingRuntimePrimitives.RequiresLosslessCurrentTurnReplay(resp.ToolName) Then
+
+            ' A model-requested expansion must reach the model losslessly at least once.
+            ' Historical compaction may replace it with a navigation stub on later turns.
+            resp.ModelReplayContent = rawContent
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = False
+            Return rawContent
+        End If
+
         If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.ControlPlanePinned Then
             Dim controlPlaneEnvelope As String = TryBuildControlPlaneReplayEnvelope(resp, rawContent)
             If controlPlaneEnvelope IsNot Nothing Then
@@ -693,6 +704,35 @@ Partial Public Class ThisAddIn
         Return compact.ToString(Formatting.None)
     End Function
 
+    Private Function TryResolveReusableReplayStoredResult(resp As ToolResponse,
+                                                           rawContent As System.String,
+                                                           ByRef stored As SharedLibrary.Agents.ToolResultStore.StoredResult) As System.Boolean
+        stored = Nothing
+        If resp Is Nothing OrElse
+           Not resp.WasCompactedForModelReplay OrElse
+           System.String.IsNullOrWhiteSpace(resp.ModelReplayContent) Then
+            Return False
+        End If
+
+        Dim existingRef As System.String = System.String.Empty
+        Try
+            Dim existingEnvelope As Newtonsoft.Json.Linq.JObject =
+                Newtonsoft.Json.Linq.JObject.Parse(resp.ModelReplayContent)
+            existingRef = If(existingEnvelope.Value(Of System.String)("result_ref"), System.String.Empty).Trim()
+        Catch ex As System.Exception
+            Return False
+        End Try
+
+        If existingRef = System.String.Empty Then Return False
+
+        Return SharedLibrary.Agents.ToolResultStore.TryReuseReference(
+            existingRef,
+            SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
+            If(resp.ToolName, System.String.Empty),
+            If(rawContent, System.String.Empty),
+            stored)
+    End Function
+
     Private Function CompactToolResponseContentForSubAgent(resp As ToolResponse, rawContent As String,
                                                            Optional overrideThresholdChars As Integer = -1,
                                                            Optional overridePreviewChars As Integer = -1) As String
@@ -739,11 +779,13 @@ Partial Public Class ThisAddIn
         Dim excerpt As String = raw.Substring(0, excerptLength)
         Dim summary As String = BuildToolReplaySummary(resp)
 
-        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult =
-            SharedLibrary.Agents.ToolResultStore.Put(
+        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+        If Not TryResolveReusableReplayStoredResult(resp, raw, stored) Then
+            stored = SharedLibrary.Agents.ToolResultStore.Put(
                 SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
                 If(resp.ToolName, ""),
                 raw)
+        End If
 
         Dim compactObj As New JObject(
         New JProperty("ok", resp.Success),

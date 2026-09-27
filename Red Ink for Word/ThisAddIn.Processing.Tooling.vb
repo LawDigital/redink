@@ -2053,37 +2053,35 @@ Partial Public Class ThisAddIn
                             Exit For
                         End If
 
-                        ' Generalized no-progress circuit breaker: suppress a repeated context_expand of a
-                        ' (ref + range) window that was already read this run so the model stops re-reading
-                        ' the same content instead of making progress.
+                        ' Generalized no-progress circuit breaker for context_expand:
+                        ' suppress only when the exact returned window is still available to the model
+                        ' (or was already produced earlier in the same tool-call batch). If historical
+                        ' compaction has removed the window body and left only a stub, re-reading is
+                        ' legitimate and must be allowed.
                         If SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(tc.ToolName) Then
-                            Dim expandRefArg As String = ""
-                            If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("result_ref") AndAlso tc.Arguments("result_ref") IsNot Nothing Then
-                                expandRefArg = tc.Arguments("result_ref").ToString()
-                            End If
+                            Dim expandWindowKey As System.String = ""
 
-                            If Not String.IsNullOrWhiteSpace(expandRefArg) Then
-                                Dim expandStartArg As String = ""
-                                If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("start_char") AndAlso tc.Arguments("start_char") IsNot Nothing Then
-                                    expandStartArg = tc.Arguments("start_char").ToString()
-                                End If
-                                Dim expandMaxArg As String = ""
-                                If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("max_chars") AndAlso tc.Arguments("max_chars") IsNot Nothing Then
-                                    expandMaxArg = tc.Arguments("max_chars").ToString()
-                                End If
+                            If SharedLibrary.Agents.ContextExpandTool.TryBuildCanonicalWindowKey(
+                                tc.Arguments,
+                                expandWindowKey) Then
 
-                                Dim expandKey As String =
-                                    SharedLibrary.Agents.ToolCallSequencing.BuildExpandedRefRangeKey(expandRefArg, expandStartArg, expandMaxArg)
+                                Dim priorWindowFound As System.Boolean = False
+                                Dim priorWindowStillAvailable As System.Boolean = False
+                                GetContextExpandWindowReplayState(
+                                    context,
+                                    expandWindowKey,
+                                    priorWindowFound,
+                                    priorWindowStillAvailable)
 
-                                If context.ExpandedContextKeys.Contains(expandKey) Then
+                                If priorWindowStillAvailable Then
                                     Dim syntheticExpand As New ToolResponse() With {
                                         .CallId = tc.CallId,
                                         .ToolName = tc.ToolName,
                                         .Success = False,
                                         .ResultKind = "error",
                                         .ErrorCode = "no_progress_suppressed",
-                                        .ErrorMessage = "Repeated context_expand of an already-read reference/range suppressed by host circuit breaker.",
-                                        .Response = "{""status"":""suppressed"",""reason"":""no_progress_suppressed"",""message"":""The host stopped re-reading this reference/range because it was already expanded this run. Do not re-expand the same window. Use the content you already retrieved, expand a different range, or proceed to finalize.""}",
+                                        .ErrorMessage = "Repeated context_expand of a window that is still available in the active model replay was suppressed by the host circuit breaker.",
+                                        .Response = "{""status"":""suppressed"",""reason"":""no_progress_suppressed"",""message"":""The requested window is still available in the active model context (or was already produced in this tool-call batch). Use that content, expand a different range, or proceed to the next step.""}",
                                         .OriginalCallJson = tc.RawJson,
                                         .NormalizedCallSignature = normalizedToolCallSignature
                                     }
@@ -2092,25 +2090,30 @@ Partial Public Class ThisAddIn
                                     context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
                                     context.PendingGuardTitle = "HOST NO-PROGRESS BREAKER"
                                     context.PendingRejectedTurnExplanation =
-                                        "The same reference/range was expanded repeatedly with no new progress. Do not re-expand it; use what you already read or continue with another step."
+                                        "The same context window was requested again while its full content was still available. Use the existing content, read a different range, or continue with the next step."
                                     context.PendingRejectedAssistantTurn = ""
                                     context.PrematureTextRetryCount = 0
                                     stopCurrentBatchAfterTool = True
 
                                     context.LogWarn(
-                                        "Suppressed repeated context_expand of already-read reference/range.",
-                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; key={expandKey}")
+                                        "Suppressed repeated context_expand because the exact window is still available in active replay.",
+                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; windowKey={expandWindowKey}")
                                     ToolingFileLogger.LogWarn(
-                                        "No-progress circuit breaker suppressed context_expand.",
-                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; key={expandKey}")
+                                        "No-progress circuit breaker suppressed context_expand while prior window remained available.",
+                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; windowKey={expandWindowKey}")
 
                                     Exit For
                                 End If
 
-                                context.ExpandedContextKeys.Add(expandKey)
+                                If priorWindowFound Then
+                                    context.Log(
+                                        "Allowing repeated context_expand because the previously returned window was compacted out of active replay.",
+                                        "diag")
+                                    ToolingFileLogger.LogDiag(
+                                        $"context_expand reread allowed after compaction: host={context.HostKind}; windowKey={expandWindowKey}")
+                                End If
                             End If
                         End If
-
                         Dim toolResponse As ToolResponse = Nothing
                         Dim legacyCompatibilityRoots As System.Collections.Generic.List(Of String) = Nothing
                         Dim legacyCompatibilitySnapshot As System.Collections.Generic.Dictionary(Of String, String) = Nothing
@@ -2335,6 +2338,19 @@ Partial Public Class ThisAddIn
                                                                           If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling)),
                                                     terminal:=toolResponse.RepairLoopTerminal,
                                                     recoveryScopeKey:=recoveryScopeKey)
+
+                                    If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
+                                       Not recoverableSubAgentTaskFailure AndAlso
+                                       Not toolResponse.RepairLoopTerminal Then
+                                        context.SequencingState.AllowCrossScopeAlternativeRecovery(
+                                            tc.ToolName,
+                                            recoveryScopeKey,
+                                            toolResponse.AlternativeRecoveryRequiredArtifactExtension,
+                                            "tool_declared_alternative_path")
+                                        context.Log(
+                                            $"Tool failure permits a validated alternative recovery path across opaque operation scopes. host={context.HostKind}; tool={tc.ToolName}; recoveryScope={recoveryScopeKey}",
+                                            "diag")
+                                    End If
                                 End If
                             Else
                                 ' Feed exact caller-supplied logical operation ids and their
@@ -4573,6 +4589,54 @@ Partial Public Class ThisAddIn
         If String.IsNullOrWhiteSpace(controlPlaneBlock) Then Return runtimeStateBlock
         Return runtimeStateBlock & Environment.NewLine & Environment.NewLine & controlPlaneBlock
     End Function
+
+    Private Sub GetContextExpandWindowReplayState(context As ToolExecutionContext,
+                                                   windowKey As System.String,
+                                                   ByRef priorWindowFound As System.Boolean,
+                                                   ByRef priorWindowStillAvailable As System.Boolean)
+        priorWindowFound = False
+        priorWindowStillAvailable = False
+
+        If context Is Nothing OrElse
+           context.AllToolResponses Is Nothing OrElse
+           System.String.IsNullOrWhiteSpace(windowKey) Then
+            Return
+        End If
+
+        For responseIndex As System.Int32 = context.AllToolResponses.Count - 1 To 0 Step -1
+            Dim prior As ToolResponse = context.AllToolResponses(responseIndex)
+            If prior Is Nothing OrElse
+               Not prior.Success OrElse
+               Not SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(prior.ToolName) Then
+                Continue For
+            End If
+
+            Dim priorWindowKey As System.String = ""
+            If Not SharedLibrary.Agents.ContextExpandTool.TryBuildCanonicalWindowKeyFromResponse(
+                prior.Response,
+                priorWindowKey) Then
+                Continue For
+            End If
+
+            If Not System.String.Equals(
+                priorWindowKey,
+                windowKey,
+                System.StringComparison.OrdinalIgnoreCase) Then
+                Continue For
+            End If
+
+            priorWindowFound = True
+
+            If SharedLibrary.Agents.ToolingRuntimePrimitives.IsExpansionWindowAvailableWithoutReexecution(
+                prior.ProducedIteration,
+                context.CurrentIteration,
+                prior.WasCompactedForModelReplay) Then
+
+                priorWindowStillAvailable = True
+                Return
+            End If
+        Next
+    End Sub
 
     Private Sub AddToolResponseToHistory(context As ToolExecutionContext,
                                          response As ToolResponse)

@@ -501,7 +501,6 @@
     <Compile Include="Code\Agents\TextTools.SemanticAndExport.vb" />
     <Compile Include="Code\Agents\TextFileSnapshot.vb" />
     <Compile Include="Code\Agents\TextExtractionResourceRegistry.vb" />
-    <Compile Include="Code\Agents\TextFileSnapshotSelfTests.vb" />
     <Compile Include="Code\Agents\TextTools.vb" />
     <Compile Include="Code\Agents\ToolCallSequencing.vb" />
     <Compile Include="Code\Agents\PdfWordLayoutAdapters.vb" />

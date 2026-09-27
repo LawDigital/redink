@@ -689,37 +689,23 @@ Partial Public Class ThisAddIn
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_PdfToWord,
             .CapabilityTags = "explicit_operation",
-            .ModelDescription = "Convert PDF to Word (built-in)",
+            .ModelDescription = "Convert PDF to Word (Microsoft Word only)",
             .ToolInstructionsPrompt =
-                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) through Word automation. In legacy auto mode Word may use any converter registered with Word; explicit quality modes verify whether an external PDF FileConverter is advertised before claiming native reflow. " &
+                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) exclusively through Microsoft Word automation. " &
+                "HARD CONVERTER POLICY: this tool first creates a dedicated Microsoft Word automation instance, temporarily disconnects the COM/VSTO add-ins that are connected in that instance, verifies that Word no longer advertises an open-capable PDF FileConverter, and only then uses Word.Documents.Open and Document.SaveAs2. It never opens the PDF through Windows file associations, Shell/Open-With, another installed PDF application, or a registered Red Ink layout/OCR adapter directly. It must not start Word in Office Safe Mode because that can surface interactive first-run/default-file-type UI. Original add-in connection states are restored before the dedicated Word instance exits. If this isolated Word path cannot be verified or fails, return a structured failure so the workflow may use the explicit OCR/text reconstruction fallback. " &
                 "The resulting .docx can then be used with process_word_document, compare_word_documents, or other Word tools. " &
                 "When the user asks to create a Word document/template that preserves, copies, or closely follows the PDF's formatting/layout, treat the PDF as a format carrier: use pdf_to_word FIRST, then transform the converted DOCX instead of extracting text and rebuilding with create_word_document. " &
-                "This is the PREFERRED method for PDF-to-Word conversion — use it FIRST. It works well for most PDFs " &
-                "that contain real (selectable/searchable) text and preserves layout, tables, and formatting. " &
-                "If the conversion result indicates the PDF is scanned/image-only (no extractable text), THEN " &
-                "fall back to extract_pdf_text (which supports OCR) to obtain the text, and use create_word_document " &
-                "to produce a .docx from that text. " &
-                "ALTERNATIVE APPROACH — USER-REQUESTED OCR PIPELINE: If the user explicitly asks to OCR the PDF first, " &
-                "or asks to 'rasterize and OCR' the PDF before converting to Word, use this pipeline instead: " &
-                "(1) Call extract_pdf_text on the PDF — this will rasterize each page and run OCR via the LLM to extract text. " &
-                "(2) Prefer text_export_to_text once, then pass its actual output_path as create_word_document.markdown_path (and snapshot_sha256 as expected_source_sha256) to produce a .docx without retyping the full source. Reuse that same export across analysis and editing. " &
-                "This OCR pipeline is useful for scanned documents, image-heavy PDFs, or when Word's built-in conversion " &
-                "produces poor results. However, it does NOT preserve the original layout/formatting — it produces a " &
-                "clean text-based document. The standard Word-based conversion (this tool) remains the default. For a request where source formatting is binding, do not silently claim exact preservation after falling back to OCR/text reconstruction. " &
-                "OPTIONAL LAYOUT ADAPTER: conversion_mode may be auto (legacy default), native, layout_preferred, layout_required, or layout_ocr. auto preserves legacy Word-automation behavior and does not make a converter-provenance claim. Explicit modes inspect Word's registered FileConverters provider-agnostically. If an external PDF FileConverter is advertised, the host must not label the result native_reflow. native/layout_required fail closed unless their required verified path or a registered Red Ink layout adapter is available. layout_preferred may report external_reflow_unverified with quality_degraded=true instead of pretending the path was native. layout_ocr requires a registered provider-agnostic layout adapter and skips Word reflow. layout_adapter_id optionally requests a specific registered adapter.",
+                "This is the PREFERRED method for PDF-to-Word conversion when Word can perform the conversion itself. It works best for PDFs that contain real selectable/searchable text. " &
+                "If Microsoft Word produces an image-only/non-editable result and OCR is required, use the explicit extract_pdf_text/text_export_to_text + create_word_document reconstruction workflow only when appropriate; that workflow is separate from pdf_to_word and must not be described as preserving the original PDF layout exactly. " &
+                "conversion_mode is retained for compatibility: auto, native, layout_preferred, and layout_required all remain Word-only. layout_required fails if Word's own result is effectively image-only. Legacy layout_ocr requests are rejected rather than invoking a non-Word adapter.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_PdfToWord & """," &
-                """description"":""Converts a PDF attachment to a Word document (.docx) through Word automation. " &
-                "Use this as the PRIMARY method for PDF-to-Word conversion and whenever a PDF is the requested formatting/layout carrier for a Word deliverable; then transform the resulting DOCX instead of rebuilding it. Works well for text-based PDFs with layout preservation. " &
-                "If the result indicates the PDF is scanned/image-only, OCR + create_word_document is only a reconstruction fallback and cannot be treated as exact source-format preservation. " &
-                "ALTERNATIVE: If the user explicitly requests OCR-based text reconstruction, use extract_pdf_text/text_export_to_text followed by create_word_document instead. " &
-                "For scanned PDFs that require layout preservation, use conversion_mode=layout_required or layout_ocr so the host either uses a registered layout adapter or fails explicitly instead of silently degrading quality.""," &
+                """description"":""Converts a PDF attachment to a Word document (.docx) by first creating a dedicated Microsoft Word automation instance, temporarily disconnecting the COM/VSTO add-ins connected in that instance, verifying that Word no longer advertises an open-capable PDF FileConverter, and then using Word.Documents.Open and Document.SaveAs2. It does not use Office Safe Mode and never opens the PDF through Windows file associations or another installed PDF application. If the isolated Word path cannot be verified or fails, the workflow may use a controlled OCR/text reconstruction fallback.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to convert""}," &
                 """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}," &
-                """conversion_mode"":{""type"":""string"",""enum"":[""auto"",""native"",""layout_preferred"",""layout_required"",""layout_ocr""],""description"":""auto preserves legacy Word-automation behavior without a converter-provenance claim; explicit modes never report native_reflow when Word advertises an external PDF FileConverter""}," &
-                """layout_adapter_id"":{""type"":""string"",""description"":""Optional exact id of a registered provider-agnostic layout OCR adapter""}" &
-                "},""required"":[""attachment_name""]}}"
+                """conversion_mode"":{""type"":""string"",""enum"": [""auto"",""native"",""layout_preferred"",""layout_required""],""description"":""Compatibility/quality mode. All modes use Microsoft Word only; layout_required fails if Word's result is effectively image-only.""}" &
+                "},""required"": [""attachment_name""]}}"
         })
 
         ' ── create_word_document ──

@@ -41,6 +41,8 @@ Namespace Agents
 
         Public Const DependentBatchingInstruction As String =
             "When using tools, the host executes multiple tool calls from one response strictly in the order emitted." & vbCrLf &
+            "If several independent calls are already known and none requires inspecting another call's result, prefer emitting them together in the same response instead of spending separate model turns on each call. This is especially appropriate for independent read-only lookups." & vbCrLf &
+            "This reduces model round-trips only; tool execution remains ordered and you must not assume parallel execution. Do not batch mutations merely for speed." & vbCrLf &
             "Only emit multiple tool calls in one response when every later call's arguments are already fully known at emission time." & vbCrLf &
             "If a later step depends on inspecting the result of an earlier tool call, emit only the earlier call and wait for its result before deciding the next call." & vbCrLf &
             "Do not rely on the host to rewrite, infer, defer, queue, or replay omitted tool calls."
@@ -205,6 +207,9 @@ Namespace Agents
             ' Host-owned bounded whole-path recovery may deliberately cross an opaque
             ' operation/task scope. Normal alternative recovery remains scope-exact.
             Public Property CrossScopeAlternativeRecoveryAllowed As Boolean = False
+            ' Optional tool-declared output-type contract for cross-scope fallback recovery.
+            ' Empty preserves generic behavior; e.g. .docx requires a replacement DOCX.
+            Public Property CrossScopeAlternativeRecoveryRequiredArtifactExtension As System.String = System.String.Empty
             ' Substantive progress epoch at which this failure occurred. Consecutive fallback
             ' failures created after the same prior substantive success share an epoch and may
             ' be superseded together by one later successful alternative path.
@@ -1676,6 +1681,7 @@ Namespace Agents
                 record.RecoveryEvidenceObserved = False
                 record.RecoveryEvidenceToolName = String.Empty
                 record.CrossScopeAlternativeRecoveryAllowed = False
+                record.CrossScopeAlternativeRecoveryRequiredArtifactExtension = System.String.Empty
                 record.ProgressEpoch = _substantiveProgressEpoch
 
                 ProjectLatestUnresolvedFailure()
@@ -1727,6 +1733,47 @@ Namespace Agents
                 If RetryInvariantArgumentsByTool IsNot Nothing Then RetryInvariantArgumentsByTool.Clear()
             End Sub
 
+            ''' <summary>
+            ''' Allows one concrete failed tool to declare that a different successful recovery
+            ''' path may cross an opaque operation/task scope. This does not itself clear anything.
+            ''' The normal recovery policy, substantive-success checks and deliverable validation
+            ''' remain authoritative. Exact same-tool retries continue to require exact scope identity.
+            ''' </summary>
+            Public Sub AllowCrossScopeAlternativeRecovery(failedToolName As System.String,
+                                                           recoveryScopeKey As System.String,
+                                                           Optional requiredArtifactExtension As System.String = "",
+                                                           Optional recoveryLabel As String = "declared_alternative_path")
+                If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                    Return
+                End If
+
+                Dim normalizedToolName As System.String = If(failedToolName, System.String.Empty).Trim()
+                Dim normalizedScope As System.String = If(recoveryScopeKey, System.String.Empty).Trim()
+                Dim normalizedRequiredExtension As System.String = If(requiredArtifactExtension, System.String.Empty).Trim()
+                If normalizedRequiredExtension <> System.String.Empty AndAlso Not normalizedRequiredExtension.StartsWith(".", System.StringComparison.Ordinal) Then
+                    normalizedRequiredExtension = "." & normalizedRequiredExtension
+                End If
+                If normalizedToolName = System.String.Empty Then Return
+
+                For i As System.Int32 = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+                    If Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If Not RecoveryScopeKeysMatch(candidate.RecoveryScopeKey, normalizedScope) Then Continue For
+                    If candidate.Terminal Then Continue For
+                    If candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then Continue For
+
+                    candidate.CrossScopeAlternativeRecoveryAllowed = True
+                    candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension = normalizedRequiredExtension
+                    candidate.RecoveryEvidenceObserved = False
+                    candidate.RecoveryEvidenceToolName = String.Empty
+                    RecoveryToolName = If(recoveryLabel, System.String.Empty)
+                    Exit For
+                Next
+
+                ProjectLatestUnresolvedFailure()
+            End Sub
+
             Public Sub BeginBoundedAlternativeRecovery(failedToolName As String,
                                                        Optional recoveryLabel As String = "full_tool_path_recovery")
                 If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
@@ -1750,6 +1797,7 @@ Namespace Agents
                     candidate.RecoveryEvidenceObserved = False
                     candidate.RecoveryEvidenceToolName = String.Empty
                     candidate.CrossScopeAlternativeRecoveryAllowed = True
+                    candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension = System.String.Empty
                     candidate.ProgressEpoch = _substantiveProgressEpoch
                 Next
 
@@ -1892,10 +1940,16 @@ Namespace Agents
                     ' capable and the shared registry/compatibility layer must already validate a
                     ' current output. This keeps recovery model-, tool-, provider- and host-agnostic.
                     If candidate.CrossScopeAlternativeRecoveryAllowed AndAlso
-                       RequestRequiresCreatedDeliverable AndAlso
-                       (Not IsDeliverableCapableTool(normalizedToolName) OrElse
-                        Not HasValidatedDeliverableForCompletion) Then
-                        Continue For
+                       RequestRequiresCreatedDeliverable Then
+                        If Not IsDeliverableCapableTool(normalizedToolName) OrElse
+                           Not HasValidatedDeliverableForCompletion Then
+                            Continue For
+                        End If
+
+                        If Not HasValidatedDeliverableForRecoveryExtension(
+                            candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension) Then
+                            Continue For
+                        End If
                     End If
 
                     ' For an explicit artifact-scoped failure, a different producer is recovery
@@ -1965,6 +2019,50 @@ Namespace Agents
 
                 _substantiveProgressEpoch += 1
             End Sub
+
+            Private Function HasValidatedDeliverableForRecoveryExtension(requiredExtension As System.String) As System.Boolean
+                Dim normalizedExtension As System.String = If(requiredExtension, System.String.Empty).Trim()
+                If normalizedExtension = System.String.Empty Then Return True
+                If Not normalizedExtension.StartsWith(".", System.StringComparison.Ordinal) Then
+                    normalizedExtension = "." & normalizedExtension
+                End If
+
+                If RegisteredDeliverableArtifacts IsNot Nothing Then
+                    For Each artifact As DeliverableArtifact In RegisteredDeliverableArtifacts
+                        If artifact Is Nothing OrElse System.String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
+                        If Not System.IO.File.Exists(artifact.SessionPath) Then Continue For
+                        If Not System.String.Equals(
+                            System.IO.Path.GetExtension(artifact.SessionPath),
+                            normalizedExtension,
+                            System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                        If artifact.LifecycleState = ArtifactLifecycleState.Final OrElse
+                           artifact.IsFinalDeliverable OrElse
+                           artifact.LegacyCompatibilityEligible Then
+                            Return True
+                        End If
+                    Next
+                End If
+
+                Try
+                    Dim legacyPaths As System.Collections.Generic.List(Of System.String) =
+                        ArtifactDelivery.ResolveLegacyCompatibilityPaths(Me)
+                    If legacyPaths Is Nothing Then Return False
+                    For Each legacyPath As System.String In legacyPaths
+                        If System.String.IsNullOrWhiteSpace(legacyPath) OrElse Not System.IO.File.Exists(legacyPath) Then Continue For
+                        If System.String.Equals(
+                            System.IO.Path.GetExtension(legacyPath),
+                            normalizedExtension,
+                            System.StringComparison.OrdinalIgnoreCase) Then
+                            Return True
+                        End If
+                    Next
+                Catch ex As System.Exception
+                    Return False
+                End Try
+
+                Return False
+            End Function
 
             ''' <summary>
             ''' Commits two-phase alternative recovery only after the host has accepted a final
@@ -2091,7 +2189,8 @@ Namespace Agents
                 End If
 
                 If failure.CrossScopeAlternativeRecoveryAllowed AndAlso
-                   failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
+                   (failure.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed OrElse
+                    failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly) Then
                     Return True
                 End If
 

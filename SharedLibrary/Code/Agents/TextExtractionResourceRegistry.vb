@@ -310,12 +310,6 @@ Namespace Agents
             Return True
         End Function
 
-        Friend Shared Sub ClearForTests()
-            Cache.Clear()
-            Flights.Clear()
-            PublishedOutputs.Clear()
-        End Sub
-
     End Class
 
 End Namespace
