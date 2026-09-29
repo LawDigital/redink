@@ -52,10 +52,96 @@ Namespace Agents
             If String.IsNullOrWhiteSpace(userLanguage) Then Return False
             If LooksLikeEnglish(userLanguage) Then Return False
             If prose.Length > maxLocalizableChars Then Return False
+
+            ' Post-localization is intentionally skipped when the final response contains an
+            ' embedded structured JSON payload. The language contract already requires the model
+            ' to produce user-facing prose in the user's language, while JSON/tool/host payloads
+            ' must remain byte-stable. Sending a mixed prose+JSON response through a translator
+            ' can silently corrupt command envelopes, tool metadata, or structured values.
+            If ContainsEmbeddedJsonPayload(prose) Then Return False
+
             If ProseLooksLikeTargetLanguage(prose, userLanguage) Then Return False
 
             Dim status As String = If(finalStatus, "").Trim().ToLowerInvariant()
             Return status = "blocked" OrElse status = "complete"
+        End Function
+
+        ''' <summary>
+        ''' Detects a complete JSON object or array embedded anywhere inside otherwise user-facing
+        ''' text. This is host-agnostic and exists only to protect structured payloads from the
+        ''' optional post-localization fallback. Brackets inside JSON strings are ignored.
+        ''' </summary>
+        Private Function ContainsEmbeddedJsonPayload(text As String) As Boolean
+            Dim raw As String = If(text, "")
+            If raw = "" Then Return False
+
+            For startIndex As Integer = 0 To raw.Length - 1
+                Dim opening As Char = raw(startIndex)
+                If opening <> "{"c AndAlso opening <> "["c Then Continue For
+
+                Dim endIndex As Integer = FindBalancedJsonPayloadEnd(raw, startIndex)
+                If endIndex < startIndex Then Continue For
+
+                Dim candidate As String = raw.Substring(startIndex, endIndex - startIndex + 1)
+                Try
+                    Newtonsoft.Json.Linq.JToken.Parse(candidate)
+                    Return True
+                Catch ex As Newtonsoft.Json.JsonException
+                    ' Not valid JSON at this opening delimiter. Continue scanning.
+                End Try
+            Next
+
+            Return False
+        End Function
+
+        Private Function FindBalancedJsonPayloadEnd(text As String, startIndex As Integer) As Integer
+            If String.IsNullOrEmpty(text) OrElse
+               startIndex < 0 OrElse
+               startIndex >= text.Length Then
+                Return -1
+            End If
+
+            Dim firstChar As Char = text(startIndex)
+            If firstChar <> "{"c AndAlso firstChar <> "["c Then Return -1
+
+            Dim expectedClosers As New System.Collections.Generic.Stack(Of Char)()
+            Dim inString As Boolean = False
+            Dim escaped As Boolean = False
+
+            For index As Integer = startIndex To text.Length - 1
+                Dim currentChar As Char = text(index)
+
+                If inString Then
+                    If escaped Then
+                        escaped = False
+                    ElseIf currentChar = "\"c Then
+                        escaped = True
+                    ElseIf currentChar = """"c Then
+                        inString = False
+                    End If
+                    Continue For
+                End If
+
+                If currentChar = """"c Then
+                    inString = True
+                    Continue For
+                End If
+
+                Select Case currentChar
+                    Case "{"c
+                        expectedClosers.Push("}"c)
+                    Case "["c
+                        expectedClosers.Push("]"c)
+                    Case "}"c, "]"c
+                        If expectedClosers.Count = 0 OrElse expectedClosers.Peek() <> currentChar Then
+                            Return -1
+                        End If
+                        expectedClosers.Pop()
+                        If expectedClosers.Count = 0 Then Return index
+                End Select
+            Next
+
+            Return -1
         End Function
 
         Private Function LooksLikeEnglish(language As String) As Boolean

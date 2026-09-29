@@ -244,6 +244,22 @@ Namespace Agents
         Private Shared _skills As List(Of SkillDescriptor)
         Private Shared _agents As List(Of AgentDescriptor)
         Private Shared _inkyMd As String
+        Private Shared _inkyMdForAutoPilot As String
+
+        Private Enum AutoPilotGuidanceSourceState
+            NotConfigured
+            NotPresent
+            EmptyOrWhitespace
+            ReadSuccessfully
+            ReadError
+        End Enum
+
+        Private NotInheritable Class AutoPilotGuidanceSourceReadResult
+            Public Property State As AutoPilotGuidanceSourceState
+            Public Property Content As System.String
+            Public Property ErrorKind As System.String
+        End Class
+
         Private Shared _initialized As Boolean
         Private Shared _resourceWatchers As New List(Of System.IO.FileSystemWatcher)()
         Private Shared _refreshGeneration As Long
@@ -285,6 +301,17 @@ Namespace Agents
             Get
                 EnsureInitialized()
                 Return If(_inkyMd, String.Empty)
+            End Get
+        End Property
+
+        ''' <summary>AutoPilot-specific project guidance, falling back to the normal combined Inky.md when no specific file exists.</summary>
+        Public Shared ReadOnly Property InkyMdForAutoPilot As System.String
+            Get
+                EnsureInitialized()
+                If Not System.String.IsNullOrWhiteSpace(_inkyMdForAutoPilot) Then
+                    Return _inkyMdForAutoPilot
+                End If
+                Return If(_inkyMd, System.String.Empty)
             End Get
         End Property
 
@@ -547,6 +574,7 @@ Namespace Agents
                 _agents = MergeByName(agentsCentral, agentsLocal)
 
                 _inkyMd = ReadInkyMd(central, localPath)
+                _inkyMdForAutoPilot = ReadAutoPilotInkyMd(central, localPath, _inkyMd)
                 _initialized = True
                 _refreshGeneration += 1
             End SyncLock
@@ -635,6 +663,144 @@ Namespace Agents
             Return sb.ToString()
         End Function
 
+        Private Shared Function ReadAutoPilotInkyMd(central As System.String,
+                                                               localPath As System.String,
+                                                               normalGuidance As System.String) As System.String
+            Dim centralResult As AutoPilotGuidanceSourceReadResult = TryReadAutoPilotInkyMd(central)
+            Dim localResult As AutoPilotGuidanceSourceReadResult = TryReadAutoPilotInkyMd(localPath)
+
+            TraceAutoPilotGuidanceSourceState("central", centralResult)
+            TraceAutoPilotGuidanceSourceState("local", localResult)
+
+            Dim sb As New System.Text.StringBuilder()
+            If Not System.String.IsNullOrEmpty(centralResult.Content) Then
+                sb.AppendLine(centralResult.Content.TrimEnd())
+            End If
+            If Not System.String.IsNullOrEmpty(localResult.Content) Then
+                If sb.Length > 0 Then
+                    sb.AppendLine()
+                    sb.AppendLine("<!-- ----- local Inky_for_AutoPilot.md overrides ----- -->")
+                    sb.AppendLine()
+                End If
+                sb.AppendLine(localResult.Content.TrimEnd())
+            End If
+
+            Dim specificGuidance As System.String = sb.ToString()
+            Dim hasUsableSpecificGuidance As System.Boolean = Not System.String.IsNullOrWhiteSpace(specificGuidance)
+            Dim hasSpecificReadError As System.Boolean =
+                centralResult.State = AutoPilotGuidanceSourceState.ReadError OrElse
+                localResult.State = AutoPilotGuidanceSourceState.ReadError
+
+            If hasUsableSpecificGuidance Then
+                TraceAutoPilotGuidanceDecision(
+                    "specific_combined",
+                    If(hasSpecificReadError, "partial_specific_read_error", "specific_available"),
+                    normalGuidance)
+            Else
+                TraceAutoPilotGuidanceDecision(
+                    "normal_combined_fallback",
+                    If(hasSpecificReadError, "specific_read_error", "no_usable_specific"),
+                    normalGuidance)
+            End If
+
+            Return specificGuidance
+        End Function
+
+        Private Shared Function TryReadAutoPilotInkyMd(root As System.String) As AutoPilotGuidanceSourceReadResult
+            Dim result As New AutoPilotGuidanceSourceReadResult()
+            result.Content = System.String.Empty
+            result.ErrorKind = System.String.Empty
+
+            If System.String.IsNullOrWhiteSpace(root) Then
+                result.State = AutoPilotGuidanceSourceState.NotConfigured
+                Return result
+            End If
+
+            For Each candidateName As System.String In {"Inky_for_AutoPilot.md", "INKY_FOR_AUTOPILOT.md", "inky_for_autopilot.md"}
+                Try
+                    Dim candidatePath As System.String = System.IO.Path.Combine(root, candidateName)
+                    result.Content = System.IO.File.ReadAllText(candidatePath, System.Text.Encoding.UTF8)
+                    If System.String.IsNullOrWhiteSpace(result.Content) Then
+                        result.State = AutoPilotGuidanceSourceState.EmptyOrWhitespace
+                    Else
+                        result.State = AutoPilotGuidanceSourceState.ReadSuccessfully
+                    End If
+                    Return result
+                Catch ex As System.IO.FileNotFoundException
+                    Continue For
+                Catch ex As System.IO.DirectoryNotFoundException
+                    Continue For
+                Catch ex As System.UnauthorizedAccessException
+                    result.State = AutoPilotGuidanceSourceState.ReadError
+                    result.ErrorKind = BoundAutoPilotGuidanceMetadata(ex.GetType().Name, 80)
+                    Return result
+                Catch ex As System.Security.SecurityException
+                    result.State = AutoPilotGuidanceSourceState.ReadError
+                    result.ErrorKind = BoundAutoPilotGuidanceMetadata(ex.GetType().Name, 80)
+                    Return result
+                Catch ex As System.IO.IOException
+                    result.State = AutoPilotGuidanceSourceState.ReadError
+                    result.ErrorKind = BoundAutoPilotGuidanceMetadata(ex.GetType().Name, 80)
+                    Return result
+                Catch ex As System.Exception
+                    result.State = AutoPilotGuidanceSourceState.ReadError
+                    result.ErrorKind = BoundAutoPilotGuidanceMetadata(ex.GetType().Name, 80)
+                    Return result
+                End Try
+            Next
+
+            result.State = AutoPilotGuidanceSourceState.NotPresent
+            Return result
+        End Function
+
+        Private Shared Sub TraceAutoPilotGuidanceSourceState(sourceName As System.String,
+                                                              result As AutoPilotGuidanceSourceReadResult)
+            If result Is Nothing Then Return
+
+            Dim message As System.String =
+                "AutoPilot guidance: mode=specific; source=" &
+                BoundAutoPilotGuidanceMetadata(sourceName, 24) &
+                "; state=" & result.State.ToString()
+
+            If result.State = AutoPilotGuidanceSourceState.ReadError AndAlso
+               Not System.String.IsNullOrWhiteSpace(result.ErrorKind) Then
+                message &= "; error=" & BoundAutoPilotGuidanceMetadata(result.ErrorKind, 80)
+            End If
+
+            TraceAutoPilotGuidance(message)
+        End Sub
+
+        Private Shared Sub TraceAutoPilotGuidanceDecision(selection As System.String,
+                                                           reason As System.String,
+                                                           normalGuidance As System.String)
+            Dim normalAvailable As System.String =
+                If(System.String.IsNullOrWhiteSpace(normalGuidance), "false", "true")
+
+            TraceAutoPilotGuidance(
+                "AutoPilot guidance: mode=selection; selection=" &
+                BoundAutoPilotGuidanceMetadata(selection, 48) &
+                "; reason=" & BoundAutoPilotGuidanceMetadata(reason, 64) &
+                "; normal_available=" & normalAvailable)
+        End Sub
+
+        Private Shared Sub TraceAutoPilotGuidance(message As System.String)
+            Try
+                System.Diagnostics.Trace.WriteLine(
+                    "[AgentResources] " & BoundAutoPilotGuidanceMetadata(message, 512))
+            Catch ex As System.Exception
+                ' Guidance diagnostics must never change resource loading or prompt selection.
+            End Try
+        End Sub
+
+        Private Shared Function BoundAutoPilotGuidanceMetadata(value As System.String,
+                                                                maxLength As System.Int32) As System.String
+            Dim normalized As System.String = If(value, System.String.Empty).Replace(System.Convert.ToChar(13), " "c).Replace(System.Convert.ToChar(10), " "c)
+            If maxLength <= 0 Then Return System.String.Empty
+            If normalized.Length <= maxLength Then Return normalized
+            If maxLength <= 3 Then Return normalized.Substring(0, maxLength)
+            Return normalized.Substring(0, maxLength - 3) & "..."
+        End Function
+
         Private Shared Function TryReadInkyMd(root As String) As String
             If String.IsNullOrWhiteSpace(root) OrElse Not System.IO.Directory.Exists(root) Then Return Nothing
             For Each candidate In {"Inky.md", "INKY.md", "inky.md"}
@@ -670,6 +836,71 @@ Namespace Agents
             End Try
 
             Return Nothing
+        End Function
+
+        ''' <summary>
+        ''' Returns True when an existing Markdown file is the descriptor the current runtime loader
+        ''' would select from one configured skills/ or agents/ location. This deliberately reuses
+        ''' the loader's existing selection rules instead of inventing an authoring-only path rule.
+        ''' </summary>
+        Friend Shared Function IsSelectedRuntimeResourceDescriptorPath(fullPath As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(fullPath) OrElse
+               Not System.String.Equals(System.IO.Path.GetExtension(fullPath), ".md", System.StringComparison.OrdinalIgnoreCase) OrElse
+               Not System.IO.File.Exists(fullPath) Then
+                Return False
+            End If
+
+            Dim candidate As System.String
+            Try
+                candidate = NormalizeConfiguredResourcePath(fullPath)
+            Catch ex As System.Exception
+                Return False
+            End Try
+
+            Dim configuredRoots As New System.Collections.Generic.List(Of System.String)() From {
+                ConfiguredLocalPath,
+                ConfiguredCentralPath
+            }
+
+            For Each configuredRoot As System.String In configuredRoots
+                If System.String.IsNullOrWhiteSpace(configuredRoot) Then Continue For
+
+                Dim skillsBase As System.String = NormalizeConfiguredResourcePath(System.IO.Path.Combine(configuredRoot, "skills"))
+                Dim agentsBase As System.String = NormalizeConfiguredResourcePath(System.IO.Path.Combine(configuredRoot, "agents"))
+                Dim candidateDirectory As System.String = NormalizeConfiguredResourcePath(System.IO.Path.GetDirectoryName(candidate))
+                Dim resourceParent As System.String = NormalizeConfiguredResourcePath(System.IO.Path.GetDirectoryName(candidateDirectory))
+
+                ' skills/<resource>/<descriptor>.md: use the exact descriptor selected by ScanSkills.
+                If System.String.Equals(resourceParent, skillsBase, System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim selectedSkillDescriptor As System.String = ResolveResourceMarkdown(candidateDirectory, {"SKILL.md", "skill.md"})
+                    If Not System.String.IsNullOrWhiteSpace(selectedSkillDescriptor) AndAlso
+                       System.String.Equals(
+                           NormalizeConfiguredResourcePath(selectedSkillDescriptor),
+                           candidate,
+                           System.StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                End If
+
+                ' agents/<name>.md: every top-level Markdown file is scanned as an agent descriptor.
+                If System.String.Equals(candidateDirectory, agentsBase, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                ' agents/<resource>/AGENT.md: folder-based agents currently use canonical names only.
+                If System.String.Equals(resourceParent, agentsBase, System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim selectedAgentDescriptor As System.String = FindMarkdownFile(candidateDirectory, {"AGENT.md", "agent.md"})
+                    If Not System.String.IsNullOrWhiteSpace(selectedAgentDescriptor) AndAlso
+                       System.String.Equals(
+                           NormalizeConfiguredResourcePath(selectedAgentDescriptor),
+                           candidate,
+                           System.StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                End If
+            Next
+
+            Return False
         End Function
 
 
@@ -708,9 +939,9 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Validates the canonical frontmatter contract for an authored SKILL.md/AGENT.md using the
-        ''' same regex and YAML parser as the runtime loader. This prevents the authoring postcondition
-        ''' from accepting a resource that exists on disk but will load without its required metadata.
+        ''' Validates the authored-resource frontmatter contract using the same regex and YAML parser
+        ''' as the runtime loader. The caller may pass a canonical SKILL.md/AGENT.md or another
+        ''' descriptor path selected by the existing loader compatibility rules.
         ''' </summary>
         Public Shared Function TryValidateAuthoredResourceFrontmatter(mdPath As System.String,
                                                                       ByRef failureReason As System.String) As System.Boolean
@@ -732,6 +963,12 @@ Namespace Agents
             Dim match As System.Text.RegularExpressions.Match = _frontmatterRegex.Match(text)
             If Not match.Success Then
                 failureReason = "missing YAML frontmatter"
+                Return False
+            End If
+
+            Dim unsupportedSyntaxReason As System.String = System.String.Empty
+            If TryGetUnsupportedFrontmatterSyntax(match.Groups("yaml").Value, unsupportedSyntaxReason) Then
+                failureReason = unsupportedSyntaxReason
                 Return False
             End If
 
@@ -827,6 +1064,32 @@ Namespace Agents
             End If
 
             Return True
+        End Function
+
+        Private Shared Function TryGetUnsupportedFrontmatterSyntax(yaml As System.String,
+                                                                        ByRef failureReason As System.String) As System.Boolean
+            failureReason = System.String.Empty
+            If System.String.IsNullOrEmpty(yaml) Then Return False
+
+            Dim lines As System.String() =
+                yaml.Replace(Microsoft.VisualBasic.ControlChars.Cr.ToString(), System.String.Empty).
+                    Split(New System.Char() {Microsoft.VisualBasic.ControlChars.Lf})
+            For Each rawLine As System.String In lines
+                Dim trimmed As System.String = If(rawLine, System.String.Empty).Trim()
+                If trimmed.Length = 0 OrElse trimmed.StartsWith("#", System.StringComparison.Ordinal) Then Continue For
+
+                Dim colonIndex As System.Int32 = trimmed.IndexOf(":"c)
+                If colonIndex <= 0 Then Continue For
+
+                Dim key As System.String = trimmed.Substring(0, colonIndex).Trim()
+                Dim rawValue As System.String = trimmed.Substring(colonIndex + 1).Trim()
+                If System.Text.RegularExpressions.Regex.IsMatch(rawValue, "^[>|](?:(?:[1-9][+-]?)|(?:[+-][1-9]?))?(?:\s*(?:#.*)?)?$") Then
+                    failureReason = "frontmatter field '" & key & "' uses YAML block-scalar syntax that the Red Ink runtime loader does not parse; use a single-line value"
+                    Return True
+                End If
+            Next
+
+            Return False
         End Function
 
         Private Shared Sub PopulateFromMarkdown(target As AgentResourceBase, mdPath As String, isLocal As Boolean)

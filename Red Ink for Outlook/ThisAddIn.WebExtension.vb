@@ -137,6 +137,8 @@ Partial Public Class ThisAddIn
         Public Property FileObject As String
         Public Property ChatId As Integer = 1
         Public Property ScheduledTaskId As String = ""
+        Public Property TerminalResultText As System.String = System.String.Empty
+        Public Property TerminalResultHtml As System.String = System.String.Empty
 
         ''' <summary>Latest user-facing progress note for the running job (local chat only).</summary>
         Public Property StatusMessage As String = ""
@@ -1492,6 +1494,39 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Function PersistCancellationTurnForJob(job As LlmJob) As System.Boolean
+        Const cancellationText As System.String = "Aborted by user."
+        Return PersistAssistantTurnForJob(job, cancellationText, MarkdownToHtml(cancellationText))
+    End Function
+
+    Private Function BuildLocalChatTerminalFailureText(existingAssistantText As System.String,
+                                                       failureMessage As System.String) As System.String
+        Dim preservedText As System.String = If(existingAssistantText, System.String.Empty)
+
+        Try
+            preservedText = SanitizeModelOutputForBrowser(preservedText).Trim()
+        Catch
+            preservedText = preservedText.Trim()
+        End Try
+
+        If preservedText.Length > 0 Then
+            Try
+                preservedText = RemoveGeneratedOutputFilesSections(preservedText).Trim()
+            Catch
+            End Try
+        End If
+
+        Dim detail As System.String = If(failureMessage, System.String.Empty).Trim()
+        If preservedText.Length > 0 Then
+            Dim suffix As System.String = "Error: The response was generated, but the job did not complete successfully."
+            If detail.Length > 0 Then suffix &= " " & detail
+            Return preservedText & vbCrLf & vbCrLf & suffix
+        End If
+
+        If detail.Length > 0 Then Return "Error: " & detail
+        Return "Error: The job failed."
+    End Function
+
     ''' <summary>
     ''' Converts markdown to HTML using Markdig advanced pipeline; falls back to HTML-encoded text on error.
     ''' </summary>
@@ -1548,21 +1583,25 @@ Partial Public Class ThisAddIn
     Private Function SyncToolingState(ByVal st As InkyState, ByRef supportsTooling As Boolean) As Boolean
         _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
 
-        supportsTooling = CurrentModelSupportsTooling(st)
+        Dim modelSupportsTooling As System.Boolean = CurrentModelSupportsTooling(st)
+        supportsTooling = modelSupportsTooling
 
-        If _apActive Then
-            supportsTooling = False
-        End If
-
-        Dim hasTools As Boolean =
+        Dim hasTools As System.Boolean =
             (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0) OrElse
             IsChatAgentWorkspaceConnected()
 
-        Dim enabled As Boolean = st.ToolingEnabled AndAlso hasTools AndAlso supportsTooling
-
-        If st.ToolingEnabled <> enabled Then
-            st.ToolingEnabled = enabled
+        ' Persist only durable validity changes. AutoPilot is a temporary runtime
+        ' condition and must not destroy the user's Local Chat tooling preference.
+        Dim preferenceEnabled As System.Boolean = st.ToolingEnabled AndAlso hasTools AndAlso modelSupportsTooling
+        If st.ToolingEnabled <> preferenceEnabled Then
+            st.ToolingEnabled = preferenceEnabled
             SaveInkyState(st)
+        End If
+
+        Dim enabled As System.Boolean = preferenceEnabled
+        If _apActive Then
+            supportsTooling = False
+            enabled = False
         End If
 
         _chatToolingEnabled = enabled
@@ -1859,6 +1898,7 @@ Partial Public Class ThisAddIn
         html.AppendLine(".inky-message-box{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--elev);font-size:.82rem;line-height:1.45;white-space:pre-wrap;word-break:break-word;} ")
         html.AppendLine(".inky-message-box.error{border-color:#8f3d3d;background:rgba(170,56,56,.12);color:#ffd7d7;} ")
         html.AppendLine(":root.light .inky-message-box.error{border-color:#d7a2a2;background:#fff1f1;color:#7a1f1f;} ")
+        html.AppendLine(".runtimeStatus{display:none;padding:6px 12px;border-bottom:1px solid var(--border);font-size:.76rem;color:var(--muted);background:var(--elev);line-height:1.35;} ")
         html.AppendLine("</style>")
         html.AppendLine("</head><body>")
         html.AppendLine("<div class=""wrap"">")
@@ -1902,6 +1942,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("    <button id=""playBtn"" title=""Open mini games"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""3"" y=""8"" width=""18"" height=""8"" rx=""4"" ry=""4""/><circle cx=""8"" cy=""12"" r=""1""/><circle cx=""12"" cy=""12"" r=""1""/><circle cx=""16"" cy=""12"" r=""1""/></svg></button>")
         html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg id=""themeIcon"" viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/></svg></button>")
         html.AppendLine("  </div>")
+        html.AppendLine("  <div id=""runtimeStatus"" class=""runtimeStatus"" role=""status"" aria-live=""polite""></div>")
 
         html.AppendLine("  <div id=""chat"" class=""chat""></div>")
 
@@ -1986,7 +2027,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function copyText(t){if(navigator.clipboard){return navigator.clipboard.writeText(t);}return new Promise((res,rej)=>{try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();res();}catch(e){rej(e);}});}")
         html.AppendLine("function enhanceCodeBlocks(scope){(scope||document).querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const btn=document.createElement('button');btn.type='button';btn.className='code-copy-btn';btn.innerHTML='<svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""9"" y=""9"" width=""13"" height=""13"" rx=""2"" ry=""2""/><path d=""M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1""/></svg>';btn.addEventListener('click',()=>{const code=pre.querySelector('code');const txt=code?code.innerText:pre.innerText;copyText(txt).then(()=>{btn.classList.add('copied');setTimeout(()=>btn.classList.remove('copied'),1500);});});pre.appendChild(btn);pre.dataset.enhanced='1';});}")
         html.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json','X-RedInk-CSRF':__redInkCsrf},body:JSON.stringify(Object.assign({Command:cmd},data))});const txt=await r.text();try{return JSON.parse(txt);}catch{return{ok:false,error:txt}}}catch(e){return{ok:false,error:e.message||'Network error'}}};")
-        html.AppendLine("function isPromptLibrarySlashTrigger(){const pos=msgEl.selectionStart||0;if(pos<=0)return true;const prev=msgEl.value.charAt(pos-1);return /\s/.test(prev);} ")
+        html.AppendLine("function isPromptLibrarySlashTrigger(){return msgEl.value.length===0;} ")
         html.AppendLine("function insertPromptIntoMessage(text){const start=msgEl.selectionStart||0;const end=msgEl.selectionEnd||start;msgEl.setRangeText(String(text||''),start,end,'end');msgEl.focus();} ")
         html.AppendLine("async function openPromptLibrary(){const r=await api('inky_promptlibpick');if(!r||!r.ok){if(r&&r.error)alert(r.error||'Prompt library failed');return;}if(r.prompt){insertPromptIntoMessage(r.prompt);}};")
 
@@ -2008,6 +2049,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const toolingSlot=document.getElementById('toolingSlot');")
         html.AppendLine("const toolingChk=document.getElementById('toolingChk');")
         html.AppendLine("const toolingLbl=document.getElementById('toolingLbl');")
+        html.AppendLine("const runtimeStatusEl=document.getElementById('runtimeStatus');")
         html.AppendLine("const advancedToolsChk=document.getElementById('advancedToolsChk');")
         html.AppendLine("const agentLbl=document.getElementById('agentLbl');")
         html.AppendLine("const toolLogBtn=document.getElementById('toolLogBtn');")
@@ -2026,7 +2068,12 @@ Partial Public Class ThisAddIn
         html.AppendLine("let __toolLogEnabled=true;")
         html.AppendLine("let __toolingEnabled=false;")
         html.AppendLine("let __modelSupportsTooling=false;")
+        html.AppendLine("let __modelCanTool=false;")
+        html.AppendLine("let __autoPilotActive=false;")
+        html.AppendLine("let __agentRuntimeBusy=false;")
         html.AppendLine("let __workspaceDialogMode='';")
+        html.AppendLine("function syncRuntimeStatus(state){state=state||{};if(typeof state.autoPilotActive==='boolean'){__autoPilotActive=!!state.autoPilotActive;}if(typeof state.agentRuntimeBusy==='boolean'){__agentRuntimeBusy=!!state.agentRuntimeBusy;}if(typeof state.modelSupportsTooling==='boolean'){__modelCanTool=!!state.modelSupportsTooling;}else if(typeof state.supportsTooling==='boolean'&&!__autoPilotActive){__modelCanTool=!!state.supportsTooling;}if(typeof state.supportsTooling==='boolean'){__modelSupportsTooling=!!state.supportsTooling;}else{__modelSupportsTooling=__modelCanTool&&!__autoPilotActive;}if(typeof state.toolingEnabled==='boolean'){__toolingEnabled=!!state.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof state.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!state.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}updateToolingVisibility();let text='';if(__agentRuntimeBusy){text=__autoPilotActive&&__modelCanTool?'AutoPilot is active and another Red Ink run is using the shared run slot. Local Chat tools are temporarily unavailable; this request may wait.':'Another Red Ink run is using the shared run slot; this request may wait.';}else if(__autoPilotActive){text=__modelCanTool?'AutoPilot is active. Local Chat tools are temporarily unavailable; requests may wait for the shared run slot.':'AutoPilot is active. Local Chat requests may wait for the shared run slot.';}else if(__modelCanTool&&!__toolingEnabled){text='Tool calling is supported by this model; Local Chat tools are currently off.';}runtimeStatusEl.textContent=text;runtimeStatusEl.style.display=text?'block':'none';}")
+        html.AppendLine("async function refreshRuntimeState(){try{const r=await api('inky_getruntimestate');if(r&&r.ok){syncRuntimeStatus(r);return r;}}catch{}return null;}")
         html.AppendLine("function syncAdvancedToolsUi(state){state=state||{};if(typeof state.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!state.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}if(typeof state.agentModelAvailable==='boolean'){__agentModelAvailable=!!state.agentModelAvailable;}if(typeof state.agentModelActive==='boolean'){__agentModelActive=!!state.agentModelActive;}updateToolingVisibility();updateAgentModelBtn();const hasWorkspace=Object.prototype.hasOwnProperty.call(state,'agentWorkspace');updateAgentWorkspaceDisplay(hasWorkspace?state.agentWorkspace:null);updateAgentFilesDisplay(Array.isArray(state.agentFiles)?state.agentFiles:[]);applyCoupling();}")
 
         html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);var icon=document.getElementById('themeIcon');if(icon){if(dark){icon.innerHTML='<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';}else{icon.innerHTML='<circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';}}} ")
@@ -2054,18 +2101,18 @@ Partial Public Class ThisAddIn
 
         ' Boot        
         html.AppendLine("async function claimScheduledTask(){const r=await api('inky_claimscheduledtask');if(!r||!r.ok)return null;return r.task||null;}")
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();const scheduledTask=await claimScheduledTask();if(scheduledTask&&scheduledTask.prompt&&!__currentJobId){__pendingScheduledTaskId=scheduledTask.taskId||'';msgEl.value=scheduledTask.prompt;await send();}}")
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__modelCanTool=(typeof st.modelSupportsTooling==='boolean'?!!st.modelSupportsTooling:__modelSupportsTooling);__autoPilotActive=(st.autoPilotActive===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});syncRuntimeStatus(st);adjustModelSel();const scheduledTask=await claimScheduledTask();if(scheduledTask&&scheduledTask.prompt&&!__currentJobId){__pendingScheduledTaskId=scheduledTask.taskId||'';msgEl.value=scheduledTask.prompt;await send();}}")
 
         ' Poll job
         html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
         html.AppendLine("function ensureJobResultVisible(st,r){const hist=(st&&Array.isArray(st.history))?st.history.slice():[];const turn=buildAssistantTurnFromJobResult(r);if(!turn)return hist;const activeChat=Number((st&&st.activeChat)||1);const resultChat=Number((r&&r.chat)||activeChat);if(activeChat!==resultChat)return hist;const last=hist.length?hist[hist.length-1]:null;const lastMd=String((last&&last.markdown)||'').trim();if(last&&last.role==='assistant'&&lastMd===turn.markdown)return hist;hist.push(turn);return hist;}")
-        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;cancelBtn.disabled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);let pollFailures=0;try{for(;;){await new Promise(r=>setTimeout(r,2000));let s=null;try{s=await api('inky_jobstatus',{Job:jobId});}catch(e){pollFailures++;console.warn('job status exception',e);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{render(ensureJobResultVisible({history:[],activeChat:1},{result:'The job finished, but the final response could not be retrieved from the host.',chat:1}));}break;}if(!s||!s.ok){pollFailures++;console.warn('job status error',s&&s.error);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{const chatId=Number((s&&s.chat)||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String((s&&s.error)||'The final response could not be retrieved from the host.'),chat:chatId}));}break;}pollFailures=0;if(s.status==='running'){if(s.statusText){setTypingStatus(s.statusText);}else if(__jobCanceled){setTypingStatus('Cancelling…');}continue;}if(s.status==='done'){const stDone={history:Array.isArray(s.history)?s.history:[],activeChat:s.chat};render(ensureJobResultVisible(stDone,s));const stSync=await api('inky_getstate').catch(()=>null);if(stSync&&stSync.ok){const synced=ensureJobResultVisible({history:stSync.history||[],activeChat:s.chat},s);render(synced);if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);}else{const chatId=Number(s.chat||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String(s.error||'The job failed.'),chat:chatId}));}console.warn('job failed',s.error);break;}const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){const hist=ensureJobResultVisible({history:st.history||[],activeChat:s.chat},s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.disabled=false;cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
+        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;cancelBtn.disabled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);let pollFailures=0;try{for(;;){await new Promise(r=>setTimeout(r,2000));let s=null;try{s=await api('inky_jobstatus',{Job:jobId});}catch(e){pollFailures++;console.warn('job status exception',e);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{render(ensureJobResultVisible({history:[],activeChat:1},{result:'The job finished, but the final response could not be retrieved from the host.',chat:1}));}break;}if(!s||!s.ok){pollFailures++;console.warn('job status error',s&&s.error);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{const chatId=Number((s&&s.chat)||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String((s&&s.error)||'The final response could not be retrieved from the host.'),chat:chatId}));}break;}pollFailures=0;if(s.status==='running'){if(s.statusText){setTypingStatus(s.statusText);}else if(__jobCanceled){setTypingStatus('Cancelling…');}continue;}if(s.status==='done'){const stDone={history:Array.isArray(s.history)?s.history:[],activeChat:s.chat};render(ensureJobResultVisible(stDone,s));const stSync=await api('inky_getstate').catch(()=>null);if(stSync&&stSync.ok){const synced=ensureJobResultVisible({history:stSync.history||[],activeChat:s.chat},s);render(synced);if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});syncRuntimeStatus(stSync);}break;}if(s.status==='canceled'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);syncRuntimeStatus(st);}break;}if(s.status==='error'){const chatId=Number(s.chat||1);const st=await api('inky_getstate').catch(()=>null);const baseHist=Array.isArray(s.history)?s.history:((st&&st.ok&&Array.isArray(st.history))?st.history:[]);const terminalResult={result:String(s.result||s.error||'The job failed.'),resultHtml:String(s.resultHtml||''),chat:chatId};render(ensureJobResultVisible({history:baseHist,activeChat:chatId},terminalResult));if(st&&st.ok){if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);syncRuntimeStatus(st);}console.warn('job failed',s.error);break;}const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){const hist=ensureJobResultVisible({history:st.history||[],activeChat:s.chat},s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.disabled=false;cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
-        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;await refreshRuntimeState();const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' PureSend
-        html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;await refreshRuntimeState();__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' drag/drop
         html.AppendLine("(function(){const stop=e=>{e.preventDefault();e.stopPropagation();};['dragenter','dragover','dragleave','drop'].forEach(ev=>document.addEventListener(ev,stop,false));document.addEventListener('drop',async e=>{const files=[...(e.dataTransfer&&e.dataTransfer.files)||[]];if(!files.length)return;")
@@ -2075,8 +2122,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("const f=files[0];if(!__supportsFiles){addTempAssistantBubble('File uploads are not supported for the current model.');return;}const tempId=addTempAssistantBubble(`Uploading <b>${f.name.replaceAll('&','&amp;')}</b> (${(f.size/1024).toFixed(1)} KB)…`);try{const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const r=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(!r.ok){replaceAssistantBubble(tempId,'Upload failed: '+(r.error||'unknown'));return;}if(r.supported===false){replaceAssistantBubble(tempId,'File uploads are not supported for this model.');return;}__pendingFilePath=r.path||'';replaceAssistantBubble(tempId,`Added file: <b>${(r.name||f.name).replaceAll('&','&amp;')}</b>`);}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}} ,false);})();")
 
         ' events
-        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;syncAdvancedToolsUi({advancedToolsEnabled:typeof r.advancedToolsEnabled==='boolean'?r.advancedToolsEnabled:false,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:Array.isArray(r.agentFiles)?r.agentFiles:[],agentModelAvailable:typeof r.agentModelAvailable==='boolean'?r.agentModelAvailable:__agentModelAvailable,agentModelActive:typeof r.agentModelActive==='boolean'?r.agentModelActive:false});});")
-        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);__pendingFilePath='';if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}const st=await api('inky_getstate');if(st&&st.ok){syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});if(st.greeting)msgEl.placeholder=st.greeting;}else{updateAgentFilesDisplay([]);}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
+        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;syncAdvancedToolsUi({advancedToolsEnabled:typeof r.advancedToolsEnabled==='boolean'?r.advancedToolsEnabled:false,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:Array.isArray(r.agentFiles)?r.agentFiles:[],agentModelAvailable:typeof r.agentModelAvailable==='boolean'?r.agentModelAvailable:__agentModelAvailable,agentModelActive:typeof r.agentModelActive==='boolean'?r.agentModelActive:false});syncRuntimeStatus(r);});")
+        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);__pendingFilePath='';if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}const st=await api('inky_getstate');if(st&&st.ok){syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});syncRuntimeStatus(st);if(st.greeting)msgEl.placeholder=st.greeting;}else{updateAgentFilesDisplay([]);}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
         html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")
@@ -2086,15 +2133,15 @@ Partial Public Class ThisAddIn
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId||__jobCanceled)return;__jobCanceled=true;cancelBtn.disabled=true;setTypingStatus('Cancelling…');await api('inky_cancel',{Job:__currentJobId});});")
         html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
-        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});updateModelTooltip();adjustModelSel();}")
+        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});syncRuntimeStatus(r);updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
 
         ' Tooling UI visibility + coupling logic
         html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__advancedToolsEnabled=false;advancedToolsChk.checked=false;__agentModelActive=false;updateAgentWorkspaceDisplay(null);updateAgentFilesDisplay([]);}updateAgentModelBtn();applyCoupling();}")
         html.AppendLine("function applyCoupling(){advancedToolsChk.disabled=!__toolingEnabled;}")
-        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}applyCoupling();});")
-        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){await api('inky_selecttools',{IncludeInteractiveM365Tools:true});}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});}});")
+        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}applyCoupling();syncRuntimeStatus(r);});")
+        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){await api('inky_selecttools',{IncludeInteractiveM365Tools:true});}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});syncRuntimeStatus(r);}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});syncRuntimeStatus(r);}});")
         html.AppendLine("advancedToolsChk.addEventListener('change',async()=>{const desired=advancedToolsChk.checked;const r=await api('inky_setagent',{Enabled:desired});if(!r||!r.ok){advancedToolsChk.checked=!desired;alert(r&&r.error||'Failed to toggle advanced tools');applyCoupling();return;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.files||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});});")
 
         ' Tooling log button (toggle)
@@ -2108,7 +2155,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"" data-open-file=""${esc(name)}"" title=""Open this file"" style=""cursor:pointer"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-download"" data-download-file=""${esc(name)}"" title=""Save a copy to the Desktop Inky folder"">⤓</button><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
         html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const openEl=e.target&&e.target.closest&&e.target.closest('[data-open-file]');if(openEl){e.preventDefault();const fileName=openEl.getAttribute('data-open-file')||'';if(!fileName)return;const r=await api('inky_agentopenfile',{Name:fileName});if(!r||!r.ok)alert(r&&r.error||'Failed to open file');return;}const dl=e.target&&e.target.closest&&e.target.closest('[data-download-file]');if(dl){e.preventDefault();const fileName=dl.getAttribute('data-download-file')||'';if(!fileName)return;dl.disabled=true;try{const r=await api('inky_agentdownloadfile',{Name:fileName});if(!r||!r.ok){alert(r&&r.error||'Failed to download file');return;}addTempAssistantBubble('Saved a copy to: '+esc(r.savedPath||''));}finally{dl.disabled=false;}return;}const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
         html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
-        html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
+        html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});syncRuntimeStatus(r);adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
         html.AppendLine("function esc(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('""','&quot;');}")
         html.AppendLine("function buildWorkspacePresetChipsHtml(ws){const presets=Array.isArray(ws&&ws.presets)?ws.presets:[];const bySlot=new Map();for(const p of presets){const slot=Number(p&&p.slot||0);if(slot>=1&&slot<=5)bySlot.set(slot,p);}let h='<div class=""ws-presets""><span class=""ws-presets-label"">Memories:</span>';for(let slot=1;slot<=5;slot++){const p=bySlot.get(slot)||{slot:slot,assigned:false,exists:false,label:'',path:''};const assigned=!!p.assigned;const exists=(p.exists!==false);const active=!!p.active;const label=assigned?String(p.label||'').trim():'';const text=(assigned&&label)?`${slot} ${esc(label)}`:String(slot);const cls=['ws-chip'];if(active)cls.push('active');if(!assigned)cls.push('empty');if(assigned&&!exists)cls.push('missing');const title=assigned?(exists?String(p.path||''):('Missing: '+String(p.path||''))):('Empty memory '+slot);h+='<span class=""ws-preset-group"">';h+=`<button type=""button"" class=""${cls.join(' ')}"" data-ws-preset-slot=""${slot}"" ${!assigned||!exists?'disabled':''} title=""${esc(title)}"">${text}</button>`;if(assigned){h+=`<button type=""button"" class=""ws-chip-clear"" data-ws-preset-clear=""${slot}"" title=""Clear memory ${slot}"" aria-label=""Clear memory ${slot}"">×</button>`;}h+='</span>';}h+='</div>';return h;}")
         html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__advancedToolsEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';const presetHtml=buildWorkspacePresetChipsHtml(ws||{});if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<div class=""ws-main""><span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button></div>'+presetHtml;bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<div class=""ws-main""><span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button></div>'+presetHtml;bindWorkspaceButtons();}")
@@ -2980,6 +3027,34 @@ Partial Public Class ThisAddIn
                             Return JsonErr("Failed to get tooling state: " & ex.Message)
                         End Try
 
+                    Case "inky_getruntimestate"
+                        Try
+                            Dim stRuntime As InkyState = LoadInkyState()
+                            Dim modelSupportsToolingRuntime As System.Boolean = CurrentModelSupportsTooling(stRuntime)
+                            Dim hasToolsRuntime As System.Boolean =
+                                HasLocalChatAnyCallableTools(stRuntime, includeInteractiveM365Tools:=True)
+                            Dim preferenceEnabledRuntime As System.Boolean =
+                                stRuntime.ToolingEnabled AndAlso hasToolsRuntime AndAlso modelSupportsToolingRuntime
+                            Dim supportsToolingRuntime As System.Boolean =
+                                modelSupportsToolingRuntime AndAlso Not _apActive
+                            Dim toolingEnabledRuntime As System.Boolean =
+                                preferenceEnabledRuntime AndAlso Not _apActive
+                            Dim advancedToolsEnabledRuntime As System.Boolean =
+                                stRuntime.AgentModeEnabled AndAlso toolingEnabledRuntime
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .toolingEnabled = toolingEnabledRuntime,
+                                .supportsTooling = supportsToolingRuntime,
+                                .modelSupportsTooling = modelSupportsToolingRuntime,
+                                .advancedToolsEnabled = advancedToolsEnabledRuntime,
+                                .autoPilotActive = _apActive,
+                                .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy
+                            })
+                        Catch ex As System.Exception
+                            Return JsonErr("Failed to get Local Chat runtime state: " & ex.Message)
+                        End Try
+
                     Case "inky_getstate"
                         Try
                             Dim debugEnabled As System.Boolean = INI_APIDebug
@@ -3060,6 +3135,9 @@ Partial Public Class ThisAddIn
                                     .activeChat = activeChatId,
                                     .toolingEnabled = toolingEnabled,
                                     .supportsTooling = supportsTooling,
+                                    .modelSupportsTooling = CurrentModelSupportsTooling(st),
+                                    .autoPilotActive = _apActive,
+                                    .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy,
                                     .toolingLogEnabled = GetEffectiveToolingLogWindowSetting(),
                                     .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
                                     .advancedToolsEnabled = st.AgentModeEnabled,
@@ -3138,6 +3216,9 @@ Partial Public Class ThisAddIn
                                 .greeting = greetingSwitch,
                                 .toolingEnabled = effectiveToolingEnabled,
                                 .supportsTooling = supportsTooling,
+                                .modelSupportsTooling = CurrentModelSupportsTooling(stSw),
+                                .autoPilotActive = _apActive,
+                                .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy,
                                 .toolingLogEnabled = INI_ToolingLogWindow,
                                 .models = models,
                                 .advancedToolsEnabled = stSw.AgentModeEnabled,
@@ -3552,7 +3633,7 @@ Partial Public Class ThisAddIn
                         Dim useSecondApiLocal As Boolean = st.UseSecondApi
                         Dim selectedModelKeyLocal As String = st.SelectedModelKey
                         Dim supportsToolingForJob As Boolean = CurrentModelSupportsTooling(st)
-                        Dim toolingEnabledForJob As Boolean = st.ToolingEnabled AndAlso supportsToolingForJob
+                        Dim toolingEnabledForJob As Boolean = st.ToolingEnabled AndAlso supportsToolingForJob AndAlso Not _apActive
                         Dim agentModeEnabledForJob As Boolean = st.AgentModeEnabled AndAlso toolingEnabledForJob
                         Dim selectedToolsForJob As List(Of ModelConfig) =
                             GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
@@ -3609,6 +3690,7 @@ Partial Public Class ThisAddIn
                                 Dim snapshotTaken As Boolean = False
                                 Dim alternateApplied As Boolean = False
                                 Dim localOutput As String = ""
+                                Dim assistantTurnPersisted As System.Boolean = False
                                 Dim agentAbortDetected As Boolean = False
                                 Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
                                 Dim agentOutputFiles As List(Of String) = Nothing
@@ -3839,6 +3921,7 @@ Partial Public Class ThisAddIn
 
                                     Dim htmlOut As String = MarkdownToHtml(assistantText)
                                     Dim persisted As Boolean = PersistAssistantTurnForJob(job, assistantText, htmlOut)
+                                    assistantTurnPersisted = persisted
                                     ToolingFileLogger.LogStep(
                                         $"Local Chat assistant persistence completed: job={job.Id}; persisted={If(persisted, "true", "false")}; assistantLen={assistantText.Length}")
 
@@ -3862,12 +3945,31 @@ Partial Public Class ThisAddIn
                                             $"Local Chat job completion signaled: job={job.Id}; status=done; accepted={If(resultAccepted, "true", "false")}; assistantLen={assistantText.Length}")
                                     End If
                                 Catch exOp As OperationCanceledException
+                                    If Not assistantTurnPersisted Then
+                                        Dim cancellationPersisted As System.Boolean = PersistCancellationTurnForJob(job)
+                                        assistantTurnPersisted = cancellationPersisted
+                                        ToolingFileLogger.LogStep(
+                                            $"Local Chat cancellation persistence completed: job={job.Id}; persisted={If(cancellationPersisted, "true", "false")}")
+                                    End If
                                     If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
                                         SchedulerFailLocalBrowserTask(job.ScheduledTaskId, "Aborted by user.")
                                         scheduledTaskFinalized = True
                                     End If
                                     tcs.TrySetCanceled()
                                 Catch ex As System.Exception
+                                    Dim terminalFailureText As System.String =
+                                        BuildLocalChatTerminalFailureText(
+                                            If(assistantTurnPersisted, System.String.Empty, localOutput),
+                                            ex.Message)
+                                    Dim terminalFailureHtml As System.String = MarkdownToHtml(terminalFailureText)
+                                    job.TerminalResultText = terminalFailureText
+                                    job.TerminalResultHtml = terminalFailureHtml
+
+                                    Dim terminalFailurePersisted As System.Boolean =
+                                        PersistAssistantTurnForJob(job, terminalFailureText, terminalFailureHtml)
+                                    ToolingFileLogger.LogStep(
+                                        $"Local Chat terminal failure persistence completed: job={job.Id}; persisted={If(terminalFailurePersisted, "true", "false")}; priorAssistantPersisted={If(assistantTurnPersisted, "true", "false")}; preservedResponse={If(System.String.IsNullOrWhiteSpace(localOutput) OrElse assistantTurnPersisted, "false", "true")}")
+
                                     If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
                                         SchedulerFailLocalBrowserTask(job.ScheduledTaskId, ex.Message)
                                         scheduledTaskFinalized = True
@@ -3985,6 +4087,7 @@ Partial Public Class ThisAddIn
                             Sub()
                                 Dim originalCfgLoadedP As Boolean = False
                                 Dim usedAlternate As Boolean = False
+                                Dim assistantTurnPersistedP As System.Boolean = False
                                 Try
                                     ' Apply alternate model if a specific alternate is selected
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -4023,6 +4126,7 @@ Partial Public Class ThisAddIn
 
                                     Dim htmlOut As String = MarkdownToHtml(assistantText)
                                     Dim persisted As Boolean = PersistAssistantTurnForJob(jobP, assistantText, htmlOut)
+                                    assistantTurnPersistedP = persisted
 
                                     If Not persisted Then
                                         Debug.WriteLine(
@@ -4035,8 +4139,21 @@ Partial Public Class ThisAddIn
                                         tcsP.TrySetResult(assistantText)
                                     End If
                                 Catch exOp As OperationCanceledException
+                                    If Not assistantTurnPersistedP Then
+                                        Dim cancellationPersistedP As System.Boolean = PersistCancellationTurnForJob(jobP)
+                                        assistantTurnPersistedP = cancellationPersistedP
+                                        ToolingFileLogger.LogStep(
+                                            $"Local Chat pure cancellation persistence completed: job={jobP.Id}; persisted={If(cancellationPersistedP, "true", "false")}")
+                                    End If
                                     tcsP.TrySetCanceled()
                                 Catch ex As System.Exception
+                                    Dim terminalFailureTextP As System.String = BuildLocalChatTerminalFailureText(System.String.Empty, ex.Message)
+                                    Dim terminalFailureHtmlP As System.String = MarkdownToHtml(terminalFailureTextP)
+                                    jobP.TerminalResultText = terminalFailureTextP
+                                    jobP.TerminalResultHtml = terminalFailureHtmlP
+                                    Dim terminalPersistedP As System.Boolean = PersistAssistantTurnForJob(jobP, terminalFailureTextP, terminalFailureHtmlP)
+                                    ToolingFileLogger.LogStep(
+                                        $"Local Chat pure terminal failure persistence completed: job={jobP.Id}; persisted={If(terminalPersistedP, "true", "false")}")
                                     tcsP.TrySetException(ex)
                                 Finally
                                     ' Restore config if alternate used
@@ -4080,7 +4197,19 @@ Partial Public Class ThisAddIn
                         If t.IsCanceled Then
                             Return JsonOk(New With {.ok = True, .job = jobId, .status = "canceled"})
                         ElseIf t.IsFaulted Then
-                            Return JsonOk(New With {.ok = False, .job = jobId, .status = "error", .error = t.Exception.GetBaseException().Message})
+                            ' The status request succeeded even though the background job itself failed.
+                            ' Keep the terminal job state explicit so the browser does not treat it as a transport failure.
+                            Dim stJob As InkyState = LoadInkyState(job.ChatId)
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .job = jobId,
+                                .status = "error",
+                                .error = t.Exception.GetBaseException().Message,
+                                .result = If(job.TerminalResultText, System.String.Empty),
+                                .resultHtml = If(job.TerminalResultHtml, System.String.Empty),
+                                .chat = job.ChatId,
+                                .history = ToBrowserTurns(If(stJob?.History, New System.Collections.Generic.List(Of ChatTurn)()))
+                            })
                         Else
                             Dim resultText As String = If(t.Result, "")
                             Dim stJob As InkyState = LoadInkyState(job.ChatId)
@@ -4209,7 +4338,10 @@ Partial Public Class ThisAddIn
                             .activeChat = activeChatId,
                             .greeting = GetFriendlyGreeting(),
                             .toolingEnabled = effectiveToolingEnabled,
-                            .supportsTooling = supportsTooling
+                            .supportsTooling = supportsTooling,
+                            .modelSupportsTooling = CurrentModelSupportsTooling(stClear),
+                            .autoPilotActive = _apActive,
+                            .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy
                         })
 
                     Case "inky_copylast"
@@ -4309,8 +4441,11 @@ Partial Public Class ThisAddIn
                                 .ok = True,
                                 .supportsFiles = st.SupportsFileUploads,
                                 .activeChat = activeChatId,
-                                .supportsTooling = supportsTooling,
-                                .toolingEnabled = st.ToolingEnabled,
+                                .supportsTooling = supportsTooling AndAlso Not _apActive,
+                                .modelSupportsTooling = supportsTooling,
+                                .autoPilotActive = _apActive,
+                                .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy,
+                                .toolingEnabled = st.ToolingEnabled AndAlso supportsTooling AndAlso Not _apActive,
                                 .advancedToolsEnabled = st.AgentModeEnabled,
                                 .agentFiles = GetAgentFileListForBrowser(),
                                 .agentWorkspace = GetAgentWorkspaceForBrowser(),
