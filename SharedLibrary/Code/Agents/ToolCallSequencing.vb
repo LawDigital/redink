@@ -34,6 +34,36 @@ Namespace Agents
     Public NotInheritable Class ToolCallSequencing
 
 
+        Public Shared Function TryPrepareToolCallArgumentsForPreflight(
+            toolConfig As SharedLibrary.ModelConfig,
+            arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+            ByRef preparedArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+            ByRef failureMessage As System.String) As System.Boolean
+
+            preparedArguments = arguments
+            failureMessage = System.String.Empty
+
+            If toolConfig Is Nothing OrElse toolConfig.ToolCallArgumentNormalizer Is Nothing Then
+                Return True
+            End If
+
+            Try
+                preparedArguments = toolConfig.ToolCallArgumentNormalizer.Invoke(arguments)
+            Catch ex As System.Exception
+                preparedArguments = arguments
+                failureMessage = "Tool arguments could not be normalized for validation."
+                Return False
+            End Try
+
+            If preparedArguments Is Nothing Then
+                preparedArguments = arguments
+                failureMessage = "Tool argument normalization returned no argument object."
+                Return False
+            End If
+
+            Return True
+        End Function
+
         Public Const TaskStatusReasonMaxChars As Integer = 160
 
         Private Sub New()
@@ -209,6 +239,14 @@ Namespace Agents
             Public Property AttemptCount As Integer
             Public Property RecoveryEvidenceStepKey As String = String.Empty
             Public Property RecoveryPolicy As ToolFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+            ' True only for a pre-execution validation failure whose invalid/incomplete input
+            ' could not yet supply a trustworthy recovery scope. A corrected retry may therefore
+            ' bind a real scope, but only when the host-owned repair-correlation signature below
+            ' proves that all non-repairable arguments are unchanged.
+            Public Property AllowRetryScopeRebinding As System.Boolean = False
+            Public Property RetryCorrelationSignature As System.String = System.String.Empty
+            Public Property RetryCorrelationRepairablePaths As System.Collections.Generic.List(Of System.String) =
+                New System.Collections.Generic.List(Of System.String)()
             ' An alternative-path success is not always cleared immediately. When causal identity
             ' cannot be proven by an explicit scope (or the failure was delegated to the parent),
             ' success is recorded as recovery evidence and committed only on an accepted final turn.
@@ -661,6 +699,108 @@ Namespace Agents
                 Return Not String.IsNullOrWhiteSpace(System.Convert.ToString(rawTaskId))
             End Function
 
+            Public Function ValidateExpectedArtifactArguments(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                ByRef failureMessage As System.String) As System.Boolean
+
+                failureMessage = System.String.Empty
+                If arguments Is Nothing Then Return True
+
+                Dim raw As System.Object = Nothing
+                If Not arguments.TryGetValue("expected_artifacts", raw) Then Return True
+
+                If raw Is Nothing Then
+                    failureMessage = "expected_artifacts must be an array; use [] for an explicitly empty final-artifact contract."
+                    Return False
+                End If
+
+                Dim token As Newtonsoft.Json.Linq.JToken = Nothing
+                Try
+                    token = Newtonsoft.Json.Linq.JToken.FromObject(raw)
+                Catch ex As System.Exception
+                    failureMessage = "expected_artifacts could not be parsed as an array."
+                    Return False
+                End Try
+
+                If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+                    failureMessage = "expected_artifacts must be an array; use [] for an explicitly empty final-artifact contract."
+                    Return False
+                End If
+
+                For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+                    Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(item, Newtonsoft.Json.Linq.JObject)
+                    If obj Is Nothing Then
+                        failureMessage = "Every expected_artifacts item must be an object."
+                        Return False
+                    End If
+
+                    Dim logicalId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "logical_deliverable_id",
+                        logicalId,
+                        failureMessage) Then
+                        Return False
+                    End If
+
+                    Dim slotId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "output_slot_id",
+                        slotId,
+                        failureMessage) Then
+                        Return False
+                    End If
+                Next
+
+                Return True
+            End Function
+
+            Private Shared Function TryGetExpectedArtifactIdentityValue(
+                obj As Newtonsoft.Json.Linq.JObject,
+                fieldName As System.String,
+                ByRef value As System.String,
+                ByRef failureMessage As System.String) As System.Boolean
+
+                value = System.String.Empty
+
+                If obj Is Nothing OrElse System.String.IsNullOrWhiteSpace(fieldName) Then
+                    failureMessage = "expected_artifacts contains an invalid identity field."
+                    Return False
+                End If
+
+                Dim fieldToken As Newtonsoft.Json.Linq.JToken = obj(fieldName)
+                If fieldToken Is Nothing OrElse
+                   fieldToken.Type = Newtonsoft.Json.Linq.JTokenType.Null OrElse
+                   fieldToken.Type = Newtonsoft.Json.Linq.JTokenType.Undefined Then
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' must be a non-empty scalar value."
+                    Return False
+                End If
+
+                If Not TypeOf fieldToken Is Newtonsoft.Json.Linq.JValue Then
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' must be a scalar value, not an object or array."
+                    Return False
+                End If
+
+                Try
+                    value = If(fieldToken.Value(Of System.String)(), System.String.Empty).Trim()
+                Catch ex As System.Exception
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' could not be converted to a scalar string value."
+                    Return False
+                End Try
+
+                If value = System.String.Empty Then
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' must be a non-empty scalar value."
+                    Return False
+                End If
+
+                Return True
+            End Function
+
             Public Sub RegisterExpectedDeliverablesFromArguments(
                 arguments As IDictionary(Of String, Object))
 
@@ -775,6 +915,9 @@ Namespace Agents
                     hasSlotId OrElse
                     hasSupersedesArtifactId
 
+                Dim hasExpectedArtifacts As System.Boolean =
+                    arguments.ContainsKey("expected_artifacts")
+
                 ' expected_artifacts on agent_* is the CHILD delegation contract and is
                 ' intentionally independent from this run's locked contract. For a
                 ' deliverable-producing call in THIS run, however, a locked multi-slot
@@ -787,7 +930,11 @@ Namespace Agents
                         failureReason = "locked_expected_artifact_slot_required"
                         Return False
                     End If
-                    Return True
+
+                    If Not hasExpectedArtifacts OrElse
+                       IsExplicitSubAgentDelegationCall(toolName, arguments) Then
+                        Return True
+                    End If
                 End If
 
                 If hasLogicalId OrElse hasSlotId OrElse hasArtifactId OrElse hasSupersedesArtifactId Then
@@ -842,13 +989,25 @@ Namespace Agents
                         Return False
                     End If
 
-                    Dim logicalId As String =
-                        If(obj.Value(Of String)("logical_deliverable_id"), "").Trim()
+                    Dim identityFailure As System.String = System.String.Empty
+                    Dim logicalId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "logical_deliverable_id",
+                        logicalId,
+                        identityFailure) Then
 
-                    Dim slotId As String =
-                        If(obj.Value(Of String)("output_slot_id"), "").Trim()
+                        failureReason = "locked_expected_artifact_contract_invalid"
+                        Return False
+                    End If
 
-                    If logicalId = "" OrElse slotId = "" Then
+                    Dim slotId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "output_slot_id",
+                        slotId,
+                        identityFailure) Then
+
                         failureReason = "locked_expected_artifact_contract_invalid"
                         Return False
                     End If
@@ -1123,42 +1282,47 @@ Namespace Agents
 
             Public Function ValidateExplicitArtifactIdentityArguments(
                 arguments As IDictionary(Of String, Object),
-                ByRef failureReason As String) As Boolean
+                ByRef failureReason As String,
+                ByRef failureMessage As String) As Boolean
 
-                failureReason = ""
+                failureReason = System.String.Empty
+                failureMessage = System.String.Empty
                 If arguments Is Nothing Then Return True
 
-                Dim hasArtifactId As Boolean =
-                    arguments.ContainsKey("artifact_id") AndAlso arguments("artifact_id") IsNot Nothing
-                Dim hasLogicalId As Boolean =
-                    arguments.ContainsKey("logical_deliverable_id") AndAlso arguments("logical_deliverable_id") IsNot Nothing
-                Dim hasSlotId As Boolean =
-                    arguments.ContainsKey("output_slot_id") AndAlso arguments("output_slot_id") IsNot Nothing
-                Dim hasSupersedesArtifactId As Boolean =
-                    arguments.ContainsKey("supersedes_artifact_id") AndAlso arguments("supersedes_artifact_id") IsNot Nothing
+                Dim artifactId As System.String = GetArgumentText(arguments, "artifact_id")
+                Dim logicalId As System.String = GetArgumentText(arguments, "logical_deliverable_id")
+                Dim slotId As System.String = GetArgumentText(arguments, "output_slot_id")
+                Dim supersedesId As System.String = GetArgumentText(arguments, "supersedes_artifact_id")
 
-                Dim hasAnyExplicitArtifactIdentity As Boolean =
-                    hasArtifactId OrElse hasLogicalId OrElse hasSlotId OrElse hasSupersedesArtifactId
+                Dim hasAnyExplicitArtifactIdentity As System.Boolean =
+                    artifactId <> System.String.Empty OrElse
+                    logicalId <> System.String.Empty OrElse
+                    slotId <> System.String.Empty OrElse
+                    supersedesId <> System.String.Empty
 
                 If Not hasAnyExplicitArtifactIdentity Then Return True
 
-                Dim artifactId As String =
-                    If(If(hasArtifactId, System.Convert.ToString(arguments("artifact_id")), ""), "").Trim()
-                Dim logicalId As String =
-                    If(If(hasLogicalId, System.Convert.ToString(arguments("logical_deliverable_id")), ""), "").Trim()
-                Dim slotId As String =
-                    If(If(hasSlotId, System.Convert.ToString(arguments("output_slot_id")), ""), "").Trim()
-                Dim supersedesId As String =
-                    If(If(hasSupersedesArtifactId, System.Convert.ToString(arguments("supersedes_artifact_id")), ""), "").Trim()
+                If artifactId = System.String.Empty OrElse
+                   logicalId = System.String.Empty OrElse
+                   slotId = System.String.Empty Then
 
-                If artifactId = "" OrElse logicalId = "" OrElse slotId = "" Then
+                    Dim missingFields As New System.Collections.Generic.List(Of System.String)()
+                    If artifactId = System.String.Empty Then missingFields.Add("artifact_id")
+                    If logicalId = System.String.Empty Then missingFields.Add("logical_deliverable_id")
+                    If slotId = System.String.Empty Then missingFields.Add("output_slot_id")
+
                     failureReason = "explicit_artifact_identity_incomplete"
+                    failureMessage =
+                        "Explicit artifact identity is incomplete. Missing non-empty field(s): " &
+                        System.String.Join(", ", missingFields) &
+                        ". artifact_id, logical_deliverable_id, and output_slot_id are required together when any explicit artifact identity value is supplied."
                     Return False
                 End If
 
-                If supersedesId <> "" AndAlso
+                If supersedesId <> System.String.Empty AndAlso
                    System.String.Equals(artifactId, supersedesId, System.StringComparison.Ordinal) Then
                     failureReason = "explicit_artifact_self_supersession"
+                    failureMessage = "supersedes_artifact_id must not equal artifact_id."
                     Return False
                 End If
 
@@ -1169,58 +1333,63 @@ Namespace Agents
                         Function(existing)
                             Return existing IsNot Nothing AndAlso
                                    System.String.Equals(
-                                       If(existing.ArtifactId, ""),
+                                       If(existing.ArtifactId, System.String.Empty),
                                        artifactId,
                                        System.StringComparison.Ordinal)
                         End Function)
 
                 If existingArtifact IsNot Nothing Then
                     If Not System.String.Equals(
-                        If(existingArtifact.LogicalDeliverableId, "").Trim(),
+                        If(existingArtifact.LogicalDeliverableId, System.String.Empty).Trim(),
                         logicalId,
                         System.StringComparison.Ordinal) OrElse
                        Not System.String.Equals(
-                        If(existingArtifact.OutputSlotId, "").Trim(),
+                        If(existingArtifact.OutputSlotId, System.String.Empty).Trim(),
                         slotId,
                         System.StringComparison.Ordinal) OrElse
                        Not System.String.Equals(
-                        If(existingArtifact.SupersedesArtifactId, "").Trim(),
+                        If(existingArtifact.SupersedesArtifactId, System.String.Empty).Trim(),
                         supersedesId,
                         System.StringComparison.Ordinal) Then
 
                         failureReason = "explicit_artifact_id_conflict"
+                        failureMessage =
+                            "artifact_id is already registered with different logical_deliverable_id, output_slot_id, or supersedes_artifact_id values."
                         Return False
                     End If
 
                     If existingArtifact.LifecycleState = ArtifactLifecycleState.Final OrElse
                        existingArtifact.LifecycleState = ArtifactLifecycleState.Superseded Then
                         failureReason = "explicit_artifact_id_terminal"
+                        failureMessage = "artifact_id already identifies a Final or Superseded artifact and cannot be executed again."
                         Return False
                     End If
                 End If
 
-                If supersedesId <> "" Then
+                If supersedesId <> System.String.Empty Then
                     Dim supersededArtifact As DeliverableArtifact =
                         RegisteredDeliverableArtifacts.FirstOrDefault(
                             Function(existing)
                                 Return existing IsNot Nothing AndAlso
                                        System.String.Equals(
-                                           If(existing.ArtifactId, ""),
+                                           If(existing.ArtifactId, System.String.Empty),
                                            supersedesId,
                                            System.StringComparison.Ordinal)
                             End Function)
 
                     If supersededArtifact Is Nothing OrElse
                        Not System.String.Equals(
-                           If(supersededArtifact.LogicalDeliverableId, "").Trim(),
+                           If(supersededArtifact.LogicalDeliverableId, System.String.Empty).Trim(),
                            logicalId,
                            System.StringComparison.Ordinal) OrElse
                        Not System.String.Equals(
-                           If(supersededArtifact.OutputSlotId, "").Trim(),
+                           If(supersededArtifact.OutputSlotId, System.String.Empty).Trim(),
                            slotId,
                            System.StringComparison.Ordinal) Then
 
                         failureReason = "explicit_artifact_supersession_slot_mismatch"
+                        failureMessage =
+                            "supersedes_artifact_id must identify an existing artifact in the same logical_deliverable_id and output_slot_id."
                         Return False
                     End If
                 End If
@@ -1640,7 +1809,9 @@ Namespace Agents
                                Optional returnedToParent As Boolean = False,
                                Optional toolErrorHandling As String = "retry",
                                Optional terminal As Boolean = False,
-                               Optional recoveryScopeKey As String = "")
+                               Optional recoveryScopeKey As String = "",
+                               Optional allowRetryScopeRebinding As System.Boolean = False,
+                               Optional retryCorrelationArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object) = Nothing)
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedHandling As String = If(toolErrorHandling, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
@@ -1659,17 +1830,46 @@ Namespace Agents
                     UnresolvedToolFailures = New List(Of ToolFailureRecord)()
                 End If
 
-                ' Only the exact same concrete step is a retry. A different step inside the
-                ' same logical operation, or the same tool under a new operation/step scope,
-                ' is retained independently and may later provide replacement evidence.
+                Dim retryCorrelationSignature As System.String = System.String.Empty
+                Dim retryCorrelationRepairablePaths As System.Collections.Generic.List(Of System.String) = Nothing
+                Dim hasExactRetryCorrelation As System.Boolean = False
+
+                If normalizedRecoveryScopeKey = System.String.Empty AndAlso
+                   retryCorrelationArguments IsNot Nothing Then
+
+                    hasExactRetryCorrelation = TryBuildPreflightRetryCorrelation(
+                        retryCorrelationArguments,
+                        If(errorCode, System.String.Empty),
+                        retryCorrelationSignature,
+                        retryCorrelationRepairablePaths)
+                End If
+
+                ' Only the exact same concrete step is a retry. Scope-less preflight failures
+                ' with host-owned repair correlation are additionally keyed by that correlation
+                ' so two different rejected calls using the same tool cannot collapse together.
                 Dim record As ToolFailureRecord = Nothing
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
-                    If System.String.Equals(If(candidate.StepKey, ""), stepKey, System.StringComparison.Ordinal) Then
-                        record = candidate
-                        Exit For
+                    If Not System.String.Equals(If(candidate.StepKey, ""), stepKey, System.StringComparison.Ordinal) Then Continue For
+
+                    Dim candidateHasCorrelation As System.Boolean =
+                        Not System.String.IsNullOrWhiteSpace(candidate.RetryCorrelationSignature)
+
+                    If candidateHasCorrelation <> hasExactRetryCorrelation Then Continue For
+                    If hasExactRetryCorrelation AndAlso
+                       (Not System.String.Equals(
+                           candidate.RetryCorrelationSignature,
+                           retryCorrelationSignature,
+                           System.StringComparison.Ordinal) OrElse
+                        Not RetryCorrelationPathsMatch(
+                            candidate.RetryCorrelationRepairablePaths,
+                            retryCorrelationRepairablePaths)) Then
+                        Continue For
                     End If
+
+                    record = candidate
+                    Exit For
                 Next
 
                 If record Is Nothing Then
@@ -1696,6 +1896,12 @@ Namespace Agents
                 record.LastAttemptSequence = _attemptSequence
                 record.AttemptCount += 1
                 record.RecoveryPolicy = failurePolicy
+                record.AllowRetryScopeRebinding = allowRetryScopeRebinding AndAlso hasExactRetryCorrelation
+                record.RetryCorrelationSignature = If(hasExactRetryCorrelation, retryCorrelationSignature, System.String.Empty)
+                record.RetryCorrelationRepairablePaths =
+                    If(hasExactRetryCorrelation,
+                       New System.Collections.Generic.List(Of System.String)(retryCorrelationRepairablePaths),
+                       New System.Collections.Generic.List(Of System.String)())
                 ' A new/failed retry invalidates prior replacement evidence for this exact step.
                 record.RecoveryEvidenceObserved = False
                 record.RecoveryEvidenceToolName = String.Empty
@@ -1863,7 +2069,8 @@ Namespace Agents
             ''' operation therefore remain valid continuations rather than accidental retries.
             ''' </summary>
             Public Sub NoteSuccessfulProgress(Optional toolName As String = "",
-                                              Optional recoveryScopeKey As String = "")
+                                              Optional recoveryScopeKey As String = "",
+                                              Optional successfulArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object) = Nothing)
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
 
@@ -1882,25 +2089,52 @@ Namespace Agents
                 End If
 
                 Dim recoveryIndex As Integer = -1
+                Dim correlatedRetryMatchCount As System.Int32 = 0
+                Dim correlatedRetryRecoveryIndex As System.Int32 = -1
 
                 ' Exact retry: same concrete StepKey. A different step_id or operation_id is
                 ' deliberately not a retry, even if it calls the same tool. Explicit sub-agent
-                ' task recovery retains its historical cross-agent special case.
+                ' task recovery retains its historical cross-agent special case. Scope-less
+                ' host-correlated preflight failures are cleared only when exactly one unresolved
+                ' candidate can explain the successful call; ambiguous matches remain visible.
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
+                    Dim exactRetryCorrelationMatches As System.Boolean =
+                        DoesPreflightRetryCorrelationMatch(candidate, successfulArguments)
                     Dim sameStep As System.Boolean =
-                        System.String.Equals(If(candidate.StepKey, ""), successfulStepKey, System.StringComparison.Ordinal)
+                        System.String.Equals(If(candidate.StepKey, ""), successfulStepKey, System.StringComparison.Ordinal) AndAlso
+                        exactRetryCorrelationMatches
                     Dim sameExplicitSubAgentTask As System.Boolean =
                         IsSameExplicitSubAgentTaskRecovery(candidate, normalizedToolName, normalizedRecoveryScopeKey)
-                    If Not sameStep AndAlso Not sameExplicitSubAgentTask Then Continue For
+                    Dim sameToolScopeReboundRetry As System.Boolean =
+                        candidate.AllowRetryScopeRebinding AndAlso
+                        exactRetryCorrelationMatches AndAlso
+                        candidate.ProgressEpoch = currentProgressEpoch AndAlso
+                        System.String.Equals(
+                            If(candidate.ToolName, System.String.Empty),
+                            normalizedToolName,
+                            System.StringComparison.OrdinalIgnoreCase)
+                    If Not sameStep AndAlso Not sameExplicitSubAgentTask AndAlso Not sameToolScopeReboundRetry Then Continue For
 
-                    If candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly OrElse
-                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
-                        recoveryIndex = i
+                    If candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.SameToolSuccessOnly AndAlso
+                       candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
+                        Continue For
                     End If
+
+                    If Not System.String.IsNullOrWhiteSpace(candidate.RetryCorrelationSignature) Then
+                        correlatedRetryMatchCount += 1
+                        correlatedRetryRecoveryIndex = i
+                        Continue For
+                    End If
+
+                    recoveryIndex = i
                     Exit For
                 Next
+
+                If recoveryIndex < 0 AndAlso correlatedRetryMatchCount = 1 Then
+                    recoveryIndex = correlatedRetryRecoveryIndex
+                End If
 
                 If recoveryIndex >= 0 Then
                     Dim recovered As ToolFailureRecord = UnresolvedToolFailures(recoveryIndex)
@@ -2215,6 +2449,250 @@ Namespace Agents
                     If(left, "").Trim(),
                     If(right, "").Trim(),
                     System.StringComparison.Ordinal)
+            End Function
+
+            Private Const RetryCorrelationMaskValue As System.String = "__REDINK_HOST_REPAIRABLE_FIELD__"
+
+            Private Shared Function RetryCorrelationPathsMatch(
+                left As System.Collections.Generic.IList(Of System.String),
+                right As System.Collections.Generic.IList(Of System.String)) As System.Boolean
+
+                Dim leftCount As System.Int32 = If(left Is Nothing, 0, left.Count)
+                Dim rightCount As System.Int32 = If(right Is Nothing, 0, right.Count)
+                If leftCount <> rightCount Then Return False
+
+                For index As System.Int32 = 0 To leftCount - 1
+                    If Not System.String.Equals(
+                        If(left(index), System.String.Empty),
+                        If(right(index), System.String.Empty),
+                        System.StringComparison.Ordinal) Then
+                        Return False
+                    End If
+                Next
+
+                Return True
+            End Function
+
+            Private Shared Function TryBuildPreflightRetryCorrelation(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                errorCode As System.String,
+                ByRef signature As System.String,
+                ByRef repairablePaths As System.Collections.Generic.List(Of System.String)) As System.Boolean
+
+                signature = System.String.Empty
+                repairablePaths = New System.Collections.Generic.List(Of System.String)()
+                If arguments Is Nothing Then Return False
+
+                Dim normalizedErrorCode As System.String = If(errorCode, System.String.Empty).Trim()
+                Dim root As Newtonsoft.Json.Linq.JObject = Nothing
+
+                Try
+                    root = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(arguments), Newtonsoft.Json.Linq.JObject)
+                Catch ex As System.Exception
+                    Return False
+                End Try
+
+                If root Is Nothing Then Return False
+
+                If System.String.Equals(
+                    normalizedErrorCode,
+                    "explicit_artifact_identity_incomplete",
+                    System.StringComparison.Ordinal) Then
+
+                    Dim requiredIdentityFields As System.String() = {
+                        "artifact_id",
+                        "logical_deliverable_id",
+                        "output_slot_id"
+                    }
+
+                    For Each fieldName As System.String In requiredIdentityFields
+                        Dim rawValue As System.Object = Nothing
+                        Dim valueText As System.String = System.String.Empty
+                        If arguments.TryGetValue(fieldName, rawValue) AndAlso rawValue IsNot Nothing Then
+                            valueText = If(System.Convert.ToString(rawValue), System.String.Empty).Trim()
+                        End If
+                        If valueText = System.String.Empty Then
+                            repairablePaths.Add("field:" & fieldName)
+                        End If
+                    Next
+
+                ElseIf System.String.Equals(
+                    normalizedErrorCode,
+                    "invalid_expected_artifacts",
+                    System.StringComparison.Ordinal) Then
+
+                    Dim expectedToken As Newtonsoft.Json.Linq.JToken = root("expected_artifacts")
+                    If expectedToken Is Nothing OrElse
+                       expectedToken.Type = Newtonsoft.Json.Linq.JTokenType.Null OrElse
+                       expectedToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+
+                        repairablePaths.Add("field:expected_artifacts")
+                    Else
+                        Dim expectedArray As Newtonsoft.Json.Linq.JArray = DirectCast(expectedToken, Newtonsoft.Json.Linq.JArray)
+                        For index As System.Int32 = 0 To expectedArray.Count - 1
+                            Dim itemObject As Newtonsoft.Json.Linq.JObject = TryCast(expectedArray(index), Newtonsoft.Json.Linq.JObject)
+                            If itemObject Is Nothing Then
+                                repairablePaths.Add("expected_item:" & index.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                Continue For
+                            End If
+
+                            For Each fieldName As System.String In New System.String() {"logical_deliverable_id", "output_slot_id"}
+                                Dim ignoredValue As System.String = System.String.Empty
+                                Dim ignoredFailure As System.String = System.String.Empty
+                                If Not TryGetExpectedArtifactIdentityValue(
+                                    itemObject,
+                                    fieldName,
+                                    ignoredValue,
+                                    ignoredFailure) Then
+
+                                    repairablePaths.Add(
+                                        "expected_field:" &
+                                        index.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                        ":" & fieldName)
+                                End If
+                            Next
+                        Next
+                    End If
+                Else
+                    Return False
+                End If
+
+                If repairablePaths.Count = 0 Then Return False
+                repairablePaths.Sort(System.StringComparer.Ordinal)
+
+                Dim masked As Newtonsoft.Json.Linq.JObject = DirectCast(root.DeepClone(), Newtonsoft.Json.Linq.JObject)
+                If Not ApplyRetryCorrelationMasks(masked, repairablePaths) Then Return False
+
+                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(masked)
+                signature = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                Return Not System.String.IsNullOrWhiteSpace(signature)
+            End Function
+
+            Private Shared Function DoesPreflightRetryCorrelationMatch(
+                failure As ToolFailureRecord,
+                successfulArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+                If failure Is Nothing Then Return False
+                If System.String.IsNullOrWhiteSpace(failure.RetryCorrelationSignature) Then Return True
+                If successfulArguments Is Nothing OrElse
+                   failure.RetryCorrelationRepairablePaths Is Nothing OrElse
+                   failure.RetryCorrelationRepairablePaths.Count = 0 Then
+                    Return False
+                End If
+
+                Dim root As Newtonsoft.Json.Linq.JObject = Nothing
+                Try
+                    root = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(successfulArguments), Newtonsoft.Json.Linq.JObject)
+                Catch ex As System.Exception
+                    Return False
+                End Try
+                If root Is Nothing Then Return False
+
+                Dim masked As Newtonsoft.Json.Linq.JObject = DirectCast(root.DeepClone(), Newtonsoft.Json.Linq.JObject)
+                If Not ApplyRetryCorrelationMasks(masked, failure.RetryCorrelationRepairablePaths) Then Return False
+
+                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(masked)
+                Dim successfulSignature As System.String = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                Return System.String.Equals(
+                    failure.RetryCorrelationSignature,
+                    successfulSignature,
+                    System.StringComparison.Ordinal)
+            End Function
+
+            Private Shared Function ApplyRetryCorrelationMasks(
+                root As Newtonsoft.Json.Linq.JObject,
+                repairablePaths As System.Collections.Generic.IList(Of System.String)) As System.Boolean
+
+                If root Is Nothing OrElse repairablePaths Is Nothing Then Return False
+
+                For Each path As System.String In repairablePaths
+                    Dim normalizedPath As System.String = If(path, System.String.Empty)
+                    If normalizedPath.StartsWith("field:", System.StringComparison.Ordinal) Then
+                        Dim fieldName As System.String = normalizedPath.Substring("field:".Length)
+                        If System.String.IsNullOrWhiteSpace(fieldName) Then Return False
+                        root(fieldName) = New Newtonsoft.Json.Linq.JValue(RetryCorrelationMaskValue)
+                        Continue For
+                    End If
+
+                    If normalizedPath.StartsWith("expected_item:", System.StringComparison.Ordinal) Then
+                        Dim indexText As System.String = normalizedPath.Substring("expected_item:".Length)
+                        Dim index As System.Int32
+                        If Not System.Int32.TryParse(
+                            indexText,
+                            System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            index) Then
+                            Return False
+                        End If
+
+                        Dim expectedArray As Newtonsoft.Json.Linq.JArray = TryCast(root("expected_artifacts"), Newtonsoft.Json.Linq.JArray)
+                        If expectedArray Is Nothing OrElse index < 0 OrElse index >= expectedArray.Count Then Return False
+                        expectedArray(index) = New Newtonsoft.Json.Linq.JValue(RetryCorrelationMaskValue)
+                        Continue For
+                    End If
+
+                    If normalizedPath.StartsWith("expected_field:", System.StringComparison.Ordinal) Then
+                        Dim remainder As System.String = normalizedPath.Substring("expected_field:".Length)
+                        Dim separatorIndex As System.Int32 = remainder.IndexOf(":"c)
+                        If separatorIndex <= 0 OrElse separatorIndex >= remainder.Length - 1 Then Return False
+
+                        Dim indexText As System.String = remainder.Substring(0, separatorIndex)
+                        Dim fieldName As System.String = remainder.Substring(separatorIndex + 1)
+                        Dim index As System.Int32
+                        If Not System.Int32.TryParse(
+                            indexText,
+                            System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            index) Then
+                            Return False
+                        End If
+
+                        Dim expectedArray As Newtonsoft.Json.Linq.JArray = TryCast(root("expected_artifacts"), Newtonsoft.Json.Linq.JArray)
+                        If expectedArray Is Nothing OrElse index < 0 OrElse index >= expectedArray.Count Then Return False
+                        Dim itemObject As Newtonsoft.Json.Linq.JObject = TryCast(expectedArray(index), Newtonsoft.Json.Linq.JObject)
+                        If itemObject Is Nothing OrElse System.String.IsNullOrWhiteSpace(fieldName) Then Return False
+                        itemObject(fieldName) = New Newtonsoft.Json.Linq.JValue(RetryCorrelationMaskValue)
+                        Continue For
+                    End If
+
+                    Return False
+                Next
+
+                Return True
+            End Function
+
+            Private Shared Function CanonicalizeRetryCorrelationToken(
+                token As Newtonsoft.Json.Linq.JToken) As Newtonsoft.Json.Linq.JToken
+
+                If token Is Nothing Then Return Newtonsoft.Json.Linq.JValue.CreateNull()
+
+                Dim objectToken As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+                If objectToken IsNot Nothing Then
+                    Dim properties As New System.Collections.Generic.List(Of Newtonsoft.Json.Linq.JProperty)(objectToken.Properties())
+                    properties.Sort(
+                        Function(left As Newtonsoft.Json.Linq.JProperty, right As Newtonsoft.Json.Linq.JProperty) As System.Int32
+                            Return System.StringComparer.Ordinal.Compare(left.Name, right.Name)
+                        End Function)
+
+                    Dim canonicalObject As New Newtonsoft.Json.Linq.JObject()
+                    For Each propertyToken As Newtonsoft.Json.Linq.JProperty In properties
+                        canonicalObject.Add(
+                            propertyToken.Name,
+                            CanonicalizeRetryCorrelationToken(propertyToken.Value))
+                    Next
+                    Return canonicalObject
+                End If
+
+                Dim arrayToken As Newtonsoft.Json.Linq.JArray = TryCast(token, Newtonsoft.Json.Linq.JArray)
+                If arrayToken IsNot Nothing Then
+                    Dim canonicalArray As New Newtonsoft.Json.Linq.JArray()
+                    For Each item As Newtonsoft.Json.Linq.JToken In arrayToken
+                        canonicalArray.Add(CanonicalizeRetryCorrelationToken(item))
+                    Next
+                    Return canonicalArray
+                End If
+
+                Return token.DeepClone()
             End Function
 
             Private Shared Function ResolveFailureRecoveryPolicy(toolErrorHandling As String,
@@ -2897,36 +3375,26 @@ Namespace Agents
                 Return result
             End If
 
-            Dim matches As MatchCollection =
-        Regex.Matches(
-            trimmedEnd,
-            "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
-            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+            Dim location As TaskStatusFooterParser.TaskStatusEnvelopeLocation =
+                TaskStatusFooterParser.LocateTrailingEnvelope(trimmedEnd)
 
-            result.FooterCount = matches.Count
+            result.FooterCount = If(location Is Nothing, 0, location.FooterCount)
 
-            If matches.Count = 0 Then
+            If location Is Nothing OrElse Not location.IsPresent Then
                 result.FailureReason = "missing_task_status"
                 Return result
             End If
 
             result.IsPresent = True
 
-            If matches.Count <> 1 Then
+            If location.FooterCount <> 1 Then
                 result.FailureReason = "multiple_task_status"
                 Return result
             End If
 
-            Dim match As Match = matches(0)
-
-            If match.Index + match.Length <> trimmedEnd.Length Then
-                result.FailureReason = "task_status_not_at_end"
-                Return result
-            End If
-
-            Dim jsonText As String = match.Groups(1).Value.Trim()
+            Dim jsonText As String = If(location.RawBody, System.String.Empty).Trim()
             result.FooterJson = jsonText
-            result.TextBeforeFooter = trimmedEnd.Substring(0, match.Index).TrimEnd()
+            result.TextBeforeFooter = trimmedEnd.Substring(0, location.StartIndex).TrimEnd()
 
             Try
                 Dim obj As JObject = JObject.Parse(jsonText)
@@ -4084,6 +4552,409 @@ Namespace Agents
             End If
 
             Return ToolFailureCategory.Unknown
+        End Function
+
+        ''' <summary>
+        ''' Builds one bounded metadata-only audit record for a tool-call phase or outcome.
+        ''' The record intentionally excludes free-form content arguments and is safe to emit
+        ''' before host preflight gates so rejected calls remain correlatable.
+        ''' </summary>
+        Private Const ToolCallAuditMaxDiagnosticCharacters As System.Int32 = 16384
+        Private Const ToolCallAuditMaxIdentityCharacters As System.Int32 = 512
+        Private Const ToolCallAuditMaxArgumentKeys As System.Int32 = 64
+        Private Const ToolCallAuditMaxArgumentKeyCharacters As System.Int32 = 256
+        Private Const ToolCallAuditMaxReferenceEntries As System.Int32 = 32
+        Private Const ToolCallAuditMaxReferenceDepth As System.Int32 = 16
+        Private Const ToolCallAuditMaxReferenceTraversalNodes As System.Int32 = 2048
+        Private Const ToolCallAuditMaxReferenceCharacters As System.Int32 = 2048
+        Private Const ToolCallAuditMaxFullPathCharacters As System.Int32 = 8192
+
+        Public Shared Function BuildToolCallAuditDiagnostic(
+            runId As System.String,
+            callId As System.String,
+            toolName As System.String,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            Optional recoveryScopeKey As System.String = "",
+            Optional callStage As System.String = "",
+            Optional outcome As System.String = "",
+            Optional errorCode As System.String = "") As System.String
+
+            Dim normalizedRunId As System.String = If(runId, System.String.Empty).Trim()
+            Dim normalizedCallId As System.String = If(callId, System.String.Empty).Trim()
+            Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
+            Dim normalizedCallStage As System.String = If(callStage, System.String.Empty).Trim()
+            Dim normalizedOutcome As System.String = If(outcome, System.String.Empty).Trim()
+            Dim normalizedErrorCode As System.String = If(errorCode, System.String.Empty).Trim()
+
+            Try
+                Dim parts As New System.Collections.Generic.List(Of System.String)()
+                parts.Add("runId=" & FormatToolCallAuditBoundedText(normalizedRunId, ToolCallAuditMaxIdentityCharacters))
+                parts.Add("callId=" & FormatToolCallAuditBoundedText(normalizedCallId, ToolCallAuditMaxIdentityCharacters))
+                parts.Add("tool=" & FormatToolCallAuditBoundedText(normalizedToolName, ToolCallAuditMaxIdentityCharacters))
+                If normalizedCallStage <> System.String.Empty Then
+                    parts.Add("callStage=" & FormatToolCallAuditBoundedText(normalizedCallStage, ToolCallAuditMaxIdentityCharacters))
+                End If
+                If normalizedOutcome <> System.String.Empty Then
+                    parts.Add("outcome=" & FormatToolCallAuditBoundedText(normalizedOutcome, ToolCallAuditMaxIdentityCharacters))
+                End If
+                If normalizedErrorCode <> System.String.Empty Then
+                    parts.Add("errorCode=" & FormatToolCallAuditBoundedText(normalizedErrorCode, ToolCallAuditMaxIdentityCharacters))
+                End If
+
+                Dim normalizedRecoveryScope As System.String = If(recoveryScopeKey, System.String.Empty).Trim()
+                If normalizedRecoveryScope = System.String.Empty Then
+                    normalizedRecoveryScope = ResolveExplicitRecoveryScopeKey(arguments)
+                End If
+                If normalizedRecoveryScope <> System.String.Empty Then
+                    parts.Add("recoveryScope=" & FormatToolCallAuditBoundedText(normalizedRecoveryScope, ToolCallAuditMaxIdentityCharacters))
+                End If
+
+                Dim operationId As System.String = System.String.Empty
+                Dim stepId As System.String = System.String.Empty
+                If arguments IsNot Nothing Then
+                    Dim rawOperationId As System.Object = Nothing
+                    If arguments.TryGetValue("operation_id", rawOperationId) AndAlso rawOperationId IsNot Nothing Then
+                        operationId = rawOperationId.ToString().Trim()
+                    End If
+                    Dim rawStepId As System.Object = Nothing
+                    If arguments.TryGetValue("step_id", rawStepId) AndAlso rawStepId IsNot Nothing Then
+                        stepId = rawStepId.ToString().Trim()
+                    End If
+                End If
+                If operationId <> System.String.Empty Then
+                    parts.Add("operationId=" & FormatToolCallAuditBoundedText(operationId, ToolCallAuditMaxIdentityCharacters))
+                    parts.Add("stepId=" & FormatToolCallAuditBoundedText(stepId, ToolCallAuditMaxIdentityCharacters))
+                End If
+
+                Dim operationIdentities As System.Collections.Generic.List(Of ExplicitOperationIdentity) =
+                    ExplicitOperationRegistry.ExtractOperationIdentities(arguments)
+                If operationIdentities IsNot Nothing AndAlso operationIdentities.Count > 0 Then
+                    Dim operationSteps As New Newtonsoft.Json.Linq.JArray()
+                    Dim operationLimit As System.Int32 = System.Math.Min(operationIdentities.Count, ToolCallAuditMaxReferenceEntries)
+                    For index As System.Int32 = 0 To operationLimit - 1
+                        Dim identity As ExplicitOperationIdentity = operationIdentities(index)
+                        If identity Is Nothing Then Continue For
+                        operationSteps.Add(New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty(
+                                "operation_id",
+                                BuildToolCallAuditBoundedToken(If(identity.OperationId, System.String.Empty), ToolCallAuditMaxIdentityCharacters)),
+                            New Newtonsoft.Json.Linq.JProperty(
+                                "step_id",
+                                BuildToolCallAuditBoundedToken(If(identity.StepId, System.String.Empty), ToolCallAuditMaxIdentityCharacters))))
+                    Next
+                    If operationSteps.Count > 0 Then
+                        parts.Add("operationSteps=" & operationSteps.ToString(Newtonsoft.Json.Formatting.None))
+                    End If
+                    If operationIdentities.Count > operationLimit Then
+                        parts.Add("operationStepsOmitted=" &
+                                  (operationIdentities.Count - operationLimit).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
+                End If
+
+                If arguments IsNot Nothing AndAlso arguments.Count > 0 Then
+                    Dim argumentKeys As New System.Collections.Generic.List(Of System.String)(arguments.Keys)
+                    argumentKeys.Sort(System.StringComparer.OrdinalIgnoreCase)
+                    Dim argumentKeyArray As New Newtonsoft.Json.Linq.JArray()
+                    Dim argumentKeyLimit As System.Int32 = System.Math.Min(argumentKeys.Count, ToolCallAuditMaxArgumentKeys)
+                    For index As System.Int32 = 0 To argumentKeyLimit - 1
+                        argumentKeyArray.Add(BuildToolCallAuditBoundedToken(argumentKeys(index), ToolCallAuditMaxArgumentKeyCharacters))
+                    Next
+                    parts.Add("argumentKeys=" & argumentKeyArray.ToString(Newtonsoft.Json.Formatting.None))
+                    If argumentKeys.Count > argumentKeyLimit Then
+                        parts.Add("argumentKeysOmitted=" &
+                                  (argumentKeys.Count - argumentKeyLimit).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
+
+                    Dim targetReferences As New System.Collections.Generic.List(Of System.String)()
+                    Dim targetReferencesTruncated As System.Boolean = False
+                    Dim targetReferencesDepthLimited As System.Boolean = False
+                    Dim targetReferencesTraversalLimited As System.Boolean = False
+                    Dim targetReferenceTraversalNodes As System.Int32 = 0
+                    CollectToolCallAuditReferences(
+                        Newtonsoft.Json.Linq.JToken.FromObject(arguments),
+                        System.String.Empty,
+                        targetReferences,
+                        targetReferencesTruncated,
+                        targetReferencesDepthLimited,
+                        targetReferencesTraversalLimited,
+                        targetReferenceTraversalNodes)
+                    targetReferences.Sort(System.StringComparer.OrdinalIgnoreCase)
+                    If targetReferences.Count > 0 Then
+                        parts.Add("targetRefs=" & System.String.Join(",", targetReferences))
+                    End If
+                    If targetReferencesTruncated Then
+                        parts.Add("targetRefsTruncated=true")
+                    End If
+                    If targetReferencesDepthLimited Then
+                        parts.Add("targetRefsDepthLimited=true")
+                    End If
+                    If targetReferencesTraversalLimited Then
+                        parts.Add("targetRefsTraversalLimited=true")
+                    End If
+                End If
+
+                Dim diagnostic As System.String = "Tool call audit: " & System.String.Join("; ", parts)
+                If diagnostic.Length <= ToolCallAuditMaxDiagnosticCharacters Then Return diagnostic
+
+                Return BuildToolCallAuditOverflowDiagnostic(
+                    normalizedRunId,
+                    normalizedCallId,
+                    normalizedToolName,
+                    normalizedCallStage,
+                    normalizedOutcome,
+                    normalizedErrorCode,
+                    diagnostic)
+            Catch ex As System.Exception
+                Try
+                    Return "Tool call audit: runId=" & FormatToolCallAuditBoundedText(normalizedRunId, ToolCallAuditMaxIdentityCharacters) &
+                           "; callId=" & FormatToolCallAuditBoundedText(normalizedCallId, ToolCallAuditMaxIdentityCharacters) &
+                           "; tool=" & FormatToolCallAuditBoundedText(normalizedToolName, ToolCallAuditMaxIdentityCharacters) &
+                           "; auditError=" & FormatToolCallAuditBoundedText(ex.GetType().Name, ToolCallAuditMaxIdentityCharacters)
+                Catch fallbackEx As System.Exception
+                    Return "Tool call audit: auditError=" & fallbackEx.GetType().Name
+                End Try
+            End Try
+        End Function
+
+        Private Shared Function BuildToolCallAuditOverflowDiagnostic(
+            runId As System.String,
+            callId As System.String,
+            toolName As System.String,
+            callStage As System.String,
+            outcome As System.String,
+            errorCode As System.String,
+            fullDiagnostic As System.String) As System.String
+
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            parts.Add("runId=" & FormatToolCallAuditBoundedText(runId, ToolCallAuditMaxIdentityCharacters))
+            parts.Add("callId=" & FormatToolCallAuditBoundedText(callId, ToolCallAuditMaxIdentityCharacters))
+            parts.Add("tool=" & FormatToolCallAuditBoundedText(toolName, ToolCallAuditMaxIdentityCharacters))
+            If Not System.String.IsNullOrWhiteSpace(callStage) Then
+                parts.Add("callStage=" & FormatToolCallAuditBoundedText(callStage, ToolCallAuditMaxIdentityCharacters))
+            End If
+            If Not System.String.IsNullOrWhiteSpace(outcome) Then
+                parts.Add("outcome=" & FormatToolCallAuditBoundedText(outcome, ToolCallAuditMaxIdentityCharacters))
+            End If
+            If Not System.String.IsNullOrWhiteSpace(errorCode) Then
+                parts.Add("errorCode=" & FormatToolCallAuditBoundedText(errorCode, ToolCallAuditMaxIdentityCharacters))
+            End If
+            parts.Add("detailsOmitted=true")
+            parts.Add("fullChars=" & If(fullDiagnostic, System.String.Empty).Length.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            parts.Add("fullSha256=" & ComputeToolCallAuditSha256(If(fullDiagnostic, System.String.Empty)))
+            Return "Tool call audit: " & System.String.Join("; ", parts)
+        End Function
+
+        Private Shared Function BuildToolCallAuditBoundedToken(
+            value As System.String,
+            maxCharacters As System.Int32) As Newtonsoft.Json.Linq.JToken
+
+            Dim normalized As System.String = If(value, System.String.Empty)
+            Dim effectiveLimit As System.Int32 = System.Math.Max(1, maxCharacters)
+            If normalized.Length <= effectiveLimit Then
+                Return New Newtonsoft.Json.Linq.JValue(normalized)
+            End If
+
+            Return New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("omitted", True),
+                New Newtonsoft.Json.Linq.JProperty("chars", normalized.Length),
+                New Newtonsoft.Json.Linq.JProperty("sha256", ComputeToolCallAuditSha256(normalized)))
+        End Function
+
+        Private Shared Function FormatToolCallAuditBoundedText(
+            value As System.String,
+            maxCharacters As System.Int32) As System.String
+
+            Return BuildToolCallAuditBoundedToken(value, maxCharacters).ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        Private Shared Function IsToolCallAuditReferenceKey(argumentName As System.String) As System.Boolean
+            Dim normalized As System.String = If(argumentName, System.String.Empty).Trim().ToLowerInvariant()
+            If normalized = System.String.Empty Then Return False
+
+            Select Case normalized
+                Case "path", "paths", "target", "filename", "file_name", "output_filename",
+                     "artifact_id", "logical_deliverable_id", "output_slot_id",
+                     "supersedes_artifact_id", "result_ref"
+                    Return True
+            End Select
+
+            Return normalized.EndsWith("_path", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_paths", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filename", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filenames", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_file", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_files", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_ref", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_refs", System.StringComparison.Ordinal)
+        End Function
+
+        Private Shared Sub CollectToolCallAuditReferences(
+            token As Newtonsoft.Json.Linq.JToken,
+            prefix As System.String,
+            result As System.Collections.Generic.List(Of System.String),
+            ByRef truncated As System.Boolean,
+            ByRef depthLimited As System.Boolean,
+            ByRef traversalLimited As System.Boolean,
+            ByRef traversalNodes As System.Int32,
+            Optional depth As System.Int32 = 0)
+
+            If token Is Nothing OrElse result Is Nothing OrElse truncated OrElse traversalLimited Then Return
+            If depth > ToolCallAuditMaxReferenceDepth Then
+                depthLimited = True
+                Return
+            End If
+
+            traversalNodes += 1
+            If traversalNodes > ToolCallAuditMaxReferenceTraversalNodes Then
+                traversalLimited = True
+                Return
+            End If
+
+            Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+            If obj IsNot Nothing Then
+                For Each prop As Newtonsoft.Json.Linq.JProperty In obj.Properties()
+                    traversalNodes += 1
+                    If traversalNodes > ToolCallAuditMaxReferenceTraversalNodes Then
+                        traversalLimited = True
+                        Return
+                    End If
+
+                    Dim currentPath As System.String =
+                        If(System.String.IsNullOrWhiteSpace(prefix), prop.Name, prefix & "." & prop.Name)
+
+                    If IsToolCallAuditReferenceKey(prop.Name) Then
+                        AddToolCallAuditReferenceValues(currentPath, prop.Name, prop.Value, result, truncated)
+                        If truncated Then Return
+                    End If
+
+                    If prop.Value IsNot Nothing AndAlso
+                       (prop.Value.Type = Newtonsoft.Json.Linq.JTokenType.Object OrElse
+                        prop.Value.Type = Newtonsoft.Json.Linq.JTokenType.Array) Then
+                        If depth >= ToolCallAuditMaxReferenceDepth Then
+                            depthLimited = True
+                        Else
+                            CollectToolCallAuditReferences(
+                                prop.Value,
+                                currentPath,
+                                result,
+                                truncated,
+                                depthLimited,
+                                traversalLimited,
+                                traversalNodes,
+                                depth + 1)
+                            If truncated OrElse traversalLimited Then Return
+                        End If
+                    End If
+                Next
+                Return
+            End If
+
+            Dim arr As Newtonsoft.Json.Linq.JArray = TryCast(token, Newtonsoft.Json.Linq.JArray)
+            If arr Is Nothing Then Return
+
+            For index As System.Int32 = 0 To arr.Count - 1
+                traversalNodes += 1
+                If traversalNodes > ToolCallAuditMaxReferenceTraversalNodes Then
+                    traversalLimited = True
+                    Return
+                End If
+                Dim currentPath As System.String = prefix & "[" &
+                    index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "]"
+                If depth >= ToolCallAuditMaxReferenceDepth Then
+                    If arr(index) IsNot Nothing AndAlso
+                       (arr(index).Type = Newtonsoft.Json.Linq.JTokenType.Object OrElse
+                        arr(index).Type = Newtonsoft.Json.Linq.JTokenType.Array) Then
+                        depthLimited = True
+                    End If
+                Else
+                    CollectToolCallAuditReferences(
+                        arr(index),
+                        currentPath,
+                        result,
+                        truncated,
+                        depthLimited,
+                        traversalLimited,
+                        traversalNodes,
+                        depth + 1)
+                    If truncated OrElse traversalLimited Then Return
+                End If
+            Next
+        End Sub
+
+        Private Shared Sub AddToolCallAuditReferenceValues(
+            path As System.String,
+            key As System.String,
+            value As Newtonsoft.Json.Linq.JToken,
+            result As System.Collections.Generic.List(Of System.String),
+            ByRef truncated As System.Boolean)
+
+            If value Is Nothing OrElse result Is Nothing OrElse truncated Then Return
+
+            Dim arr As Newtonsoft.Json.Linq.JArray = TryCast(value, Newtonsoft.Json.Linq.JArray)
+            If arr IsNot Nothing Then
+                For index As System.Int32 = 0 To arr.Count - 1
+                    If Not TypeOf arr(index) Is Newtonsoft.Json.Linq.JValue Then Continue For
+                    If result.Count >= ToolCallAuditMaxReferenceEntries Then
+                        truncated = True
+                        Return
+                    End If
+                    Dim itemPath As System.String = path & "[" &
+                        index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "]"
+                    result.Add(
+                        FormatToolCallAuditBoundedText(itemPath, ToolCallAuditMaxArgumentKeyCharacters) & "=" &
+                        FormatToolCallAuditReferenceToken(arr(index), IsToolCallAuditPathKey(key)))
+                Next
+                Return
+            End If
+
+            If Not TypeOf value Is Newtonsoft.Json.Linq.JValue Then Return
+            If result.Count >= ToolCallAuditMaxReferenceEntries Then
+                truncated = True
+                Return
+            End If
+            result.Add(
+                FormatToolCallAuditBoundedText(path, ToolCallAuditMaxArgumentKeyCharacters) & "=" &
+                FormatToolCallAuditReferenceToken(value, IsToolCallAuditPathKey(key)))
+        End Sub
+
+        Private Shared Function IsToolCallAuditPathKey(argumentName As System.String) As System.Boolean
+            Dim normalized As System.String = If(argumentName, System.String.Empty).Trim().ToLowerInvariant()
+            If normalized = "path" OrElse normalized = "paths" OrElse
+               normalized = "filename" OrElse normalized = "file_name" OrElse
+               normalized = "output_filename" Then
+                Return True
+            End If
+
+            Return normalized.EndsWith("_path", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_paths", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filename", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filenames", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_file", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_files", System.StringComparison.Ordinal)
+        End Function
+
+        Private Shared Function FormatToolCallAuditReferenceToken(
+            value As Newtonsoft.Json.Linq.JToken,
+            preserveFullValue As System.Boolean) As System.String
+
+            Dim serialized As System.String =
+                If(value Is Nothing, "null", value.ToString(Newtonsoft.Json.Formatting.None))
+            Dim maxCharacters As System.Int32 =
+                If(preserveFullValue, ToolCallAuditMaxFullPathCharacters, ToolCallAuditMaxReferenceCharacters)
+            If serialized.Length <= maxCharacters Then Return serialized
+
+            Dim omission As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("omitted", True),
+                New Newtonsoft.Json.Linq.JProperty("chars", serialized.Length),
+                New Newtonsoft.Json.Linq.JProperty("sha256", ComputeToolCallAuditSha256(serialized)))
+            Return omission.ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        Private Shared Function ComputeToolCallAuditSha256(value As System.String) As System.String
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Dim bytes As System.Byte() = System.Text.Encoding.UTF8.GetBytes(If(value, System.String.Empty))
+                Return System.BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", System.String.Empty).ToLowerInvariant()
+            End Using
         End Function
 
         Public Shared Function BuildToolFailureDiagnostic(toolName As System.String,

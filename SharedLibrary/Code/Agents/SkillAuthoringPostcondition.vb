@@ -100,8 +100,8 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Validates every authored SKILL.md/AGENT.md touched in the current resource root. Reference-only
-        ''' mutations are allowed; when a descriptor was touched, its frontmatter must satisfy the runtime loader.
+        ''' Validates every authored runtime-selected Skill/Agent descriptor touched in the current resource root.
+        ''' Reference-only mutations are allowed; when a descriptor was touched, its frontmatter must satisfy the authoring contract.
         ''' </summary>
         Public Shared Function HasValidAuthoredResourceStructure(ByRef failureReason As System.String,
                                                                  Optional context As System.Object = Nothing) As System.Boolean
@@ -115,7 +115,8 @@ Namespace Agents
                 If Not _resourceRootPaths.TryGetValue(key, paths) OrElse paths Is Nothing Then Return True
 
                 For Each fullPath As System.String In paths
-                    If IsAuthoredDescriptorPath(fullPath) Then
+                    If IsAuthoredDescriptorPath(fullPath) OrElse
+                       AgentResources.IsSelectedRuntimeResourceDescriptorPath(fullPath) Then
                         candidates.Add(fullPath)
                     End If
                 Next

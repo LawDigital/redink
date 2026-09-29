@@ -71,7 +71,8 @@ Partial Public Class ThisAddIn
                                            Optional keepRecentFullCount As Integer = 2,
                                            Optional staleCompactionThresholdChars As Integer = -1,
                                            Optional staleCompactionPreviewChars As Integer = -1,
-                                           Optional currentIteration As Integer = -1) As String
+                                           Optional currentIteration As Integer = -1,
+                                           Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
             Return ""
@@ -100,10 +101,10 @@ Partial Public Class ThisAddIn
         Dim respIndex As Integer = -1
         For Each resp In responses
             respIndex += 1
-            ' A response whose own body exceeds the large-result threshold is always
-            ' compaction-eligible, regardless of recency: it is stored by reference and
-            ' remains fully retrievable via context_expand, so keeping it "recent-full"
-            ' would only bloat the payload. Smaller responses keep the recency exemption.
+            ' Historical responses whose own body exceeds the large-result threshold are
+            ' compaction-eligible regardless of recency-window position. Current-turn results
+            ' stay lossless until the outer payload-budget pass explicitly permits current-turn
+            ' reference compaction after exhausting historical compaction.
             Dim replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind =
                 ResolveEffectiveReplayRetention(resp, currentIteration)
             Dim respIsLarge As Boolean =
@@ -156,7 +157,10 @@ Partial Public Class ThisAddIn
             ' also move into the drawer; everything stays retrievable via context_expand.
             Dim effStaleThresholdChars As Integer = -1
             Dim effStalePreviewChars As Integer = -1
-            If isStaleForCompaction AndAlso staleCompactionThresholdChars > 0 Then
+            If staleCompactionThresholdChars > 0 AndAlso
+               (isStaleForCompaction OrElse
+                (allowCurrentTurnReferenceCompaction AndAlso
+                 replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical)) Then
                 effStaleThresholdChars = staleCompactionThresholdChars
                 effStalePreviewChars = staleCompactionPreviewChars
             End If
@@ -165,7 +169,8 @@ Partial Public Class ThisAddIn
                 compactForSubAgent OrElse isStaleForCompaction,
                 effStaleThresholdChars,
                 effStalePreviewChars,
-                replayRetention)
+                replayRetention,
+                allowCurrentTurnReferenceCompaction)
 
             ' Model-agnostic handling:
             ' - If the response placeholder is quoted, emit an escaped string.
@@ -241,9 +246,9 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Wraps <see cref="BuildToolResponsesForModel"/> with a payload-size budget. The first
-    ''' pass keeps the most recent results fully visible. Only when the overall payload grows
-    ''' beyond the budget does it progressively shrink the recent-full window and then
-    ''' reference-compact older medium-sized results using lower thresholds. Everything moved
+    ''' pass keeps current-turn results and recent history fully visible. Only when the overall
+    ''' payload grows beyond the budget does it progressively shrink historical replay first;
+    ''' only a final budget stage may reference-compact current-turn results. Everything moved
     ''' this way stays fully retrievable via context_expand, so compaction is lossless. The
     ''' model can also voluntarily tighten this via the context_compact tool.
     ''' Capability-driven: no tool-name or content-type heuristics.
@@ -266,7 +271,8 @@ Partial Public Class ThisAddIn
             compactForSubAgent:=compactForSubAgent,
             compactStaleLargeResponses:=True,
             keepRecentFullCount:=keepRecentFullCount,
-            currentIteration:=currentIteration)
+            currentIteration:=currentIteration,
+                allowCurrentTurnReferenceCompaction:=False)
 
         Dim budget As Integer =
             If(ThisAddIn.INI_ToolResponsePayloadBudgetChars > 0,
@@ -298,7 +304,8 @@ Partial Public Class ThisAddIn
                 compactForSubAgent:=compactForSubAgent,
                 compactStaleLargeResponses:=True,
                 keepRecentFullCount:=keepRecentFullCount,
-                currentIteration:=currentIteration)
+                currentIteration:=currentIteration,
+                allowCurrentTurnReferenceCompaction:=False)
         End While
 
         If payload.Length <= budget Then
@@ -317,11 +324,28 @@ Partial Public Class ThisAddIn
                 keepRecentFullCount:=0,
                 staleCompactionThresholdChars:=mediumThresholdChars,
                 staleCompactionPreviewChars:=previewChars,
-                currentIteration:=currentIteration)
+                currentIteration:=currentIteration,
+                allowCurrentTurnReferenceCompaction:=False)
             If payload.Length <= budget Then
                 Exit For
             End If
         Next
+
+        ' Stage 3: only after historical compaction is exhausted may current-turn results
+        ' use the existing reference/sub-agent compactors. context_expand remains lossless
+        ' because its runtime primitive contract is enforced inside the content builder.
+        If payload.Length > budget Then
+            payload = BuildToolResponsesForModel(
+                responses,
+                toolingModel,
+                compactForSubAgent:=compactForSubAgent,
+                compactStaleLargeResponses:=True,
+                keepRecentFullCount:=0,
+                staleCompactionThresholdChars:=aggressiveThreshold,
+                staleCompactionPreviewChars:=previewChars,
+                currentIteration:=currentIteration,
+                allowCurrentTurnReferenceCompaction:=True)
+        End If
 
         If payload.Length > budget Then
             ToolingFileLogger.LogWarn(
@@ -378,7 +402,8 @@ Partial Public Class ThisAddIn
                                                   Optional compactForSubAgent As Boolean = False,
                                                   Optional overrideThresholdChars As Integer = -1,
                                                   Optional overridePreviewChars As Integer = -1,
-                                                  Optional replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical) As String
+                                                  Optional replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical,
+                                                  Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
         If resp Is Nothing Then Return ""
 
         Dim rawContent As String
@@ -396,6 +421,24 @@ Partial Public Class ThisAddIn
 
             ' A model-requested expansion must reach the model losslessly at least once.
             ' Historical compaction may replace it with a navigation stub on later turns.
+            resp.ModelReplayContent = rawContent
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = False
+            Return rawContent
+        End If
+
+        If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical AndAlso
+           Not allowCurrentTurnReferenceCompaction Then
+
+            ' If budget pressure already compacted this immutable response earlier in the
+            ' same iteration, keep that replay/ref stable instead of creating a new one.
+            If resp.WasCompactedForModelReplay AndAlso
+               Not System.String.IsNullOrWhiteSpace(resp.ModelReplayContent) Then
+                Return resp.ModelReplayContent
+            End If
+
+            ' Otherwise a newly produced result must be visible losslessly at least once
+            ' while the total payload budget can still be met by compacting history first.
             resp.ModelReplayContent = rawContent
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = False

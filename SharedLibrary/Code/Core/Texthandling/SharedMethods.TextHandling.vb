@@ -157,7 +157,20 @@ Namespace SharedLibrary
         ''' Builds the common Markdig pipeline used for HTML display. Advanced extensions are preserved,
         ''' but the Mathematics extension is removed because the embedded HTML viewers do not run MathJax/KaTeX.
         ''' </summary>
-        Public Shared Function CreateMarkdownHtmlPipeline(Optional useSoftlineBreakAsHardlineBreak As Boolean = False) As Markdig.MarkdownPipeline
+        Public Shared Function CreateMarkdownHtmlPipeline(
+            Optional useSoftlineBreakAsHardlineBreak As Boolean = False
+        ) As Markdig.MarkdownPipeline
+
+            Return CreateMarkdownHtmlPipeline(
+                useSoftlineBreakAsHardlineBreak,
+                usePreciseSourceLocation:=False)
+        End Function
+
+        Public Shared Function CreateMarkdownHtmlPipeline(
+            useSoftlineBreakAsHardlineBreak As Boolean,
+            usePreciseSourceLocation As System.Boolean
+        ) As Markdig.MarkdownPipeline
+
             Dim builder As New Markdig.MarkdownPipelineBuilder()
             builder.UseAdvancedExtensions()
 
@@ -175,6 +188,10 @@ Namespace SharedLibrary
 
             If useSoftlineBreakAsHardlineBreak Then
                 builder.UseSoftlineBreakAsHardlineBreak()
+            End If
+
+            If usePreciseSourceLocation Then
+                builder.UsePreciseSourceLocation()
             End If
 
             Return builder.Build()

@@ -1191,6 +1191,14 @@ Namespace SharedLibrary
                     End Try
 
                     If ownerWindow IsNot Nothing Then
+                        OfficeWindowWatchdog.InspectDialogOwner(
+                            ownerWindow,
+                            "AskUserForm",
+                            "ShowAskUserDialogCore")
+                        ownerWindow = IfOwnerOnCurrentThread(ownerWindow)
+                    End If
+
+                    If ownerWindow IsNot Nothing Then
                         dialogResult = inputForm.ShowDialog(ownerWindow)
                     Else
                         dialogResult = inputForm.ShowDialog()
@@ -1209,6 +1217,282 @@ Namespace SharedLibrary
             End Using
         End Function
 
+        Private Shared Function ProtectAskUserQuestionWindowsPathsForMarkdown(
+            markdown As System.String,
+            pipeline As Markdig.MarkdownPipeline
+        ) As System.String
+
+            If System.String.IsNullOrEmpty(markdown) OrElse markdown.IndexOf("\"c) < 0 Then
+                Return If(markdown, System.String.Empty)
+            End If
+
+            If pipeline Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(pipeline))
+            End If
+
+            Dim document As Markdig.Syntax.MarkdownDocument =
+                Markdig.Markdown.Parse(markdown, pipeline)
+
+            Dim proseSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan) =
+                CollectAskUserQuestionProseSourceSpans(document, markdown.Length)
+
+            If proseSpans.Count = 0 Then
+                Return markdown
+            End If
+
+            Dim output As New System.Text.StringBuilder(markdown.Length + 16)
+            Dim sourceIndex As System.Int32 = 0
+
+            For Each proseSpan As Markdig.Syntax.SourceSpan In proseSpans
+                If proseSpan.Start < sourceIndex Then
+                    Continue For
+                End If
+
+                If proseSpan.Start > sourceIndex Then
+                    output.Append(markdown.Substring(sourceIndex, proseSpan.Start - sourceIndex))
+                End If
+
+                AppendAskUserProtectedProseRange(
+                    output,
+                    markdown,
+                    proseSpan.Start,
+                    proseSpan.End)
+
+                sourceIndex = proseSpan.End + 1
+            Next
+
+            If sourceIndex < markdown.Length Then
+                output.Append(markdown.Substring(sourceIndex))
+            End If
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function CollectAskUserQuestionProseSourceSpans(
+            document As Markdig.Syntax.MarkdownDocument,
+            markdownLength As System.Int32
+        ) As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+
+            Dim result As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+            Dim htmlLiteralDepth As System.Int32 = 0
+
+            For Each markdownObject As Markdig.Syntax.MarkdownObject In
+                Markdig.Syntax.MarkdownObjectExtensions.Descendants(document)
+
+                If TypeOf markdownObject Is Markdig.Syntax.Inlines.HtmlInline Then
+                    Dim htmlInline As Markdig.Syntax.Inlines.HtmlInline =
+                        DirectCast(markdownObject, Markdig.Syntax.Inlines.HtmlInline)
+
+                    Dim depthDelta As System.Int32 =
+                        GetAskUserLiteralHtmlTagDepthDelta(htmlInline.Tag)
+
+                    If depthDelta < 0 Then
+                        htmlLiteralDepth = System.Math.Max(0, htmlLiteralDepth + depthDelta)
+                    ElseIf depthDelta > 0 Then
+                        htmlLiteralDepth += depthDelta
+                    End If
+
+                    Continue For
+                End If
+
+                If htmlLiteralDepth <> 0 OrElse
+                   Not TypeOf markdownObject Is Markdig.Syntax.Inlines.LiteralInline Then
+                    Continue For
+                End If
+
+                Dim literal As Markdig.Syntax.Inlines.LiteralInline =
+                    DirectCast(markdownObject, Markdig.Syntax.Inlines.LiteralInline)
+
+                If IsAskUserUsableSourceSpan(literal.Span, markdownLength) Then
+                    result.Add(literal.Span)
+                End If
+            Next
+
+            Return result
+        End Function
+
+        Private Shared Function GetAskUserLiteralHtmlTagDepthDelta(tag As System.String) As System.Int32
+            If System.String.IsNullOrWhiteSpace(tag) Then
+                Return 0
+            End If
+
+            Dim trimmed As System.String = tag.Trim()
+            If trimmed.Length < 3 OrElse trimmed(0) <> "<"c Then
+                Return 0
+            End If
+
+            Dim nameStart As System.Int32 = 1
+            Dim isClosing As System.Boolean = False
+
+            If nameStart < trimmed.Length AndAlso trimmed(nameStart) = "/"c Then
+                isClosing = True
+                nameStart += 1
+            End If
+
+            Dim nameEnd As System.Int32 = nameStart
+            While nameEnd < trimmed.Length AndAlso System.Char.IsLetter(trimmed(nameEnd))
+                nameEnd += 1
+            End While
+
+            If nameEnd = nameStart Then
+                Return 0
+            End If
+
+            Dim tagName As System.String = trimmed.Substring(nameStart, nameEnd - nameStart)
+            If Not System.String.Equals(tagName, "code", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not System.String.Equals(tagName, "pre", System.StringComparison.OrdinalIgnoreCase) Then
+                Return 0
+            End If
+
+            If nameEnd < trimmed.Length AndAlso
+               Not System.Char.IsWhiteSpace(trimmed(nameEnd)) AndAlso
+               trimmed(nameEnd) <> ">"c AndAlso
+               trimmed(nameEnd) <> "/"c Then
+                Return 0
+            End If
+
+            If isClosing Then
+                Return -1
+            End If
+
+            If trimmed.EndsWith("/>", System.StringComparison.Ordinal) Then
+                Return 0
+            End If
+
+            Return 1
+        End Function
+
+        Private Shared Function IsAskUserUsableSourceSpan(
+            span As Markdig.Syntax.SourceSpan,
+            markdownLength As System.Int32
+        ) As System.Boolean
+
+            Return span.Start >= 0 AndAlso
+                   span.End >= span.Start AndAlso
+                   span.End < markdownLength
+        End Function
+
+        Private Shared Sub AppendAskUserProtectedProseRange(
+            output As System.Text.StringBuilder,
+            markdown As System.String,
+            rangeStart As System.Int32,
+            rangeEnd As System.Int32
+        )
+            Dim index As System.Int32 = rangeStart
+
+            While index <= rangeEnd
+                If IsAskUserWindowsPathStart(markdown, index) Then
+                    Dim pathEnd As System.Int32 = index
+                    Dim quotedTerminator As System.Char = System.Char.MinValue
+
+                    If index > 0 AndAlso
+                       (markdown(index - 1) = """"c OrElse markdown(index - 1) = "'"c) Then
+                        quotedTerminator = markdown(index - 1)
+                    End If
+
+                    While pathEnd <= rangeEnd
+                        Dim pathChar As System.Char = markdown(pathEnd)
+
+                        If quotedTerminator <> System.Char.MinValue Then
+                            If pathChar = quotedTerminator Then Exit While
+                        ElseIf System.Char.IsWhiteSpace(pathChar) OrElse
+                               pathChar = "`"c OrElse
+                               pathChar = "<"c OrElse
+                               pathChar = ">"c Then
+                            Exit While
+                        End If
+
+                        pathEnd += 1
+                    End While
+
+                    Dim pathToken As System.String = markdown.Substring(index, pathEnd - index)
+                    output.Append(ProtectAskUserWindowsPathTokenForMarkdown(pathToken))
+                    index = pathEnd
+                    Continue While
+                End If
+
+                output.Append(markdown(index))
+                index += 1
+            End While
+        End Sub
+
+        Private Shared Function ProtectAskUserWindowsPathTokenForMarkdown(pathToken As System.String) As System.String
+            If System.String.IsNullOrEmpty(pathToken) OrElse pathToken.IndexOf("\"c) < 0 Then
+                Return If(pathToken, System.String.Empty)
+            End If
+
+            Dim output As New System.Text.StringBuilder(pathToken.Length + 8)
+            Dim index As System.Int32 = 0
+
+            If pathToken.StartsWith("\\", System.StringComparison.Ordinal) Then
+                Dim leadingSlashCount As System.Int32 = 0
+                While leadingSlashCount < pathToken.Length AndAlso
+                      pathToken(leadingSlashCount) = "\"c
+                    leadingSlashCount += 1
+                End While
+
+                If leadingSlashCount = 2 Then
+                    output.Append("\\\\")
+                Else
+                    output.Append(pathToken.Substring(0, leadingSlashCount))
+                End If
+
+                index = leadingSlashCount
+            End If
+
+            While index < pathToken.Length
+                If pathToken(index) <> "\"c Then
+                    output.Append(pathToken(index))
+                    index += 1
+                    Continue While
+                End If
+
+                Dim slashRunStart As System.Int32 = index
+                While index < pathToken.Length AndAlso pathToken(index) = "\"c
+                    index += 1
+                End While
+
+                Dim slashRunLength As System.Int32 = index - slashRunStart
+
+                If slashRunLength = 1 AndAlso
+                   (index >= pathToken.Length OrElse
+                    IsAskUserMarkdownEscapablePunctuation(pathToken(index))) Then
+                    output.Append("\\")
+                Else
+                    output.Append(New System.String("\"c, slashRunLength))
+                End If
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function IsAskUserMarkdownEscapablePunctuation(value As System.Char) As System.Boolean
+            Select Case value
+                Case "!"c, """"c, "#"c, "$"c, "%"c, "&"c, "'"c,
+                     "("c, ")"c, "*"c, "+"c, ","c, "-"c, "."c, "/"c,
+                     ":"c, ";"c, "<"c, "="c, ">"c, "?"c, "@"c, "["c,
+                     "\"c, "]"c, "^"c, "_"c, "`"c, "{"c, "|"c, "}"c, "~"c
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function IsAskUserWindowsPathStart(value As System.String, index As System.Int32) As System.Boolean
+            If System.String.IsNullOrEmpty(value) OrElse index < 0 OrElse index >= value.Length Then Return False
+
+            If index + 2 < value.Length AndAlso
+               System.Char.IsLetter(value(index)) AndAlso
+               value(index + 1) = ":"c AndAlso
+               value(index + 2) = "\"c Then
+                Return True
+            End If
+
+            Return index + 1 < value.Length AndAlso
+                   value(index) = "\"c AndAlso
+                   value(index + 1) = "\"c
+        End Function
+
         ''' <summary>
         ''' Renders the ask_user question as a small Markdown-enabled HTML document
         ''' whose background matches the given control color so it blends with the form.
@@ -1222,11 +1506,18 @@ Namespace SharedLibrary
 
             Try
                 Dim pipeline As Markdig.MarkdownPipeline =
-                    Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(
+                        useSoftlineBreakAsHardlineBreak:=True,
+                        usePreciseSourceLocation:=True)
+
+                Dim normalizedQuestion As System.String =
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(question, ""))
+
+                normalizedQuestion = ProtectAskUserQuestionWindowsPathsForMarkdown(normalizedQuestion, pipeline)
 
                 bodyHtml =
                     Markdig.Markdown.ToHtml(
-                        Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(question, "")),
+                        normalizedQuestion,
                         pipeline
                     )
             Catch ex As System.Exception

@@ -40,17 +40,53 @@ Namespace Agents
         Public Shared Property CurrentHostProvider As Func(Of String)
 
         Public Shared Function Build() As SharedLibrary.ModelConfig
-            Dim def =
-                "{""name"":""" & ToolName & """," &
-                """description"":""Load and apply a Skill (Claude-style SKILL.md). Returns the skill's instructions and an inventory of its scripts/ and references/ files. Read text files with text_read, materialize binary reference or script assets with the appropriate file_* tools when allowed, and execute scripts with js_run. Use this when a relevant skill is offered above and the user's task matches."",""parameters"":{" &
-                """type"":""object""," &
-                """properties"":{" &
-                """name"":{""type"":""string"",""description"":""The skill name (matches the Skill listed above).""}," &
-                """input"":{""type"":""string"",""description"":""Optional input or sub-task description for the skill.""}," &
-                """expected_artifacts"":{""type"":""array"",""description"":""Optional slot-selection hints. For skills with deliverable-count > 0, the host owns and normalizes the exact opaque logical_deliverable_id/output_slot_id contract; callers may omit this field."",""items"":{""type"":""object"",""properties"":{" &
-                """logical_deliverable_id"":{""type"":""string""}," &
-                """output_slot_id"":{""type"":""string""}}}}," &
-                """required"":[""name""]}}"
+            Dim parameterProperties As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty(
+                    "name",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                        New Newtonsoft.Json.Linq.JProperty("description", "The skill name (matches the Skill listed above)."))),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "input",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                        New Newtonsoft.Json.Linq.JProperty("description", "Optional input or sub-task description for the skill."))),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "expected_artifacts",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "array"),
+                        New Newtonsoft.Json.Linq.JProperty("description", "Optional slot-selection hints. For skills with deliverable-count > 0, the host owns and normalizes the exact opaque logical_deliverable_id/output_slot_id contract; callers may omit this field."),
+                        New Newtonsoft.Json.Linq.JProperty(
+                            "items",
+                            New Newtonsoft.Json.Linq.JObject(
+                                New Newtonsoft.Json.Linq.JProperty("type", "object"),
+                                New Newtonsoft.Json.Linq.JProperty(
+                                    "properties",
+                                    New Newtonsoft.Json.Linq.JObject(
+                                        New Newtonsoft.Json.Linq.JProperty(
+                                            "logical_deliverable_id",
+                                            New Newtonsoft.Json.Linq.JObject(
+                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))),
+                                        New Newtonsoft.Json.Linq.JProperty(
+                                            "output_slot_id",
+                                            New Newtonsoft.Json.Linq.JObject(
+                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))))))))))
+
+            Dim definition As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("name", ToolName),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "description",
+                    "Load and apply a Skill (Claude-style SKILL.md). Returns the skill's instructions and an inventory of its scripts/ and references/ files. Read text files with text_read, materialize binary reference or script assets with the appropriate file_* tools when allowed, and execute scripts with js_run. Use this when a relevant skill is offered above and the user's task matches."),
+                New Newtonsoft.Json.Linq.JProperty(
+                    "parameters",
+                    New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "object"),
+                        New Newtonsoft.Json.Linq.JProperty("properties", parameterProperties),
+                        New Newtonsoft.Json.Linq.JProperty(
+                            "required",
+                            New Newtonsoft.Json.Linq.JArray("name")))))
+
+            Dim def As System.String = definition.ToString(Newtonsoft.Json.Formatting.None)
 
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = ToolName,
@@ -59,7 +95,8 @@ Namespace Agents
                 .ModelDescription = "Skill loader",
                 .Tool = True,
                 .ToolPriority = 940,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .ToolCallArgumentNormalizer = AddressOf PrepareHostOwnedDeclaredDeliverableContractForPreflight
             }
         End Function
 
@@ -67,7 +104,8 @@ Namespace Agents
         ''' Executes the skill_use call. Returns a JSON string suitable for the tool response.
         ''' Caller passes the dictionary from ToolCall.Arguments.
         ''' </summary>
-        Public Shared Function Execute(arguments As IDictionary(Of String, Object)) As String
+        Public Shared Function Execute(arguments As IDictionary(Of String, Object),
+                                       Optional authoritativeUserRequest As System.String = Nothing) As String
             Try
                 Dim name As String = GetStr(arguments, "name")
                 Dim input As String = GetStr(arguments, "input")
@@ -84,23 +122,7 @@ Namespace Agents
                     Return JsonConvert.SerializeObject(New With {Key .error = "missing_name"})
                 End If
 
-                ' Canonical, agnostic skill resolution: try the name exactly as provided
-                ' first, then fall back to a single "skill_" prefix strip only if that
-                ' actually resolves. This avoids double-stripping when the tool name
-                ' (e.g. "skill_<slug>") has already been reduced to the skill's own name,
-                ' which may itself legitimately start with "skill_".
-                Dim sk = AgentResources.FindSkill(name)
-
-                If sk Is Nothing AndAlso name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
-                    Dim strippedName As String = name.Substring("skill_".Length)
-                    If Not String.IsNullOrWhiteSpace(strippedName) Then
-                        Dim strippedSkill = AgentResources.FindSkill(strippedName)
-                        If strippedSkill IsNot Nothing Then
-                            name = strippedName
-                            sk = strippedSkill
-                        End If
-                    End If
-                End If
+                Dim sk As SkillDescriptor = ResolveSkillForInvocation(name)
 
                 If sk Is Nothing Then
                     Return JsonConvert.SerializeObject(New With {Key .error = "skill_not_found", Key .name = name})
@@ -172,7 +194,16 @@ Namespace Agents
                 ' resource lives, which leads to failed reads and accidental new files.
                 result("resource_index") = BuildResourceIndex()
 
-                If Not String.IsNullOrWhiteSpace(input) Then result("input") = input
+                If Not System.String.IsNullOrWhiteSpace(authoritativeUserRequest) Then
+                    result("user_request") = authoritativeUserRequest
+                    result("request_authority_guidance") =
+                        "user_request is the host-preserved latest user request and is user-authored. input, when present, is supplementary orchestrator context, not a user quotation; use conversation context to resolve follow-ups, and never let input contradict the user's words."
+                End If
+
+                If Not String.IsNullOrWhiteSpace(input) Then
+                    result("input") = input
+                    result("input_role") = "orchestrator_summary_non_authoritative"
+                End If
 
                 Return result.ToString(Formatting.None)
             Catch ex As Exception
@@ -397,6 +428,92 @@ Namespace Agents
             End If
 
             Return System.Math.Max(0, parsed)
+        End Function
+
+        ''' <summary>
+        ''' Prepares a generic skill invocation for host preflight without mutating the model-authored
+        ''' dictionary. Only a positively resolved skill with deliverable-count > 0 receives a host-owned
+        ''' expected_artifacts contract; all other arguments remain value-identical in the returned copy.
+        ''' </summary>
+        Public Shared Function PrepareHostOwnedDeclaredDeliverableContractForPreflight(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Collections.Generic.Dictionary(Of System.String, System.Object)
+
+            Dim prepared As System.Collections.Generic.Dictionary(Of System.String, System.Object) =
+                CopyArgumentsForPreflight(arguments)
+
+            Dim name As System.String = GetStr(prepared, "name")
+            If System.String.IsNullOrWhiteSpace(name) Then
+                name = GetStr(prepared, "tool")
+            End If
+            If System.String.IsNullOrWhiteSpace(name) Then
+                name = GetStr(prepared, "skill")
+            End If
+
+            If System.String.IsNullOrWhiteSpace(name) Then Return prepared
+
+            Dim skill As SkillDescriptor = ResolveSkillForInvocation(name)
+            If skill IsNot Nothing Then
+                NormalizeHostOwnedDeclaredDeliverableContract(skill, prepared)
+            End If
+
+            Return prepared
+        End Function
+
+        ''' <summary>
+        ''' Prepares a registry-bound skill invocation using its already-resolved descriptor.
+        ''' The source dictionary is never mutated.
+        ''' </summary>
+        Public Shared Function PrepareKnownSkillHostOwnedDeclaredDeliverableContractForPreflight(
+            skill As SkillDescriptor,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Collections.Generic.Dictionary(Of System.String, System.Object)
+
+            Dim prepared As System.Collections.Generic.Dictionary(Of System.String, System.Object) =
+                CopyArgumentsForPreflight(arguments)
+
+            NormalizeHostOwnedDeclaredDeliverableContract(skill, prepared)
+            Return prepared
+        End Function
+
+        Private Shared Function CopyArgumentsForPreflight(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Collections.Generic.Dictionary(Of System.String, System.Object)
+
+            Dim comparer As System.Collections.Generic.IEqualityComparer(Of System.String) = System.StringComparer.OrdinalIgnoreCase
+            Dim dictionaryArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object) =
+                TryCast(arguments, System.Collections.Generic.Dictionary(Of System.String, System.Object))
+            If dictionaryArguments IsNot Nothing AndAlso dictionaryArguments.Comparer IsNot Nothing Then
+                comparer = dictionaryArguments.Comparer
+            End If
+
+            Dim prepared As New System.Collections.Generic.Dictionary(Of System.String, System.Object)(comparer)
+            If arguments Is Nothing Then Return prepared
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Object) In arguments
+                prepared(pair.Key) = pair.Value
+            Next
+
+            Return prepared
+        End Function
+
+        ' Canonical, agnostic skill resolution: try the name exactly as provided first, then
+        ' fall back to a single "skill_" prefix strip only when that stripped name resolves.
+        Private Shared Function ResolveSkillForInvocation(ByRef name As System.String) As SkillDescriptor
+            Dim skill As SkillDescriptor = AgentResources.FindSkill(name)
+
+            If skill Is Nothing AndAlso
+               name IsNot Nothing AndAlso
+               name.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) Then
+
+                Dim strippedName As System.String = name.Substring("skill_".Length)
+                If Not System.String.IsNullOrWhiteSpace(strippedName) Then
+                    Dim strippedSkill As SkillDescriptor = AgentResources.FindSkill(strippedName)
+                    If strippedSkill IsNot Nothing Then
+                        name = strippedName
+                        skill = strippedSkill
+                    End If
+                End If
+            End If
+
+            Return skill
         End Function
 
         ''' <summary>

@@ -50,40 +50,223 @@ Namespace Agents
     ''' </summary>
     Public Module TaskStatusFooterParser
 
-        Private ReadOnly _envelopeRx As New Regex(
-            "<TASK_STATUS>\s*(?<body>\{[\s\S]*?\})\s*</TASK_STATUS>",
-            RegexOptions.Compiled Or RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant)
+        Private Const OpenTag As System.String = "<TASK_STATUS>"
+        Private Const CloseTag As System.String = "</TASK_STATUS>"
 
-        Private ReadOnly _trailingEnvelopeRx As New Regex(
-            "(?<footer><TASK_STATUS>\s*\{[\s\S]*?\}\s*</TASK_STATUS>)\s*$",
-            RegexOptions.Compiled Or RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant)
+        Public NotInheritable Class TaskStatusEnvelopeLocation
+            Public Property IsPresent As System.Boolean
+            Public Property FooterCount As System.Int32
+            Public Property StartIndex As System.Int32
+            Public Property EndIndex As System.Int32
+            Public Property RawBody As System.String = System.String.Empty
+        End Class
+
+        ''' <summary>
+        ''' Locates the real top-level trailing TASK_STATUS protocol envelope. Literal tags
+        ''' in fenced code, inline text, blockquotes, or earlier examples are data. Consecutive
+        ''' top-level trailing envelopes are counted so strict callers can reject duplicates.
+        ''' </summary>
+        Public Function LocateTrailingEnvelope(text As System.String) As TaskStatusEnvelopeLocation
+            Dim result As New TaskStatusEnvelopeLocation()
+            Dim trimmedEnd As System.String = If(text, System.String.Empty).TrimEnd()
+            If trimmedEnd = System.String.Empty Then Return result
+
+            Dim current As TaskStatusEnvelopeLocation = LocateSingleTrailingEnvelope(trimmedEnd)
+            If current Is Nothing Then Return result
+
+            result.IsPresent = True
+            result.FooterCount = 1
+            result.StartIndex = current.StartIndex
+            result.EndIndex = current.EndIndex
+            result.RawBody = current.RawBody
+
+            Dim prefix As System.String = trimmedEnd.Substring(0, current.StartIndex).TrimEnd()
+            Do While prefix <> System.String.Empty
+                Dim preceding As TaskStatusEnvelopeLocation = LocateSingleTrailingEnvelope(prefix)
+                If preceding Is Nothing Then Exit Do
+                result.FooterCount += 1
+                prefix = prefix.Substring(0, preceding.StartIndex).TrimEnd()
+            Loop
+
+            Return result
+        End Function
+
+        Private Function LocateSingleTrailingEnvelope(text As System.String) As TaskStatusEnvelopeLocation
+            If System.String.IsNullOrEmpty(text) OrElse
+               Not text.EndsWith(CloseTag, System.StringComparison.OrdinalIgnoreCase) Then
+                Return Nothing
+            End If
+
+            Dim closeStart As System.Int32 = text.Length - CloseTag.Length
+            Dim candidateStarts As New System.Collections.Generic.List(Of System.Int32)()
+            Dim searchFrom As System.Int32 = 0
+
+            Do While searchFrom < closeStart
+                Dim openStart As System.Int32 =
+                    text.IndexOf(OpenTag, searchFrom, System.StringComparison.OrdinalIgnoreCase)
+                If openStart < 0 OrElse openStart >= closeStart Then Exit Do
+
+                If IsAcceptableProtocolStart(text, openStart) AndAlso
+                   Not IsInsideMarkdownFence(text, openStart) Then
+                    candidateStarts.Add(openStart)
+                End If
+
+                searchFrom = openStart + OpenTag.Length
+            Loop
+
+            ' Prefer a candidate whose complete body is already a valid JSON object. This lets the
+            ' existing Newtonsoft parser define JSON string/escape boundaries, so literal protocol
+            ' tags inside string values are data rather than competing envelope delimiters.
+            For candidateIndex As System.Int32 = candidateStarts.Count - 1 To 0 Step -1
+                Dim openStart As System.Int32 = candidateStarts(candidateIndex)
+                Dim bodyStart As System.Int32 = openStart + OpenTag.Length
+                Dim rawBody As System.String = text.Substring(bodyStart, closeStart - bodyStart).Trim()
+
+                If IsCompleteJsonObject(rawBody) Then
+                    Return BuildEnvelopeLocation(text.Length, openStart, rawBody)
+                End If
+            Next
+
+            ' A single unambiguous protocol start must still be returned when the JSON is malformed,
+            ' so Parse/strict sequencing can report the existing controlled malformed-footer result.
+            ' With multiple non-data candidates and no valid JSON body, do not silently choose the
+            ' last marker and "repair" an ambiguous response.
+            If candidateStarts.Count = 1 Then
+                Dim openStart As System.Int32 = candidateStarts(0)
+                Dim bodyStart As System.Int32 = openStart + OpenTag.Length
+                Dim rawBody As System.String = text.Substring(bodyStart, closeStart - bodyStart).Trim()
+                Return BuildEnvelopeLocation(text.Length, openStart, rawBody)
+            End If
+
+            Return Nothing
+        End Function
+
+        Private Function BuildEnvelopeLocation(endIndex As System.Int32,
+                                               openStart As System.Int32,
+                                               rawBody As System.String) As TaskStatusEnvelopeLocation
+            Return New TaskStatusEnvelopeLocation() With {
+                .IsPresent = True,
+                .FooterCount = 1,
+                .StartIndex = openStart,
+                .EndIndex = endIndex,
+                .RawBody = If(rawBody, System.String.Empty)
+            }
+        End Function
+
+        Private Function IsCompleteJsonObject(rawBody As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(rawBody) Then Return False
+
+            Try
+                Dim parsed As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(rawBody)
+                Return parsed IsNot Nothing
+            Catch ex As Newtonsoft.Json.JsonReaderException
+                Return False
+            Catch ex As System.Exception
+                Return False
+            End Try
+        End Function
+
+        Private Function IsAcceptableProtocolStart(text As System.String, openStart As System.Int32) As System.Boolean
+            Dim lineStart As System.Int32 = 0
+            If openStart > 0 Then
+                lineStart = text.LastIndexOf(ControlChars.Lf, openStart - 1)
+                If lineStart < 0 Then
+                    lineStart = 0
+                Else
+                    lineStart += 1
+                End If
+            End If
+
+            Dim linePrefix As System.String = text.Substring(lineStart, openStart - lineStart)
+            Dim indentationColumns As System.Int32 = 0
+
+            For Each prefixCharacter As System.Char In linePrefix
+                If prefixCharacter = " "c Then
+                    indentationColumns += 1
+                ElseIf prefixCharacter = ControlChars.Tab Then
+                    indentationColumns += 4 - (indentationColumns Mod 4)
+                Else
+                    ' Protocol control must begin at the top-level line start. Inline prose,
+                    ' blockquote markers and other Markdown prefixes are data, not control.
+                    Return False
+                End If
+
+                If indentationColumns >= 4 Then Return False
+            Next
+
+            Return True
+        End Function
+
+        Private Function IsInsideMarkdownFence(text As System.String, position As System.Int32) As System.Boolean
+            Dim insideFence As System.Boolean = False
+            Dim fenceCharacter As System.Char = System.Char.MinValue
+            Dim fenceLength As System.Int32 = 0
+            Dim lineStart As System.Int32 = 0
+
+            Do While lineStart < position
+                Dim lineEnd As System.Int32 = text.IndexOf(ControlChars.Lf, lineStart)
+                If lineEnd < 0 OrElse lineEnd > position Then lineEnd = position
+
+                Dim line As System.String = text.Substring(lineStart, lineEnd - lineStart)
+                If line.Length > 0 AndAlso line.Chars(line.Length - 1) = ControlChars.Cr Then
+                    line = line.Substring(0, line.Length - 1)
+                End If
+
+                Dim leadingSpaces As System.Int32 = 0
+                Do While leadingSpaces < line.Length AndAlso leadingSpaces < 4 AndAlso line.Chars(leadingSpaces) = " "c
+                    leadingSpaces += 1
+                Loop
+
+                If leadingSpaces <= 3 AndAlso leadingSpaces < line.Length Then
+                    Dim markerCharacter As System.Char = line.Chars(leadingSpaces)
+                    If markerCharacter = "`"c OrElse markerCharacter = "~"c Then
+                        Dim markerLength As System.Int32 = 0
+                        Do While leadingSpaces + markerLength < line.Length AndAlso
+                                 line.Chars(leadingSpaces + markerLength) = markerCharacter
+                            markerLength += 1
+                        Loop
+
+                        If markerLength >= 3 Then
+                            If Not insideFence Then
+                                insideFence = True
+                                fenceCharacter = markerCharacter
+                                fenceLength = markerLength
+                            ElseIf markerCharacter = fenceCharacter AndAlso markerLength >= fenceLength Then
+                                Dim remainder As System.String = line.Substring(leadingSpaces + markerLength)
+                                If System.String.IsNullOrWhiteSpace(remainder) Then
+                                    insideFence = False
+                                    fenceCharacter = System.Char.MinValue
+                                    fenceLength = 0
+                                End If
+                            End If
+                        End If
+                    End If
+                End If
+
+                If lineEnd >= position Then Exit Do
+                lineStart = lineEnd + 1
+            Loop
+
+            Return insideFence
+        End Function
 
         ''' <summary>Parses the trailing TASK_STATUS footer. Returns Missing if none, Invalid if malformed or duplicated.</summary>
         Public Function Parse(text As String) As TaskStatusFooter
             Dim result As New TaskStatusFooter() With {.Kind = TaskStatusKind.Missing}
             If String.IsNullOrWhiteSpace(text) Then Return result
 
-            ' TASK_STATUS is a trailing parent-response contract. Literal tags inside
-            ' JSON/tool/agent data are not protocol envelopes and must be ignored.
-            Dim m As Match = _trailingEnvelopeRx.Match(text)
-            If Not m.Success Then Return result
+            Dim location As TaskStatusEnvelopeLocation = LocateTrailingEnvelope(text)
+            If location Is Nothing OrElse Not location.IsPresent Then Return result
 
-            Dim prefix As String = text.Substring(0, m.Index).TrimEnd()
-            If _trailingEnvelopeRx.IsMatch(prefix) Then
+            result.StartIndex = location.StartIndex
+            result.EndIndex = location.EndIndex
+            result.RawJson = If(location.RawBody, System.String.Empty).Trim()
+
+            If location.FooterCount <> 1 Then
                 result.Kind = TaskStatusKind.Invalid
                 result.InvalidDetail = "multiple_task_status_footers"
                 Return result
             End If
-
-            result.StartIndex = m.Index
-            result.EndIndex = m.Index + m.Length
-            Dim strictMatch As Match = _envelopeRx.Match(m.Groups("footer").Value)
-            If Not strictMatch.Success Then
-                result.Kind = TaskStatusKind.Invalid
-                result.InvalidDetail = "malformed_task_status_footer"
-                Return result
-            End If
-            result.RawJson = strictMatch.Groups("body").Value
 
             Dim parsedKind As TaskStatusKind = TaskStatusKind.Invalid
             Dim parsedReason As String = ""
@@ -129,21 +312,26 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Strips only a trailing top-level TASK_STATUS envelope. Literal TASK_STATUS
-        ''' text embedded in agent/tool payloads is data and must remain untouched.
+        ''' Strips only the real trailing top-level TASK_STATUS envelope. Literal TASK_STATUS
+        ''' text embedded in prose, quotes, fences, or payloads remains untouched.
         ''' </summary>
         Public Function Strip(text As String) As String
             If String.IsNullOrEmpty(text) Then Return text
-            Dim cleaned As String = _trailingEnvelopeRx.Replace(text, "")
-            Return cleaned.TrimEnd()
+
+            Dim cleaned As System.String = text.TrimEnd()
+            Do While cleaned <> System.String.Empty
+                Dim location As TaskStatusEnvelopeLocation = LocateSingleTrailingEnvelope(cleaned)
+                If location Is Nothing OrElse Not location.IsPresent Then Exit Do
+                cleaned = cleaned.Substring(0, location.StartIndex).TrimEnd()
+            Loop
+
+            Return cleaned
         End Function
 
-        ''' <summary>Returns the prose part (everything BEFORE the footer if present, else the whole text).</summary>
+        ''' <summary>Returns the prose part (everything BEFORE real trailing protocol footer(s), else the whole text).</summary>
         Public Function ExtractProse(text As String) As String
             If String.IsNullOrEmpty(text) Then Return ""
-            Dim parsed As TaskStatusFooter = Parse(text)
-            If parsed.Kind = TaskStatusKind.Missing Then Return text.TrimEnd()
-            Return text.Substring(0, parsed.StartIndex).TrimEnd()
+            Return Strip(text)
         End Function
 
         ''' <summary>Builds a strict, valid TASK_STATUS footer line.</summary>

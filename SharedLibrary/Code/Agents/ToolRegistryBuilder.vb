@@ -233,7 +233,8 @@ Namespace Agents
                 .ModelDescription = "Skill: " & sk.Name & " (" & originLabel & ")",
                 .Tool = True,
                 .ToolPriority = 500,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .ToolCallArgumentNormalizer = Function(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) SkillInvokeTool.PrepareKnownSkillHostOwnedDeclaredDeliverableContractForPreflight(sk, arguments)
             }
         End Function
 

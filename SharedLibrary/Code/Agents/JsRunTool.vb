@@ -126,8 +126,10 @@ Namespace Agents
         Friend Shared Function DetectNodeApiUsage(code As String) As String
             If String.IsNullOrWhiteSpace(code) Then Return ""
 
+            Dim executableCode As System.String = MaskJavaScriptLiteralAndCommentText(code)
+
             ' Node module loading (the exact failure seen in production: "require is not defined").
-            If Regex.IsMatch(code, "(^|[^.\w])require\s*\(") Then
+            If Regex.IsMatch(executableCode, "(^|[^.\w])require\s*\(") Then
                 Return "Node.js module loading (require(...)) is unavailable in this sandbox. " &
                        "To read local files use the designated file tools (for example text_read, text_search, " &
                        "or the workspace_* tools) instead of Node's fs module. Use js_run only for in-memory, " &
@@ -135,16 +137,445 @@ Namespace Agents
             End If
 
             ' Other Node-only globals that are guaranteed to be undefined in a browser context.
-            If Regex.IsMatch(code, "(^|[^.\w])module\s*\.\s*exports\b") OrElse
-               Regex.IsMatch(code, "(^|[^.\w])__dirname\b") OrElse
-               Regex.IsMatch(code, "(^|[^.\w])__filename\b") OrElse
-               Regex.IsMatch(code, "(^|[^.\w])process\s*\.\s*(env|argv|cwd|platform)\b") Then
+            If Regex.IsMatch(executableCode, "(^|[^.\w])module\s*\.\s*exports\b") OrElse
+               Regex.IsMatch(executableCode, "(^|[^.\w])__dirname\b") OrElse
+               Regex.IsMatch(executableCode, "(^|[^.\w])__filename\b") OrElse
+               Regex.IsMatch(executableCode, "(^|[^.\w])process\s*\.\s*(env|argv|cwd|platform)\b") Then
                 Return "This code relies on Node.js runtime globals (module.exports/__dirname/__filename/process) " &
                        "that do not exist in the sandboxed browser environment. Use js_run only for in-memory, " &
                        "rule-based computation, and use the file tools (text_read, text_search, workspace_*) for filesystem access."
             End If
 
             Return ""
+        End Function
+
+        ''' <summary>
+        ''' Returns a same-shape analysis view with JavaScript string literals, template-literal
+        ''' text, and comments masked out. The Node preflight is advisory rather than a security
+        ''' boundary; masking ambiguous literal text avoids rejecting browser-valid JavaScript.
+        ''' </summary>
+        Private Shared Function MaskJavaScriptLiteralAndCommentText(code As System.String) As System.String
+            If System.String.IsNullOrEmpty(code) Then Return If(code, System.String.Empty)
+
+            Const StateCode As System.Int32 = 0
+            Const StateSingleQuoted As System.Int32 = 1
+            Const StateDoubleQuoted As System.Int32 = 2
+            Const StateTemplateLiteral As System.Int32 = 3
+            Const StateLineComment As System.Int32 = 4
+            Const StateBlockComment As System.Int32 = 5
+            Const StateRegularExpression As System.Int32 = 6
+
+            Dim masked As New System.Text.StringBuilder(code.Length)
+            Dim state As System.Int32 = StateCode
+            Dim escaped As System.Boolean = False
+            Dim regularExpressionCharacterClass As System.Boolean = False
+            Dim canStartRegularExpression As System.Boolean = True
+            Dim lexicalStateCertain As System.Boolean = True
+            Dim templateExpressionDepth As System.Int32 = 0
+            Dim templateExpressionDepthStack As New System.Collections.Generic.Stack(Of System.Int32)()
+            Dim controlParenthesisStack As New System.Collections.Generic.Stack(Of System.Boolean)()
+            Dim pendingControlParenthesis As System.Boolean = False
+            Dim nextIdentifierIsMemberName As System.Boolean = False
+            Dim index As System.Int32 = 0
+
+            Do While index < code.Length
+                Dim current As System.Char = code.Chars(index)
+                Dim nextCharacter As System.Char = System.Char.MinValue
+                If index + 1 < code.Length Then nextCharacter = code.Chars(index + 1)
+
+                Select Case state
+                    Case StateCode
+                        If System.Char.IsWhiteSpace(current) Then
+                            masked.Append(current)
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = "'"c Then
+                            masked.Append(" "c)
+                            state = StateSingleQuoted
+                            escaped = False
+                            pendingControlParenthesis = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = """"c Then
+                            masked.Append(" "c)
+                            state = StateDoubleQuoted
+                            escaped = False
+                            pendingControlParenthesis = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = "`"c Then
+                            masked.Append(" "c)
+                            state = StateTemplateLiteral
+                            escaped = False
+                            pendingControlParenthesis = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = "/"c AndAlso nextCharacter = "/"c Then
+                            masked.Append("  ")
+                            index += 2
+                            state = StateLineComment
+                            Continue Do
+                        End If
+
+                        If current = "/"c AndAlso nextCharacter = "*"c Then
+                            masked.Append("  ")
+                            index += 2
+                            state = StateBlockComment
+                            Continue Do
+                        End If
+
+                        If current = "/"c AndAlso canStartRegularExpression Then
+                            masked.Append(" "c)
+                            state = StateRegularExpression
+                            escaped = False
+                            regularExpressionCharacterClass = False
+                            pendingControlParenthesis = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = "/"c Then
+                            ' Division and /= both require a right-hand expression. Keeping the slash
+                            ' as code prevents a normal division operator from becoming a fake regex.
+                            masked.Append(current)
+                            canStartRegularExpression = True
+                            pendingControlParenthesis = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If IsJavaScriptIdentifierStart(current) Then
+                            Dim identifierEnd As System.Int32 = index + 1
+                            While identifierEnd < code.Length AndAlso
+                                  IsJavaScriptIdentifierPart(code.Chars(identifierEnd))
+                                identifierEnd += 1
+                            End While
+
+                            Dim identifier As System.String =
+                                code.Substring(index, identifierEnd - index)
+                            masked.Append(identifier)
+
+                            Dim identifierIsMemberName As System.Boolean = nextIdentifierIsMemberName
+                            nextIdentifierIsMemberName = False
+                            If identifierIsMemberName Then
+                                pendingControlParenthesis = False
+                                canStartRegularExpression = False
+                            Else
+                                pendingControlParenthesis =
+                                    IsJavaScriptControlParenthesisKeyword(identifier)
+                                canStartRegularExpression =
+                                    JavaScriptKeywordAllowsRegularExpressionAfter(identifier)
+                            End If
+                            index = identifierEnd
+                            Continue Do
+                        End If
+
+                        If System.Char.IsDigit(current) Then
+                            masked.Append(current)
+                            canStartRegularExpression = False
+                            pendingControlParenthesis = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        Select Case current
+                            Case "("c
+                                masked.Append(current)
+                                controlParenthesisStack.Push(pendingControlParenthesis)
+                                pendingControlParenthesis = False
+                                canStartRegularExpression = True
+
+                            Case ")"c
+                                masked.Append(current)
+                                Dim closesControlParenthesis As System.Boolean = False
+                                If controlParenthesisStack.Count > 0 Then
+                                    closesControlParenthesis = controlParenthesisStack.Pop()
+                                End If
+                                canStartRegularExpression = closesControlParenthesis
+                                pendingControlParenthesis = False
+
+                            Case "{"c
+                                masked.Append(current)
+                                If templateExpressionDepth > 0 Then
+                                    templateExpressionDepth += 1
+                                End If
+                                canStartRegularExpression = True
+                                pendingControlParenthesis = False
+
+                            Case "}"c
+                                If templateExpressionDepth > 0 Then
+                                    templateExpressionDepth -= 1
+                                    If templateExpressionDepth = 0 Then
+                                        masked.Append(" "c)
+                                        If templateExpressionDepthStack.Count > 0 Then
+                                            templateExpressionDepth = templateExpressionDepthStack.Pop()
+                                        End If
+                                        state = StateTemplateLiteral
+                                        escaped = False
+                                        pendingControlParenthesis = False
+                                        index += 1
+                                        Continue Do
+                                    End If
+                                End If
+
+                                masked.Append(current)
+                                ' A closing brace can end an object value or a statement block. Treat
+                                ' a following slash conservatively as regex-capable; a false negative
+                                ' advisory hint is safer than rejecting browser-valid regex code.
+                                canStartRegularExpression = True
+                                pendingControlParenthesis = False
+
+                            Case "["c
+                                masked.Append(current)
+                                canStartRegularExpression = True
+                                pendingControlParenthesis = False
+
+                            Case "]"c
+                                masked.Append(current)
+                                canStartRegularExpression = False
+                                pendingControlParenthesis = False
+
+                            Case "."c
+                                masked.Append(current)
+                                canStartRegularExpression = False
+                                pendingControlParenthesis = False
+                                nextIdentifierIsMemberName = True
+
+                            Case "+"c, "-"c
+                                If nextCharacter = current Then
+                                    masked.Append(current)
+                                    masked.Append(nextCharacter)
+                                    index += 2
+                                    pendingControlParenthesis = False
+                                    Continue Do
+                                End If
+
+                                masked.Append(current)
+                                canStartRegularExpression = True
+                                pendingControlParenthesis = False
+
+                            Case "="c, "!"c, "*"c, "%"c, "&"c, "|"c, "^"c,
+                                 "<"c, ">"c, "?"c, ","c, ";"c, ":"c, "~"c
+                                masked.Append(current)
+                                canStartRegularExpression = True
+                                pendingControlParenthesis = False
+
+                            Case Else
+                                masked.Append(current)
+                                pendingControlParenthesis = False
+                        End Select
+
+                        index += 1
+
+                    Case StateSingleQuoted, StateDoubleQuoted
+                        If current = Microsoft.VisualBasic.ControlChars.Cr OrElse
+                           current = Microsoft.VisualBasic.ControlChars.Lf Then
+                            masked.Append(current)
+                        Else
+                            masked.Append(" "c)
+                        End If
+
+                        If escaped Then
+                            escaped = False
+                        ElseIf current = "\"c Then
+                            escaped = True
+                        ElseIf (state = StateSingleQuoted AndAlso current = "'"c) OrElse
+                               (state = StateDoubleQuoted AndAlso current = """"c) Then
+                            state = StateCode
+                            canStartRegularExpression = False
+                        End If
+
+                        index += 1
+
+                    Case StateTemplateLiteral
+                        If escaped Then
+                            If current = Microsoft.VisualBasic.ControlChars.Cr OrElse
+                               current = Microsoft.VisualBasic.ControlChars.Lf Then
+                                masked.Append(current)
+                            Else
+                                masked.Append(" "c)
+                            End If
+                            escaped = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = "\"c Then
+                            masked.Append(" "c)
+                            escaped = True
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = "`"c Then
+                            masked.Append(" "c)
+                            state = StateCode
+                            canStartRegularExpression = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        If current = "$"c AndAlso nextCharacter = "{"c Then
+                            masked.Append("  ")
+                            index += 2
+                            templateExpressionDepthStack.Push(templateExpressionDepth)
+                            templateExpressionDepth = 1
+                            state = StateCode
+                            canStartRegularExpression = True
+                            pendingControlParenthesis = False
+                            Continue Do
+                        End If
+
+                        If current = Microsoft.VisualBasic.ControlChars.Cr OrElse
+                           current = Microsoft.VisualBasic.ControlChars.Lf Then
+                            masked.Append(current)
+                        Else
+                            masked.Append(" "c)
+                        End If
+                        index += 1
+
+                    Case StateLineComment
+                        If current = Microsoft.VisualBasic.ControlChars.Cr OrElse
+                           current = Microsoft.VisualBasic.ControlChars.Lf Then
+                            masked.Append(current)
+                            state = StateCode
+                        Else
+                            masked.Append(" "c)
+                        End If
+                        index += 1
+
+                    Case StateBlockComment
+                        If current = "*"c AndAlso nextCharacter = "/"c Then
+                            masked.Append("  ")
+                            index += 2
+                            state = StateCode
+                            Continue Do
+                        End If
+
+                        If current = Microsoft.VisualBasic.ControlChars.Cr OrElse
+                           current = Microsoft.VisualBasic.ControlChars.Lf Then
+                            masked.Append(current)
+                        Else
+                            masked.Append(" "c)
+                        End If
+                        index += 1
+
+                    Case StateRegularExpression
+                        If current = Microsoft.VisualBasic.ControlChars.Cr OrElse
+                           current = Microsoft.VisualBasic.ControlChars.Lf Then
+                            masked.Append(current)
+                            state = StateCode
+                            lexicalStateCertain = False
+                            canStartRegularExpression = True
+                            regularExpressionCharacterClass = False
+                            escaped = False
+                            index += 1
+                            Continue Do
+                        End If
+
+                        masked.Append(" "c)
+
+                        If escaped Then
+                            escaped = False
+                        ElseIf current = "\"c Then
+                            escaped = True
+                        ElseIf current = "["c AndAlso Not regularExpressionCharacterClass Then
+                            regularExpressionCharacterClass = True
+                        ElseIf current = "]"c AndAlso regularExpressionCharacterClass Then
+                            regularExpressionCharacterClass = False
+                        ElseIf current = "/"c AndAlso Not regularExpressionCharacterClass Then
+                            state = StateCode
+                            canStartRegularExpression = False
+
+                            Dim flagIndex As System.Int32 = index + 1
+                            While flagIndex < code.Length AndAlso
+                                  IsJavaScriptIdentifierPart(code.Chars(flagIndex))
+                                masked.Append(" "c)
+                                flagIndex += 1
+                            End While
+
+                            index = flagIndex
+                            Continue Do
+                        End If
+
+                        index += 1
+                End Select
+            Loop
+
+            If state = StateSingleQuoted OrElse
+               state = StateDoubleQuoted OrElse
+               state = StateTemplateLiteral OrElse
+               state = StateBlockComment OrElse
+               state = StateRegularExpression OrElse
+               templateExpressionDepth > 0 OrElse
+               templateExpressionDepthStack.Count > 0 Then
+                lexicalStateCertain = False
+            End If
+
+            If Not lexicalStateCertain Then
+                Return MaskAllJavaScriptTextPreservingLineBreaks(code)
+            End If
+
+            Return masked.ToString()
+        End Function
+
+        Private Shared Function IsJavaScriptIdentifierStart(value As System.Char) As System.Boolean
+            Return value = "_"c OrElse
+                   value = "$"c OrElse
+                   System.Char.IsLetter(value)
+        End Function
+
+        Private Shared Function IsJavaScriptIdentifierPart(value As System.Char) As System.Boolean
+            Return IsJavaScriptIdentifierStart(value) OrElse System.Char.IsDigit(value)
+        End Function
+
+        Private Shared Function JavaScriptKeywordAllowsRegularExpressionAfter(
+            identifier As System.String
+        ) As System.Boolean
+
+            Select Case identifier
+                Case "return", "throw", "case", "delete", "void", "typeof", "new",
+                     "yield", "await", "instanceof", "in", "of", "else", "do"
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function IsJavaScriptControlParenthesisKeyword(
+            identifier As System.String
+        ) As System.Boolean
+
+            Select Case identifier
+                Case "if", "while", "for", "with", "switch", "catch"
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function MaskAllJavaScriptTextPreservingLineBreaks(
+            code As System.String
+        ) As System.String
+
+            Dim masked As New System.Text.StringBuilder(code.Length)
+            For Each current As System.Char In code
+                If current = Microsoft.VisualBasic.ControlChars.Cr OrElse
+                   current = Microsoft.VisualBasic.ControlChars.Lf Then
+                    masked.Append(current)
+                Else
+                    masked.Append(" "c)
+                End If
+            Next
+            Return masked.ToString()
         End Function
 
         Private Shared Function GetStr(args As IDictionary(Of String, Object), name As String) As String
