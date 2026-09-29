@@ -3968,7 +3968,10 @@ Namespace Agents
                 Return result
             End If
 
-            If Not HasSubstantiveUserFacingText(parsed.TextBeforeFooter) Then
+            ' A valid final turn needs actual user-presentable content, not merely letters
+            ' contained in a raw JSON/structured protocol payload before TASK_STATUS. Mixed
+            ' prose + structured payload remains presentable; a payload-only final does not.
+            If Not IsUserPresentableFinalText(parsed.TextBeforeFooter) Then
                 result.InvalidReason = "non_user_facing_final_text"
                 Return result
             End If

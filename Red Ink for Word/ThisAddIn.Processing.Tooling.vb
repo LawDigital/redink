@@ -971,6 +971,18 @@ Partial Public Class ThisAddIn
                     subAgentMode,
                     context.FinalResponseContract)
 
+            ' Word-chat host actions are a final-response transport, not native tool calls.
+            ' The generic tooling contract is intentionally strict about raw JSON, so when the
+            ' Word command protocol is active we restate this host-specific exception AFTER the
+            ' generic tooling instructions. This prevents the tooling loop from suppressing valid
+            ' redInkWordCommands output while preserving TASK_STATUS as the literal final line.
+            If Not subAgentMode AndAlso
+               baseSysPrompt.IndexOf(SharedMethods.ChatWordCommandProtocolMarker, StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+                enhancedSysPrompt &= Environment.NewLine & Environment.NewLine &
+                    "WORD CHAT HOST-ACTION OVERRIDE: The redInkWordCommands JSON object expressly authorized elsewhere in this system prompt is a host document-action envelope, not raw internal JSON and not a native tool call. It is allowed only in the final user-facing turn after all native tool work is complete. Keep normal user-facing prose before it. When TASK_STATUS is required, place redInkWordCommands immediately before the TASK_STATUS footer so TASK_STATUS remains the literal final line. Never place redInkWordCommands in an intermediate tool-call turn and never serialize a native tool call inside it."
+            End If
+
             If Not String.IsNullOrWhiteSpace(languageContractFragment) Then
                 enhancedSysPrompt = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
                                     languageContractFragment
@@ -1408,7 +1420,7 @@ Partial Public Class ThisAddIn
                 If Not subAgentMode AndAlso
                    context.CapabilityRoutingRequired AndAlso
                    ShouldBlockForCapabilityRouting("", context) AndAlso
-                   Not ContainsToolCalls(currentResponse, detectionPattern) Then
+                   Not ContainsConfirmedToolCalls(currentResponse, detectionPattern, context.ToolingModel.ToolCallExtractionMap) Then
 
                     If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
                         context.PrematureTextRetryCount += 1
@@ -1436,7 +1448,7 @@ Partial Public Class ThisAddIn
                     Exit While
                 End If
 
-                If ContainsToolCalls(currentResponse, detectionPattern) Then
+                If ContainsConfirmedToolCalls(currentResponse, detectionPattern, context.ToolingModel.ToolCallExtractionMap) Then
                     context.Log("Tool calls detected in response")
 
                     Dim extractionMap = context.ToolingModel.ToolCallExtractionMap
@@ -3515,7 +3527,7 @@ Partial Public Class ThisAddIn
                     ' (Bug 1) an envelope/tool-call/provider-JSON payload is never user-facing;
                     ' (Bug 2) a 'complete' claim requires a validated deliverable when the request needs one.
                     Dim forcedFinalIsEnvelope As Boolean =
-                        ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+                        ContainsConfirmedToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) OrElse
                         SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(currentResponse)
 
                     Dim forcedFinalDeliverableFailureReason As String =
@@ -3623,7 +3635,7 @@ Partial Public Class ThisAddIn
             ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
             If iteration >= context.MaxIterations AndAlso
                Not context.IsCancelled AndAlso
-               (ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+               (ContainsConfirmedToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) OrElse
                 Not SharedLibrary.Agents.ToolCallSequencing.IsUserPresentableFinalText(currentResponse)) Then
 
                 context.Log("Forcing final response (max iterations reached with a pending tool call or non-user-facing content)...")
@@ -3669,7 +3681,7 @@ Partial Public Class ThisAddIn
                         EnsureUI:=True)
 
                     If Not String.IsNullOrWhiteSpace(finalResponse) AndAlso
-                               Not ContainsToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern) AndAlso
+                               Not ContainsConfirmedToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) AndAlso
                                Not SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(finalResponse) Then
                         currentResponse = finalResponse
                         context.Log($"Final response received ({currentResponse.Length} chars)")
@@ -3864,7 +3876,8 @@ Partial Public Class ThisAddIn
 
                 If Not context.FinalizationBlocked AndAlso
                    Not String.IsNullOrWhiteSpace(acceptedFinalStatus) AndAlso
-                   Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(currentResponse) Then
+                   (Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(currentResponse) OrElse
+                    IsWordHostActionEnvelopeOnlyFinalText(currentResponse)) Then
 
                     Dim previousAcceptedFinalStatus As String = acceptedFinalStatus
 
@@ -3897,7 +3910,16 @@ Partial Public Class ThisAddIn
                     Dim _userLanguage As String =
                         If(context.SequencingState IsNot Nothing, context.SequencingState.UserLanguage, "")
 
-                    If Agents.ToolingOrchestrator.ShouldPostLocalizeFinal(
+                    ' redInkWordCommands is a Word-host action envelope that Form1 parses after the
+                    ' tooling loop returns. Do not send a mixed prose+host-action response through
+                    ' the optional localization fallback because a translation pass could modify
+                    ' exact search anchors or structured JSON values. This guard is intentionally
+                    ' Word-specific; generic/native tool payload handling remains unchanged.
+                    Dim containsWordHostActionEnvelope As Boolean =
+                        If(currentResponse, "").IndexOf("""redInkWordCommands""", StringComparison.OrdinalIgnoreCase) >= 0
+
+                    If Not containsWordHostActionEnvelope AndAlso
+                       Agents.ToolingOrchestrator.ShouldPostLocalizeFinal(
                         currentResponse,
                         _userLanguage,
                         acceptedFinalStatus) Then
@@ -6486,6 +6508,92 @@ Partial Public Class ThisAddIn
             End Select
         Next
         Return sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Returns True only when the complete final text is the internal Word host-action
+    ''' JSON envelope (optionally inside a JSON Markdown fence) and therefore contains no
+    ''' user-facing prose. This guard is intentionally Word-specific so generic tooling
+    ''' workflows that legitimately return JSON keep their existing behavior.
+    ''' </summary>
+    Private Function IsWordHostActionEnvelopeOnlyFinalText(response As String) As Boolean
+        Dim raw As String = If(response, "").Trim()
+        If raw = "" Then Return False
+
+        If raw.StartsWith("```", StringComparison.Ordinal) Then
+            Dim firstLineBreak As Integer = raw.IndexOf(ChrW(10))
+            If firstLineBreak < 0 Then Return False
+
+            Dim openingFence As String = raw.Substring(0, firstLineBreak).Trim()
+            If Not openingFence.Equals("```", StringComparison.Ordinal) AndAlso
+               Not openingFence.Equals("```json", StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Dim fencedBody As String = raw.Substring(firstLineBreak + 1).Trim()
+            If Not fencedBody.EndsWith("```", StringComparison.Ordinal) Then Return False
+            raw = fencedBody.Substring(0, fencedBody.Length - 3).Trim()
+        End If
+
+        If raw = "" OrElse raw(0) <> "{"c Then Return False
+
+        Try
+            Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(raw)
+            If obj.Properties().Count() <> 1 Then Return False
+
+            Return obj.GetValue("redInkWordCommands", StringComparison.OrdinalIgnoreCase) IsNot Nothing
+        Catch ex As Newtonsoft.Json.JsonException
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Confirms a native tool-call turn in two stages: the provider/model detection regex must
+    ''' match AND the configured extraction map must yield at least one concrete tool call.
+    ''' This prevents arbitrary JSON/text (including Word's redInkWordCommands final-response
+    ''' envelope) from becoming a tooling false positive merely because a broad regex matched it.
+    ''' </summary>
+    Private Function ContainsConfirmedToolCalls(
+        response As String,
+        detectionPattern As String,
+        extractionMap As String) As Boolean
+
+        If Not ContainsToolCalls(response, detectionPattern) Then Return False
+        If String.IsNullOrWhiteSpace(response) OrElse String.IsNullOrWhiteSpace(extractionMap) Then Return False
+
+        ' IMPORTANT: this is deliberately a side-effect-free confirmation probe. Do not call
+        ' ExtractToolCalls() here: a broad detection regex may legitimately match ordinary
+        ' final-response JSON. ExtractToolCalls() logs parse/extraction failures, which would
+        ' turn an expected false positive into misleading tooling errors/warnings.
+        Try
+            Dim responseToken As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(response)
+            Dim mapObject As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(extractionMap)
+
+            Dim arrayPath As String = If(mapObject("array_path")?.ToString(), "")
+            Dim namePath As String = If(mapObject("name_path")?.ToString(), "name")
+            If String.IsNullOrWhiteSpace(namePath) Then Return False
+
+            Dim candidateTokens As IEnumerable(Of Newtonsoft.Json.Linq.JToken)
+            If String.IsNullOrWhiteSpace(arrayPath) Then
+                candidateTokens = {responseToken}
+            Else
+                candidateTokens = responseToken.SelectTokens(arrayPath).ToList()
+            End If
+
+            For Each candidate As Newtonsoft.Json.Linq.JToken In candidateTokens
+                Dim toolNameToken As Newtonsoft.Json.Linq.JToken = candidate.SelectToken(namePath)
+                If toolNameToken IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(toolNameToken.ToString()) Then
+                    Return True
+                End If
+            Next
+        Catch ex As System.Exception
+            ' Not a response that can be extracted as a native provider tool call. This is
+            ' an expected outcome for user-facing prose, TASK_STATUS, and Word command JSON.
+            Return False
+        End Try
+
+        Return False
     End Function
 
     ''' <summary>

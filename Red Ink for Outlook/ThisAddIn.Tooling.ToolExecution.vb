@@ -545,6 +545,55 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
+    ''' Confirms a native tool-call turn in two stages: the provider/model detection regex must
+    ''' match AND the configured extraction map must yield at least one concrete tool call.
+    ''' This prevents arbitrary JSON/text from becoming a tooling false positive merely because
+    ''' a broad regex matched it. Keep this logic symmetric with the Word tooling loop.
+    ''' </summary>
+    Private Function ContainsConfirmedToolCalls(
+        response As String,
+        detectionPattern As String,
+        extractionMap As String) As Boolean
+
+        If Not ContainsToolCalls(response, detectionPattern) Then Return False
+        If String.IsNullOrWhiteSpace(response) OrElse String.IsNullOrWhiteSpace(extractionMap) Then Return False
+
+        ' IMPORTANT: this is deliberately a side-effect-free confirmation probe. Do not call
+        ' ExtractToolCalls() here: a broad detection regex may legitimately match ordinary
+        ' final-response JSON. ExtractToolCalls() logs parse/extraction failures, which would
+        ' turn an expected false positive into misleading tooling errors/warnings.
+        Try
+            Dim responseToken As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(response)
+            Dim mapObject As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(extractionMap)
+
+            Dim arrayPath As String = If(mapObject("array_path")?.ToString(), "")
+            Dim namePath As String = If(mapObject("name_path")?.ToString(), "name")
+            If String.IsNullOrWhiteSpace(namePath) Then Return False
+
+            Dim candidateTokens As IEnumerable(Of Newtonsoft.Json.Linq.JToken)
+            If String.IsNullOrWhiteSpace(arrayPath) Then
+                candidateTokens = {responseToken}
+            Else
+                candidateTokens = responseToken.SelectTokens(arrayPath).ToList()
+            End If
+
+            For Each candidate As Newtonsoft.Json.Linq.JToken In candidateTokens
+                Dim toolNameToken As Newtonsoft.Json.Linq.JToken = candidate.SelectToken(namePath)
+                If toolNameToken IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(toolNameToken.ToString()) Then
+                    Return True
+                End If
+            Next
+        Catch ex As System.Exception
+            ' Not a response that can be extracted as a native provider tool call. This is
+            ' an expected outcome for user-facing prose, TASK_STATUS, and Word command JSON.
+            Return False
+        End Try
+
+        Return False
+    End Function
+
+    ''' <summary>
     ''' Determines whether a response contains tool calls by applying a detection regex pattern.
     ''' If <paramref name="detectionPattern"/> is empty, the pattern is derived from <c>INI_Response_2</c>.
     ''' </summary>

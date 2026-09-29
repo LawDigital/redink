@@ -1957,7 +1957,7 @@ Partial Public Class ThisAddIn
                 If Not subAgentMode AndAlso
                    context.CapabilityRoutingRequired AndAlso
                    ShouldBlockForCapabilityRouting("", context) AndAlso
-                   Not ContainsToolCalls(currentResponse, detectionPattern) Then
+                   Not ContainsConfirmedToolCalls(currentResponse, detectionPattern, context.ToolingModel.ToolCallExtractionMap) Then
 
                     If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
                         context.PrematureTextRetryCount += 1
@@ -1985,7 +1985,7 @@ Partial Public Class ThisAddIn
                     Exit While
                 End If
 
-                If ContainsToolCalls(currentResponse, detectionPattern) Then
+                If ContainsConfirmedToolCalls(currentResponse, detectionPattern, context.ToolingModel.ToolCallExtractionMap) Then
                     context.Log("Tool calls detected in response")
 
                     Dim extractionMap = context.ToolingModel.ToolCallExtractionMap
@@ -4119,7 +4119,7 @@ Partial Public Class ThisAddIn
                     ' (Bug 1) an envelope/tool-call/provider-JSON payload is never user-facing;
                     ' (Bug 2) a 'complete' claim requires a validated deliverable when the request needs one.
                     Dim forcedFinalIsEnvelope As Boolean =
-                        ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+                        ContainsConfirmedToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) OrElse
                         SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(currentResponse)
 
                     Dim forcedFinalDeliverableFailureReason As String =
@@ -4229,7 +4229,7 @@ Partial Public Class ThisAddIn
                 iteration >= context.MaxIterations AndAlso
                 Not context.IsCancelled AndAlso
                 Not cancellationToken.IsCancellationRequested AndAlso
-                (ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+                (ContainsConfirmedToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) OrElse
                  Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(
                      SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
                          StripTaskStatus(If(currentResponse, "")))))
@@ -4287,7 +4287,7 @@ Partial Public Class ThisAddIn
                                 True, True, binaryOutputDirectory:=binaryOutputDirectory)
 
                             If Not String.IsNullOrWhiteSpace(finalResponse) AndAlso
-                               Not ContainsToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern) AndAlso
+                               Not ContainsConfirmedToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) AndAlso
                                Not SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(finalResponse) Then
                                 currentResponse = finalResponse
                                 context.Log($"Final response received ({currentResponse.Length} chars)")
