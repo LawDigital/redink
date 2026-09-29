@@ -442,7 +442,8 @@ Partial Public Class ThisAddIn
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 cancellationToken.ThrowIfCancellationRequested()
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
-        toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context).ConfigureAwait(False)
+        toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
+        authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw)).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
@@ -461,6 +462,8 @@ Partial Public Class ThisAddIn
                 End If
 
                 If String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) AndAlso response.Success Then
+                    LoadSkillAllowedToolsFromResponse(response.Response, context)
+
                     Dim __skillName As String = Nothing
                     If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("name") Then
                         __skillName = System.Convert.ToString(toolCall.Arguments("name"))
@@ -489,7 +492,9 @@ Partial Public Class ThisAddIn
                     End If
                 End If
 
-                response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
+                response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(
+                    skillArgs,
+                    If(context Is Nothing, Nothing, context.LatestUserRequestRaw))
 
                 Dim hostExpectedArtifacts As Object = Nothing
                 If toolCall.Arguments IsNot Nothing AndAlso

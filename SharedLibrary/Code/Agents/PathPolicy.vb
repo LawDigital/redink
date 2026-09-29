@@ -245,6 +245,7 @@ Namespace Agents
             End If
 
             Dim ws = If(_workspaceRoot, "")
+            Dim allowCentralAuthorWrites As System.Boolean = SkillAuthorMode.AllowCentralWrites
 
             ' Enforce user-configured workspace permissions for any path that resolves
             ' under the workspace root. Skill and staging/Desktop roots are governed by
@@ -257,6 +258,8 @@ Namespace Agents
                     Throw New UnauthorizedAccessException("Workspace write access is disabled.")
                 End If
             End If
+
+            EnforceCentralWriteAuthority(full, access, allowCentralAuthorWrites)
 
             If _restrictToWorkspaceRootOnly.Value Then
                 ' Collect the strict allow-set: the active workspace root plus any
@@ -318,15 +321,19 @@ Namespace Agents
             End If
 
             ' Skill scripts/references — always readable.
-            ' In skill-author mode (or legacy chat-author scope), the ENTIRE skill folder
-            ' is writable (so SKILL.md plus scripts/ and references/ can be edited).
+            ' In skill-author mode (or legacy chat-author scope), an existing LOCAL skill folder
+            ' is writable; CENTRAL skill folders additionally require the explicit central-write opt-in.
             Dim skillReadRoots As New List(Of String)()
             Dim skillFullRoots As New List(Of String)()
+            Dim skillWriteRoots As New List(Of String)()
             Try
                 For Each sk In AgentResources.Skills
                     If sk Is Nothing OrElse String.IsNullOrWhiteSpace(sk.DirectoryPath) Then Continue For
                     Dim skFull As String = Path.GetFullPath(sk.DirectoryPath)
                     skillFullRoots.Add(skFull)
+                    If sk.IsLocal OrElse allowCentralAuthorWrites Then
+                        skillWriteRoots.Add(skFull)
+                    End If
                     Dim sdir As String = Path.Combine(skFull, "scripts")
                     Dim rdir As String = Path.Combine(skFull, "references")
                     If Directory.Exists(sdir) Then skillReadRoots.Add(Path.GetFullPath(sdir))
@@ -338,10 +345,15 @@ Namespace Agents
             ' Existing agent folders (agents/<name>/ or the agents/ base for single-file agents)
             ' are always readable so the author can inspect and revise them.
             Dim agentFullRoots As New List(Of String)()
+            Dim agentWriteRoots As New List(Of String)()
             Try
                 For Each ag In AgentResources.Agents
                     If ag Is Nothing OrElse String.IsNullOrWhiteSpace(ag.DirectoryPath) Then Continue For
-                    agentFullRoots.Add(Path.GetFullPath(ag.DirectoryPath))
+                    Dim agFull As String = Path.GetFullPath(ag.DirectoryPath)
+                    agentFullRoots.Add(agFull)
+                    If ag.IsLocal OrElse allowCentralAuthorWrites Then
+                        agentWriteRoots.Add(agFull)
+                    End If
                 Next
             Catch
             End Try
@@ -354,7 +366,7 @@ Namespace Agents
                 For Each baseDir In AgentResources.GetLocalResourceBaseDirectories()
                     If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
                 Next
-                If SkillAuthorMode.AllowCentralWrites Then
+                If allowCentralAuthorWrites Then
                     For Each baseDir In AgentResources.GetCentralResourceBaseDirectories()
                         If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
                     Next
@@ -396,8 +408,8 @@ Namespace Agents
             Catch
             End Try
             If _chatAuthor.Value OrElse SkillAuthorMode.IsActive Then
-                writeRoots.AddRange(skillFullRoots)
-                writeRoots.AddRange(agentFullRoots)
+                writeRoots.AddRange(skillWriteRoots)
+                writeRoots.AddRange(agentWriteRoots)
                 writeRoots.AddRange(authorBaseRoots)
             End If
 
@@ -420,6 +432,25 @@ Namespace Agents
 
             Throw New UnauthorizedAccessException("Path is outside the allowed roots for " & access.ToString().ToLowerInvariant() & " access.")
         End Function
+
+        Private Shared Sub EnforceCentralWriteAuthority(full As System.String,
+                                                       access As PathAccess,
+                                                       allowCentralWrites As System.Boolean)
+            If access <> PathAccess.Write OrElse allowCentralWrites Then Return
+
+            Dim centralRoot As System.String = AgentResources.ConfiguredCentralPath
+            If System.String.IsNullOrWhiteSpace(centralRoot) Then Return
+
+            Try
+                centralRoot = System.IO.Path.GetFullPath(centralRoot)
+            Catch
+                Return
+            End Try
+
+            If IsUnder(full, centralRoot) Then
+                Throw New System.UnauthorizedAccessException("Central resource writes require explicit central-write permission.")
+            End If
+        End Sub
 
         ''' <summary>
         ''' Classifies an allowed write for the skill-authoring postcondition: a write under a

@@ -71,6 +71,9 @@ Namespace SharedLibrary
         Public Property ToolAPICall As String
         Public Property ToolPriority As Integer = 100
         Public Property ToolErrorHandling As String = "skip"
+        ' Optional tool-owned, side-effect-free argument preparation that runs before schema validation/signature generation.
+        ' Nothing preserves the original argument object unchanged; participating tools return the canonical object to validate and execute.
+        Public Property ToolCallArgumentNormalizer As System.Func(Of System.Collections.Generic.IDictionary(Of System.String, System.Object), System.Collections.Generic.Dictionary(Of System.String, System.Object))
         Public Property APICall_ToolCallPart_Template As String = ""
 
         ' Project preference: capability-driven flag (not tool-specific) marking tools that are designed to

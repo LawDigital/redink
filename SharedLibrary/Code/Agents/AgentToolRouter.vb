@@ -43,7 +43,8 @@ Namespace Agents
                                                     arguments As IDictionary(Of String, Object),
                                                     host As ISubAgentHost,
                                                     Optional cancellationToken As CancellationToken = Nothing,
-                                                    Optional sharedContext As ISharedContext = Nothing) As Task(Of String)
+                                                    Optional sharedContext As ISharedContext = Nothing,
+                                                    Optional authoritativeUserRequest As System.String = Nothing) As System.Threading.Tasks.Task(Of System.String)
             If String.IsNullOrWhiteSpace(toolName) Then Return Nothing
 
             If MemoryTools.IsMemoryTool(toolName) Then
@@ -79,7 +80,7 @@ Namespace Agents
             End If
 
             If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
-                Return SkillInvokeTool.Execute(arguments)
+                Return SkillInvokeTool.Execute(arguments, authoritativeUserRequest)
             End If
 
             If toolName.StartsWith(AgentToolPrefix, StringComparison.OrdinalIgnoreCase) Then

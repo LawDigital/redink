@@ -971,6 +971,18 @@ Partial Public Class ThisAddIn
                     subAgentMode,
                     context.FinalResponseContract)
 
+            ' Word-chat host actions are a final-response transport, not native tool calls.
+            ' The generic tooling contract is intentionally strict about raw JSON, so when the
+            ' Word command protocol is active we restate this host-specific exception AFTER the
+            ' generic tooling instructions. This prevents the tooling loop from suppressing valid
+            ' redInkWordCommands output while preserving TASK_STATUS as the literal final line.
+            If Not subAgentMode AndAlso
+               baseSysPrompt.IndexOf(SharedMethods.ChatWordCommandProtocolMarker, StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+                enhancedSysPrompt &= Environment.NewLine & Environment.NewLine &
+                    "WORD CHAT HOST-ACTION OVERRIDE: The redInkWordCommands JSON object expressly authorized elsewhere in this system prompt is a host document-action envelope, not raw internal JSON and not a native tool call. It is allowed only in the final user-facing turn after all native tool work is complete. Keep normal user-facing prose before it. When TASK_STATUS is required, place redInkWordCommands immediately before the TASK_STATUS footer so TASK_STATUS remains the literal final line. Never place redInkWordCommands in an intermediate tool-call turn and never serialize a native tool call inside it."
+            End If
+
             If Not String.IsNullOrWhiteSpace(languageContractFragment) Then
                 enhancedSysPrompt = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
                                     languageContractFragment
@@ -1408,7 +1420,7 @@ Partial Public Class ThisAddIn
                 If Not subAgentMode AndAlso
                    context.CapabilityRoutingRequired AndAlso
                    ShouldBlockForCapabilityRouting("", context) AndAlso
-                   Not ContainsToolCalls(currentResponse, detectionPattern) Then
+                   Not ContainsConfirmedToolCalls(currentResponse, detectionPattern, context.ToolingModel.ToolCallExtractionMap) Then
 
                     If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
                         context.PrematureTextRetryCount += 1
@@ -1436,7 +1448,7 @@ Partial Public Class ThisAddIn
                     Exit While
                 End If
 
-                If ContainsToolCalls(currentResponse, detectionPattern) Then
+                If ContainsConfirmedToolCalls(currentResponse, detectionPattern, context.ToolingModel.ToolCallExtractionMap) Then
                     context.Log("Tool calls detected in response")
 
                     Dim extractionMap = context.ToolingModel.ToolCallExtractionMap
@@ -1463,6 +1475,23 @@ Partial Public Class ThisAddIn
 
                     For Each tc In toolCalls
                         If context.IsCancelled Then Exit For
+
+                        Dim auditResponseStartIndex As System.Int32 =
+                            If(context.AllToolResponses Is Nothing, 0, context.AllToolResponses.Count)
+                        Dim auditExecutionStarted As System.Boolean = False
+                        Dim auditPreExecutionOutcome As System.String = System.String.Empty
+                        Dim auditAbortErrorCode As System.String = "host_aborted_before_execution"
+                        Dim auditRecoveryScopeKey As System.String = System.String.Empty
+
+                        LogToolCallAuditSafely(
+                            context,
+                            tc,
+                            System.String.Empty,
+                            "preflight",
+                            "attempt",
+                            System.String.Empty)
+
+                        Try
 
                         ' B1 major-step announcement: surface the model-authored heading and
                         ' acknowledge the call as a successful no-op. Kept out of sequencing,
@@ -1511,7 +1540,10 @@ Partial Public Class ThisAddIn
 
                         context.ReportProgress(BuildFriendlyProgressText(tc, context))
 
-                        If context.IsCancelled Then Exit For
+                        If context.IsCancelled Then
+                            auditAbortErrorCode = "cancelled"
+                            Exit For
+                        End If
 
                         If Not subAgentMode AndAlso
                            SharedLibrary.Agents.ToolCallSequencing.RequiresRequiredMemoryGroundingBeforeNonMemoryTool(
@@ -1531,6 +1563,8 @@ Partial Public Class ThisAddIn
                                     "Blocked non-memory tool before required Memory grounding.",
                                     details:=$"host={context.HostKind}; tool={tc.ToolName}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
 
+                                auditPreExecutionOutcome = "deferred"
+                                auditAbortErrorCode = SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode
                                 restartForRequiredMemoryGrounding = True
                                 Exit For
                             End If
@@ -1547,6 +1581,8 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.HasOpenToolWorkflow = False
                             End If
 
+                            auditPreExecutionOutcome = "rejected"
+                            auditAbortErrorCode = SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode
                             context.LogWarn(
                                 "Blocked tooling loop after repeated attempts to bypass required Memory grounding.",
                                 details:=$"host={context.HostKind}; tool={tc.ToolName}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
@@ -1573,6 +1609,7 @@ Partial Public Class ThisAddIn
 
                         Dim recoveryScopeKey As String =
                             SharedLibrary.Agents.ToolCallSequencing.ResolveExplicitRecoveryScopeKey(tc.Arguments)
+                        auditRecoveryScopeKey = recoveryScopeKey
                         Dim toolWasVisibleAtTurnStart As Boolean =
                             turnVisibleToolNames.Contains(normalizedToolName)
 
@@ -1588,6 +1625,8 @@ Partial Public Class ThisAddIn
                             ' the tool can mislead the next model turn into declaring the tool unavailable.
                             ' Convert that response to an explicit host-status result while preserving the call id.
                             If preparedForNextTurn Then
+                                auditPreExecutionOutcome = "deferred"
+                                auditAbortErrorCode = "tool_exposure_deferred"
                                 hiddenResponse.Success = True
                                 hiddenResponse.ErrorMessage = ""
                                 hiddenResponse.ErrorCode = ""
@@ -1654,7 +1693,7 @@ Partial Public Class ThisAddIn
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.NoteToolFailure(tc.ToolName,
                                                     If(blockedResponse.ErrorCode, "tool_not_allowed"),
-                                                    If(blockedResponse.ErrorMessage, "Tool call was rejected by the sub-agent runtime."),
+                                                    If(blockedResponse.ErrorMessage, "Tool call was rejected by the current runtime tool scope."),
                                                     toolErrorHandling:="skip",
                                                     recoveryScopeKey:=recoveryScopeKey)
                             End If
@@ -1720,8 +1759,6 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        Dim normalizedToolCallSignature As String = BuildNormalizedToolCallSignature(tc)
-
                         Dim toolArgumentValidationError As String = ""
 
                         If Not TryValidateToolCallArguments(tc, toolConfig, toolArgumentValidationError) Then
@@ -1753,6 +1790,8 @@ Partial Public Class ThisAddIn
 
                             Exit For
                         End If
+
+                        Dim normalizedToolCallSignature As System.String = BuildNormalizedToolCallSignature(tc)
 
                         ' Exact sub-agent task guard MUST run before expected-output
                         ' registration. A terminal delegated task must not mutate the
@@ -1990,21 +2029,80 @@ Partial Public Class ThisAddIn
                             Exit For
                         End If
 
+                        ' Validate an explicitly supplied expected_artifacts contract before
+                        ' tool side effects. Missing expected_artifacts remains legacy-compatible;
+                        ' an explicit [] remains the valid empty contract. Locked delegated
+                        ' contracts have already been checked above and keep their existing errors.
+                        Dim expectedArtifactsFailureMessage As System.String = System.String.Empty
+
+                        If context.SequencingState IsNot Nothing AndAlso
+                           Not context.SequencingState.ValidateExpectedArtifactArguments(
+                               tc.Arguments,
+                               expectedArtifactsFailureMessage) Then
+
+                            Dim expectedArtifactsErrorMessage As System.String =
+                                If(System.String.IsNullOrWhiteSpace(expectedArtifactsFailureMessage),
+                                   "The supplied expected_artifacts contract is invalid.",
+                                   expectedArtifactsFailureMessage)
+
+                            Dim syntheticExpectedArtifactsValidation As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = False,
+                                .ResultKind = "error",
+                                .ErrorCode = "invalid_expected_artifacts",
+                                .ErrorMessage = expectedArtifactsErrorMessage,
+                                .Response =
+                                    "{""status"":""unresolved"",""reason"":""invalid_expected_artifacts"",""message"":" &
+                                    JsonConvert.SerializeObject(expectedArtifactsErrorMessage) &
+                                    "}",
+                                .OriginalCallJson = tc.RawJson,
+                                .NormalizedCallSignature = normalizedToolCallSignature
+                            }
+
+                            AddToolResponseToHistory(context, syntheticExpectedArtifactsValidation)
+
+                            context.SequencingState.NoteToolFailure(
+                                tc.ToolName,
+                                "invalid_expected_artifacts",
+                                syntheticExpectedArtifactsValidation.ErrorMessage,
+                                recoveryScopeKey:=recoveryScopeKey,
+                                retryCorrelationArguments:=tc.Arguments)
+
+                            context.PendingContinuationGuardPrompt =
+                                "HOST EXPECTED-ARTIFACT CONTRACT: The previous tool call was rejected before execution because expected_artifacts was malformed. Omit expected_artifacts when no explicit contract is intended, use [] for an explicitly empty contract, or provide an array whose items each contain non-empty logical_deliverable_id and output_slot_id values. Preserve opaque ids exactly."
+                            context.PendingGuardTitle = "HOST EXPECTED-ARTIFACT CONTRACT"
+                            context.PendingRejectedTurnExplanation =
+                                "The tool call supplied a malformed expected_artifacts contract."
+                            context.PendingRejectedAssistantTurn = System.String.Empty
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
+
+                            Exit For
+                        End If
+
                         ' Explicit artifact-id preflight. The same opaque artifact_id may not
                         ' be rebound to another logical slot/revision edge or physically re-executed
                         ' after it is already Final/Superseded. This check happens before tool side effects.
                         Dim explicitArtifactIdentityFailureReason As String = ""
+                        Dim explicitArtifactIdentityFailureMessage As String = ""
 
                         If context.SequencingState IsNot Nothing AndAlso
                            context.SequencingState.IsDeliverableCapableTool(tc.ToolName) AndAlso
                            Not context.SequencingState.ValidateExplicitArtifactIdentityArguments(
                                tc.Arguments,
-                               explicitArtifactIdentityFailureReason) Then
+                               explicitArtifactIdentityFailureReason,
+                               explicitArtifactIdentityFailureMessage) Then
 
                             Dim explicitArtifactErrorCode As String =
                                 If(String.IsNullOrWhiteSpace(explicitArtifactIdentityFailureReason),
                                    "explicit_artifact_identity_conflict",
                                    explicitArtifactIdentityFailureReason)
+
+                            Dim explicitArtifactErrorMessage As String =
+                                If(String.IsNullOrWhiteSpace(explicitArtifactIdentityFailureMessage),
+                                   "The tool call violates the explicit artifact identity contract.",
+                                   explicitArtifactIdentityFailureMessage)
 
                             Dim syntheticExplicitArtifactIdentity As New ToolResponse() With {
                                 .CallId = tc.CallId,
@@ -2012,41 +2110,55 @@ Partial Public Class ThisAddIn
                                 .Success = False,
                                 .ResultKind = "error",
                                 .ErrorCode = explicitArtifactErrorCode,
-                                .ErrorMessage =
-                                    "The tool call conflicts with an already registered explicit artifact identity.",
+                                .ErrorMessage = explicitArtifactErrorMessage,
                                 .Response =
                                     "{""status"":""unresolved"",""reason"":" &
                                     JsonConvert.SerializeObject(explicitArtifactErrorCode) &
-                                    ",""message"":""The opaque artifact_id/logical_deliverable_id/output_slot_id/supersedes_artifact_id contract is immutable. No file was created.""}",
+                                    ",""message"":" &
+                                    JsonConvert.SerializeObject(explicitArtifactErrorMessage) &
+                                    "}",
                                 .OriginalCallJson = tc.RawJson,
                                 .NormalizedCallSignature = normalizedToolCallSignature
                             }
 
                             AddToolResponseToHistory(context, syntheticExplicitArtifactIdentity)
 
-                            ' An incomplete explicit artifact identity is not a valid opaque
-                            ' operation identity and therefore must not poison a corrected retry
-                            ' with a scope that the successful call cannot legitimately reproduce.
-                            ' Keep valid explicit scopes strict for every other identity failure.
-                            Dim artifactIdentityFailureRecoveryScopeKey As String =
-                                If(System.String.Equals(
-                                       explicitArtifactErrorCode,
-                                       "explicit_artifact_identity_incomplete",
-                                       System.StringComparison.Ordinal),
-                                   System.String.Empty,
-                                   recoveryScopeKey)
+                            ' Preserve any valid independent operation/step or other recovery scope.
+                            ' Scope rebinding is permitted only when no trustworthy scope existed and
+                            ' the shared sequencing layer can prove an exact host-owned repair correlation.
+                            Dim artifactIdentityRetryScopeMayRebind As System.Boolean =
+                                System.String.Equals(
+                                    explicitArtifactErrorCode,
+                                    "explicit_artifact_identity_incomplete",
+                                    System.StringComparison.Ordinal) AndAlso
+                                System.String.IsNullOrWhiteSpace(recoveryScopeKey)
+                            Dim artifactIdentityFailureRecoveryScopeKey As System.String = recoveryScopeKey
 
                             context.SequencingState.NoteToolFailure(
                                 tc.ToolName,
                                 explicitArtifactErrorCode,
                                 syntheticExplicitArtifactIdentity.ErrorMessage,
-                                recoveryScopeKey:=artifactIdentityFailureRecoveryScopeKey)
+                                recoveryScopeKey:=artifactIdentityFailureRecoveryScopeKey,
+                                allowRetryScopeRebinding:=artifactIdentityRetryScopeMayRebind,
+                                retryCorrelationArguments:=tc.Arguments)
 
-                            context.PendingContinuationGuardPrompt =
-                                "HOST EXPLICIT ARTIFACT IDENTITY: The previous output-producing tool call was rejected before execution because its opaque artifact identity conflicts with registered state or is already terminal. Reuse an existing Final by finalizing the task; use a new artifact_id only for a genuinely new physical revision. Never rename/rebind an existing artifact_id."
+                            If System.String.Equals(
+                                explicitArtifactErrorCode,
+                                "explicit_artifact_identity_incomplete",
+                                System.StringComparison.Ordinal) Then
+
+                                context.PendingContinuationGuardPrompt =
+                                    "HOST EXPLICIT ARTIFACT IDENTITY: The previous output-producing tool call was rejected before execution because explicit artifact identity was only partially supplied. On retry, preserve every already supplied non-empty identity value exactly and fill the missing artifact_id, logical_deliverable_id, or output_slot_id values so all three are non-empty together; supersedes_artifact_id is optional. Preserve any host-issued opaque ids exactly."
+                                context.PendingRejectedTurnExplanation =
+                                    "The output-producing tool call supplied an incomplete explicit artifact identity."
+                            Else
+                                context.PendingContinuationGuardPrompt =
+                                    "HOST EXPLICIT ARTIFACT IDENTITY: The previous output-producing tool call was rejected before execution because its opaque artifact identity conflicts with registered state or is already terminal. Reuse an existing Final by finalizing the task; use a new artifact_id only for a genuinely new physical revision. Never rename/rebind an existing artifact_id."
+                                context.PendingRejectedTurnExplanation =
+                                    "The output-producing tool call conflicted with immutable explicit artifact state."
+                            End If
+
                             context.PendingGuardTitle = "HOST EXPLICIT ARTIFACT IDENTITY"
-                            context.PendingRejectedTurnExplanation =
-                                "The output-producing tool call conflicted with immutable explicit artifact state."
                             context.PendingRejectedAssistantTurn = ""
                             context.PrematureTextRetryCount = 0
                             stopCurrentBatchAfterTool = True
@@ -2154,6 +2266,7 @@ Partial Public Class ThisAddIn
                                 }
                             End If
 
+                            auditExecutionStarted = True
                             Dim toolPhaseStopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                             toolResponse = Await ExecuteToolCall(executionToolCall, toolConfig, context, cancellationToken)
                             toolPhaseStopwatch.Stop()
@@ -2392,7 +2505,7 @@ Partial Public Class ThisAddIn
                                         details:=$"host={context.HostKind}; tool={tc.ToolName}")
                                 Else
                                     If context.SequencingState IsNot Nothing Then
-                                        context.SequencingState.NoteSuccessfulProgress(tc.ToolName, recoveryScopeKey)
+                                        context.SequencingState.NoteSuccessfulProgress(tc.ToolName, recoveryScopeKey, tc.Arguments)
 
                                         Dim recoveredFailureSummary As System.String =
                                             SharedLibrary.Agents.ToolCallSequencing.ConsumeRecoveredFailureSummary(context.SequencingState)
@@ -2756,6 +2869,16 @@ Partial Public Class ThisAddIn
                     details:=$"host={context.HostKind}; tool={tc.ToolName}; errorCode={If(toolResponse.ErrorCode, "")}")
                             Exit For
                         End If
+                        Finally
+                            LogToolCallAuditOutcomeSafely(
+                                context,
+                                tc,
+                                auditResponseStartIndex,
+                                auditExecutionStarted,
+                                auditPreExecutionOutcome,
+                                auditAbortErrorCode,
+                                auditRecoveryScopeKey)
+                        End Try
                     Next
 
                     If restartForCapabilityRouting Then
@@ -3404,7 +3527,7 @@ Partial Public Class ThisAddIn
                     ' (Bug 1) an envelope/tool-call/provider-JSON payload is never user-facing;
                     ' (Bug 2) a 'complete' claim requires a validated deliverable when the request needs one.
                     Dim forcedFinalIsEnvelope As Boolean =
-                        ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+                        ContainsConfirmedToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) OrElse
                         SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(currentResponse)
 
                     Dim forcedFinalDeliverableFailureReason As String =
@@ -3512,7 +3635,7 @@ Partial Public Class ThisAddIn
             ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
             If iteration >= context.MaxIterations AndAlso
                Not context.IsCancelled AndAlso
-               (ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+               (ContainsConfirmedToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) OrElse
                 Not SharedLibrary.Agents.ToolCallSequencing.IsUserPresentableFinalText(currentResponse)) Then
 
                 context.Log("Forcing final response (max iterations reached with a pending tool call or non-user-facing content)...")
@@ -3558,7 +3681,7 @@ Partial Public Class ThisAddIn
                         EnsureUI:=True)
 
                     If Not String.IsNullOrWhiteSpace(finalResponse) AndAlso
-                               Not ContainsToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern) AndAlso
+                               Not ContainsConfirmedToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) AndAlso
                                Not SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(finalResponse) Then
                         currentResponse = finalResponse
                         context.Log($"Final response received ({currentResponse.Length} chars)")
@@ -3753,7 +3876,8 @@ Partial Public Class ThisAddIn
 
                 If Not context.FinalizationBlocked AndAlso
                    Not String.IsNullOrWhiteSpace(acceptedFinalStatus) AndAlso
-                   Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(currentResponse) Then
+                   (Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(currentResponse) OrElse
+                    IsWordHostActionEnvelopeOnlyFinalText(currentResponse)) Then
 
                     Dim previousAcceptedFinalStatus As String = acceptedFinalStatus
 
@@ -3786,7 +3910,16 @@ Partial Public Class ThisAddIn
                     Dim _userLanguage As String =
                         If(context.SequencingState IsNot Nothing, context.SequencingState.UserLanguage, "")
 
-                    If Agents.ToolingOrchestrator.ShouldPostLocalizeFinal(
+                    ' redInkWordCommands is a Word-host action envelope that Form1 parses after the
+                    ' tooling loop returns. Do not send a mixed prose+host-action response through
+                    ' the optional localization fallback because a translation pass could modify
+                    ' exact search anchors or structured JSON values. This guard is intentionally
+                    ' Word-specific; generic/native tool payload handling remains unchanged.
+                    Dim containsWordHostActionEnvelope As Boolean =
+                        If(currentResponse, "").IndexOf("""redInkWordCommands""", StringComparison.OrdinalIgnoreCase) >= 0
+
+                    If Not containsWordHostActionEnvelope AndAlso
+                       Agents.ToolingOrchestrator.ShouldPostLocalizeFinal(
                         currentResponse,
                         _userLanguage,
                         acceptedFinalStatus) Then
@@ -4640,6 +4773,122 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+    Private Sub LogToolCallAuditSafely(
+        context As ToolExecutionContext,
+        toolCall As ToolCall,
+        recoveryScopeKey As System.String,
+        callStage As System.String,
+        outcome As System.String,
+        errorCode As System.String)
+
+        If context Is Nothing OrElse toolCall Is Nothing Then Return
+
+        Try
+            context.Log(
+                SharedLibrary.Agents.ToolCallSequencing.BuildToolCallAuditDiagnostic(
+                    context.RunId,
+                    toolCall.CallId,
+                    toolCall.ToolName,
+                    toolCall.Arguments,
+                    recoveryScopeKey,
+                    callStage,
+                    outcome,
+                    errorCode),
+                "diag")
+        Catch ex As System.Exception
+            Try
+                ToolingFileLogger.LogWarn("Tool-call audit diagnostic logging failed.", ex:=ex)
+            Catch logEx As System.Exception
+                ' Audit logging is diagnostic-only and must never alter tool semantics.
+            End Try
+        End Try
+    End Sub
+
+    Private Sub LogToolCallAuditOutcomeSafely(
+        context As ToolExecutionContext,
+        toolCall As ToolCall,
+        responseStartIndex As System.Int32,
+        executionStarted As System.Boolean,
+        preExecutionOutcome As System.String,
+        abortErrorCode As System.String,
+        recoveryScopeKey As System.String)
+
+        If context Is Nothing OrElse toolCall Is Nothing Then Return
+
+        Try
+            Dim correlatedResponse As ToolResponse =
+                FindToolResponseAddedForAudit(context, toolCall.CallId, responseStartIndex)
+            Dim callStage As System.String = "preflight"
+            Dim outcome As System.String = System.String.Empty
+            Dim errorCode As System.String = If(abortErrorCode, System.String.Empty)
+
+            If executionStarted Then
+                callStage = "tool_result"
+                If correlatedResponse Is Nothing Then
+                    outcome = "aborted"
+                    errorCode = "execution_outcome_unavailable"
+                ElseIf correlatedResponse.Success Then
+                    outcome = "succeeded"
+                    errorCode = System.String.Empty
+                Else
+                    outcome = "failed"
+                    errorCode = If(correlatedResponse.ErrorCode, System.String.Empty)
+                End If
+            ElseIf Not System.String.IsNullOrWhiteSpace(preExecutionOutcome) Then
+                outcome = preExecutionOutcome.Trim()
+                If correlatedResponse IsNot Nothing AndAlso Not correlatedResponse.Success Then
+                    errorCode = If(correlatedResponse.ErrorCode, errorCode)
+                End If
+            ElseIf correlatedResponse IsNot Nothing Then
+                If correlatedResponse.Success Then
+                    outcome = "succeeded_without_execution"
+                    errorCode = System.String.Empty
+                Else
+                    outcome = "rejected"
+                    errorCode = If(correlatedResponse.ErrorCode, errorCode)
+                End If
+            Else
+                outcome = "aborted"
+            End If
+
+            LogToolCallAuditSafely(
+                context,
+                toolCall,
+                recoveryScopeKey,
+                callStage,
+                outcome,
+                errorCode)
+        Catch ex As System.Exception
+            Try
+                ToolingFileLogger.LogWarn("Tool-call audit outcome logging failed.", ex:=ex)
+            Catch logEx As System.Exception
+                ' Audit logging is diagnostic-only and must never alter tool semantics.
+            End Try
+        End Try
+    End Sub
+
+    Private Function FindToolResponseAddedForAudit(
+        context As ToolExecutionContext,
+        callId As System.String,
+        responseStartIndex As System.Int32) As ToolResponse
+
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then Return Nothing
+
+        Dim lowerBound As System.Int32 = System.Math.Max(0, responseStartIndex)
+        For index As System.Int32 = context.AllToolResponses.Count - 1 To lowerBound Step -1
+            Dim candidate As ToolResponse = context.AllToolResponses(index)
+            If candidate IsNot Nothing AndAlso
+               System.String.Equals(
+                   If(candidate.CallId, System.String.Empty),
+                   If(callId, System.String.Empty),
+                   System.StringComparison.Ordinal) Then
+                Return candidate
+            End If
+        Next
+
+        Return Nothing
+    End Function
+
     Private Sub AddToolResponseToHistory(context As ToolExecutionContext,
                                          response As ToolResponse)
         If context Is Nothing OrElse response Is Nothing Then Return
@@ -4747,10 +4996,10 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function BuildToolNotAllowedResponse(toolCall As ToolCall, context As ToolExecutionContext) As ToolResponse
-        Dim message As String = $"Tool '{toolCall.ToolName}' is not allowed for this sub-agent."
+        Dim message As String = $"Tool '{toolCall.ToolName}' is not allowed in the current enforced tool scope."
 
         Dim payload As String = JsonConvert.SerializeObject(New With {
-        Key .summary = "Tool call was rejected by the sub-agent runtime.",
+        Key .summary = "Tool call was rejected by the current runtime tool scope.",
         Key .result = CType(Nothing, Object),
         Key .resultKind = "error",
         Key .error = New With {
@@ -4772,7 +5021,7 @@ Partial Public Class ThisAddIn
     }
 
         If context IsNot Nothing Then
-            context.LogWarn("Blocked tool outside sub-agent scope.",
+            context.LogWarn("Blocked tool outside enforced tool scope.",
                         details:=$"host={context.HostKind}; tool={toolCall.ToolName}")
         End If
 
@@ -5525,6 +5774,9 @@ Partial Public Class ThisAddIn
         End Function)
 
         If existing IsNot Nothing Then
+            If Not IsToolExposableForCurrentModel(existing, context) Then
+                Return Nothing
+            End If
             Return existing
         End If
 
@@ -5533,12 +5785,50 @@ Partial Public Class ThisAddIn
         End If
 
         Dim loaded = context.AllowedToolRegistry.Get(toolName)
-        If loaded Is Nothing Then
+        If loaded Is Nothing OrElse Not IsToolExposableForCurrentModel(loaded, context) Then
             Return Nothing
         End If
 
         context.SelectedTools.Add(loaded)
         Return loaded
+    End Function
+
+    Private Function IsToolExposableForCurrentModel(tool As ModelConfig,
+                                                    context As ToolExecutionContext) As System.Boolean
+        If tool Is Nothing OrElse context Is Nothing Then
+            Return False
+        End If
+
+        ' Initial required runtime primitives are selected before the tooling model is assigned.
+        ' Preserve that initialization contract; once a tooling model exists, availability must
+        ' match what BuildToolInstructionsForModel can actually emit for the next turn.
+        If context.ToolingModel Is Nothing Then
+            Return True
+        End If
+
+        If System.String.IsNullOrWhiteSpace(context.ToolingModel.APICall_ToolInstructions) OrElse
+           System.String.IsNullOrWhiteSpace(context.ToolingModel.APICall_ToolInstructions_Template) Then
+            context.LogWarn(
+                "Tool loader could not expose the materialized tool because the current tooling model adapter configuration is incomplete.",
+                details:=$"ToolName='{tool.ToolName}'",
+                visibleToUser:=False)
+            Return False
+        End If
+
+        Dim modelSpecificDefinition As System.String =
+            ConvertCanonicalToModelFormat(
+                tool.ToolDefinition,
+                context.ToolingModel.APICall_ToolInstructions_Template)
+
+        If Not System.String.IsNullOrWhiteSpace(modelSpecificDefinition) Then
+            Return True
+        End If
+
+        context.LogWarn(
+            "Tool loader could not expose the materialized tool through the current tooling model adapter.",
+            details:=$"ToolName='{tool.ToolName}'",
+            visibleToUser:=False)
+        Return False
     End Function
 
     Private Function ExpandAllowedToolNamesForRegistry(requestedToolNames As IEnumerable(Of String),
@@ -5722,20 +6012,20 @@ Partial Public Class ThisAddIn
                 Continue For
             End If
 
-            If requestedName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
-                alreadyLoadedNames.Add(requestedName)
-                Continue For
-            End If
-
             Dim existing = context.SelectedTools.FirstOrDefault(
             Function(t)
                 Return t IsNot Nothing AndAlso
-                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
-                       t.ToolName.Equals(requestedName, StringComparison.OrdinalIgnoreCase)
+                       Not System.String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       t.ToolName.Equals(requestedName, System.StringComparison.OrdinalIgnoreCase)
             End Function)
 
             If existing IsNot Nothing Then
-                alreadyLoadedNames.Add(existing.ToolName)
+                Dim verifiedExisting As ModelConfig = EnsureVisibleToolLoaded(requestedName, context)
+                If verifiedExisting IsNot Nothing Then
+                    alreadyLoadedNames.Add(verifiedExisting.ToolName)
+                Else
+                    unavailableNames.Add(requestedName)
+                End If
                 Continue For
             End If
 
@@ -5996,7 +6286,8 @@ Partial Public Class ThisAddIn
                                            Optional keepRecentFullCount As Integer = 2,
                                            Optional staleCompactionThresholdChars As Integer = -1,
                                            Optional staleCompactionPreviewChars As Integer = -1,
-                                           Optional currentIteration As Integer = -1) As String
+                                           Optional currentIteration As Integer = -1,
+                                           Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
             Return ""
@@ -6025,10 +6316,10 @@ Partial Public Class ThisAddIn
         Dim respIndex As Integer = -1
         For Each resp In responses
             respIndex += 1
-            ' A response whose own body exceeds the large-result threshold is always
-            ' compaction-eligible, regardless of recency: it is stored by reference and
-            ' remains fully retrievable via context_expand, so keeping it "recent-full"
-            ' would only bloat the payload. Smaller responses keep the recency exemption.
+            ' Historical responses whose own body exceeds the large-result threshold are
+            ' compaction-eligible regardless of recency-window position. Current-turn results
+            ' stay lossless until the outer payload-budget pass explicitly permits current-turn
+            ' reference compaction after exhausting historical compaction.
             Dim replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind =
                 ResolveEffectiveReplayRetention(resp, currentIteration)
             Dim respIsLarge As Boolean =
@@ -6081,7 +6372,10 @@ Partial Public Class ThisAddIn
             ' also move into the drawer; everything stays retrievable via context_expand.
             Dim effStaleThresholdChars As Integer = -1
             Dim effStalePreviewChars As Integer = -1
-            If isStaleForCompaction AndAlso staleCompactionThresholdChars > 0 Then
+            If staleCompactionThresholdChars > 0 AndAlso
+               (isStaleForCompaction OrElse
+                (allowCurrentTurnReferenceCompaction AndAlso
+                 replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical)) Then
                 effStaleThresholdChars = staleCompactionThresholdChars
                 effStalePreviewChars = staleCompactionPreviewChars
             End If
@@ -6090,7 +6384,8 @@ Partial Public Class ThisAddIn
                 compactForSubAgent OrElse isStaleForCompaction,
                 effStaleThresholdChars,
                 effStalePreviewChars,
-                replayRetention)
+                replayRetention,
+                allowCurrentTurnReferenceCompaction)
 
             ' Model-agnostic handling:
             ' - If the response placeholder is quoted, emit an escaped string.
@@ -6213,6 +6508,92 @@ Partial Public Class ThisAddIn
             End Select
         Next
         Return sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Returns True only when the complete final text is the internal Word host-action
+    ''' JSON envelope (optionally inside a JSON Markdown fence) and therefore contains no
+    ''' user-facing prose. This guard is intentionally Word-specific so generic tooling
+    ''' workflows that legitimately return JSON keep their existing behavior.
+    ''' </summary>
+    Private Function IsWordHostActionEnvelopeOnlyFinalText(response As String) As Boolean
+        Dim raw As String = If(response, "").Trim()
+        If raw = "" Then Return False
+
+        If raw.StartsWith("```", StringComparison.Ordinal) Then
+            Dim firstLineBreak As Integer = raw.IndexOf(ChrW(10))
+            If firstLineBreak < 0 Then Return False
+
+            Dim openingFence As String = raw.Substring(0, firstLineBreak).Trim()
+            If Not openingFence.Equals("```", StringComparison.Ordinal) AndAlso
+               Not openingFence.Equals("```json", StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Dim fencedBody As String = raw.Substring(firstLineBreak + 1).Trim()
+            If Not fencedBody.EndsWith("```", StringComparison.Ordinal) Then Return False
+            raw = fencedBody.Substring(0, fencedBody.Length - 3).Trim()
+        End If
+
+        If raw = "" OrElse raw(0) <> "{"c Then Return False
+
+        Try
+            Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(raw)
+            If obj.Properties().Count() <> 1 Then Return False
+
+            Return obj.GetValue("redInkWordCommands", StringComparison.OrdinalIgnoreCase) IsNot Nothing
+        Catch ex As Newtonsoft.Json.JsonException
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Confirms a native tool-call turn in two stages: the provider/model detection regex must
+    ''' match AND the configured extraction map must yield at least one concrete tool call.
+    ''' This prevents arbitrary JSON/text (including Word's redInkWordCommands final-response
+    ''' envelope) from becoming a tooling false positive merely because a broad regex matched it.
+    ''' </summary>
+    Private Function ContainsConfirmedToolCalls(
+        response As String,
+        detectionPattern As String,
+        extractionMap As String) As Boolean
+
+        If Not ContainsToolCalls(response, detectionPattern) Then Return False
+        If String.IsNullOrWhiteSpace(response) OrElse String.IsNullOrWhiteSpace(extractionMap) Then Return False
+
+        ' IMPORTANT: this is deliberately a side-effect-free confirmation probe. Do not call
+        ' ExtractToolCalls() here: a broad detection regex may legitimately match ordinary
+        ' final-response JSON. ExtractToolCalls() logs parse/extraction failures, which would
+        ' turn an expected false positive into misleading tooling errors/warnings.
+        Try
+            Dim responseToken As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(response)
+            Dim mapObject As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(extractionMap)
+
+            Dim arrayPath As String = If(mapObject("array_path")?.ToString(), "")
+            Dim namePath As String = If(mapObject("name_path")?.ToString(), "name")
+            If String.IsNullOrWhiteSpace(namePath) Then Return False
+
+            Dim candidateTokens As IEnumerable(Of Newtonsoft.Json.Linq.JToken)
+            If String.IsNullOrWhiteSpace(arrayPath) Then
+                candidateTokens = {responseToken}
+            Else
+                candidateTokens = responseToken.SelectTokens(arrayPath).ToList()
+            End If
+
+            For Each candidate As Newtonsoft.Json.Linq.JToken In candidateTokens
+                Dim toolNameToken As Newtonsoft.Json.Linq.JToken = candidate.SelectToken(namePath)
+                If toolNameToken IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(toolNameToken.ToString()) Then
+                    Return True
+                End If
+            Next
+        Catch ex As System.Exception
+            ' Not a response that can be extracted as a native provider tool call. This is
+            ' an expected outcome for user-facing prose, TASK_STATUS, and Word command JSON.
+            Return False
+        End Try
+
+        Return False
     End Function
 
     ''' <summary>

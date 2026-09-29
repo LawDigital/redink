@@ -219,6 +219,493 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Applies the Swiss orthography display preference only to ordinary presentation prose.
+        ''' Markdig owns Markdown structure recognition; only proven LiteralInline source spans are
+        ''' rewritten, while structural/literal regions stay byte-for-byte unchanged.
+        ''' </summary>
+        Private Shared Function ApplyDoubleSForPresentation(value As System.String) As System.String
+            If System.String.IsNullOrEmpty(value) OrElse value.IndexOf(System.Convert.ToChar(223)) < 0 Then
+                Return value
+            End If
+
+            ' A structured top-level result is data rather than presentation prose.
+            Try
+                Dim token As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(value)
+                If token IsNot Nothing AndAlso
+                   (token.Type = Newtonsoft.Json.Linq.JTokenType.Object OrElse
+                    token.Type = Newtonsoft.Json.Linq.JTokenType.Array) Then
+
+                    Return value
+                End If
+            Catch ex As System.Exception
+                ' Plain assistant text is expected to fail JSON parsing.
+            End Try
+
+            Dim document As Markdig.Syntax.MarkdownDocument
+            Try
+                Dim pipeline As Markdig.MarkdownPipeline =
+                    CreateMarkdownHtmlPipeline(
+                        useSoftlineBreakAsHardlineBreak:=False,
+                        usePreciseSourceLocation:=True)
+
+                document = Markdig.Markdown.Parse(value, pipeline)
+            Catch ex As System.Exception
+                ' A display preference must never corrupt output if Markdown parsing itself fails.
+                System.Diagnostics.Debug.WriteLine(
+                    "[DOUBLE-S PRESENTATION] Markdig parse failed; preserving original text. " & ex.Message)
+                Return value
+            End Try
+
+            Dim taskStatusProtectedStart As System.Int32 =
+                GetDoubleSTaskStatusProtectedStart(value)
+
+            Dim protectedInlineSourceSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan) =
+                CollectDoubleSProtectedInlineSourceSpans(value)
+
+            Dim proseSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan) =
+                CollectDoubleSProseSourceSpans(
+                    document,
+                    value,
+                    taskStatusProtectedStart)
+
+            If proseSpans.Count = 0 Then
+                Return value
+            End If
+
+            Dim output As New System.Text.StringBuilder(value.Length + 16)
+            Dim sourceIndex As System.Int32 = 0
+
+            For Each proseSpan As Markdig.Syntax.SourceSpan In proseSpans
+                Dim spanStart As System.Int32 = proseSpan.Start
+                Dim spanEnd As System.Int32 = proseSpan.End
+
+                If taskStatusProtectedStart >= 0 Then
+                    If spanStart >= taskStatusProtectedStart Then
+                        Exit For
+                    End If
+                    If spanEnd >= taskStatusProtectedStart Then
+                        spanEnd = taskStatusProtectedStart - 1
+                    End If
+                End If
+
+                If spanEnd < spanStart OrElse spanStart < sourceIndex Then
+                    Continue For
+                End If
+
+                If spanStart > sourceIndex Then
+                    output.Append(value.Substring(sourceIndex, spanStart - sourceIndex))
+                End If
+
+                AppendDoubleSProseSourceRange(
+                    output,
+                    value,
+                    spanStart,
+                    spanEnd,
+                    protectedInlineSourceSpans)
+                sourceIndex = spanEnd + 1
+            Next
+
+            If sourceIndex < value.Length Then
+                output.Append(value.Substring(sourceIndex))
+            End If
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function CollectDoubleSProseSourceSpans(
+            document As Markdig.Syntax.MarkdownDocument,
+            source As System.String,
+            taskStatusProtectedStart As System.Int32
+        ) As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+
+            Dim result As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+            Dim protectedBlockSpans As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+            Dim protectedReferenceLabelSpans As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+
+            For Each markdownObject As Markdig.Syntax.MarkdownObject In
+                Markdig.Syntax.MarkdownObjectExtensions.Descendants(document)
+
+                If TypeOf markdownObject Is Markdig.Syntax.QuoteBlock Then
+                    Dim quoteBlock As Markdig.Syntax.QuoteBlock =
+                        DirectCast(markdownObject, Markdig.Syntax.QuoteBlock)
+                    If IsDoubleSUsableSourceSpan(quoteBlock.Span, source.Length) Then
+                        protectedBlockSpans.Add(quoteBlock.Span)
+                    End If
+                    Continue For
+                End If
+
+                If TypeOf markdownObject Is Markdig.Syntax.Inlines.LinkInline Then
+                    Dim link As Markdig.Syntax.Inlines.LinkInline =
+                        DirectCast(markdownObject, Markdig.Syntax.Inlines.LinkInline)
+
+                    ' In shortcut/collapsed reference links the visible first label is also the
+                    ' structural reference identifier. Protect the whole link source span so a
+                    ' presentation rewrite cannot change link resolution. Full reference links
+                    ' keep a separate second label and may still rewrite visible link prose.
+                    If IsDoubleSSharedReferenceLabel(link, source) AndAlso
+                       IsDoubleSUsableSourceSpan(link.Span, source.Length) Then
+                        protectedReferenceLabelSpans.Add(link.Span)
+                    End If
+                End If
+            Next
+
+            Dim htmlLiteralDepth As System.Int32 = 0
+
+            For Each markdownObject As Markdig.Syntax.MarkdownObject In
+                Markdig.Syntax.MarkdownObjectExtensions.Descendants(document)
+
+                If TypeOf markdownObject Is Markdig.Syntax.Inlines.HtmlInline Then
+                    Dim htmlInline As Markdig.Syntax.Inlines.HtmlInline =
+                        DirectCast(markdownObject, Markdig.Syntax.Inlines.HtmlInline)
+
+                    Dim depthDelta As System.Int32 =
+                        GetDoubleSLiteralHtmlTagDepthDelta(htmlInline.Tag)
+
+                    If depthDelta < 0 Then
+                        htmlLiteralDepth = System.Math.Max(0, htmlLiteralDepth + depthDelta)
+                    ElseIf depthDelta > 0 Then
+                        htmlLiteralDepth += depthDelta
+                    End If
+
+                    Continue For
+                End If
+
+                If htmlLiteralDepth <> 0 OrElse
+                   Not TypeOf markdownObject Is Markdig.Syntax.Inlines.LiteralInline Then
+                    Continue For
+                End If
+
+                Dim literal As Markdig.Syntax.Inlines.LiteralInline =
+                    DirectCast(markdownObject, Markdig.Syntax.Inlines.LiteralInline)
+
+                If Not IsDoubleSUsableSourceSpan(literal.Span, source.Length) Then
+                    Continue For
+                End If
+
+                If taskStatusProtectedStart >= 0 AndAlso literal.Span.Start >= taskStatusProtectedStart Then
+                    Continue For
+                End If
+
+                If DoubleSSpanOverlapsAny(literal.Span, protectedBlockSpans) OrElse
+                   DoubleSSpanOverlapsAny(literal.Span, protectedReferenceLabelSpans) Then
+                    Continue For
+                End If
+
+                result.Add(literal.Span)
+            Next
+
+            result.Sort(
+                Function(left As Markdig.Syntax.SourceSpan, right As Markdig.Syntax.SourceSpan) As System.Int32
+                    Return left.Start.CompareTo(right.Start)
+                End Function)
+
+            Return result
+        End Function
+
+        Private Shared Function IsDoubleSSharedReferenceLabel(
+            link As Markdig.Syntax.Inlines.LinkInline,
+            source As System.String
+        ) As System.Boolean
+
+            If link Is Nothing OrElse link.Reference Is Nothing Then
+                Return False
+            End If
+
+            If link.IsShortcut Then
+                Return True
+            End If
+
+            If Not IsDoubleSUsableSourceSpan(link.Span, source.Length) Then
+                Return True
+            End If
+
+            Dim sourceLength As System.Int32 = link.Span.End - link.Span.Start + 1
+            If sourceLength < 2 Then
+                Return True
+            End If
+
+            Dim linkSource As System.String = source.Substring(link.Span.Start, sourceLength)
+            Return linkSource.EndsWith("[]", System.StringComparison.Ordinal)
+        End Function
+
+        Private Shared Function DoubleSSpanOverlapsAny(
+            span As Markdig.Syntax.SourceSpan,
+            protectedSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+        ) As System.Boolean
+
+            For Each protectedSpan As Markdig.Syntax.SourceSpan In protectedSpans
+                If span.Start <= protectedSpan.End AndAlso span.End >= protectedSpan.Start Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function CollectDoubleSProtectedInlineSourceSpans(
+            source As System.String
+        ) As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+
+            Dim result As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan) =
+                CollectDoubleSQuotedSourceSpans(source)
+
+            Dim index As System.Int32 = 0
+            While index < source.Length
+                If IsLiteralReferenceStart(source, index) Then
+                    Dim literalEnd As System.Int32 = index + 1
+                    While literalEnd < source.Length AndAlso
+                          Not System.Char.IsWhiteSpace(source(literalEnd))
+                        literalEnd += 1
+                    End While
+
+                    result.Add(New Markdig.Syntax.SourceSpan(index, literalEnd - 1))
+                    index = literalEnd
+                    Continue While
+                End If
+
+                index += 1
+            End While
+
+            Return result
+        End Function
+
+        Private Shared Function CollectDoubleSQuotedSourceSpans(
+            source As System.String
+        ) As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+
+            Dim result As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+            Dim lineStart As System.Int32 = 0
+
+            While lineStart < source.Length
+                Dim lineEnd As System.Int32 = lineStart
+                While lineEnd < source.Length AndAlso
+                      source(lineEnd) <> Microsoft.VisualBasic.ControlChars.Cr AndAlso
+                      source(lineEnd) <> Microsoft.VisualBasic.ControlChars.Lf
+                    lineEnd += 1
+                End While
+
+                Dim index As System.Int32 = lineStart
+                While index < lineEnd
+                    Dim current As System.Char = source(index)
+                    Dim lowDoubleQuote As System.Char = System.Convert.ToChar(&H201E)
+                    Dim leftDoubleQuote As System.Char = System.Convert.ToChar(&H201C)
+                    Dim rightDoubleQuote As System.Char = System.Convert.ToChar(&H201D)
+
+                    If current = """"c OrElse current = lowDoubleQuote OrElse current = leftDoubleQuote Then
+                        Dim closingQuote As System.Char = current
+                        If current = lowDoubleQuote Then closingQuote = leftDoubleQuote
+                        If current = leftDoubleQuote Then closingQuote = rightDoubleQuote
+
+                        Dim closingIndex As System.Int32 = index + 1
+                        While closingIndex < lineEnd
+                            If source(closingIndex) = closingQuote AndAlso
+                               Not IsBackslashEscaped(source, closingIndex) Then
+                                Exit While
+                            End If
+                            closingIndex += 1
+                        End While
+
+                        If closingIndex >= lineEnd Then
+                            If lineEnd > index Then
+                                result.Add(New Markdig.Syntax.SourceSpan(index, lineEnd - 1))
+                            End If
+                            Exit While
+                        End If
+
+                        result.Add(New Markdig.Syntax.SourceSpan(index, closingIndex))
+                        index = closingIndex + 1
+                        Continue While
+                    End If
+
+                    index += 1
+                End While
+
+                If lineEnd >= source.Length Then
+                    Exit While
+                End If
+
+                If source(lineEnd) = Microsoft.VisualBasic.ControlChars.Cr AndAlso
+                   lineEnd + 1 < source.Length AndAlso
+                   source(lineEnd + 1) = Microsoft.VisualBasic.ControlChars.Lf Then
+                    lineStart = lineEnd + 2
+                Else
+                    lineStart = lineEnd + 1
+                End If
+            End While
+
+            Return result
+        End Function
+
+        Private Shared Function GetDoubleSProtectedSourceEnd(
+            index As System.Int32,
+            rangeEnd As System.Int32,
+            protectedSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+        ) As System.Int32
+
+            Dim protectedEnd As System.Int32 = -1
+
+            For Each protectedSpan As Markdig.Syntax.SourceSpan In protectedSpans
+                If index >= protectedSpan.Start AndAlso index <= protectedSpan.End Then
+                    protectedEnd = System.Math.Max(protectedEnd, protectedSpan.End)
+                End If
+            Next
+
+            If protectedEnd < index Then
+                Return -1
+            End If
+
+            Return System.Math.Min(protectedEnd, rangeEnd)
+        End Function
+
+        Private Shared Function GetDoubleSTaskStatusProtectedStart(value As System.String) As System.Int32
+            Dim location As Global.SharedLibrary.Agents.TaskStatusFooterParser.TaskStatusEnvelopeLocation =
+                Global.SharedLibrary.Agents.TaskStatusFooterParser.LocateTrailingEnvelope(value)
+
+            If location Is Nothing OrElse Not location.IsPresent Then
+                Return -1
+            End If
+
+            Dim protectedStart As System.Int32 = location.StartIndex
+            Dim remainingPrecedingEnvelopes As System.Int32 = location.FooterCount - 1
+
+            While remainingPrecedingEnvelopes > 0 AndAlso protectedStart > 0
+                Dim prefix As System.String = value.Substring(0, protectedStart).TrimEnd()
+                Dim preceding As Global.SharedLibrary.Agents.TaskStatusFooterParser.TaskStatusEnvelopeLocation =
+                    Global.SharedLibrary.Agents.TaskStatusFooterParser.LocateTrailingEnvelope(prefix)
+
+                If preceding Is Nothing OrElse Not preceding.IsPresent Then
+                    Exit While
+                End If
+
+                protectedStart = preceding.StartIndex
+                remainingPrecedingEnvelopes -= 1
+            End While
+
+            Return protectedStart
+        End Function
+
+        Private Shared Function GetDoubleSLiteralHtmlTagDepthDelta(tag As System.String) As System.Int32
+            If System.String.IsNullOrWhiteSpace(tag) Then
+                Return 0
+            End If
+
+            Dim trimmed As System.String = tag.Trim()
+            If trimmed.Length < 3 OrElse trimmed(0) <> "<"c Then
+                Return 0
+            End If
+
+            Dim nameStart As System.Int32 = 1
+            Dim isClosing As System.Boolean = False
+
+            If nameStart < trimmed.Length AndAlso trimmed(nameStart) = "/"c Then
+                isClosing = True
+                nameStart += 1
+            End If
+
+            Dim nameEnd As System.Int32 = nameStart
+            While nameEnd < trimmed.Length AndAlso System.Char.IsLetter(trimmed(nameEnd))
+                nameEnd += 1
+            End While
+
+            If nameEnd = nameStart Then
+                Return 0
+            End If
+
+            Dim tagName As System.String = trimmed.Substring(nameStart, nameEnd - nameStart)
+            If Not System.String.Equals(tagName, "code", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not System.String.Equals(tagName, "pre", System.StringComparison.OrdinalIgnoreCase) Then
+                Return 0
+            End If
+
+            If nameEnd < trimmed.Length AndAlso
+               Not System.Char.IsWhiteSpace(trimmed(nameEnd)) AndAlso
+               trimmed(nameEnd) <> ">"c AndAlso
+               trimmed(nameEnd) <> "/"c Then
+                Return 0
+            End If
+
+            If isClosing Then
+                Return -1
+            End If
+
+            If trimmed.EndsWith("/>", System.StringComparison.Ordinal) Then
+                Return 0
+            End If
+
+            Return 1
+        End Function
+
+        Private Shared Function IsDoubleSUsableSourceSpan(
+            span As Markdig.Syntax.SourceSpan,
+            sourceLength As System.Int32
+        ) As System.Boolean
+
+            Return span.Start >= 0 AndAlso
+                   span.End >= span.Start AndAlso
+                   span.End < sourceLength
+        End Function
+
+        Private Shared Sub AppendDoubleSProseSourceRange(
+            output As System.Text.StringBuilder,
+            source As System.String,
+            startIndex As System.Int32,
+            endIndex As System.Int32,
+            protectedInlineSourceSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan))
+
+            Dim index As System.Int32 = startIndex
+
+            While index <= endIndex
+                Dim protectedEnd As System.Int32 =
+                    GetDoubleSProtectedSourceEnd(index, endIndex, protectedInlineSourceSpans)
+
+                If protectedEnd >= index Then
+                    output.Append(source.Substring(index, protectedEnd - index + 1))
+                    index = protectedEnd + 1
+                    Continue While
+                End If
+
+                Dim current As System.Char = source(index)
+                If current = System.Convert.ToChar(223) Then
+                    output.Append("ss")
+                Else
+                    output.Append(current)
+                End If
+
+                index += 1
+            End While
+        End Sub
+
+        Private Shared Function IsBackslashEscaped(value As System.String, index As System.Int32) As System.Boolean
+            Dim slashCount As System.Int32 = 0
+            Dim probe As System.Int32 = index - 1
+            While probe >= 0 AndAlso value(probe) = "\"c
+                slashCount += 1
+                probe -= 1
+            End While
+            Return (slashCount Mod 2) = 1
+        End Function
+
+        Private Shared Function IsLiteralReferenceStart(value As System.String, index As System.Int32) As System.Boolean
+            If System.String.IsNullOrEmpty(value) OrElse index < 0 OrElse index >= value.Length Then Return False
+
+            If value.IndexOf("https://", index, System.StringComparison.OrdinalIgnoreCase) = index OrElse
+               value.IndexOf("http://", index, System.StringComparison.OrdinalIgnoreCase) = index OrElse
+               value.IndexOf("file://", index, System.StringComparison.OrdinalIgnoreCase) = index OrElse
+               value.IndexOf("mailto:", index, System.StringComparison.OrdinalIgnoreCase) = index Then
+                Return True
+            End If
+
+            If index + 2 < value.Length AndAlso
+               System.Char.IsLetter(value(index)) AndAlso
+               value(index + 1) = ":"c AndAlso
+               (value(index + 2) = "\"c OrElse value(index + 2) = "/"c) Then
+                Return True
+            End If
+
+            Return index + 1 < value.Length AndAlso value(index) = "\"c AndAlso value(index + 1) = "\"c
+        End Function
+
+        ''' <summary>
         ''' Optionally performs a post-processing LLM call as configured by <paramref name="context"/> and returns the resulting text.
         ''' </summary>
         ''' <param name="context">Shared configuration context used to read post-correction settings and model/API selection.</param>
@@ -1484,7 +1971,7 @@ Namespace SharedLibrary
 
 PostProcess:
                     If context.INI_DoubleS Then
-                        Returnvalue = Returnvalue.Replace(ChrW(223), "ss")
+                        Returnvalue = ApplyDoubleSForPresentation(Returnvalue)
                     End If
                     If context.INI_NoDash Then
                         Returnvalue = System.Text.RegularExpressions.Regex.Replace(
