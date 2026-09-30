@@ -247,6 +247,12 @@ Namespace Agents
             Public Property RetryCorrelationSignature As System.String = System.String.Empty
             Public Property RetryCorrelationRepairablePaths As System.Collections.Generic.List(Of System.String) =
                 New System.Collections.Generic.List(Of System.String)()
+            ' A scope-less incomplete explicit-artifact preflight may be retried through the
+            ' fully legacy protocol because the rejected attempt produced no side effect. This
+            ' second signature removes only optional artifact-protocol metadata while preserving
+            ' every substantive argument. It is never enabled when an expected-artifact contract
+            ' exists or when expected_artifacts was supplied on the rejected call.
+            Public Property RetryCorrelationLegacyArtifactFallbackSignature As System.String = System.String.Empty
             ' An alternative-path success is not always cleared immediately. When causal identity
             ' cannot be proven by an explicit scope (or the failure was delegated to the parent),
             ' success is recorded as recovery evidence and committed only on an accepted final turn.
@@ -372,6 +378,29 @@ Namespace Agents
                 New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         End Class
 
+        Public NotInheritable Class ToolingRunContinuationSnapshot
+            Public Property SchemaVersion As System.Int32 = 1
+            Public Property SequencingStateJson As System.String = System.String.Empty
+            Public Property OperationRecords As System.Collections.Generic.List(Of ExplicitOperationRecord) =
+                New System.Collections.Generic.List(Of ExplicitOperationRecord)()
+            Public Property SubAgentTaskRecords As System.Collections.Generic.List(Of ExplicitSubAgentTaskRecord) =
+                New System.Collections.Generic.List(Of ExplicitSubAgentTaskRecord)()
+            Public Property FailureSequence As System.Int64
+            Public Property AttemptSequence As System.Int64
+            Public Property SubstantiveProgressEpoch As System.Int64
+            Public Property ArtifactRevisionSequence As System.Int64
+            Public Property OriginalUserRequestRaw As System.String = System.String.Empty
+            Public Property LastUserFacingResponse As System.String = System.String.Empty
+            Public Property ContinuationKey As System.String = System.String.Empty
+            Public Property ResumeCount As System.Int32
+            ' Continuation retention is persisted with the snapshot so every host can
+            ' enforce the same expiry without depending on host configuration during lookup.
+            Public Property RetentionDays As System.Int32 = 7
+            Public Property ExpiresUtc As System.DateTime = System.DateTime.MinValue
+            Public Property CreatedUtc As System.DateTime = System.DateTime.UtcNow
+            Public Property UpdatedUtc As System.DateTime = System.DateTime.UtcNow
+        End Class
+
         Public NotInheritable Class ToolingRunState
             Public Property HasUnresolvedToolFailure As Boolean
             Public Property LastToolName As String
@@ -451,6 +480,63 @@ Namespace Agents
             ''' </summary>
             Public Property DeliverableCapableToolNames As HashSet(Of String) =
                 New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+
+            Public Function CreateContinuationSnapshot(
+                Optional originalUserRequestRaw As System.String = "",
+                Optional lastUserFacingResponse As System.String = "",
+                Optional continuationKey As System.String = "") As ToolingRunContinuationSnapshot
+
+                Dim stateToken As Newtonsoft.Json.Linq.JObject =
+                    Newtonsoft.Json.Linq.JObject.FromObject(Me)
+
+                ' These members are restored through explicit host-owned snapshot channels.
+                ' Current host capabilities are intentionally not persisted across runs.
+                stateToken.Remove("OperationRegistry")
+                stateToken.Remove("SubAgentTaskRegistry")
+                stateToken.Remove("DeliverableCapableToolNames")
+
+                Return New ToolingRunContinuationSnapshot With {
+                    .SequencingStateJson = stateToken.ToString(Newtonsoft.Json.Formatting.None),
+                    .OperationRecords = If(OperationRegistry, New ExplicitOperationRegistry()).ExportRecords(),
+                    .SubAgentTaskRecords = If(SubAgentTaskRegistry, New ExplicitSubAgentTaskRegistry()).ExportRecords(),
+                    .FailureSequence = _failureSequence,
+                    .AttemptSequence = _attemptSequence,
+                    .SubstantiveProgressEpoch = _substantiveProgressEpoch,
+                    .ArtifactRevisionSequence = _artifactRevisionSequence,
+                    .OriginalUserRequestRaw = If(originalUserRequestRaw, ""),
+                    .LastUserFacingResponse = If(lastUserFacingResponse, ""),
+                    .ContinuationKey = If(continuationKey, "").Trim(),
+                    .CreatedUtc = System.DateTime.UtcNow,
+                    .UpdatedUtc = System.DateTime.UtcNow
+                }
+            End Function
+
+            Public Sub ApplyContinuationSnapshot(snapshot As ToolingRunContinuationSnapshot)
+                If snapshot Is Nothing OrElse snapshot.SchemaVersion <> 1 Then
+                    Throw New System.InvalidOperationException("Unsupported or missing tooling continuation snapshot.")
+                End If
+
+                Dim currentCapabilities As System.Collections.Generic.HashSet(Of System.String) = DeliverableCapableToolNames
+
+                If Not System.String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then
+                    Newtonsoft.Json.JsonConvert.PopulateObject(snapshot.SequencingStateJson, Me)
+                End If
+
+                If OperationRegistry Is Nothing Then OperationRegistry = New ExplicitOperationRegistry()
+                OperationRegistry.ImportRecords(snapshot.OperationRecords)
+
+                If SubAgentTaskRegistry Is Nothing Then SubAgentTaskRegistry = New ExplicitSubAgentTaskRegistry()
+                SubAgentTaskRegistry.ImportRecords(snapshot.SubAgentTaskRecords)
+
+                _failureSequence = System.Math.Max(_failureSequence, snapshot.FailureSequence)
+                _attemptSequence = System.Math.Max(_attemptSequence, snapshot.AttemptSequence)
+                _substantiveProgressEpoch = System.Math.Max(_substantiveProgressEpoch, snapshot.SubstantiveProgressEpoch)
+                _artifactRevisionSequence = System.Math.Max(_artifactRevisionSequence, snapshot.ArtifactRevisionSequence)
+
+                DeliverableCapableToolNames =
+                    If(currentCapabilities,
+                       New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase))
+            End Sub
 
             ''' <summary>
             ''' True when the given tool name is allowed to produce a deliverable. Fails open
@@ -1833,6 +1919,7 @@ Namespace Agents
                 Dim retryCorrelationSignature As System.String = System.String.Empty
                 Dim retryCorrelationRepairablePaths As System.Collections.Generic.List(Of System.String) = Nothing
                 Dim hasExactRetryCorrelation As System.Boolean = False
+                Dim legacyArtifactFallbackSignature As System.String = System.String.Empty
 
                 If normalizedRecoveryScopeKey = System.String.Empty AndAlso
                    retryCorrelationArguments IsNot Nothing Then
@@ -1842,6 +1929,18 @@ Namespace Agents
                         If(errorCode, System.String.Empty),
                         retryCorrelationSignature,
                         retryCorrelationRepairablePaths)
+
+                    If hasExactRetryCorrelation AndAlso
+                       System.String.Equals(
+                           If(errorCode, System.String.Empty).Trim(),
+                           "explicit_artifact_identity_incomplete",
+                           System.StringComparison.Ordinal) AndAlso
+                       Not HasExpectedDeliverableContract Then
+
+                        TryBuildLegacyArtifactFallbackCorrelation(
+                            retryCorrelationArguments,
+                            legacyArtifactFallbackSignature)
+                    End If
                 End If
 
                 ' Only the exact same concrete step is a retry. Scope-less preflight failures
@@ -1902,6 +2001,7 @@ Namespace Agents
                     If(hasExactRetryCorrelation,
                        New System.Collections.Generic.List(Of System.String)(retryCorrelationRepairablePaths),
                        New System.Collections.Generic.List(Of System.String)())
+                record.RetryCorrelationLegacyArtifactFallbackSignature = legacyArtifactFallbackSignature
                 ' A new/failed retry invalidates prior replacement evidence for this exact step.
                 record.RecoveryEvidenceObserved = False
                 record.RecoveryEvidenceToolName = String.Empty
@@ -2568,7 +2668,7 @@ Namespace Agents
                 Return Not System.String.IsNullOrWhiteSpace(signature)
             End Function
 
-            Private Shared Function DoesPreflightRetryCorrelationMatch(
+            Private Function DoesPreflightRetryCorrelationMatch(
                 failure As ToolFailureRecord,
                 successfulArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
 
@@ -2589,14 +2689,99 @@ Namespace Agents
                 If root Is Nothing Then Return False
 
                 Dim masked As Newtonsoft.Json.Linq.JObject = DirectCast(root.DeepClone(), Newtonsoft.Json.Linq.JObject)
-                If Not ApplyRetryCorrelationMasks(masked, failure.RetryCorrelationRepairablePaths) Then Return False
+                If ApplyRetryCorrelationMasks(masked, failure.RetryCorrelationRepairablePaths) Then
+                    Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(masked)
+                    Dim successfulSignature As System.String = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                    If System.String.Equals(
+                        failure.RetryCorrelationSignature,
+                        successfulSignature,
+                        System.StringComparison.Ordinal) Then
 
-                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(masked)
-                Dim successfulSignature As System.String = canonical.ToString(Newtonsoft.Json.Formatting.None)
-                Return System.String.Equals(
-                    failure.RetryCorrelationSignature,
-                    successfulSignature,
-                    System.StringComparison.Ordinal)
+                        Return True
+                    End If
+                End If
+
+                ' A rejected partial explicit-artifact call created no side effect. If there is
+                ' no expected-artifact contract, a later successful call may deliberately return
+                ' to the legacy protocol. Recover only when the successful call contains no
+                ' non-empty explicit identity and all substantive arguments still match exactly.
+                If Not HasExpectedDeliverableContract AndAlso
+                   Not System.String.IsNullOrWhiteSpace(
+                       failure.RetryCorrelationLegacyArtifactFallbackSignature) AndAlso
+                   Not HasNonEmptyExplicitArtifactIdentity(successfulArguments) Then
+
+                    Dim legacySuccessfulSignature As System.String = System.String.Empty
+                    If TryBuildLegacyArtifactFallbackCorrelation(
+                        successfulArguments,
+                        legacySuccessfulSignature) AndAlso
+                       System.String.Equals(
+                           failure.RetryCorrelationLegacyArtifactFallbackSignature,
+                           legacySuccessfulSignature,
+                           System.StringComparison.Ordinal) Then
+
+                        Return True
+                    End If
+                End If
+
+                Return False
+            End Function
+
+            Private Shared Function HasNonEmptyExplicitArtifactIdentity(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+                If arguments Is Nothing Then Return False
+
+                For Each fieldName As System.String In New System.String() {
+                    "artifact_id",
+                    "logical_deliverable_id",
+                    "output_slot_id",
+                    "supersedes_artifact_id"
+                }
+                    Dim rawValue As System.Object = Nothing
+                    If arguments.TryGetValue(fieldName, rawValue) AndAlso rawValue IsNot Nothing AndAlso
+                       Not System.String.IsNullOrWhiteSpace(System.Convert.ToString(rawValue)) Then
+
+                        Return True
+                    End If
+                Next
+
+                Return False
+            End Function
+
+            Private Shared Function TryBuildLegacyArtifactFallbackCorrelation(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                ByRef signature As System.String) As System.Boolean
+
+                signature = System.String.Empty
+                If arguments Is Nothing Then Return False
+
+                Dim root As Newtonsoft.Json.Linq.JObject = Nothing
+                Try
+                    root = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(arguments), Newtonsoft.Json.Linq.JObject)
+                Catch ex As System.Exception
+                    Return False
+                End Try
+                If root Is Nothing Then Return False
+
+                ' expected_artifacts is orchestration state, not optional per-file identity.
+                ' Never permit a legacy fallback to erase or introduce that contract.
+                If root("expected_artifacts") IsNot Nothing Then Return False
+
+                For Each fieldName As System.String In New System.String() {
+                    "artifact_id",
+                    "logical_deliverable_id",
+                    "output_slot_id",
+                    "supersedes_artifact_id",
+                    "artifact_state",
+                    "artifact_delivery_intent",
+                    "storage_kind"
+                }
+                    root.Remove(fieldName)
+                Next
+
+                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(root)
+                signature = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                Return Not System.String.IsNullOrWhiteSpace(signature)
             End Function
 
             Private Shared Function ApplyRetryCorrelationMasks(
@@ -6027,7 +6212,8 @@ Namespace Agents
         Public Shared Function TryBuildDeterministicHostFailureMessage(errorCode As System.String,
                                                                        message As System.String,
                                                                        userLanguage As System.String,
-                                                                       ByRef result As System.String) As System.Boolean
+                                                                       ByRef result As System.String,
+                                                                       Optional producedUserDeliverable As System.Boolean = False) As System.Boolean
             result = System.String.Empty
             Dim category As HostFailureCategory = ClassifyHostFailure(errorCode, message)
             If category = HostFailureCategory.Unknown Then Return False
@@ -6099,7 +6285,107 @@ Namespace Agents
                     End Select
             End Select
 
+            If producedUserDeliverable AndAlso result <> System.String.Empty Then
+                Select Case lang
+                    Case "de"
+                        result &= " Eine Ergebnisdatei wurde jedoch bereits erstellt und kann trotzdem verwendbar sein. Bitte prüfen Sie sie kurz und wiederholen Sie den Vorgang nur, wenn etwas fehlt, falsch ist oder die Datei nicht verwendbar ist."
+                    Case "fr"
+                        result &= " Un fichier de résultat a toutefois déjà été créé et peut néanmoins être utilisable. Veuillez le vérifier brièvement et ne relancez l’opération que s’il manque quelque chose, si le contenu est incorrect ou si le fichier n’est pas utilisable."
+                    Case "it"
+                        result &= " È tuttavia già stato creato un file di risultato che potrebbe essere comunque utilizzabile. Verificalo brevemente e ripeti l’operazione solo se manca qualcosa, il contenuto è errato o il file non è utilizzabile."
+                    Case Else
+                        result &= " A result file was nevertheless already created and may still be usable. Please review it briefly and retry only if something is missing, incorrect, or the file cannot be used."
+                End Select
+            End If
+
             Return result <> System.String.Empty
+        End Function
+
+        ''' <summary>
+        ''' Extracts a safe, user-facing provisional answer from a rejected final turn.
+        ''' The TASK_STATUS footer is removed and provider/tool envelopes are never surfaced.
+        ''' </summary>
+        Public Shared Function TryExtractProvisionalUserFacingText(candidate As System.String,
+                                                                   ByRef result As System.String) As System.Boolean
+            result = System.String.Empty
+            Dim raw As System.String = If(candidate, System.String.Empty).Trim()
+            If raw = System.String.Empty Then Return False
+            If ContainsProviderToolEnvelope(raw) Then Return False
+
+            Dim parsed As TaskStatusParseResult = ParseStrictTaskStatus(raw)
+            If parsed Is Nothing OrElse Not parsed.IsPresent OrElse Not parsed.IsValid Then Return False
+            If parsed.Status <> TaskStatusKind.Complete AndAlso parsed.Status <> TaskStatusKind.Blocked Then Return False
+
+            Dim body As System.String = If(parsed.TextBeforeFooter, System.String.Empty).Trim()
+            If body = System.String.Empty Then Return False
+            If Not IsUserPresentableFinalText(body) Then Return False
+            If ContainsProviderToolEnvelope(body) Then Return False
+
+            result = body
+            Return True
+        End Function
+
+        ''' <summary>
+        ''' Only finalization failures where the model already produced a complete/blocked user answer
+        ''' may expose that answer as provisional. Missing grounding or missing mandatory tool work is
+        ''' intentionally excluded because the substance may be materially unsupported.
+        ''' </summary>
+        Public Shared Function CanSurfaceProvisionalBlockedResponse(finalizationReason As System.String) As System.Boolean
+            Dim reason As System.String = If(finalizationReason, System.String.Empty).Trim()
+
+            ' Keep this intentionally narrow. A complete answer rejected only because a tool failure
+            ' remains unresolved may still contain useful substance. Missing grounding, missing required
+            ' tools, or missing deliverables can make the substance itself incomplete or misleading.
+            Return System.String.Equals(
+                reason,
+                "complete_with_unresolved_tool_failure",
+                System.StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        ''' <summary>
+        ''' Appends a deterministic caveat to a safe provisional answer without rewriting its substance.
+        ''' </summary>
+        Public Shared Function BuildProvisionalBlockedFinalMessage(provisionalText As System.String,
+                                                                   runState As ToolingRunState,
+                                                                   userLanguage As System.String) As System.String
+            Dim body As System.String = If(provisionalText, System.String.Empty).Trim()
+            If body = System.String.Empty Then Return System.String.Empty
+
+            Dim lang As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant()
+            Dim sep As System.Int32 = lang.IndexOfAny(New System.Char() {"-"c, "_"c})
+            If sep > 0 Then lang = lang.Substring(0, sep)
+
+            Dim hasDeliverable As System.Boolean = HasProducedUserDeliverable(runState)
+            Dim note As System.String
+
+            Select Case lang
+                Case "de"
+                    If hasDeliverable Then
+                        note = "Hinweis: Das obige inhaltliche Ergebnis wurde erzeugt, und eine Ergebnisdatei wurde bereits erstellt. Die abschliessende technische Prüfung des Vorgangs konnte jedoch nicht vollständig abgeschlossen werden. Die Datei kann trotzdem verwendbar sein; bitte prüfen Sie sie kurz. Wiederholen Sie den Vorgang nur, wenn etwas fehlt, falsch ist oder die Datei nicht verwendbar ist."
+                    Else
+                        note = "Hinweis: Das obige inhaltliche Ergebnis wurde erzeugt, die abschliessende technische Prüfung des Vorgangs konnte jedoch nicht vollständig abgeschlossen werden. Der Inhalt kann trotzdem nützlich sein, sollte aber als vorläufig betrachtet werden. Wiederholen Sie den Vorgang, wenn etwas fehlt oder falsch erscheint."
+                    End If
+                Case "fr"
+                    If hasDeliverable Then
+                        note = "Remarque : le résultat de fond ci-dessus a été généré et un fichier de résultat a déjà été créé. La vérification technique finale n’a toutefois pas pu être entièrement menée à bien. Le fichier peut néanmoins être utilisable ; veuillez le vérifier brièvement. Ne relancez l’opération que s’il manque quelque chose, si le contenu est incorrect ou si le fichier n’est pas utilisable."
+                    Else
+                        note = "Remarque : le résultat de fond ci-dessus a été généré, mais la vérification technique finale n’a pas pu être entièrement menée à bien. Le contenu peut néanmoins être utile, mais doit être considéré comme provisoire. Relancez l’opération si quelque chose manque ou semble incorrect."
+                    End If
+                Case "it"
+                    If hasDeliverable Then
+                        note = "Nota: il risultato sostanziale riportato sopra è stato generato ed è già stato creato un file di risultato. La verifica tecnica finale non ha tuttavia potuto essere completata interamente. Il file potrebbe essere comunque utilizzabile; verificalo brevemente. Ripeti l’operazione solo se manca qualcosa, il contenuto è errato o il file non è utilizzabile."
+                    Else
+                        note = "Nota: il risultato sostanziale riportato sopra è stato generato, ma la verifica tecnica finale non ha potuto essere completata interamente. Il contenuto potrebbe comunque essere utile, ma va considerato provvisorio. Ripeti l’operazione se manca qualcosa o se qualcosa sembra errato."
+                    End If
+                Case Else
+                    If hasDeliverable Then
+                        note = "Note: The substantive result above was generated, and a result file was already created. Final technical verification of the run did not complete successfully. The file may still be usable; please review it briefly. Retry only if something is missing, incorrect, or the file cannot be used."
+                    Else
+                        note = "Note: The substantive result above was generated, but final technical verification of the run did not complete successfully. The content may still be useful, but should be treated as provisional. Retry if something is missing or appears incorrect."
+                    End If
+            End Select
+
+            Return body & vbCrLf & vbCrLf & note
         End Function
 
         Public Shared Function BuildUserSafeBlockedFinalMessage(runState As ToolingRunState,
@@ -6110,7 +6396,12 @@ Namespace Agents
                                                                 Optional userLanguage As String = "",
                                                                 Optional appendTaskStatusFooter As Boolean = True) As String
             Dim deterministicMessage As System.String = System.String.Empty
-            If TryBuildDeterministicHostFailureMessage(errorCode, message, userLanguage, deterministicMessage) Then
+            If TryBuildDeterministicHostFailureMessage(
+                errorCode,
+                message,
+                userLanguage,
+                deterministicMessage,
+                producedUserDeliverable:=HasProducedUserDeliverable(runState)) Then
                 If appendTaskStatusFooter Then
                     deterministicMessage &= " " & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
                 End If

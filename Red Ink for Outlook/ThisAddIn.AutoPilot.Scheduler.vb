@@ -939,6 +939,8 @@ Partial Public Class ThisAddIn
             ' Every scheduled execution owns a fresh top-level tooling/delivery result.
             ' A no-tool scheduled run must never see the previous AutoPilot/Local-Agent registry.
             _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolingWorkflowId = System.String.Empty
+            _lastCompletedToolingWasBlocked = False
             _lastCompletedToolResponses = New List(Of ToolResponse)()
 
             ' Create isolated temp directory

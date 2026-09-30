@@ -2972,6 +2972,13 @@ Partial Public Class ThisAddIn
         Dim primaryReplySubmitted As System.Boolean = False
         Dim outcomeHandoffEstablished As System.Boolean = False
         Dim processingException As System.Exception = Nothing
+        Dim workflowContinuationKey As System.String = System.String.Empty
+        Dim continuationWorkflowId As System.String = System.String.Empty
+        Dim continuationRetryRequested As System.Boolean = False
+        Dim resumeBlockedWorkflow As System.Boolean = False
+        Dim continuationInstructionLanguage As System.String = System.String.Empty
+        Dim workflowContinuationRetentionDays As System.Int32 =
+            SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
 
         Try
             Try
@@ -3059,6 +3066,28 @@ Partial Public Class ThisAddIn
             If Not MatchesFilterRules(mailInfo) Then : ApDashboardLog("SKIP (no filter match): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
             If MatchesNegativeFilters(mailInfo) Then : ApDashboardLog("SKIP (negative filter): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
 
+            ' Cross-mail continuation is opt-in and bound to the authenticated sender plus
+            ' Outlook ConversationID. A plain follow-up never silently resumes old state.
+            workflowContinuationKey = BuildAutoPilotWorkflowContinuationKey(mailInfo)
+            workflowContinuationRetentionDays = ResolveAutoPilotWorkflowContinuationRetentionDays()
+            continuationRetryRequested = IsExplicitWorkflowContinuationRetry(mailInfo.Body)
+            If continuationRetryRequested AndAlso workflowContinuationKey <> "" Then
+                continuationInstructionLanguage =
+                    SharedLibrary.Agents.WorkflowContinuity.GetLatestBlockedContinuationUserLanguage(
+                        workflowContinuationKey,
+                        "Outlook")
+                continuationWorkflowId =
+                    SharedLibrary.Agents.WorkflowContinuity.FindBlockedContinuationWorkflowId(
+                        workflowContinuationKey,
+                        "Outlook")
+                resumeBlockedWorkflow = Not System.String.IsNullOrWhiteSpace(continuationWorkflowId)
+                If resumeBlockedWorkflow Then
+                    ApDashboardLog("CONTINUATION: resuming blocked workflow " & continuationWorkflowId, "step")
+                Else
+                    ApDashboardLog("CONTINUATION: retry requested but no matching blocked checkpoint exists; refusing a blind fresh rerun.", "warn")
+                End If
+            End If
+
             ' Subject trigger word CAN be bypassed for existing conversations — reply subjects
             ' often have "Re: Re: ..." prefixes or the trigger word gets stripped in threading.
             If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
@@ -3087,6 +3116,8 @@ Partial Public Class ThisAddIn
                     ApDashboardLog("COOLDOWN BYPASS (holding notice already sent): " & mailInfo.SenderEmail, "step")
                 ElseIf isCatchUpMail Then
                     ApDashboardLog("COOLDOWN BYPASS (catch-up/reprocess mail): " & mailInfo.SenderEmail, "step")
+                ElseIf resumeBlockedWorkflow Then
+                    ApDashboardLog("COOLDOWN BYPASS (explicit blocked-workflow continuation): " & mailInfo.SenderEmail, "step")
                 Else
                     ApDashboardLog($"SKIP (cooldown): {mailInfo.SenderEmail} — SentOn {mailSentUtc:HH:mm:ss} UTC", "step")
                     Return
@@ -3096,6 +3127,20 @@ Partial Public Class ThisAddIn
             If _apConfig.MaxRepliesPerSession > 0 AndAlso _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (global session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached — " & _apSessionReplyCount.ToString() & " replies sent across all senders): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "warn") : Return : End If
 
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
+
+            If continuationRetryRequested AndAlso Not resumeBlockedWorkflow Then
+                Dim unavailableNotice As System.String =
+                    SharedLibrary.Agents.WorkflowContinuity.BuildContinuationUnavailableNotice(continuationInstructionLanguage)
+                Await SwitchToUi(Sub() SendReplyToSender(mi, unavailableNotice, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                outcomeHandoffEstablished = True
+                Dim continuationSourceFinalized As System.Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                System.Threading.Interlocked.Increment(_apSessionReplyCount)
+                RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                RecordLastProcessedTime()
+                TrackAutoPilotConversation(mi)
+                ApDashboardLog("CONTINUATION: sent unavailable-checkpoint notice; no fresh tooling run was started.", "warn")
+                Return
+            End If
 
             ' ── Reply-To mismatch: potential spoofing or reflection attack ──
             ' If the mail has a Reply-To that differs from the sender, log a warning
@@ -3282,6 +3327,8 @@ Partial Public Class ThisAddIn
                 ' This mail owns its delivery state. Never let a no-tool mail fall back
                 ' to the completed registry of the previous AutoPilot mail/dialog.
                 _lastCompletedToolingRunState = Nothing
+                _lastCompletedToolingWorkflowId = System.String.Empty
+                _lastCompletedToolingWasBlocked = False
                 _lastCompletedToolResponses = New List(Of ToolResponse)()
 
                 ' Initialize tool call log for this e-mail
@@ -3421,12 +3468,15 @@ Partial Public Class ThisAddIn
                             hideSplash:=True, hideLogWindow:=True,
                             cancellationToken:=ct,
                             binaryOutputDirectory:=_apCurrentTempDir,
-                            workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                            workflowId:=If(resumeBlockedWorkflow, continuationWorkflowId, SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId()),
                             memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
                             memoryGroundingModeIsExplicit:=True,
                             toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
                                 If(String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
                                 mailInfo.Subject),
+                            resumeWorkflowFromCheckpoint:=resumeBlockedWorkflow,
+                            workflowContinuationKey:=workflowContinuationKey,
+                            workflowContinuationRetentionDays:=workflowContinuationRetentionDays,
                             transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                     Else
                         ' Use no-tools system prompt when tooling is disabled
@@ -3463,6 +3513,18 @@ Partial Public Class ThisAddIn
                     INI_ToolingMaximumIterations = previousMaxToolIterations
                     ClearAttachmentCaches()
                 End Try
+
+                If Not jobAborted AndAlso
+                   _lastCompletedToolingWasBlocked AndAlso
+                   Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingWorkflowId) AndAlso
+                   SharedLibrary.Agents.WorkflowContinuity.HasContinuationSnapshot(_lastCompletedToolingWorkflowId) Then
+                    Dim retryInstructionLanguage As System.String = continuationInstructionLanguage
+                    If _lastCompletedToolingRunState IsNot Nothing AndAlso
+                       Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingRunState.UserLanguage) Then
+                        retryInstructionLanguage = _lastCompletedToolingRunState.UserLanguage
+                    End If
+                    response = AppendAutoPilotContinuationRetryHint(response, retryInstructionLanguage)
+                End If
 
                 ' ── Detect swallowed cancellation ──
                 ' ExecuteToolingLoop catches OperationCanceledException internally and returns
@@ -7204,6 +7266,56 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="mi">The incoming MailItem to check.</param>
     ''' <returns>True if this mail is part of an AutoPilot-managed conversation.</returns>
+    Private Function IsExplicitWorkflowContinuationRetry(body As System.String) As System.Boolean
+        Dim normalized As System.String = If(body, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        For Each rawLine As System.String In normalized.Split(ControlChars.Lf)
+            Dim line As System.String = If(rawLine, System.String.Empty).Trim()
+            If line = System.String.Empty Then Continue For
+            If System.String.Equals(line, "retry", System.StringComparison.OrdinalIgnoreCase) OrElse
+               System.String.Equals(line, "#retry", System.StringComparison.OrdinalIgnoreCase) OrElse
+               line.StartsWith("retry ", System.StringComparison.OrdinalIgnoreCase) OrElse
+               line.StartsWith("#retry ", System.StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+            Return False
+        Next
+        Return False
+    End Function
+
+    Private Function BuildAutoPilotWorkflowContinuationKey(info As AutoPilotMailInfo) As System.String
+        If info Is Nothing Then Return System.String.Empty
+        Dim sender As System.String = If(info.SenderEmail, System.String.Empty).Trim().ToLowerInvariant()
+        Dim conversationId As System.String = If(info.ConversationID, System.String.Empty).Trim()
+        If sender = System.String.Empty OrElse conversationId = System.String.Empty Then Return System.String.Empty
+
+        Dim seed As System.String = sender & "|" & conversationId
+        Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+            Dim hash As System.Byte() = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(seed))
+            Dim builder As New System.Text.StringBuilder(40)
+            For i As System.Int32 = 0 To System.Math.Min(19, hash.Length - 1)
+                builder.Append(hash(i).ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+            Next
+            Return "mail_" & builder.ToString()
+        End Using
+    End Function
+
+    Private Function ResolveAutoPilotWorkflowContinuationRetentionDays() As System.Int32
+        If _apConfig IsNot Nothing AndAlso _apConfig.ThreadRetentionDays > 0 Then
+            Return _apConfig.ThreadRetentionDays
+        End If
+        Return SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
+    End Function
+
+    Private Function AppendAutoPilotContinuationRetryHint(responseText As System.String,
+                                                           userLanguage As System.String) As System.String
+        Dim text As System.String = If(responseText, System.String.Empty).TrimEnd()
+        Dim hint As System.String =
+            SharedLibrary.Agents.WorkflowContinuity.BuildContinuationRetryHint(userLanguage)
+        If text = System.String.Empty Then Return hint
+        If text.IndexOf(hint, System.StringComparison.Ordinal) >= 0 Then Return text
+        Return text & Environment.NewLine & Environment.NewLine & hint
+    End Function
+
     Private Function IsPartOfAutoPilotConversation(mi As MailItem) As Boolean
         Try
             ' 1. Check the incoming mail itself for the header (any value: "true" or "holding")
@@ -8319,6 +8431,8 @@ Partial Public Class ThisAddIn
             ' This voicemail owns its delivery state. Never reuse a completed
             ' registry from the previous AutoPilot item when no tooling run occurs.
             _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolingWorkflowId = System.String.Empty
+            _lastCompletedToolingWasBlocked = False
             _lastCompletedToolResponses = New List(Of ToolResponse)()
 
             ' ── Initialize tool call log ──

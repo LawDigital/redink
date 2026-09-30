@@ -156,6 +156,44 @@ Namespace Agents
         Private ReadOnly _records As New System.Collections.Generic.Dictionary(Of String, ExplicitOperationRecord)(System.StringComparer.Ordinal)
         Private ReadOnly _syncRoot As New Object()
 
+        Public Function ExportRecords() As System.Collections.Generic.List(Of ExplicitOperationRecord)
+            SyncLock _syncRoot
+                Return _records.Values.
+                    Where(Function(record) record IsNot Nothing).
+                    Select(Function(record) New ExplicitOperationRecord With {
+                        .OperationId = record.OperationId,
+                        .StepId = record.StepId,
+                        .AttemptCount = record.AttemptCount,
+                        .Status = record.Status,
+                        .TerminalReason = record.TerminalReason,
+                        .UpdatedUtc = record.UpdatedUtc
+                    }).
+                    ToList()
+            End SyncLock
+        End Function
+
+        Public Sub ImportRecords(records As System.Collections.Generic.IEnumerable(Of ExplicitOperationRecord))
+            If records Is Nothing Then Return
+
+            SyncLock _syncRoot
+                For Each source As ExplicitOperationRecord In records
+                    If source Is Nothing Then Continue For
+                    Dim operationId As String = If(source.OperationId, "").Trim()
+                    If operationId = "" Then Continue For
+
+                    Dim copy As New ExplicitOperationRecord With {
+                        .OperationId = operationId,
+                        .StepId = If(source.StepId, "").Trim(),
+                        .AttemptCount = System.Math.Max(0, source.AttemptCount),
+                        .Status = source.Status,
+                        .TerminalReason = If(source.TerminalReason, ""),
+                        .UpdatedUtc = source.UpdatedUtc
+                    }
+                    _records(BuildRecordKey(copy.OperationId, copy.StepId)) = copy
+                Next
+            End SyncLock
+        End Sub
+
         Public Function IsTerminal(operationId As String, Optional stepId As String = "") As Boolean
             Dim id As String = If(operationId, "").Trim()
             If id = "" Then Return False

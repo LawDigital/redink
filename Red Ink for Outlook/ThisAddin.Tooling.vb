@@ -116,6 +116,8 @@ Partial Public Class ThisAddIn
     ''' delivery collection has finished. Nested sub-agent runs never overwrite it.
     ''' </summary>
     Private _lastCompletedToolingRunState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState = Nothing
+    Private _lastCompletedToolingWorkflowId As System.String = System.String.Empty
+    Private _lastCompletedToolingWasBlocked As System.Boolean = False
 
 
 #Region "Tooling Data Classes"
@@ -785,6 +787,9 @@ Partial Public Class ThisAddIn
         Optional subAgentExpectedArtifactsJson As String = Nothing,
         Optional toolingLogArchivePath As String = Nothing,
         Optional subAgentRequiredSuccessfulToolNames As IReadOnlyList(Of String) = Nothing,
+        Optional resumeWorkflowFromCheckpoint As System.Boolean = False,
+        Optional workflowContinuationKey As System.String = "",
+        Optional workflowContinuationRetentionDays As System.Int32 = 0,
         Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
@@ -811,6 +816,8 @@ Partial Public Class ThisAddIn
 
         If Not subAgentMode Then
             _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolingWorkflowId = System.String.Empty
+            _lastCompletedToolingWasBlocked = False
             _lastCompletedToolResponses = New List(Of ToolResponse)()
         End If
 
@@ -1012,7 +1019,7 @@ Partial Public Class ThisAddIn
         context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
         context.WorkflowId = ResolveToolingWorkflowId(workflowId, subAgentMode, parentToolingContext)
 
-        If Not subAgentMode Then
+        If Not subAgentMode AndAlso Not resumeWorkflowFromCheckpoint Then
             Dim clearedCount As Integer =
                 SharedLibrary.Agents.SessionMemory.ClearTransientEntriesForHost(
                     context.HostKind,
@@ -1025,10 +1032,24 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        context.RuntimeState =
-    If(subAgentMode,
-       SharedLibrary.Agents.WorkflowContinuity.AttachWorkflow(context.WorkflowId, context.HostKind),
-       SharedLibrary.Agents.WorkflowContinuity.StartWorkflow(context.WorkflowId, context.HostKind))
+        If subAgentMode Then
+            context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.AttachWorkflow(context.WorkflowId, context.HostKind)
+        ElseIf resumeWorkflowFromCheckpoint Then
+            context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.ResumeWorkflow(
+                context.WorkflowId,
+                context.HostKind,
+                workflowContinuationRetentionDays)
+            Dim continuationSnapshot As SharedLibrary.Agents.ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+            If Not SharedLibrary.Agents.WorkflowContinuity.TryGetContinuationSnapshot(context.WorkflowId, continuationSnapshot) OrElse continuationSnapshot Is Nothing Then
+                Throw New System.InvalidOperationException("The requested workflow continuation checkpoint is unavailable.")
+            End If
+            context.SequencingState.ApplyContinuationSnapshot(continuationSnapshot)
+            context.SequencingState.ActiveToolingSession = True
+            context.SequencingState.HasOpenToolWorkflow = True
+            context.Log("Cross-run workflow continuation restored from checkpoint.", "step")
+        Else
+            context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.StartWorkflow(context.WorkflowId, context.HostKind)
+        End If
 
         workflowScope = SharedLibrary.Agents.WorkflowContinuity.BeginWorkflowScope(context.WorkflowId, context.HostKind)
 
@@ -4060,6 +4081,7 @@ Partial Public Class ThisAddIn
                                 Continue While
                             End If
 
+                            context.PendingRejectedAssistantTurn = If(currentResponse, System.String.Empty)
                             context.FinalizationBlocked = True
                             context.FinalizationBlockedReason = If(turnValidation.InvalidReason, "invalid_turn")
                             currentResponse = Await BuildBlockedToolingResultAsync(
@@ -4680,7 +4702,12 @@ Partial Public Class ThisAddIn
                     SharedLibrary.Agents.WorkflowContinuity.NoteFinalStatus(
                         context.WorkflowId,
                         context.HostKind,
-                        isBlockedFinal)
+                        isBlockedFinal,
+                        context.SequencingState,
+                        context.LatestUserRequestRaw,
+                        currentResponse,
+                        workflowContinuationKey,
+                        workflowContinuationRetentionDays)
 
                 context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
                 context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}", "diag")
@@ -4786,6 +4813,11 @@ Partial Public Class ThisAddIn
 
             If Not subAgentMode Then
                 _lastCompletedToolingRunState = context.SequencingState
+                _lastCompletedToolingWorkflowId = context.WorkflowId
+                _lastCompletedToolingWasBlocked =
+                    context.FinalizationBlocked OrElse
+                    context.EmptyMainModelResponse OrElse
+                    System.String.Equals(acceptedFinalStatus, "blocked", System.StringComparison.OrdinalIgnoreCase)
             End If
 
             _activeToolingContext = parentToolingContext
@@ -5863,12 +5895,38 @@ Partial Public Class ThisAddIn
             failedCount = context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count()
         End If
 
+        Dim provisionalUserFacingText As System.String = System.String.Empty
+        If context IsNot Nothing AndAlso
+           SharedLibrary.Agents.ToolCallSequencing.CanSurfaceProvisionalBlockedResponse(context.FinalizationBlockedReason) AndAlso
+           SharedLibrary.Agents.ToolCallSequencing.TryExtractProvisionalUserFacingText(
+               context.PendingRejectedAssistantTurn,
+               provisionalUserFacingText) Then
+
+            Dim provisionalMessage As System.String =
+                SharedLibrary.Agents.ToolCallSequencing.BuildProvisionalBlockedFinalMessage(
+                    provisionalUserFacingText,
+                    context.SequencingState,
+                    ResolveBlockedFallbackUserLanguage(context))
+
+            If Not System.String.IsNullOrWhiteSpace(provisionalMessage) Then
+                ToolingFileLogger.LogWarn(
+                    "Returning safe provisional user-facing result after finalization was blocked.",
+                    details:=$"host={If(context.HostKind, System.String.Empty)}; finalizationReason={If(context.FinalizationBlockedReason, System.String.Empty)}; producedUserDeliverable={If(SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState), "true", "false")}")
+
+                Return provisionalMessage.Trim() & " " &
+                    SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
+                        "blocked",
+                        If(errorCode, "host_generated_blocked"))
+            End If
+        End If
+
         Dim deterministicHostMessage As System.String = System.String.Empty
         If SharedLibrary.Agents.ToolCallSequencing.TryBuildDeterministicHostFailureMessage(
             errorCode,
             message,
             ResolveBlockedFallbackUserLanguage(context),
-            deterministicHostMessage) Then
+            deterministicHostMessage,
+            producedUserDeliverable:=SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)) Then
 
             Return deterministicHostMessage.Trim() & " " &
                 SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
