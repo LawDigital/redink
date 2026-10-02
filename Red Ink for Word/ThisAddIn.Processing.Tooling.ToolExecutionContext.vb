@@ -135,6 +135,9 @@ Partial Public Class ThisAddIn
 
         Public Property PrematureTextRetryCount As Integer = 0
 
+        ''' <summary>Tool-response count already covered by the last host evidence-finalization review; -1 means no review yet.</summary>
+        Public Property EvidenceFinalizationReviewResponseCount As Integer = -1
+
         ''' <summary>Number of full finalization re-planning passes already consumed in this run.</summary>
         Public Property FinalizationRecoveryRestartCount As Integer = 0
         ''' <summary>Number of full tool-path recovery re-planning passes already consumed in this run.</summary>

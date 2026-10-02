@@ -32,6 +32,7 @@ Notes:
 | `internet_search` | Searches the public internet and returns readable content from top results. | Yes | Yes | Yes |
 | `web_grounding` | Uses a web-enabled model to perform cited live-web research. | Yes | Yes | Yes |
 | `knowledge_search` | Searches the user's local knowledge store for relevant internal content. | Yes | Yes | Yes |
+| `log_count` | Deterministically counts current-host skill invocations from `INI_LogPath`; returns statistics only for skills in the caller's effective permission scope. | No | Yes | Yes |
 | `tool_loader` | Lazily loads full tool definitions only when a specific tool is needed. | Yes | Yes | Yes |
 | `resolve_capability_route` | Internal top-level routing handshake. Before substantive ordinary tooling, selects a specifically applicable advertised skill; otherwise a suitable top-level agent; otherwise `none`. Uses manifest metadata only and does not preload skill/agent bodies. Availability is host/runtime controlled. | Yes | Yes | Yes |
 | `report_progress` | Announces a short user-facing major-step progress update. Use it before the first substantive tool action and again whenever a new major phase begins. | Yes | Yes | No |

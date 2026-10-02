@@ -1675,9 +1675,16 @@ Partial Public Class ThisAddIn
                 OrderBy(Function(name) name, StringComparer.OrdinalIgnoreCase).
                 ToList()
 
+        Dim executionLocal As System.DateTimeOffset = System.DateTimeOffset.Now
+
         prompt.AppendLine("[SCHEDULED TASK EXECUTION]")
         prompt.AppendLine($"You are executing a previously scheduled task (ID: {shortTaskId}...).")
         prompt.AppendLine($"Schedule: {If(task?.ScheduleDescription, "one-time")}")
+        prompt.AppendLine($"Execution local datetime: {executionLocal:yyyy-MM-ddTHH:mm:sszzz}")
+        prompt.AppendLine($"Execution local date: {executionLocal:yyyy-MM-dd}")
+        prompt.AppendLine($"Execution UTC datetime: {executionLocal.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}")
+        prompt.AppendLine($"Execution timezone: {System.TimeZoneInfo.Local.Id}")
+        prompt.AppendLine("Treat these execution timestamps as authoritative for relative date/time terms such as today, tomorrow, this morning, and tonight.")
         prompt.AppendLine("This task is already scheduled — do NOT call manage_scheduled_tasks to create, update, or re-schedule it.")
         prompt.AppendLine("Just perform the work described below and return the result.")
 

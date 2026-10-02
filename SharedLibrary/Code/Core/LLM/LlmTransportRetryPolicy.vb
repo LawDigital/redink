@@ -209,6 +209,23 @@ Namespace SharedLibrary
             Return New Scope(previousProfile, previousFailureBudget)
         End Function
 
+        ''' <summary>
+        ''' Starts a fresh transient-failure wall-clock budget for one isolated child
+        ''' operation while preserving the currently resolved retry profile. Disposing
+        ''' the scope restores the parent budget. This prevents a long-running or failed
+        ''' sub-agent attempt from consuming the parent's remaining transport-recovery
+        ''' budget while still allowing all calls inside the child attempt to share one
+        ''' bounded budget of their own.
+        ''' </summary>
+        Public Shared Function PushIsolatedFailureBudget() As System.IDisposable
+            Dim previousProfile As System.Nullable(Of LlmTransportRetryProfile) = CurrentProfileStorage.Value
+            Dim previousFailureBudget As TransientFailureBudgetState = CurrentFailureBudgetStorage.Value
+
+            CurrentFailureBudgetStorage.Value = New TransientFailureBudgetState()
+
+            Return New Scope(previousProfile, previousFailureBudget)
+        End Function
+
         Private NotInheritable Class Scope
             Implements System.IDisposable
 

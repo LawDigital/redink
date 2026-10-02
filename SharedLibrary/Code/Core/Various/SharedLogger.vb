@@ -129,6 +129,25 @@ Public Module SharedLogger
     End Sub
 
     ''' <summary>
+    ''' Waits until all log writes that were queued before this call have been processed.
+    ''' A queue barrier is used instead of polling the file system. Returns False on timeout
+    ''' or failure; no exception escapes to the caller.
+    ''' </summary>
+    Public Function FlushPendingWrites(Optional timeoutMilliseconds As System.Int32 = 5000) As System.Boolean
+        Try
+            EnsureLogWorker()
+
+            Dim boundedTimeout As System.Int32 = System.Math.Max(1, timeoutMilliseconds)
+            Using completed As New System.Threading.ManualResetEventSlim(False)
+                _logQueue.Add(Sub() completed.Set())
+                Return completed.Wait(boundedTimeout)
+            End Using
+        Catch ex As System.Exception
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
     ''' Starts the single background log worker thread if it has not been started yet.
     ''' </summary>
     ''' <remarks>
@@ -568,6 +587,33 @@ Public Module SharedLogger
     End Function
 
     ''' <summary>
+    ''' Resolves all log files in the configured log directory for one Office host.
+    ''' The filename filter uses the same host-code contract as <see cref="Log"/> and
+    ''' intentionally does not enumerate logs for other Office hosts.
+    ''' </summary>
+    Public Function TryGetHostLogFilePaths(context As ISharedContext,
+                                           hostName As System.String,
+                                           ByRef logFiles As System.String()) As System.Boolean
+        logFiles = New System.String() {}
+
+        Try
+            If context Is Nothing OrElse System.String.IsNullOrWhiteSpace(context.INI_LogPath) Then Return False
+            If Not System.IO.Directory.Exists(context.INI_LogPath) Then Return False
+
+            Dim appCode As System.String = GetOfficeHostCode(hostName)
+            If System.String.Equals(appCode, "UK", System.StringComparison.OrdinalIgnoreCase) Then Return False
+
+            Dim searchPattern As System.String = $"{AN2}-*-" & appCode & ".log"
+            logFiles = System.IO.Directory.GetFiles(context.INI_LogPath, searchPattern, System.IO.SearchOption.TopDirectoryOnly)
+            System.Array.Sort(Of System.String)(logFiles, System.StringComparer.OrdinalIgnoreCase)
+            Return True
+        Catch ex As System.Exception
+            logFiles = New System.String() {}
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
     ''' Produces a stable short hash used to partition log files per user and host application.
     ''' </summary>
     ''' <param name="appCode">The application code (WD/XL/OL/UK).</param>
@@ -719,6 +765,24 @@ Public Module SharedLogger
     End Function
 
     ''' <summary>
+    ''' Parses one log line and returns only the timestamp and exact invocation key.
+    ''' Raw remainder text and non-invocation records are never returned.
+    ''' </summary>
+    Friend Function TryParseInvocationKey(line As System.String,
+                                          ByRef timestamp As System.DateTime,
+                                          ByRef invocationKey As System.String) As System.Boolean
+        timestamp = System.DateTime.MinValue
+        invocationKey = System.String.Empty
+
+        Dim parsed As ParsedLine = ParseLogLine(line)
+        If parsed Is Nothing OrElse Not parsed.IsInvoked Then Return False
+
+        timestamp = parsed.Time
+        invocationKey = If(parsed.Key, System.String.Empty)
+        Return invocationKey <> System.String.Empty
+    End Function
+
+    ''' <summary>
     ''' Logs one agent/tool invocation in a format that AnalyzeLogs can aggregate.
     ''' The full counting key must remain in the first token, followed by "invoked".
     ''' Example:
@@ -742,7 +806,7 @@ Public Module SharedLogger
     ''' Normalizes one token fragment so it is safe for log-key aggregation.
     ''' Keeps letters, digits, and underscores; collapses separators to underscores.
     ''' </summary>
-    Private Function NormalizeLogTokenPart(value As String) As String
+    Friend Function NormalizeLogTokenPart(value As String) As String
         If String.IsNullOrWhiteSpace(value) Then Return ""
 
         Dim sb As New StringBuilder()

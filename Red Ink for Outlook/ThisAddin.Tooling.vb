@@ -1767,6 +1767,12 @@ Partial Public Class ThisAddIn
                         Catch ex As System.TimeoutException
                             context.LogError("LLM call timed out in the shared LLM transport.", ex:=ex)
                             ToolingFileLogger.EndSession(False, "LLM timeout")
+                            If subAgentMode Then
+                                Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                                    subAgentName,
+                                    System.Math.Max(1, CInt(System.Math.Ceiling(perCallTimeoutMs / 1000.0R))),
+                                    ex.Message)
+                            End If
                             Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
                                 context.SequencingState,
                                 "llm_transport_timeout",
@@ -1780,6 +1786,12 @@ Partial Public Class ThisAddIn
                                                                           Not cancellationToken.IsCancellationRequested
                             context.LogError($"LLM call timed out after {totalTimeout}s")
                             ToolingFileLogger.EndSession(False, $"Timeout after {totalTimeout}s")
+                            If subAgentMode Then
+                                Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                                    subAgentName,
+                                    totalTimeout,
+                                    ex.Message)
+                            End If
                             Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
                                 context.SequencingState,
                                 "llm_transport_timeout",
@@ -1790,6 +1802,7 @@ Partial Public Class ThisAddIn
                                 appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
 
                         Catch ex As System.OperationCanceledException
+                            If subAgentMode Then Throw
                             If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
                                 context.LogWarn("Cancelled due to power transition")
                                 ToolingFileLogger.EndSession(False, "Cancelled due to power transition")
@@ -3027,7 +3040,8 @@ Partial Public Class ThisAddIn
                                                                           "retry",
                                                                           If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling)),
                                                     terminal:=toolResponse.RepairLoopTerminal,
-                                                    recoveryScopeKey:=recoveryScopeKey)
+                                                    recoveryScopeKey:=recoveryScopeKey,
+                                                    retryCorrelationArguments:=tc.Arguments)
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -3073,7 +3087,8 @@ Partial Public Class ThisAddIn
                                             tc.ToolName,
                                             "no_change_applied",
                                             "Tool executed but applied no changes (no matching anchor).",
-                                            recoveryScopeKey:=recoveryScopeKey)
+                                            recoveryScopeKey:=recoveryScopeKey,
+                                            retryCorrelationArguments:=tc.Arguments)
                                     End If
 
                                     context.LogWarn(
@@ -3884,6 +3899,10 @@ Partial Public Class ThisAddIn
                                 Exit While
                             End If
 
+                            If TryScheduleEvidenceFinalizationReview(context, currentResponse) Then
+                                Continue While
+                            End If
+
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.FinalizeObservedAlternativeRecoveries("alternative_recovery_finalized")
                             End If
@@ -4684,6 +4703,15 @@ Partial Public Class ThisAddIn
                                 details:=ex.Message)
                         End Try
                     End If
+                End If
+
+                ' Defensive egress scrub: BuildBlockedToolingResultAsync may be invoked after the
+                ' earlier status-strip stage. Parent/user-facing responses must never expose the
+                ' internal TASK_STATUS protocol even in such late host-generated fallback paths.
+                If Not subAgentMode Then
+                    currentResponse =
+                        SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                            StripTaskStatus(currentResponse))
                 End If
 
                 currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
@@ -6839,6 +6867,43 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ''' <summary>
+    ''' Returns the caller's effective authoritative registry used as the security boundary
+    ''' for log_count. AutoPilot sender policy has already narrowed this registry before the
+    ''' tooling loop starts.
+    ''' </summary>
+    Private Function GetLogCountPermissionRegistry(context As ToolExecutionContext) As SharedLibrary.Agents.ToolRegistry
+        If context Is Nothing Then Return Nothing
+        If context.IsSubAgentRun Then Return context.AllowedToolRegistry
+        Return context.AuthoritativeToolRegistrySnapshot
+    End Function
+
+    Private Function IsLogCountPermittedForCaller(context As ToolExecutionContext) As System.Boolean
+        Dim registry As SharedLibrary.Agents.ToolRegistry = GetLogCountPermissionRegistry(context)
+        Return registry IsNot Nothing AndAlso registry.Contains(SharedLibrary.Agents.LogCountTool.ToolName)
+    End Function
+
+    ''' <summary>
+    ''' Returns only skill tool names that are callable within the caller's effective
+    ''' authoritative permission scope. The log itself is never used for skill discovery.
+    ''' </summary>
+    Private Function GetPermittedSkillToolNamesForLogCount(context As ToolExecutionContext) As System.Collections.Generic.List(Of System.String)
+        Dim result As New System.Collections.Generic.List(Of System.String)()
+        Dim registry As SharedLibrary.Agents.ToolRegistry = GetLogCountPermissionRegistry(context)
+        If registry Is Nothing Then Return result
+
+        For Each manifest As SharedLibrary.Agents.ToolManifest In registry.ListManifests()
+            If manifest Is Nothing OrElse System.String.IsNullOrWhiteSpace(manifest.Name) Then Continue For
+            If Not System.String.Equals(manifest.Category, "skill", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+            If Not manifest.Name.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+            result.Add(manifest.Name.Trim())
+        Next
+
+        result.Sort(System.StringComparer.OrdinalIgnoreCase)
+        Return result
+    End Function
+
+
 
 
 
@@ -7477,6 +7542,33 @@ Partial Public Class ThisAddIn
                 GoTo __AfterDispatch
             End If
 
+            If SharedLibrary.Agents.LogCountTool.IsLogCountTool(toolCall.ToolName) Then
+                ' Defense in depth: the tool may inspect logs only when log_count itself is
+                ' in the caller's authoritative effective registry. If a per-sender rule
+                ' removed log_count, pass an empty skill scope; LogCountTool then returns
+                ' generic not_available before touching any log file.
+                Dim logCountInvocationPermitted As System.Boolean = IsLogCountPermittedForCaller(context)
+                Dim permittedSkillNamesForLogCount As System.Collections.Generic.List(Of System.String) =
+                    If(logCountInvocationPermitted,
+                       GetPermittedSkillToolNamesForLogCount(context),
+                       New System.Collections.Generic.List(Of System.String)())
+
+                Dim logCountResult As SharedLibrary.Agents.LogCountTool.ExecutionResult =
+                    SharedLibrary.Agents.LogCountTool.Execute(
+                        toolCall.Arguments,
+                        _context,
+                        If(context Is Nothing, "Outlook", context.HostKind),
+                        permittedSkillNamesForLogCount,
+                        New System.String() {"Outlook_AutoPilot", "Outlook_LocalChatAgent"},
+                        toolInvocationPermitted:=logCountInvocationPermitted)
+
+                response.Response = If(logCountResult.Response, System.String.Empty)
+                response.Success = logCountResult.Success
+                response.ErrorMessage = If(logCountResult.ErrorMessage, System.String.Empty)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
             ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
@@ -7817,6 +7909,11 @@ __AfterDispatch:
 
         tools.AddRange(GetInternalKnowledgeTools())
 
+        Dim logCountTool As ModelConfig = SharedLibrary.Agents.LogCountTool.Build(_context)
+        If logCountTool IsNot Nothing Then
+            tools.Add(logCountTool)
+        End If
+
         ' python_execute: secure sandboxed Python execution.
         ' Only advertised when the executor path is set, the exe is available, and
         ' (when requested) its authenticity has been verified.
@@ -8017,6 +8114,16 @@ __AfterDispatch:
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+
+        ' Permission-scoped host-log statistics participate in the existing AutoPilot
+        ' external-tool selection like every other AutoPilot-compatible tool. Build()
+        ' remains the authoritative feature gate and returns Nothing when INI_LogPath
+        ' is not configured. Selection persistence/migration is handled generically by
+        ' the AutoPilot configuration layer.
+        Dim logCountTool As ModelConfig = SharedLibrary.Agents.LogCountTool.Build(_context)
+        If logCountTool IsNot Nothing Then
+            tools.Add(logCountTool)
+        End If
 
         ' AutoPilot should also let the user explicitly select discovered skills and agents.
         Try

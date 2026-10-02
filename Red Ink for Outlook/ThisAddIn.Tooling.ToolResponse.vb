@@ -72,6 +72,7 @@ Partial Public Class ThisAddIn
                                            Optional staleCompactionThresholdChars As Integer = -1,
                                            Optional staleCompactionPreviewChars As Integer = -1,
                                            Optional currentIteration As Integer = -1,
+                                           Optional allowCurrentTurnStructuredCompaction As System.Boolean = False,
                                            Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
@@ -97,24 +98,38 @@ Partial Public Class ThisAddIn
         Dim firstCall As Boolean = True
         Dim firstResp As Boolean = True
 
-        Dim responseCount As Integer = If(responses Is Nothing, 0, responses.Count)
+        ' The recent-full window is defined over historical responses only. A large batch of
+        ' newly produced current-turn results must not evict the immediately preceding source
+        ' evidence from protection before those new results have even been replayed once.
+        Dim protectedHistoricalIndexes As New System.Collections.Generic.HashSet(Of Integer)()
+        If responses IsNot Nothing AndAlso keepRecentFullCount > 0 Then
+            Dim historicalIndexes As New System.Collections.Generic.List(Of Integer)()
+            For historyIndex As Integer = 0 To responses.Count - 1
+                If ResolveEffectiveReplayRetention(responses(historyIndex), currentIteration) =
+                   SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical Then
+                    historicalIndexes.Add(historyIndex)
+                End If
+            Next
+
+            Dim firstProtected As Integer = System.Math.Max(0, historicalIndexes.Count - keepRecentFullCount)
+            For protectedIndex As Integer = firstProtected To historicalIndexes.Count - 1
+                protectedHistoricalIndexes.Add(historicalIndexes(protectedIndex))
+            Next
+        End If
+
         Dim respIndex As Integer = -1
         For Each resp In responses
             respIndex += 1
-            ' Historical responses whose own body exceeds the large-result threshold are
-            ' compaction-eligible regardless of recency-window position. Current-turn results
-            ' stay lossless until the outer payload-budget pass explicitly permits current-turn
-            ' reference compaction after exhausting historical compaction.
+            ' The protected recent-history window stays lossless on the first pass, even
+            ' for large results. Older historical results may be compacted; current-turn results
+            ' stay lossless until the outer payload-budget pass explicitly permits structured
+            ' evidence-core or, as a final fallback, reference compaction.
             Dim replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind =
                 ResolveEffectiveReplayRetention(resp, currentIteration)
-            Dim respIsLarge As Boolean =
-                resp IsNot Nothing AndAlso
-                Not String.IsNullOrEmpty(resp.Response) AndAlso
-                resp.Response.Length > SubAgentLargeToolResponseThresholdChars
             Dim isStaleForCompaction As Boolean =
                 replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical AndAlso
                 compactStaleLargeResponses AndAlso
-                (respIsLarge OrElse (respIndex < responseCount - keepRecentFullCount))
+                Not protectedHistoricalIndexes.Contains(respIndex)
             If useCallParts Then
                 ' Extract the original arguments from the parsed tool call JSON
                 Dim argsJson As String = "{}"
@@ -164,12 +179,17 @@ Partial Public Class ThisAddIn
                 effStaleThresholdChars = staleCompactionThresholdChars
                 effStalePreviewChars = staleCompactionPreviewChars
             End If
+            Dim compactCurrentTurnByReference As System.Boolean =
+                allowCurrentTurnReferenceCompaction AndAlso
+                replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical
+
             Dim responseContent As String = BuildToolResponseContentForModel(
                 resp,
-                compactForSubAgent OrElse isStaleForCompaction,
+                compactForSubAgent OrElse isStaleForCompaction OrElse compactCurrentTurnByReference,
                 effStaleThresholdChars,
                 effStalePreviewChars,
                 replayRetention,
+                allowCurrentTurnStructuredCompaction,
                 allowCurrentTurnReferenceCompaction)
 
             ' Model-agnostic handling:
@@ -272,7 +292,8 @@ Partial Public Class ThisAddIn
             compactStaleLargeResponses:=True,
             keepRecentFullCount:=keepRecentFullCount,
             currentIteration:=currentIteration,
-                allowCurrentTurnReferenceCompaction:=False)
+            allowCurrentTurnStructuredCompaction:=False,
+            allowCurrentTurnReferenceCompaction:=False)
 
         Dim budget As Integer =
             If(ThisAddIn.INI_ToolResponsePayloadBudgetChars > 0,
@@ -290,12 +311,33 @@ Partial Public Class ThisAddIn
             If(ThisAddIn.INI_BudgetCompactionPreviewChars > 0,
                ThisAddIn.INI_BudgetCompactionPreviewChars,
                SharedLibrary.Agents.ToolingConstants.BudgetCompactionPreviewChars)
+
         If budget <= 0 OrElse String.IsNullOrEmpty(payload) OrElse payload.Length <= budget Then
             LogToolReplayRetentionDiagnostics(responses, currentIteration, payload.Length, budget)
             Return payload
         End If
 
-        ' Stage 1: shrink the ordinary recent-full window. Current-turn and control-plane semantics are protected independently.
+        ' Stage 0: before sacrificing historical evidence, compact newly produced large
+        ' structured results to deterministic evidence cores. Exact retained scalar values
+        ' remain visible while the full original stays available by result_ref.
+        payload = BuildToolResponsesForModel(
+            responses,
+            toolingModel,
+            compactForSubAgent:=compactForSubAgent,
+            compactStaleLargeResponses:=True,
+            keepRecentFullCount:=keepRecentFullCount,
+            currentIteration:=currentIteration,
+            allowCurrentTurnStructuredCompaction:=True,
+            allowCurrentTurnReferenceCompaction:=False)
+
+        If payload.Length <= budget Then
+            LogToolReplayRetentionDiagnostics(responses, currentIteration, payload.Length, budget)
+            Return payload
+        End If
+
+        ' Stage 1: shrink only the historical recent-full window. Current-turn results may
+        ' continue using evidence-core replay, and current results never displace historical
+        ' responses merely because they were emitted in the same new batch.
         While payload.Length > budget AndAlso keepRecentFullCount > 0
             keepRecentFullCount -= 1
             payload = BuildToolResponsesForModel(
@@ -305,6 +347,7 @@ Partial Public Class ThisAddIn
                 compactStaleLargeResponses:=True,
                 keepRecentFullCount:=keepRecentFullCount,
                 currentIteration:=currentIteration,
+                allowCurrentTurnStructuredCompaction:=True,
                 allowCurrentTurnReferenceCompaction:=False)
         End While
 
@@ -313,8 +356,8 @@ Partial Public Class ThisAddIn
             Return payload
         End If
 
-        ' Stage 2: reference-compact older medium-sized results using progressively
-        ' lower thresholds until the payload fits or the floor is reached.
+        ' Stage 2: progressively compact historical medium-sized results. Structured JSON
+        ' is reduced to an exact evidence core before falling back to preview-only replay.
         For Each mediumThresholdChars As Integer In New Integer() {mediumThreshold, aggressiveThreshold}
             payload = BuildToolResponsesForModel(
                 responses,
@@ -325,15 +368,14 @@ Partial Public Class ThisAddIn
                 staleCompactionThresholdChars:=mediumThresholdChars,
                 staleCompactionPreviewChars:=previewChars,
                 currentIteration:=currentIteration,
+                allowCurrentTurnStructuredCompaction:=True,
                 allowCurrentTurnReferenceCompaction:=False)
-            If payload.Length <= budget Then
-                Exit For
-            End If
+            If payload.Length <= budget Then Exit For
         Next
 
-        ' Stage 3: only after historical compaction is exhausted may current-turn results
-        ' use the existing reference/sub-agent compactors. context_expand remains lossless
-        ' because its runtime primitive contract is enforced inside the content builder.
+        ' Stage 3: only after evidence-preserving compaction is exhausted may opaque
+        ' current-turn results fall back to reference/preview compaction. context_expand
+        ' itself remains lossless on its current turn.
         If payload.Length > budget Then
             payload = BuildToolResponsesForModel(
                 responses,
@@ -344,6 +386,7 @@ Partial Public Class ThisAddIn
                 staleCompactionThresholdChars:=aggressiveThreshold,
                 staleCompactionPreviewChars:=previewChars,
                 currentIteration:=currentIteration,
+                allowCurrentTurnStructuredCompaction:=True,
                 allowCurrentTurnReferenceCompaction:=True)
         End If
 
@@ -381,6 +424,7 @@ Partial Public Class ThisAddIn
                    If(resp.ModelReplayContent, "").Length,
                    originalChars)
             Dim replayReference As String = ""
+            Dim replayMode As String = If(resp.WasCompactedForModelReplay, "compacted", "full")
 
             If resp.WasCompactedForModelReplay AndAlso Not String.IsNullOrWhiteSpace(resp.ModelReplayContent) Then
                 Try
@@ -389,12 +433,23 @@ Partial Public Class ThisAddIn
                     If String.IsNullOrWhiteSpace(replayReference) Then
                         replayReference = If(replayObject.Value(Of String)("control_plane_key"), "")
                     End If
+
+                    If replayObject("evidence_core") IsNot Nothing Then
+                        replayMode = "evidence_core"
+                    ElseIf replayObject("preview") IsNot Nothing Then
+                        replayMode = "preview"
+                    ElseIf replayObject("omitted_window_chars") IsNot Nothing Then
+                        replayMode = "window_stub"
+                    ElseIf Not String.IsNullOrWhiteSpace(replayObject.Value(Of String)("control_plane_key")) Then
+                        replayMode = "control_plane"
+                    End If
                 Catch
+                    replayMode = "compacted_unclassified"
                 End Try
             End If
 
             ToolingFileLogger.LogDiag(
-                $"Tool replay retention: index={responseIndex}; tool={If(resp.ToolName, "")}; retention={retention}; producedIteration={resp.ProducedIteration}; currentIteration={currentIteration}; compacted={If(resp.WasCompactedForModelReplay, "true", "false")}; originalChars={originalChars}; replayChars={replayChars}; replayRef={replayReference}; payloadChars={payloadChars}; budgetChars={budgetChars}")
+                $"Tool replay retention: index={responseIndex}; tool={If(resp.ToolName, "")}; retention={retention}; producedIteration={resp.ProducedIteration}; currentIteration={currentIteration}; compacted={If(resp.WasCompactedForModelReplay, "true", "false")}; replayMode={replayMode}; originalChars={originalChars}; replayChars={replayChars}; replayRef={replayReference}; payloadChars={payloadChars}; budgetChars={budgetChars}")
         Next
     End Sub
 
@@ -403,6 +458,7 @@ Partial Public Class ThisAddIn
                                                   Optional overrideThresholdChars As Integer = -1,
                                                   Optional overridePreviewChars As Integer = -1,
                                                   Optional replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical,
+                                                  Optional allowCurrentTurnStructuredCompaction As System.Boolean = False,
                                                   Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
         If resp Is Nothing Then Return ""
 
@@ -428,17 +484,25 @@ Partial Public Class ThisAddIn
         End If
 
         If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical AndAlso
+           allowCurrentTurnStructuredCompaction Then
+
+            ' Under budget pressure, a newly produced structured result may be replayed as
+            ' an exact evidence core before older source evidence is sacrificed. Values that
+            ' remain in evidence_core are verbatim; omitted fields stay retrievable by ref.
+            Dim evidenceEnvelope As String = TryBuildEvidenceReplayEnvelope(resp, rawContent)
+            If evidenceEnvelope IsNot Nothing AndAlso evidenceEnvelope.Length < rawContent.Length Then
+                resp.ModelReplayContent = evidenceEnvelope
+                resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+                resp.WasCompactedForModelReplay = True
+                Return evidenceEnvelope
+            End If
+        End If
+
+        If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical AndAlso
            Not allowCurrentTurnReferenceCompaction Then
 
-            ' If budget pressure already compacted this immutable response earlier in the
-            ' same iteration, keep that replay/ref stable instead of creating a new one.
-            If resp.WasCompactedForModelReplay AndAlso
-               Not System.String.IsNullOrWhiteSpace(resp.ModelReplayContent) Then
-                Return resp.ModelReplayContent
-            End If
-
-            ' Otherwise a newly produced result must be visible losslessly at least once
-            ' while the total payload budget can still be met by compacting history first.
+            ' A current-turn result that cannot be reduced safely to a structured evidence
+            ' core remains full until historical/evidence-preserving compaction is exhausted.
             resp.ModelReplayContent = rawContent
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = False
@@ -475,6 +539,13 @@ Partial Public Class ThisAddIn
                     Return safeEnvelope
                 End If
             End If
+
+            ' Keep replay-state metadata synchronized with what the model actually receives.
+            ' A response that is full again must not remain marked as compacted from an
+            ' earlier budget pass, otherwise final evidence review would act on stale state.
+            resp.ModelReplayContent = rawContent
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = False
             Return rawContent
         End If
 
@@ -747,6 +818,67 @@ Partial Public Class ThisAddIn
         Return compact.ToString(Formatting.None)
     End Function
 
+    ''' <summary>
+    ''' Builds a compact evidence-preserving replay for structured JSON. The full result is
+    ''' stored losslessly by reference; every value retained in evidence_core is copied exactly.
+    ''' </summary>
+    Private Function TryBuildEvidenceReplayEnvelope(resp As ToolResponse, rawContent As System.String) As System.String
+        If resp Is Nothing OrElse Not resp.Success Then Return Nothing
+
+        Dim raw As System.String = If(rawContent, System.String.Empty)
+        If raw = System.String.Empty Then Return Nothing
+        If MustPreserveFullResponseForReplay(resp, raw) Then Return Nothing
+
+        Dim evidenceCoreJson As System.String = System.String.Empty
+        Dim omittedPropertyCount As System.Int32 = 0
+        Dim exactScalarCount As System.Int32 = 0
+        Dim arrayItemPropertyLimit As System.Int32 = 0
+
+        If Not SharedLibrary.Agents.ToolingRuntimePrimitives.TryBuildEvidenceCore(
+                raw,
+                SharedLibrary.Agents.ToolingConstants.EvidenceReplayCoreMaxChars,
+                evidenceCoreJson,
+                omittedPropertyCount,
+                exactScalarCount,
+                arrayItemPropertyLimit) Then
+            Return Nothing
+        End If
+
+        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+        If Not TryResolveReusableReplayStoredResult(resp, raw, stored) Then
+            stored = SharedLibrary.Agents.ToolResultStore.Put(
+                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
+                If(resp.ToolName, System.String.Empty),
+                raw)
+        End If
+
+        Dim evidenceCore As JToken
+        Try
+            evidenceCore = JToken.Parse(evidenceCoreJson)
+        Catch ex As System.Exception
+            Return Nothing
+        End Try
+
+        Dim compact As New JObject(
+            New JProperty("ok", True),
+            New JProperty("tool", If(resp.ToolName, System.String.Empty)),
+            New JProperty("summary", BuildToolReplaySummary(resp)),
+            New JProperty("result_ref", stored.Ref),
+            New JProperty("total_chars", raw.Length),
+            New JProperty("compacted_for_model_replay", True),
+            New JProperty("evidence_core_exact_values", True),
+            New JProperty("evidence_core_omitted_property_count", omittedPropertyCount),
+            New JProperty("evidence_core_exact_scalar_count", exactScalarCount),
+            New JProperty("evidence_core_array_item_property_limit", arrayItemPropertyLimit),
+            New JProperty("evidence_core", evidenceCore),
+            New JProperty("evidence_contract",
+                "Every scalar value present in evidence_core is verbatim from the original tool result and is authoritative for that value. Omitted properties/text are not evidence. If a required fact is omitted, call context_expand with result_ref before relying on it. Never reconstruct or alter exact factual values."),
+            New JProperty("continuation",
+                "The full original result is stored losslessly. Use context_expand with result_ref only for facts or text omitted from evidence_core."))
+
+        Return compact.ToString(Formatting.None)
+    End Function
+
     Private Function TryResolveReusableReplayStoredResult(resp As ToolResponse,
                                                            rawContent As System.String,
                                                            ByRef stored As SharedLibrary.Agents.ToolResultStore.StoredResult) As System.Boolean
@@ -816,6 +948,16 @@ Partial Public Class ThisAddIn
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = False
             Return raw
+        End If
+
+        ' Prefer deterministic structured evidence replay over a positional text preview.
+        ' This preserves exact scalar facts across all array items whenever the result is JSON.
+        Dim evidenceEnvelope As String = TryBuildEvidenceReplayEnvelope(resp, raw)
+        If evidenceEnvelope IsNot Nothing AndAlso evidenceEnvelope.Length < raw.Length Then
+            resp.ModelReplayContent = evidenceEnvelope
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = True
+            Return evidenceEnvelope
         End If
 
         Dim excerptLength As Integer = Math.Min(previewChars, raw.Length)
@@ -940,6 +1082,39 @@ Partial Public Class ThisAddIn
         Return $" ({String.Join(", ", parts)})"
     End Function
 
+
+    ''' <summary>
+    ''' Schedules one bounded evidence-grounding review after the latest set of tool
+    ''' responses whenever source evidence is currently compacted by reference.
+    ''' </summary>
+    Private Function TryScheduleEvidenceFinalizationReview(context As ToolExecutionContext,
+                                                           proposedFinalResponse As System.String) As System.Boolean
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then Return False
+
+        Dim responseCount As System.Int32 = context.AllToolResponses.Count
+        If context.EvidenceFinalizationReviewResponseCount = responseCount Then Return False
+
+        Dim compactedEvidenceCount As System.Int32 = 0
+        For Each response As ToolResponse In context.AllToolResponses
+            If response Is Nothing OrElse Not response.Success OrElse Not response.WasCompactedForModelReplay Then Continue For
+            If SharedLibrary.Agents.ToolingRuntimePrimitives.IsEvidenceCompactedReplay(response.ModelReplayContent) Then
+                compactedEvidenceCount += 1
+            End If
+        Next
+
+        If compactedEvidenceCount = 0 Then Return False
+
+        context.EvidenceFinalizationReviewResponseCount = responseCount
+        context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.EvidenceFinalizationReviewInstruction
+        context.PendingGuardTitle = "HOST EVIDENCE FINALIZATION REVIEW"
+        context.PendingRejectedTurnExplanation =
+            $"The draft final response must be re-checked against {compactedEvidenceCount} compacted evidence result(s) before acceptance."
+        context.PendingRejectedAssistantTurn = If(proposedFinalResponse, System.String.Empty)
+        context.LogWarn(
+            "Final response deferred for evidence-grounding review.",
+            details:=$"compactedEvidenceResults={compactedEvidenceCount}; toolResponseCount={responseCount}")
+        Return True
+    End Function
 
     Private Function GetLastSuccessfulToolResponse(context As ToolExecutionContext) As ToolResponse
         If context Is Nothing OrElse context.AllToolResponses Is Nothing Then Return Nothing

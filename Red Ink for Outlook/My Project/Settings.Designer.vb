@@ -402,6 +402,18 @@ Namespace My
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_AvailableExternalToolNames() As String
+            Get
+                Return CType(Me("AP_AvailableExternalToolNames"),String)
+            End Get
+            Set
+                Me("AP_AvailableExternalToolNames") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
         Public Property InboxBoardSummaryCache() As String
             Get
                 Return CType(Me("InboxBoardSummaryCache"),String)

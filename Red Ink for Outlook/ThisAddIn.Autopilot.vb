@@ -7919,16 +7919,23 @@ Partial Public Class ThisAddIn
         Dim manualText As String = ""
         Dim usingIndexedManual As Boolean = False
 
-        Dim isRemote As Boolean =
-            manualPath.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
-            manualPath.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+        ' Resolve local AND remote indexed manuals through the exact same cache/refresh
+        ' path used by HelpMeInky. The default HelpMeInky source is commonly remote; the
+        ' previous Not-isRemote guard therefore caused AutoPilot inability handling to
+        ' download and send the whole indexed file as plain text instead of searching it.
+        Dim semanticIndexPath As String =
+            Await Global.SharedLibrary.SharedLibrary.HelpMeInky.ResolveSemanticSearchIndexPathAsync(
+                manualPath,
+                Sub(statusText As String)
+                    If Not String.IsNullOrWhiteSpace(statusText) Then
+                        ApDashboardLog(statusText, "step")
+                    End If
+                End Sub).ConfigureAwait(False)
 
-        If Not isRemote AndAlso
-           SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(manualPath) Then
-
+        If Not String.IsNullOrWhiteSpace(semanticIndexPath) Then
             Dim retrieval As SharedMethods.SemanticSearchRetrievalResult =
                 Await SharedMethods.RetrieveSemanticSearchAsync(
-                    manualPath,
+                    semanticIndexPath,
                     _context,
                     questionForManual,
                     "",

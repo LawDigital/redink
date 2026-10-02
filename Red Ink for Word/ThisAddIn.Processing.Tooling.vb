@@ -1244,6 +1244,12 @@ Partial Public Class ThisAddIn
                 Catch ex As System.TimeoutException
                     context.LogError("LLM call timed out.", ex:=ex)
                     ToolingFileLogger.EndSession(False, "LLM timeout")
+                    If subAgentMode Then
+                        Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                            subAgentName,
+                            0,
+                            ex.Message)
+                    End If
                     Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
                         context.SequencingState,
                         "llm_transport_timeout",
@@ -1254,6 +1260,7 @@ Partial Public Class ThisAddIn
                         appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
 
                 Catch ex As System.OperationCanceledException
+                    If subAgentMode Then Throw
                     context.IsCancelled = True
                     context.LogWarn("Operation was cancelled by the user.")
                     ToolingFileLogger.EndSession(False, "Cancelled by user")
@@ -2464,7 +2471,8 @@ Partial Public Class ThisAddIn
                                                                           "retry",
                                                                           If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling)),
                                                     terminal:=toolResponse.RepairLoopTerminal,
-                                                    recoveryScopeKey:=recoveryScopeKey)
+                                                    recoveryScopeKey:=recoveryScopeKey,
+                                                    retryCorrelationArguments:=tc.Arguments)
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -2510,7 +2518,8 @@ Partial Public Class ThisAddIn
                                             tc.ToolName,
                                             "no_change_applied",
                                             "Tool executed but applied no changes (no matching anchor).",
-                                            recoveryScopeKey:=recoveryScopeKey)
+                                            recoveryScopeKey:=recoveryScopeKey,
+                                            retryCorrelationArguments:=tc.Arguments)
                                     End If
 
                                     context.LogWarn(
@@ -3287,6 +3296,10 @@ Partial Public Class ThisAddIn
                                 Exit While
                             End If
 
+                            If TryScheduleEvidenceFinalizationReview(context, currentResponse) Then
+                                Continue While
+                            End If
+
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.FinalizeObservedAlternativeRecoveries("alternative_recovery_finalized")
                             End If
@@ -3951,6 +3964,15 @@ Partial Public Class ThisAddIn
                                 details:=ex.Message)
                         End Try
                     End If
+                End If
+
+                ' Defensive egress scrub: BuildBlockedToolingResultAsync may be invoked after the
+                ' earlier status-strip stage. Parent/user-facing responses must never expose the
+                ' internal TASK_STATUS protocol even in such late host-generated fallback paths.
+                If Not subAgentMode Then
+                    currentResponse =
+                        SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                            StripTaskStatus(currentResponse))
                 End If
 
                 currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
@@ -6331,6 +6353,7 @@ Partial Public Class ThisAddIn
                                            Optional staleCompactionThresholdChars As Integer = -1,
                                            Optional staleCompactionPreviewChars As Integer = -1,
                                            Optional currentIteration As Integer = -1,
+                                           Optional allowCurrentTurnStructuredCompaction As System.Boolean = False,
                                            Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
@@ -6356,24 +6379,38 @@ Partial Public Class ThisAddIn
         Dim firstCall As Boolean = True
         Dim firstResp As Boolean = True
 
-        Dim responseCount As Integer = If(responses Is Nothing, 0, responses.Count)
+        ' The recent-full window is defined over historical responses only. A large batch of
+        ' newly produced current-turn results must not evict the immediately preceding source
+        ' evidence from protection before those new results have even been replayed once.
+        Dim protectedHistoricalIndexes As New System.Collections.Generic.HashSet(Of Integer)()
+        If responses IsNot Nothing AndAlso keepRecentFullCount > 0 Then
+            Dim historicalIndexes As New System.Collections.Generic.List(Of Integer)()
+            For historyIndex As Integer = 0 To responses.Count - 1
+                If ResolveEffectiveReplayRetention(responses(historyIndex), currentIteration) =
+                   SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical Then
+                    historicalIndexes.Add(historyIndex)
+                End If
+            Next
+
+            Dim firstProtected As Integer = System.Math.Max(0, historicalIndexes.Count - keepRecentFullCount)
+            For protectedIndex As Integer = firstProtected To historicalIndexes.Count - 1
+                protectedHistoricalIndexes.Add(historicalIndexes(protectedIndex))
+            Next
+        End If
+
         Dim respIndex As Integer = -1
         For Each resp In responses
             respIndex += 1
-            ' Historical responses whose own body exceeds the large-result threshold are
-            ' compaction-eligible regardless of recency-window position. Current-turn results
-            ' stay lossless until the outer payload-budget pass explicitly permits current-turn
-            ' reference compaction after exhausting historical compaction.
+            ' The protected recent-history window stays lossless on the first pass, even
+            ' for large results. Older historical results may be compacted; current-turn results
+            ' stay lossless until the outer payload-budget pass explicitly permits structured
+            ' evidence-core or, as a final fallback, reference compaction.
             Dim replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind =
                 ResolveEffectiveReplayRetention(resp, currentIteration)
-            Dim respIsLarge As Boolean =
-                resp IsNot Nothing AndAlso
-                Not String.IsNullOrEmpty(resp.Response) AndAlso
-                resp.Response.Length > SubAgentLargeToolResponseThresholdChars
             Dim isStaleForCompaction As Boolean =
                 replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical AndAlso
                 compactStaleLargeResponses AndAlso
-                (respIsLarge OrElse (respIndex < responseCount - keepRecentFullCount))
+                Not protectedHistoricalIndexes.Contains(respIndex)
             If useCallParts Then
                 ' Extract the original arguments from the parsed tool call JSON
                 Dim argsJson As String = "{}"
@@ -6423,12 +6460,17 @@ Partial Public Class ThisAddIn
                 effStaleThresholdChars = staleCompactionThresholdChars
                 effStalePreviewChars = staleCompactionPreviewChars
             End If
+            Dim compactCurrentTurnByReference As System.Boolean =
+                allowCurrentTurnReferenceCompaction AndAlso
+                replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical
+
             Dim responseContent As String = BuildToolResponseContentForModel(
                 resp,
-                compactForSubAgent OrElse isStaleForCompaction,
+                compactForSubAgent OrElse isStaleForCompaction OrElse compactCurrentTurnByReference,
                 effStaleThresholdChars,
                 effStalePreviewChars,
                 replayRetention,
+                allowCurrentTurnStructuredCompaction,
                 allowCurrentTurnReferenceCompaction)
 
             ' Model-agnostic handling:

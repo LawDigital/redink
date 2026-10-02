@@ -1151,6 +1151,19 @@ Namespace SharedLibrary
             pathOrUrl As String,
             Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
 
+            Return Await ResolveSemanticSearchIndexPathAsync(pathOrUrl, statusReporter).ConfigureAwait(False)
+        End Function
+
+        ''' <summary>
+        ''' Resolves a local semantic-search index path for a local or remote HelpMeInky
+        ''' manual source. Remote sources use the same deterministic cache/refresh path as
+        ''' the HelpMeInky UI, so other hosts (for example AutoPilot inability handling) do
+        ''' not silently fall back to loading a remote indexed manual as one large text blob.
+        ''' </summary>
+        Public Shared Async Function ResolveSemanticSearchIndexPathAsync(
+            pathOrUrl As String,
+            Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
+
             Dim localPath As String = Await EnsureLocalManualFileCopyAsync(
                 pathOrUrl,
                 "Indexed manual — downloading refreshed source...",

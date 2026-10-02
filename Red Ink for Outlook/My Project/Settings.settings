@@ -89,6 +89,9 @@
     <Setting Name="AP_SelectedExternalToolNames" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
+    <Setting Name="AP_AvailableExternalToolNames" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
     <Setting Name="InboxBoardSummaryCache" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>

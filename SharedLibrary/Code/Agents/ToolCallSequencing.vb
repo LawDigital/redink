@@ -89,9 +89,17 @@ Namespace Agents
         ''' one of those tools is advertised.
         ''' </summary>
         Public Const ContextDrawerInstruction As String =
-            "CONTEXT MANAGEMENT: Large tool results are not kept in full in the conversation. Each is replaced by a short 'result_ref' plus a preview, and the full text stays available." & vbCrLf &
-            "To read more of a stored result, call context_expand with its result_ref (optionally start_char and max_chars) to page through the full content." & vbCrLf &
-            "When you no longer need older results in full, you may call context_compact to move them out of the active context and free space; they remain retrievable via context_expand. Prefer letting the host manage this automatically, and use context_compact only when you know earlier results are no longer needed."
+            "CONTEXT MANAGEMENT: Large tool results may be compacted by reference. The full original stays available through result_ref/context_expand." & vbCrLf &
+            "A compacted result may include an evidence_core. Every scalar value present in evidence_core is copied verbatim from the original result and is authoritative for that value; omitted properties or text are NOT evidence." & vbCrLf &
+            "Never reconstruct, interpolate, relocalize, rename, or otherwise alter exact identifiers, numbers, dates, times, statuses, or other factual values that are present in tool evidence. Copy exact values when the task depends on them." & vbCrLf &
+            "If a fact required for the answer is not visible exactly in the active replay/evidence_core, you MUST call context_expand with result_ref before relying on that fact. Do not fill missing evidence from plausibility or surrounding context." & vbCrLf &
+            "When you no longer need older results in full, you may call context_compact to move them out of active context; they remain retrievable via context_expand. Prefer letting the host manage this automatically."
+
+        Public Const EvidenceFinalizationReviewInstruction As String =
+            "HOST EVIDENCE FINALIZATION REVIEW: One or more source/tool results were compacted during this run. Re-check the draft against the exact values currently visible in tool results/evidence_core. " &
+            "Every factual assertion attributed to tool/source evidence must be supported by the visible evidence, including the association between an entity/item and its values; the mere presence of the same value elsewhere is not sufficient. " &
+            "Do not invent entries, infer omitted facts, merge neighboring records, or alter exact factual values. If any fact needed by the draft is omitted from the visible evidence, call context_expand for the corresponding result_ref now and verify it before finalizing. " &
+            "If the visible evidence is sufficient, return a corrected final answer now. Do not discuss this review step with the user."
 
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
@@ -253,6 +261,11 @@ Namespace Agents
             ' every substantive argument. It is never enabled when an expected-artifact contract
             ' exists or when expected_artifacts was supplied on the rejected call.
             Public Property RetryCorrelationLegacyArtifactFallbackSignature As System.String = System.String.Empty
+            ' Deterministic output-target correlation for deliverable-capable tools. This is
+            ' intentionally independent of operation_id so a corrected producer retry that uses a
+            ' fresh opaque operation id can still supersede the failed producer when both calls
+            ' target the same concrete output identity and the later artifact is host-validated.
+            Public Property DeliverableTargetCorrelationSignature As System.String = System.String.Empty
             ' An alternative-path success is not always cleared immediately. When causal identity
             ' cannot be proven by an explicit scope (or the failure was delegated to the parent),
             ' success is recorded as recovery evidence and committed only on an accepted final turn.
@@ -1920,6 +1933,15 @@ Namespace Agents
                 Dim retryCorrelationRepairablePaths As System.Collections.Generic.List(Of System.String) = Nothing
                 Dim hasExactRetryCorrelation As System.Boolean = False
                 Dim legacyArtifactFallbackSignature As System.String = System.String.Empty
+                Dim deliverableTargetCorrelationSignature As System.String = System.String.Empty
+
+                If retryCorrelationArguments IsNot Nothing AndAlso
+                   IsDeliverableCapableTool(normalizedToolName) Then
+
+                    TryBuildDeliverableTargetCorrelation(
+                        retryCorrelationArguments,
+                        deliverableTargetCorrelationSignature)
+                End If
 
                 If normalizedRecoveryScopeKey = System.String.Empty AndAlso
                    retryCorrelationArguments IsNot Nothing Then
@@ -2002,6 +2024,7 @@ Namespace Agents
                        New System.Collections.Generic.List(Of System.String)(retryCorrelationRepairablePaths),
                        New System.Collections.Generic.List(Of System.String)())
                 record.RetryCorrelationLegacyArtifactFallbackSignature = legacyArtifactFallbackSignature
+                record.DeliverableTargetCorrelationSignature = deliverableTargetCorrelationSignature
                 ' A new/failed retry invalidates prior replacement evidence for this exact step.
                 record.RecoveryEvidenceObserved = False
                 record.RecoveryEvidenceToolName = String.Empty
@@ -2182,6 +2205,15 @@ Namespace Agents
                 Dim currentProgressEpoch As Long = _substantiveProgressEpoch
                 Dim successfulStepKey As String = BuildFailureStepKey(normalizedToolName, normalizedRecoveryScopeKey)
                 Dim successfulLogicalOperationKey As String = ResolveLogicalOperationKey(normalizedRecoveryScopeKey)
+                Dim successfulDeliverableTargetCorrelationSignature As System.String = System.String.Empty
+
+                If HasValidatedDeliverableForCompletion AndAlso
+                   IsDeliverableCapableTool(normalizedToolName) Then
+
+                    TryBuildDeliverableTargetCorrelation(
+                        successfulArguments,
+                        successfulDeliverableTargetCorrelationSignature)
+                End If
 
                 If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
                     _substantiveProgressEpoch += 1
@@ -2287,7 +2319,8 @@ Namespace Agents
                         normalizedToolName,
                         normalizedRecoveryScopeKey,
                         successfulLogicalOperationKey,
-                        successfulStepKey) Then
+                        successfulStepKey,
+                        successfulDeliverableTargetCorrelationSignature) Then
                         Continue For
                     End If
 
@@ -2321,7 +2354,8 @@ Namespace Agents
                 successfulToolName As String,
                 successfulRecoveryScopeKey As String,
                 successfulLogicalOperationKey As String,
-                successfulStepKey As String) As Boolean
+                successfulStepKey As String,
+                successfulDeliverableTargetCorrelationSignature As System.String) As Boolean
 
                 If failure Is Nothing Then Return False
                 If failure.Terminal AndAlso Not failure.ReturnedToParent Then Return False
@@ -2339,6 +2373,31 @@ Namespace Agents
                 End If
 
                 If failure.ReturnedToParent Then Return True
+
+                ' Legacy/bounded producers may not have an explicit expected-artifact contract.
+                ' In that case operation_id is still opaque orchestration identity and MUST NOT be
+                ' guessed or rebound. Instead, allow replacement only when:
+                '   * both calls are the same deliverable-capable producer,
+                '   * both independently identify the same concrete output target, and
+                '   * the later call has already produced a host-validated completion artifact.
+                ' This is stricter than "some later file exists" and prevents an unrelated producer
+                ' success from hiding a genuinely unresolved earlier deliverable.
+                If HasValidatedDeliverableForCompletion AndAlso
+                   IsDeliverableCapableTool(failure.ToolName) AndAlso
+                   IsDeliverableCapableTool(successfulToolName) AndAlso
+                   System.String.Equals(
+                       If(failure.ToolName, System.String.Empty),
+                       If(successfulToolName, System.String.Empty),
+                       System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.IsNullOrWhiteSpace(failure.DeliverableTargetCorrelationSignature) AndAlso
+                   Not System.String.IsNullOrWhiteSpace(successfulDeliverableTargetCorrelationSignature) AndAlso
+                   System.String.Equals(
+                       failure.DeliverableTargetCorrelationSignature,
+                       successfulDeliverableTargetCorrelationSignature,
+                       System.StringComparison.Ordinal) Then
+
+                    Return True
+                End If
 
                 Dim sameLogicalOperation As Boolean =
                     Not System.String.IsNullOrWhiteSpace(failure.LogicalOperationKey) AndAlso
@@ -2552,6 +2611,58 @@ Namespace Agents
             End Function
 
             Private Const RetryCorrelationMaskValue As System.String = "__REDINK_HOST_REPAIRABLE_FIELD__"
+
+            Private Shared Function TryBuildDeliverableTargetCorrelation(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                ByRef signature As System.String) As System.Boolean
+
+                signature = System.String.Empty
+                If arguments Is Nothing Then Return False
+
+                Dim target As New Newtonsoft.Json.Linq.JObject()
+
+                ' Only output/artifact identity fields participate. operation_id and step_id are
+                ' deliberately excluded: they are opaque execution identities, not deliverable
+                ' identity. Generic input-only fields such as "path" are also excluded.
+                For Each fieldName As System.String In New System.String() {
+                    "artifact_id",
+                    "logical_deliverable_id",
+                    "output_slot_id",
+                    "output_filename",
+                    "output_file_name",
+                    "file_name",
+                    "destination_filename",
+                    "destination_file_name",
+                    "output_path",
+                    "output_file_path",
+                    "destination_path",
+                    "target_path",
+                    "save_path",
+                    "save_as_path"
+                }
+                    Dim rawValue As System.Object = Nothing
+                    If Not arguments.TryGetValue(fieldName, rawValue) OrElse rawValue Is Nothing Then Continue For
+
+                    Dim valueText As System.String = If(System.Convert.ToString(rawValue), System.String.Empty).Trim()
+                    If valueText = System.String.Empty Then Continue For
+
+                    If fieldName.EndsWith("_path", System.StringComparison.Ordinal) OrElse
+                       fieldName.EndsWith("_filename", System.StringComparison.Ordinal) OrElse
+                       fieldName.EndsWith("_file_name", System.StringComparison.Ordinal) OrElse
+                       System.String.Equals(fieldName, "file_name", System.StringComparison.Ordinal) Then
+
+                        valueText = valueText.Replace("\"c, "/"c).ToLowerInvariant()
+                    End If
+
+                    target(fieldName) = New Newtonsoft.Json.Linq.JValue(valueText)
+                Next
+
+                If target.Count = 0 Then Return False
+
+                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(target)
+                signature = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                Return Not System.String.IsNullOrWhiteSpace(signature)
+            End Function
 
             Private Shared Function RetryCorrelationPathsMatch(
                 left As System.Collections.Generic.IList(Of System.String),
@@ -6361,27 +6472,27 @@ Namespace Agents
             Select Case lang
                 Case "de"
                     If hasDeliverable Then
-                        note = "Hinweis: Das obige inhaltliche Ergebnis wurde erzeugt, und eine Ergebnisdatei wurde bereits erstellt. Die abschliessende technische Prüfung des Vorgangs konnte jedoch nicht vollständig abgeschlossen werden. Die Datei kann trotzdem verwendbar sein; bitte prüfen Sie sie kurz. Wiederholen Sie den Vorgang nur, wenn etwas fehlt, falsch ist oder die Datei nicht verwendbar ist."
+                        note = "Die Ergebnisdatei wurde erstellt. Bei einem früheren Verarbeitungsschritt trat jedoch ein Fehler auf, sodass der Vorgang nicht vollständig als abgeschlossen bestätigt werden konnte. Bitte prüfen Sie die Datei kurz und wiederholen Sie den Auftrag nur, wenn etwas fehlt, falsch ist oder die Datei nicht verwendbar ist."
                     Else
-                        note = "Hinweis: Das obige inhaltliche Ergebnis wurde erzeugt, die abschliessende technische Prüfung des Vorgangs konnte jedoch nicht vollständig abgeschlossen werden. Der Inhalt kann trotzdem nützlich sein, sollte aber als vorläufig betrachtet werden. Wiederholen Sie den Vorgang, wenn etwas fehlt oder falsch erscheint."
+                        note = "Das inhaltliche Ergebnis wurde erzeugt, aber ein früherer Verarbeitungsschritt blieb fehlerhaft. Bitte prüfen Sie die Antwort kurz und wiederholen Sie den Auftrag nur, wenn etwas fehlt oder falsch erscheint."
                     End If
                 Case "fr"
                     If hasDeliverable Then
-                        note = "Remarque : le résultat de fond ci-dessus a été généré et un fichier de résultat a déjà été créé. La vérification technique finale n’a toutefois pas pu être entièrement menée à bien. Le fichier peut néanmoins être utilisable ; veuillez le vérifier brièvement. Ne relancez l’opération que s’il manque quelque chose, si le contenu est incorrect ou si le fichier n’est pas utilisable."
+                        note = "Le fichier de résultat a été créé. Une étape de traitement antérieure a toutefois échoué, de sorte que l’opération n’a pas pu être confirmée comme entièrement terminée. Vérifiez brièvement le fichier et ne relancez l’opération que s’il manque quelque chose, si le contenu est incorrect ou si le fichier n’est pas utilisable."
                     Else
-                        note = "Remarque : le résultat de fond ci-dessus a été généré, mais la vérification technique finale n’a pas pu être entièrement menée à bien. Le contenu peut néanmoins être utile, mais doit être considéré comme provisoire. Relancez l’opération si quelque chose manque ou semble incorrect."
+                        note = "Le résultat de fond a été généré, mais une étape de traitement antérieure est restée en échec. Vérifiez brièvement la réponse et ne relancez l’opération que si quelque chose manque ou semble incorrect."
                     End If
                 Case "it"
                     If hasDeliverable Then
-                        note = "Nota: il risultato sostanziale riportato sopra è stato generato ed è già stato creato un file di risultato. La verifica tecnica finale non ha tuttavia potuto essere completata interamente. Il file potrebbe essere comunque utilizzabile; verificalo brevemente. Ripeti l’operazione solo se manca qualcosa, il contenuto è errato o il file non è utilizzabile."
+                        note = "Il file di risultato è stato creato. Tuttavia, una fase di elaborazione precedente non è riuscita, quindi l’operazione non ha potuto essere confermata come completamente conclusa. Verifica brevemente il file e ripeti l’operazione solo se manca qualcosa, il contenuto è errato o il file non è utilizzabile."
                     Else
-                        note = "Nota: il risultato sostanziale riportato sopra è stato generato, ma la verifica tecnica finale non ha potuto essere completata interamente. Il contenuto potrebbe comunque essere utile, ma va considerato provvisorio. Ripeti l’operazione se manca qualcosa o se qualcosa sembra errato."
+                        note = "Il risultato sostanziale è stato generato, ma una fase di elaborazione precedente è rimasta in errore. Verifica brevemente la risposta e ripeti l’operazione solo se manca qualcosa o se qualcosa sembra errato."
                     End If
                 Case Else
                     If hasDeliverable Then
-                        note = "Note: The substantive result above was generated, and a result file was already created. Final technical verification of the run did not complete successfully. The file may still be usable; please review it briefly. Retry only if something is missing, incorrect, or the file cannot be used."
+                        note = "The result file was created. An earlier processing step failed, so the run could not be confirmed as fully complete. Please review the file briefly and retry only if something is missing, incorrect, or the file cannot be used."
                     Else
-                        note = "Note: The substantive result above was generated, but final technical verification of the run did not complete successfully. The content may still be useful, but should be treated as provisional. Retry if something is missing or appears incorrect."
+                        note = "The substantive result was generated, but an earlier processing step remained failed. Please review the response briefly and retry only if something is missing or appears incorrect."
                     End If
             End Select
 

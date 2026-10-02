@@ -294,10 +294,9 @@ Namespace SharedLibrary
         .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
-            "m365_get_event: Returns calendar event details. Provide event_id. " &
-            "When the output contains StartLocal or EndLocal, prefer those values for user-facing dates and times. " &
-            "Use StartUtc or EndUtc only when the user explicitly asks for UTC or when a stable UTC reference is required. " &
-            "Copy rendered date/time values exactly.",
+            "m365_get_mail: Returns e-mail details. Provide message_id. " &
+            "When referring to sent/received dates or times, use the rendered date/time values returned by the tool and copy them exactly. " &
+            "Do not reinterpret or relocalize those values.",
         .ModelDescription = "M365: Read e-mail" & suffix,
         .Tool = True,
         .ToolPriority = 995,
@@ -429,9 +428,8 @@ Namespace SharedLibrary
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_event: Returns calendar event details. Provide event_id. " &
-            "If the output contains StartAnchor/StartISO or EndAnchor/EndISO, prefer the *Anchor values " &
-            "when referring to dates or times, and copy them exactly. Do not reinterpret, relocalize or " &
-            "reformat numeric ISO dates.",
+            "For user-facing appointment times, prefer the rendered Start and End local values returned by the tool. " &
+            "Use StartUtc or EndUtc only when UTC is explicitly required. Copy rendered date/time values exactly; do not reinterpret, relocalize, round, or infer them.",
         .ModelDescription = "M365: Read calendar event" & suffix,
         .Tool = True,
         .ToolPriority = 992,

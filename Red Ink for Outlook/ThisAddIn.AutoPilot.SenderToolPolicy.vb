@@ -57,6 +57,9 @@
 '  - First matching line wins (top-to-bottom). DEFAULT is only used if no pattern
 '    matched. If there is no match and no DEFAULT, the sender inherits ALL tools.
 '  - report_inability is ALWAYS preserved so the model can decline gracefully.
+'  - log_count is a permission-scoped inspection tool: when configured it may remain
+'    available under skill-limited rules, but its result can contain only skills that
+'    survived this sender policy. NONE or an explicit !log_count exclusion blocks it.
 ' =============================================================================
 
 Option Explicit On
@@ -524,16 +527,22 @@ Partial Public Class ThisAddIn
 
                   If IsAlwaysAllowedTool(toolName) Then Return True
 
+                  Dim isDenied As Boolean =
+                      denied.Any(Function(selector) ToolSelectorMatches(selector, toolName))
+
+                  If isDenied Then Return False
+
+                  ' Permission-scoped introspection tools do not widen the sender's
+                  ' substantive capability surface. They may remain available even when
+                  ' the allow-list names only skills; their own output is independently
+                  ' restricted to the effective sender-permitted skill registry.
+                  If IsPermissionScopedIntrospectionTool(toolName) Then Return True
+
                   Dim isAllowed As Boolean =
                       allowed.Count = 0 OrElse
                       allowed.Any(Function(selector) ToolSelectorMatches(selector, toolName))
 
-                  If Not isAllowed Then Return False
-
-                  Dim isDenied As Boolean =
-                      denied.Any(Function(selector) ToolSelectorMatches(selector, toolName))
-
-                  Return Not isDenied
+                  Return isAllowed
               End Function).
         ToList()
     End Function
@@ -579,6 +588,11 @@ Partial Public Class ThisAddIn
                       Dim name As String = t.ToolName.Trim()
 
                       If IsAlwaysAllowedTool(name) Then Return True
+
+                      ' Keep permission-scoped introspection such as log_count available
+                      ' under ONLY <skill>; it can expose statistics only for this exact
+                      ' effective skill scope and therefore does not grant another skill.
+                      If IsPermissionScopedIntrospectionTool(name) Then Return True
 
                       If name.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) Then
                           Return name.Equals(exclusive, System.StringComparison.OrdinalIgnoreCase)
@@ -627,6 +641,15 @@ Partial Public Class ThisAddIn
     Private Function IsAlwaysAllowedTool(toolName As String) As Boolean
         If String.IsNullOrWhiteSpace(toolName) Then Return False
         Return toolName.Trim().Equals(AP_Tool_ReportInability, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ''' <summary>
+    ''' Returns True for host-owned inspection tools whose own implementation applies the
+    ''' effective sender permission boundary before reading protected data. Such a tool may
+    ''' remain callable under a skill-only rule without widening the set of executable skills.
+    ''' </summary>
+    Private Function IsPermissionScopedIntrospectionTool(toolName As String) As Boolean
+        Return SharedLibrary.Agents.LogCountTool.IsLogCountTool(toolName)
     End Function
 
 
