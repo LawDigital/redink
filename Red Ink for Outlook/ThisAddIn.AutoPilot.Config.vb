@@ -171,6 +171,12 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property ThreadRetentionDays As Integer = 0
 
+        ''' <summary>
+        ''' Recipient for periodic privacy-scrubbed AutoPilot engineering diagnostics reports.
+        ''' Empty disables idle log analysis and reporting completely.
+        ''' </summary>
+        Public Property LogDiagnosticsReportEmail As String = ""
+
 
     End Class
 
@@ -409,6 +415,10 @@ Partial Public Class ThisAddIn
             .Name = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
             .Value = saved.ThreadRetentionDays.ToString()
         }
+        Dim pLogDiagnosticsReportEmail As New InputParameter() With {
+            .Name = "Engineering diagnostics report recipient (email; empty = disabled)",
+            .Value = If(saved.LogDiagnosticsReportEmail, "")
+        }
 
         Dim paramsList As New List(Of InputParameter) From {
             pCooldown,
@@ -422,7 +432,8 @@ Partial Public Class ThisAddIn
             pEnableUserFiles,
             pEnablePrivacyProtection,
             pIncludeSourcesFooter,
-            pThreadRetentionDays
+            pThreadRetentionDays,
+            pLogDiagnosticsReportEmail
         }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -492,6 +503,20 @@ Partial Public Class ThisAddIn
         Dim threadRetentionDays As Integer
         If Integer.TryParse(pThreadRetentionDays.Value?.ToString(), threadRetentionDays) AndAlso threadRetentionDays >= 0 Then
             config.ThreadRetentionDays = threadRetentionDays
+        End If
+
+        Dim diagnosticsRecipientInput As System.String = If(pLogDiagnosticsReportEmail.Value?.ToString(), System.String.Empty).Trim()
+        If diagnosticsRecipientInput.Length > 0 Then
+            Dim normalizedDiagnosticsRecipient As System.String = NormalizeAutoPilotLogDiagnosticsRecipient(diagnosticsRecipientInput)
+            If normalizedDiagnosticsRecipient.Length = 0 Then
+                ShowCustomMessageBox(
+                    "The engineering diagnostics report recipient must be a valid e-mail address, or left empty to disable the function.",
+                    AN)
+                Return Nothing
+            End If
+            config.LogDiagnosticsReportEmail = normalizedDiagnosticsRecipient
+        Else
+            config.LogDiagnosticsReportEmail = System.String.Empty
         End If
 
         ' Voicemail settings
@@ -605,6 +630,7 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"User file storage: {If(config.EnableUserFiles, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
         summaryBuilder.AppendLine($"Sender tool policy: {If(String.IsNullOrWhiteSpace(config.SenderToolPolicyPath), "disabled", config.SenderToolPolicyPath)}")
+        summaryBuilder.AppendLine($"Engineering diagnostics: {If(String.IsNullOrWhiteSpace(config.LogDiagnosticsReportEmail), "disabled", "enabled → " & config.LogDiagnosticsReportEmail)}")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -787,6 +813,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
         My.Settings.AP_SenderToolPolicyPath = If(config.SenderToolPolicyPath, "")
         My.Settings.AP_ThreadRetentionDays = config.ThreadRetentionDays
+        My.Settings.AP_LogDiagnosticsReportEmail = If(config.LogDiagnosticsReportEmail, "")
 
         ' Persist the explicit user selection exactly as before. In addition, persist the
         ' catalog against which that selection was made so newly introduced tools can be
@@ -836,6 +863,7 @@ Partial Public Class ThisAddIn
         config.AutoDeleteAfterHours = If(My.Settings.AP_AutoDeleteAfterHours >= 0, My.Settings.AP_AutoDeleteAfterHours, 0)
         config.SenderToolPolicyPath = If(My.Settings.AP_SenderToolPolicyPath, "")
         config.ThreadRetentionDays = If(My.Settings.AP_ThreadRetentionDays >= 0, My.Settings.AP_ThreadRetentionDays, 0)
+        config.LogDiagnosticsReportEmail = If(My.Settings.AP_LogDiagnosticsReportEmail, "")
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

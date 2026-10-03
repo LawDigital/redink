@@ -43,7 +43,7 @@ Partial Public Class ThisAddIn
         Try
             Dim json As New JObject From {
                 {"T", "AutoPilot"},
-                {"V", 6},
+                {"V", 7},
                 {"AP_FilterRules", If(My.Settings.AP_FilterRules, "")},
                 {"AP_WhitelistedSenders", If(My.Settings.AP_WhitelistedSenders, "")},
                 {"AP_SubjectTriggerWord", If(My.Settings.AP_SubjectTriggerWord, "")},
@@ -73,6 +73,7 @@ Partial Public Class ThisAddIn
                 {"AP_DashboardWindowH", My.Settings.AP_DashboardWindowH},
                 {"AP_SenderToolPolicyPath", If(My.Settings.AP_SenderToolPolicyPath, "")},
                 {"AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays},
+                {"AP_LogDiagnosticsReportEmail", If(My.Settings.AP_LogDiagnosticsReportEmail, "")},
                 {"D", Date.UtcNow.ToString("o")}
             }
 
@@ -170,6 +171,7 @@ Partial Public Class ThisAddIn
             My.Settings.AP_DashboardWindowH = GetJsonInteger(json, "AP_DashboardWindowH", My.Settings.AP_DashboardWindowH)
             My.Settings.AP_SenderToolPolicyPath = GetJsonString(json, "AP_SenderToolPolicyPath")
             My.Settings.AP_ThreadRetentionDays = GetJsonInteger(json, "AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays)
+            My.Settings.AP_LogDiagnosticsReportEmail = GetJsonString(json, "AP_LogDiagnosticsReportEmail")
 
             My.Settings.Save()
 

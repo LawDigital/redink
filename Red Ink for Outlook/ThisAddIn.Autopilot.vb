@@ -197,8 +197,8 @@ Partial Public Class ThisAddIn
     ''' Best-effort retention cleanup for AutoPilot tooling-log archives. Retention counts logical
     ''' runs, not files: a run consists of its __Tooling log plus any companion __SubAgent_Returns log.
     ''' </summary>
-    Private Shared Sub PruneAutoPilotToolingLogArchives(archiveDirectory As String,
-                                                        keepExistingRunCount As Integer)
+    Private Sub PruneAutoPilotToolingLogArchives(archiveDirectory As String,
+                                                 keepExistingRunCount As Integer)
         Try
             Dim keepCount As Integer = System.Math.Max(0, keepExistingRunCount)
             Dim existingFiles As System.Collections.Generic.List(Of System.IO.FileInfo) =
@@ -225,7 +225,23 @@ Partial Public Class ThisAddIn
                     ToList()
 
             For runIndex As Integer = keepCount To orderedRuns.Count - 1
-                For Each fileInfo As System.IO.FileInfo In orderedRuns(runIndex).Value
+                Dim runKey As System.String = orderedRuns(runIndex).Key
+                Dim runFiles As System.Collections.Generic.List(Of System.IO.FileInfo) = orderedRuns(runIndex).Value
+
+                If IsAutoPilotLogDiagnosticsEnabled() AndAlso
+                   Not HasAutoPilotLogDiagnosticResult(runKey) Then
+                    ' Preserve every not-yet-analysed run before it leaves the 50-run archive.
+                    ' The idle diagnostics worker deletes the pending raw copy only after a
+                    ' successful standard-model analysis has been persisted.
+                    If TryQueueAutoPilotRunForLogDiagnostics(runKey, runFiles) Then Continue For
+
+                    ' Fail closed for diagnostics retention: if preservation failed, keep the
+                    ' archive files rather than silently losing an unanalysed run. This may
+                    ' temporarily exceed the normal retention count until a later cleanup pass.
+                    Continue For
+                End If
+
+                For Each fileInfo As System.IO.FileInfo In runFiles
                     Try
                         fileInfo.Delete()
                     Catch
@@ -739,6 +755,8 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] Failed to persist config on start: {ex.Message}")
         End Try
+
+        PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
 
         StopLocalSchedulerRuntime()
         SetAutoPilotQueueJournalPersistenceEnabled(True)
@@ -1885,6 +1903,10 @@ Partial Public Class ThisAddIn
 
         entryId = entryId.Trim()
 
+        ' Foreground mail processing always pre-empts idle engineering diagnostics so the
+        ' normal AutoPilot workload never waits behind a background log-analysis model call.
+        CancelAutoPilotLogDiagnosticsForForegroundWork()
+
         ' Atomic deduplication across NewMailEx, catch-up and other queue sources.
         If Not _apQueuedOrProcessingEntryIds.TryAdd(entryId, True) Then
             Return False
@@ -2302,6 +2324,13 @@ Partial Public Class ThisAddIn
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
             Await SendQueuePositionNotificationsAsync(ct.Value)
             Await SendActiveJobProgressNotificationAsync(ct.Value)
+
+            ' Engineering diagnostics run only during genuine AutoPilot idle periods and
+            ' are launched without blocking the heartbeat/notification timer itself.
+            If _apMailQueue.IsEmpty AndAlso
+               System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then
+                TryStartAutoPilotLogDiagnosticsIdle(ct.Value)
+            End If
         Catch ex As OperationCanceledException
             ' Expected during shutdown
         Catch ex As System.Exception

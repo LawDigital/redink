@@ -1097,6 +1097,18 @@ Namespace My
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_LogDiagnosticsReportEmail() As String
+            Get
+                Return CType(Me("AP_LogDiagnosticsReportEmail"),String)
+            End Get
+            Set
+                Me("AP_LogDiagnosticsReportEmail") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
         Public Property LocalHttpAuthMasterKey() As String
             Get
                 Return CType(Me("LocalHttpAuthMasterKey"),String)

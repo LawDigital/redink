@@ -923,6 +923,10 @@ Partial Public Class ThisAddIn
         Dim senderDesignScope As System.IDisposable = Nothing
 
         Try
+            ' A due scheduled task is foreground AutoPilot work. Pre-empt any idle log
+            ' diagnostics before waiting for the shared LLM/agent gate.
+            CancelAutoPilotLogDiagnosticsForForegroundWork()
+
             Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
             runIsolationOwned = True
 

@@ -292,6 +292,8 @@ Partial Public Class ThisAddIn
                     "APIKeyBack",
                     "APIKeyPrefix",
                     "DecodedAPI",
+                    "HeaderA",
+                    "HeaderB",
                     "TokenCount",
                     "MaxOutputToken",
                     "MergePrompt",
