@@ -404,6 +404,127 @@ Namespace SharedLibrary
         Public Const DEFAULT_KB_MANIFEST_FILENAME As String = "redink-kb-manifest.json"
         Public Const DEFAULT_KB_SUPPORTED_EXTENSIONS As String = ".docx,.pdf,.pptx,.rtf,.txt,.md,.json,.xml,.html,.htm,.csv,.yaml,.yml"
 
+        ' Semantic Archive defaults: the authority for configuration and option fallbacks.
+        ' Empty collections/identities are structural state; format versions, validated bounds,
+        ' access-control lifetimes and immutable file names are deliberately not user defaults.
+        ' The configuration wizard resolves defaultConstant references at runtime. Designer/XML
+        ' user-setting metadata mirrors are checked against these constants by regression tests.
+
+        ' Global INI settings and per-user fallback controls (explicit user values still win).
+
+        ' Bounded catalog discovery: descriptors are metadata, never document evidence.
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_PAGE_SIZE As System.Int32 = 20
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_MAX_PAGE_SIZE As System.Int32 = 50
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_NAME_CHARACTERS As System.Int32 = 200
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_DESCRIPTION_CHARACTERS As System.Int32 = 1000
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_PROMPT_ENTRIES As System.Int32 = 8
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_PROMPT_CHARACTERS As System.Int32 = 12000
+
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_LIBRARY_SYNC_SECONDS As System.Int32 = 300
+        Public Const DEFAULT_SEMANTICARCHIVE_LIBRARY_MAX_ENTRIES As System.Int32 = 1024
+        Public Const DEFAULT_SEMANTICARCHIVE_LIBRARY_MAX_DESCRIPTOR_BYTES As System.Int32 = 262144
+        Public Const DEFAULT_SEMANTICARCHIVE_LIBRARY_AUTO_SUBSCRIBE As System.Boolean = True
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_CATALOG_MAXIMUM_BYTES As System.Int64 = 8L * 1024L * 1024L
+        Public Const DEFAULT_RETRIEVAL_SOURCE_MENU_REFRESH_SECONDS As System.Int32 = 60
+        Public Const DEFAULT_RETRIEVAL_SOURCE_MENU_MAX_ENTRIES As System.Int32 = 200
+        Public Const DEFAULT_RETRIEVAL_SOURCE_MENU_NAME_CHARACTERS As System.Int32 = 120
+        Public Const DEFAULT_RETRIEVAL_SOURCE_MENU_DESCRIPTION_CHARACTERS As System.Int32 = 1200
+        Public Const DEFAULT_SEMANTICARCHIVE_FLAT_METADATA_DOCUMENTS As System.Int32 = 64
+
+        Public Const DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_WINDOW As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED As System.Boolean = True
+        Public Const DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_WINDOW As System.String = ""
+
+        ' Per-archive and per-source-binding scalar configuration.
+        Public Const DEFAULT_SEMANTICARCHIVE_NAME As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_DESCRIPTION As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_ENABLED As System.Boolean = True
+        Public Const DEFAULT_SEMANTICARCHIVE_BACKGROUND_ENABLED As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_BACKGROUND_WINDOW As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_SOURCE_INDEX_THRESHOLD_BYTES As System.Int64 = 65536
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_CHILDREN_PER_NODE As System.Int32 = 48
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_ROUTING_CHARACTERS As System.Int32 = 32000
+        Public Const DEFAULT_SEMANTICARCHIVE_EXTRACTION_PROFILE_VERSION As System.String = "1"
+        Public Const DEFAULT_SEMANTICARCHIVE_SEMANTIC_PROFILE_VERSION As System.String = "1"
+        Public Const DEFAULT_SEMANTICARCHIVE_ALLOW_PARTIAL_SEARCH As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_ROOT_PATH As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_RECURSIVE As System.Boolean = True
+        Public Const DEFAULT_SEMANTICARCHIVE_FILE_TYPE_FILTER_ENABLED As System.Boolean = True
+        ' Only extensions already supported by the shared text exporter. Technical/code,
+        ' metadata and media-video formats remain opt-in through the source filter.
+        Public Const DEFAULT_SEMANTICARCHIVE_SUPPORTED_EXTENSIONS As System.String = ".pdf;.doc;.docx;.docm;.rtf;.xlsx;.xlsm;.pptx;.pptm;.txt;.csv;.eml;.msg;.png;.jpg;.jpeg;.gif;.bmp;.tif;.tiff;.webp;.svg"
+        Public Const DEFAULT_SEMANTICARCHIVE_ARTIFACT_PLACEMENT_MODE As System.String = "auto"
+        Public Const DEFAULT_SEMANTICARCHIVE_SHARED_ARTIFACT_ROOT As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_SHADOW_ARTIFACT_ROOT As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_ENABLE_OCR As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_OCR_BATCH_PAGES As System.Int32 = 16
+        Public Const DEFAULT_SEMANTICARCHIVE_EXTRACTION_OPTIONS_SIGNATURE As System.String = ""
+
+        ' Per-archive retrieval budgets. Validation/security maximums remain separate invariants.
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_NODES_VISITED As System.Int32 = 40
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_MODEL_CALLS As System.Int32 = 24
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_ELAPSED_SECONDS As System.Int32 = 120
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_CANDIDATE_FILES As System.Int32 = 120
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_EVIDENCE_BYTES As System.Int32 = 65536
+        Public Const DEFAULT_SEMANTICARCHIVE_INITIAL_BRANCHES As System.Int32 = 4
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_EXACT_LOOKUP_DOCUMENTS As System.Int32 = 2000
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_SECTION_CANDIDATES As System.Int32 = 48
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_PROMPT_CHARACTERS As System.Int32 = 32000
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_REQUEST_TOKENS As System.Int32 = 65536
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_LITERAL_SCAN_BYTES As System.Int32 = 16777216
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_LITERAL_SCAN_DOCUMENTS As System.Int32 = 64
+
+        ' Build/query option defaults shared by direct Office calls and the optional worker.
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_DISCOVERY_ENTRIES As System.Int32 = 1000
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_DISCOVERY_SECONDS As System.Int32 = 10
+        Public Const DEFAULT_SEMANTICARCHIVE_MAXIMUM_FILES_PER_BATCH As System.Int32 = 64
+        Public Const DEFAULT_SEMANTICARCHIVE_FORCE_SCAN As System.Boolean = True
+        Public Const DEFAULT_SEMANTICARCHIVE_REBUILD_SEMANTIC_METADATA As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_FORCE_REEXTRACT As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_RECONCILE_PERMISSIONS_ONLY As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_RETRY_FAILURES As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_IS_BACKGROUND As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_FULL_INTEGRITY_AUDIT As System.Boolean = False
+        Public Const DEFAULT_SEMANTICARCHIVE_BACKGROUND_MAXIMUM_FILES_PER_BATCH As System.Int32 = 8
+        Public Const DEFAULT_SEMANTICARCHIVE_BACKGROUND_WRITER_LEASE_WAIT_MILLISECONDS As System.Int32 = 250
+        Public Const DEFAULT_SEMANTICARCHIVE_WRITER_LEASE_WAIT_SECONDS As System.Int32 = 30
+        Public Const DEFAULT_SEMANTICARCHIVE_PERMISSION_MAXIMUM_FILES_PER_BATCH As System.Int32 = 32
+        Public Const DEFAULT_SEMANTICARCHIVE_PERMISSION_MAX_DISCOVERY_ENTRIES As System.Int32 = 128
+        Public Const DEFAULT_SEMANTICARCHIVE_PERMISSION_MAX_DISCOVERY_SECONDS As System.Int32 = 5
+        Public Const DEFAULT_SEMANTICARCHIVE_REQUEST_MODE As System.String = "content"
+        Public Const DEFAULT_SEMANTICARCHIVE_SEARCH_LIMIT As System.Int32 = 8
+        Public Const DEFAULT_SEMANTICARCHIVE_READ_MAXIMUM_BYTES As System.Int32 = 32768
+        Public Const DEFAULT_SEMANTICARCHIVE_READ_MAXIMUM_EXCERPTS As System.Int32 = 32
+        Public Const DEFAULT_SEMANTICARCHIVE_INLINE_CONTEXT_CHARACTERS As System.Int32 = 46000
+        Public Const DEFAULT_SEMANTICARCHIVE_MIXED_CONTEXT_CHARACTERS As System.Int32 = 20000
+
+        ' Bounded private diagnostics; these are fixed implementation limits, not INI parameters.
+        Public Const DEFAULT_SEMANTICARCHIVE_MAXIMUM_DIAGNOSTIC_CHARACTERS As System.Int32 = 8192
+        Public Const DEFAULT_SEMANTICARCHIVE_DIAGNOSTIC_MAXIMUM_BYTES As System.Int32 = 32768
+        Public Const DEFAULT_SEMANTICARCHIVE_MAX_DIAGNOSTIC_DISPLAY_CHARACTERS As System.Int32 = 262144
+        Public Const DEFAULT_SEMANTICARCHIVE_DIAGNOSTIC_MAXIMUM_EVENTS As System.Int32 = 128
+        Public Const DEFAULT_SEMANTICARCHIVE_DIAGNOSTIC_EVENT_CHARACTERS As System.Int32 = 2048
+        Public Const DEFAULT_SEMANTICARCHIVE_SHOW_TECHNICAL_DIAGNOSTICS As System.Boolean = False
+
+        ' Shared exporter observations only; these bounds do not alter extraction policy.
+        Public Const DEFAULT_TEXTEXPORT_MAXIMUM_COVERAGE_WARNINGS As System.Int32 = 64
+        Public Const DEFAULT_TEXTEXPORT_COVERAGE_WARNING_CHARACTERS As System.Int32 = 512
+
+        ' Command-line defaults; explicit options continue to override these values.
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_OPERATION As System.String = "refresh"
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_CONFIGURATION_SOURCE As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_LOG_PATH As System.String = ""
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_MAXIMUM_FILES As System.Int32 = 64
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_DISCOVERY_ENTRIES As System.Int32 = 5000
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_DISCOVERY_SECONDS As System.Int32 = 60
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_INTERVAL_SECONDS As System.Int32 = 1
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_MAXIMUM_CYCLES As System.Int32 = 0
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_MAXIMUM_SECONDS As System.Int32 = 0
+        Public Const DEFAULT_SEMANTICARCHIVE_WORKER_WRITER_LEASE_WAIT_MILLISECONDS As System.Int32 = DEFAULT_SEMANTICARCHIVE_BACKGROUND_WRITER_LEASE_WAIT_MILLISECONDS
+
         ' M365
         Public Const DEFAULT_M365SCOPES As String = "openid profile Calendars.Read Chat.Read ChannelMessage.Read.All Files.Read Mail.Read Notes.Read.All offline_access Sites.Read.All User.Read"
 

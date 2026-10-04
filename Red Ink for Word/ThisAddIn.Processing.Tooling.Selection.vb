@@ -173,6 +173,7 @@ Partial Public Class ThisAddIn
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+        tools.AddRange(Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.GetTools(_context))
 
         ' python_execute: secure sandboxed Python execution.
         ' Only advertised when INI_PythonAgentPath is set, the exe is available, and
@@ -598,6 +599,10 @@ Partial Public Class ThisAddIn
                         f.ShowDialog(selector)
                     End Using
                 End Sub)
+
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+                selector.AddExtraButton("Archive scope…", Sub(s, e) SelectSemanticArchiveSources(selector))
+            End If
 
             selector.AddExtraButton("Memory…",
                 Sub(s, e)

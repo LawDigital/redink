@@ -166,6 +166,12 @@ Namespace SharedLibrary
                             Exit For
                         End If
 
+                        ' Recheck registration immediately before dispatch as foreground queues can outlive a scan.
+                        If IsMetadataPath(item.FilePath) Then
+                            result.SkippedFiles += 1
+                            Continue For
+                        End If
+
                         processed += 1
                         Dim fileName = Path.GetFileName(item.FilePath)
                         ProgressBarModule.GlobalProgressLabel = $"({processed}/{fileQueue.Count}) {fileName}"
@@ -217,6 +223,7 @@ Namespace SharedLibrary
         ''' Returns True if the path is inside a .redink/ metadata folder.
         ''' </summary>
         Private Shared Function IsMetadataPath(filePath As String) As Boolean
+            If GeneratedOutputRegistry.IsGeneratedPath(filePath) Then Return True
             Dim sep1 = $"{Path.DirectorySeparatorChar}.redink{Path.DirectorySeparatorChar}"
             Dim sep2 = $"{Path.AltDirectorySeparatorChar}.redink{Path.AltDirectorySeparatorChar}"
             Return filePath.IndexOf(sep1, StringComparison.OrdinalIgnoreCase) >= 0 OrElse

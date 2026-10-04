@@ -654,6 +654,7 @@
   -->
   <ItemGroup>
     <AppDesigner Include="My Project\" />
+    <Compile Include="ThisAddIn.SemanticArchives.vb" />
     <Compile Include="BridgeSubs.vb" />
     <Compile Include="ComparisonHtmlViewerForm.vb">
       <SubType>Form</SubType>

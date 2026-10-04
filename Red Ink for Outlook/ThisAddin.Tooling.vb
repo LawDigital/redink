@@ -790,7 +790,10 @@ Partial Public Class ThisAddIn
         Optional resumeWorkflowFromCheckpoint As System.Boolean = False,
         Optional workflowContinuationKey As System.String = "",
         Optional workflowContinuationRetentionDays As System.Int32 = 0,
-        Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
+        Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit,
+        Optional semanticArchiveRequest As System.String = Nothing,
+        Optional semanticArchivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing,
+        Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing) As System.Threading.Tasks.Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -864,6 +867,35 @@ Partial Public Class ThisAddIn
             .ParentToolingContext = If(subAgentMode, parentToolingContext, Nothing)
         }
 
+        ' Archive control syntax is accepted only from an explicit host handoff.
+        ' Combined prompts, retrieved text and delegated model task text are never parsed.
+        Dim preparedArchive As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
+        If subAgentMode Then
+            context.SemanticArchiveScope = If(parentToolingContext Is Nothing, Nothing, parentToolingContext.SemanticArchiveScope)
+        Else
+            ' Explicit current-request authority takes precedence over ambient state.
+            ' AutoPilot and explicitly scoped scheduled calls never inherit it.
+            preparedArchive = semanticArchivePrepared
+            If preparedArchive Is Nothing AndAlso semanticArchiveScope Is Nothing AndAlso Not _apActive Then
+                preparedArchive = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Current
+            End If
+            context.SemanticArchiveScope = If(preparedArchive Is Nothing, semanticArchiveScope, preparedArchive.Scope)
+            If context.SemanticArchiveScope Is Nothing Then
+                context.SemanticArchiveScope = CreateSelectedSemanticArchiveRunScope()
+            End If
+            If preparedArchive Is Nothing AndAlso semanticArchiveRequest IsNot Nothing Then
+                preparedArchive = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, semanticArchiveRequest, context.SemanticArchiveScope,
+                    allowInteractiveSelection:=False, cancellationToken:=cancellationToken)
+                context.SemanticArchiveScope = preparedArchive.Scope
+                If preparedArchive.HasTrigger Then
+                    sysCommand &= System.Environment.NewLine & preparedArchive.ContextText
+                    If System.String.Equals(otherPrompt, semanticArchiveRequest, System.StringComparison.Ordinal) Then otherPrompt = preparedArchive.CleanPrompt
+                    If System.String.Equals(userText, semanticArchiveRequest, System.StringComparison.Ordinal) Then userText = preparedArchive.CleanPrompt
+                End If
+            End If
+        End If
+
         If subAgentMode AndAlso
            (parentToolingContext Is Nothing OrElse
             parentToolingContext.SequencingState Is Nothing OrElse
@@ -923,6 +955,9 @@ Partial Public Class ThisAddIn
                 userText,
                 otherPrompt,
                 fullPromptOverride)
+        If Not subAgentMode AndAlso preparedArchive IsNot Nothing AndAlso preparedArchive.HasTrigger Then
+            context.LatestUserRequestRaw = preparedArchive.AuthoritativeRequest
+        End If
 
         ' Created-deliverable enforcement is metadata-driven only.
         ' Do not classify the user's text to decide whether an artifact is required.
@@ -1404,6 +1439,15 @@ Partial Public Class ThisAddIn
 
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             Dim baseSysPrompt As String = sysCommand
+
+            ' Read only the host-selected catalog descriptors, before normal source planning.
+            ' This also runs for children, using only their inherited scope. No source scan.
+            Dim archiveCatalogPrompt As System.String = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveCatalogDiscovery.BuildPromptAsync(
+                _context, context.SemanticArchiveScope, cancellationToken)
+            If Not System.String.IsNullOrWhiteSpace(archiveCatalogPrompt) Then
+                baseSysPrompt &= System.Environment.NewLine & System.Environment.NewLine & archiveCatalogPrompt
+                context.Log("Semantic Archive catalog guidance prepared for the host-selected run scope.", "diag")
+            End If
 
             ' B1 progress (major steps only): the model announces significant new phases via the
             ' report_progress tool (a real tool call authored in the dialogue language). Deterministic
@@ -7573,7 +7617,8 @@ Partial Public Class ThisAddIn
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
-        authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw)).ConfigureAwait(False)
+        authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
+        semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope)).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
@@ -7848,6 +7893,9 @@ __AfterDispatch:
                     f.ShowDialog(selector)
                 End Using
             End Sub)
+        If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+            selector.AddExtraButton("Archive scope…", Sub(s, e) SelectSemanticArchiveSources(selector))
+        End If
         selector.AddExtraButton("Memory…",
             Sub(s, e)
                 Using f As New SharedLibrary.Agents.SessionMemoryViewerForm()
@@ -7908,6 +7956,7 @@ __AfterDispatch:
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+        tools.AddRange(Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.GetTools(_context))
 
         Dim logCountTool As ModelConfig = SharedLibrary.Agents.LogCountTool.Build(_context)
         If logCountTool IsNot Nothing Then
@@ -8114,6 +8163,7 @@ __AfterDispatch:
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+        tools.AddRange(Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.GetTools(_context))
 
         ' Permission-scoped host-log statistics participate in the existing AutoPilot
         ' external-tool selection like every other AutoPilot-compatible tool. Build()
@@ -8362,6 +8412,9 @@ __AfterDispatch:
                     End Using
                 End Sub)
 
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+                selector.AddExtraButton("Archive scope…", Sub(s, e) SelectSemanticArchiveSources(selector))
+            End If
             selector.AddExtraButton("Memory…",
                 Sub(s, e)
                     Using f As New SharedLibrary.Agents.SessionMemoryViewerForm()

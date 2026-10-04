@@ -573,6 +573,7 @@ Public Class Ribbon1
     End Sub
 
     Public Sub ApplyRibbonVisibilityConfiguration()
+        SetRibbonControlVisibleByAvailability(RI_SemanticArchives, SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(ThisAddIn._context))
         ApplySimpleModeToRibbonControls(
             ThisAddIn.INI_SimpleMenuHide,
             ThisAddIn.INI_MenuBlock,
@@ -1305,4 +1306,8 @@ Public Class Ribbon1
     Private Sub RI_Tabular_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_Tabular.Click
         RunTabularCommand()
     End Sub
+    Private Sub RI_SemanticArchives_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_SemanticArchives.Click
+        SharedLibrary.SharedLibrary.SharedMethods.ShowSemanticArchiveConsole(ThisAddIn._context)
+    End Sub
+
 End Class

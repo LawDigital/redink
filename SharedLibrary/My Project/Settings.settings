@@ -170,6 +170,27 @@
     <Setting Name="SelectedModelNumber" Type="System.Int32" Scope="User">
       <Value Profile="(Default)">0</Value>
     </Setting>
+    <Setting Name="SemanticArchiveBackgroundIndexingEnabled" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="SemanticArchivePermissionMaintenanceEnabled" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">True</Value>
+    </Setting>
+    <Setting Name="SemanticArchiveSettingsVersion" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">0</Value>
+    </Setting>
+    <Setting Name="EnableSAPermissionMaintenance" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">True</Value>
+    </Setting>
+    <Setting Name="SemanticArchivePermissionMaintenanceWindow" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="EnableSABackgroundIndexing" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="SemanticArchiveBackgroundIndexingWindow" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
     <Setting Name="EnableKBBackgroundIndexing" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">False</Value>
     </Setting>

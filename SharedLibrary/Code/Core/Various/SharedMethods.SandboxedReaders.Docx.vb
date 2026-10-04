@@ -134,10 +134,12 @@ Namespace SharedLibrary
             ''' </summary>
             Public Shared Function ReadDocxSandboxed(
                 docxPath As System.String,
-                Optional returnMarkdown As System.Boolean = False
+                Optional returnMarkdown As System.Boolean = False,
+                Optional ByRef readError As System.String = Nothing
             ) As System.String
+                readError = System.String.Empty
                 If System.String.IsNullOrWhiteSpace(docxPath) OrElse Not System.IO.File.Exists(docxPath) Then
-                    Return "Error: File not found."
+                    Return ReportLegacyTextReaderError("Error: File not found.", readError)
                 End If
 
                 Dim tempDirectory As System.String =
@@ -153,7 +155,7 @@ Namespace SharedLibrary
                     Dim documentXmlPath As System.String = System.IO.Path.Combine(wordDirectory, "document.xml")
 
                     If Not System.IO.File.Exists(documentXmlPath) Then
-                        Return "Error: Not a valid .docx file (missing word/document.xml)."
+                        Return ReportLegacyTextReaderError("Error: Not a valid .docx file (missing word/document.xml).", readError)
                     End If
 
                     Dim context As New ExtractionContext()
@@ -166,7 +168,7 @@ Namespace SharedLibrary
                     Dim bodyNode As System.Xml.XmlNode = mainDocument.SelectSingleNode("//w:body", mainNamespaceManager)
 
                     If bodyNode Is Nothing Then
-                        Return "Error: Not a valid .docx file (missing document body)."
+                        Return ReportLegacyTextReaderError("Error: Not a valid .docx file (missing document body).", readError)
                     End If
 
                     Dim bodyStory As New StorySection()
@@ -263,13 +265,13 @@ Namespace SharedLibrary
                     Dim result As System.String = output.ToString().TrimEnd()
 
                     If System.String.IsNullOrWhiteSpace(result) Then
-                        Return "Error: No text content found in .docx."
+                        Return ReportLegacyTextReaderError("Error: No text content found in .docx.", readError)
                     End If
 
                     Return result
 
                 Catch ex As System.Exception
-                    Return "Error reading .docx: " & ex.Message
+                    Return ReportLegacyTextReaderError("Error reading .docx: " & ex.Message, readError)
 
                 Finally
                     Try

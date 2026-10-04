@@ -27,6 +27,8 @@ Namespace Agents
         Public Property OcrSkipped As System.Nullable(Of System.Boolean) = Nothing
         Public Property OcrDurationMilliseconds As System.Nullable(Of System.Int64) = Nothing
         Public Property ExtractionComplete As System.Nullable(Of System.Boolean) = Nothing
+        Public Property ExtractionCoverageBasis As System.String = "unverified"
+        Public Property ExtractionWarnings As New System.Collections.Generic.List(Of System.String)()
         Public Property ContentFormat As System.String = "unknown"
         Public Property ProcessedRanges As New System.Collections.Generic.List(Of TextExtractionProcessedRange)()
     End Class
@@ -35,6 +37,7 @@ Namespace Agents
         Public Property ResourceId As System.String = System.String.Empty
         Public Property SourceIdentifier As System.String = System.String.Empty
         Public Property SourceSha256 As System.String = System.String.Empty
+        Public Property SourceByteCount As System.Int64
         Public Property AdapterId As System.String = System.String.Empty
         Public Property AdapterVersion As System.String = System.String.Empty
         Public Property ConfigurationFingerprint As System.String = System.String.Empty
@@ -50,6 +53,7 @@ Namespace Agents
             Public Property OriginalPath As System.String = System.String.Empty
             Public Property SnapshotPath As System.String = System.String.Empty
             Public Property Sha256 As System.String = System.String.Empty
+            Public Property ByteCount As System.Int64
         End Class
 
         Private Shared ReadOnly SessionId As System.String = System.Guid.NewGuid().ToString("N")
@@ -137,6 +141,7 @@ Namespace Agents
                     .ResourceId = "txr-" & key.Substring(0, 24),
                     .SourceIdentifier = captured.OriginalPath,
                     .SourceSha256 = captured.Sha256,
+                    .SourceByteCount = captured.ByteCount,
                     .AdapterId = If(adapterId, System.String.Empty),
                     .AdapterVersion = If(adapterVersion, System.String.Empty),
                     .ConfigurationFingerprint = If(configurationFingerprint, System.String.Empty),
@@ -168,11 +173,13 @@ Namespace Agents
                 System.IO.Path.Combine(directory, ".ri-source-" & System.Guid.NewGuid().ToString("N") & extension), PathAccess.Write)
 
             Dim hash As System.String
+            Dim capturedByteCount As System.Int64
             Try
                 Using input As New System.IO.FileStream(sourcePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
                     Using output As New System.IO.FileStream(snapshotPath, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None)
                         input.CopyTo(output)
                         output.Flush(True)
+                        capturedByteCount = output.Length
                     End Using
                 End Using
                 Using snapshotStream As New System.IO.FileStream(snapshotPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
@@ -180,7 +187,7 @@ Namespace Agents
                         hash = System.BitConverter.ToString(algorithm.ComputeHash(snapshotStream)).Replace("-", System.String.Empty).ToLowerInvariant()
                     End Using
                 End Using
-                Return New CapturedSource With {.OriginalPath = sourcePath, .SnapshotPath = snapshotPath, .Sha256 = hash}
+                Return New CapturedSource With {.OriginalPath = sourcePath, .SnapshotPath = snapshotPath, .Sha256 = hash, .ByteCount = capturedByteCount}
             Catch
                 Try
                     If System.IO.File.Exists(snapshotPath) Then System.IO.File.Delete(snapshotPath)
@@ -247,6 +254,7 @@ Namespace Agents
                 .ResourceId = source.ResourceId,
                 .SourceIdentifier = source.SourceIdentifier,
                 .SourceSha256 = source.SourceSha256,
+                .SourceByteCount = source.SourceByteCount,
                 .AdapterId = source.AdapterId,
                 .AdapterVersion = source.AdapterVersion,
                 .ConfigurationFingerprint = source.ConfigurationFingerprint,

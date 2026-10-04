@@ -263,7 +263,10 @@ Partial Public Class ThisAddIn
         Optional pinnedWordSelectionEnd As Integer = -1,
         Optional resumeWorkflowFromCheckpoint As System.Boolean = False,
         Optional workflowContinuationKey As System.String = "",
-        Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
+        Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit,
+        Optional semanticArchiveRequest As System.String = Nothing,
+        Optional semanticArchivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing,
+        Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing) As System.Threading.Tasks.Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -365,6 +368,33 @@ Partial Public Class ThisAddIn
             End If
         End If
 
+        ' Archive control syntax is accepted only from an explicit host handoff.
+        ' Combined prompts, retrieved text and delegated model task text are never parsed.
+        Dim preparedArchive As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
+        If subAgentMode Then
+            context.SemanticArchiveScope = If(parentToolingContext Is Nothing, Nothing, parentToolingContext.SemanticArchiveScope)
+        Else
+            preparedArchive = semanticArchivePrepared
+            If preparedArchive Is Nothing AndAlso semanticArchiveScope Is Nothing Then
+                preparedArchive = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Current
+            End If
+            context.SemanticArchiveScope = If(preparedArchive Is Nothing, semanticArchiveScope, preparedArchive.Scope)
+            If context.SemanticArchiveScope Is Nothing Then
+                context.SemanticArchiveScope = CreateSelectedSemanticArchiveRunScope()
+            End If
+            If preparedArchive Is Nothing AndAlso semanticArchiveRequest IsNot Nothing Then
+                preparedArchive = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, semanticArchiveRequest, context.SemanticArchiveScope,
+                    allowInteractiveSelection:=False, cancellationToken:=cancellationToken)
+                context.SemanticArchiveScope = preparedArchive.Scope
+                If preparedArchive.HasTrigger Then
+                    sysCommand &= System.Environment.NewLine & preparedArchive.ContextText
+                    If System.String.Equals(otherPrompt, semanticArchiveRequest, System.StringComparison.Ordinal) Then otherPrompt = preparedArchive.CleanPrompt
+                    If System.String.Equals(userText, semanticArchiveRequest, System.StringComparison.Ordinal) Then userText = preparedArchive.CleanPrompt
+                End If
+            End If
+        End If
+
         If subAgentMode AndAlso
            (parentToolingContext Is Nothing OrElse
             parentToolingContext.SequencingState Is Nothing OrElse
@@ -424,6 +454,9 @@ Partial Public Class ThisAddIn
                 userText,
                 otherPrompt,
                 fullPromptOverride)
+        If Not subAgentMode AndAlso preparedArchive IsNot Nothing AndAlso preparedArchive.HasTrigger Then
+            context.LatestUserRequestRaw = preparedArchive.AuthoritativeRequest
+        End If
 
         ' Created-deliverable enforcement is metadata-driven only.
         ' Do not classify the user's text to decide whether an artifact is required.
@@ -895,6 +928,15 @@ Partial Public Class ThisAddIn
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             ' Base system command
             Dim baseSysPrompt As String = sysCommand
+
+            ' Read only the host-selected catalog descriptors, before normal source planning.
+            ' This also runs for children, using only their inherited scope. No source scan.
+            Dim archiveCatalogPrompt As System.String = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveCatalogDiscovery.BuildPromptAsync(
+                _context, context.SemanticArchiveScope, cancellationToken)
+            If Not System.String.IsNullOrWhiteSpace(archiveCatalogPrompt) Then
+                baseSysPrompt &= System.Environment.NewLine & System.Environment.NewLine & archiveCatalogPrompt
+                context.Log("Semantic Archive catalog guidance prepared for the host-selected run scope.", "diag")
+            End If
 
             ' B1 progress (major steps only): the model announces significant new phases via the
             ' report_progress tool (a real tool call authored in the dialogue language). Deterministic

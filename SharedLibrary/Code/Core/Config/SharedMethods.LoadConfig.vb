@@ -50,6 +50,27 @@ Namespace SharedLibrary
         ''' <param name="FirstTime">If <c>True</c>, allows showing the initial setup wizard when no `.ini` is found.</param>
         ''' <param name="Reload">If <c>True</c>, forces reload even when <c>context.INIloaded</c> is already set.</param>
         Public Shared Sub InitializeConfig(ByRef context As ISharedContext, FirstTime As Boolean, Reload As Boolean)
+            InitializeConfigCore(context, FirstTime, Reload, Nothing)
+        End Sub
+
+        ''' <summary>Loads an explicit configuration with the existing parser and license rules.
+        ''' No setup UI, settings restoration or saved model selection is performed.
+        ''' Invalid configuration and interactive requirements fail as exceptions.</summary>
+        Public Shared Sub InitializeConfigHeadless(context As ISharedContext, configurationSource As System.String,
+                                                   Optional requireModelConfiguration As System.Boolean = True)
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            Dim resolvedSource As System.String = If(configurationSource, "").Trim()
+            If System.String.IsNullOrWhiteSpace(resolvedSource) Then resolvedSource = GetActiveConfigSource(context)
+            If System.String.IsNullOrWhiteSpace(resolvedSource) Then Throw New System.InvalidOperationException("configuration_missing: Red Ink could not resolve its standard redink.ini source.")
+            Using headless As HeadlessExecutionScope = BeginHeadlessExecution()
+                InitializeConfigCore(context, False, True, resolvedSource, requireModelConfiguration)
+                headless.ThrowIfInteractionRequested()
+                If Not context.INIloaded OrElse context.GPTSetupError Then Throw New System.InvalidOperationException("configuration_invalid: The unattended configuration did not initialize successfully.")
+            End Using
+        End Sub
+
+        Private Shared Sub InitializeConfigCore(ByRef context As ISharedContext, FirstTime As System.Boolean, Reload As System.Boolean, explicitSource As System.String,
+                                                Optional requireModelConfiguration As System.Boolean = True)
 
             If context.INIloaded AndAlso Not Reload Then Return
 
@@ -64,12 +85,15 @@ Namespace SharedLibrary
 
             Try
 
-                ' Resolve the active source without changing the historic priority rules.
-                RegFilePath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
-                DefaultPath = GetDefaultINIPath(context.RDV)
-                DefaultPath2 = GetDefaultINIPath("Word")
-
-                Dim configSource As String = GetActiveConfigSource(context)
+                ' An explicit unattended source never changes registry configuration.
+                ' Interactive calls retain the historic source priority rules.
+                Dim configSource As System.String = explicitSource
+                If System.String.IsNullOrWhiteSpace(configSource) Then
+                    RegFilePath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+                    DefaultPath = GetDefaultINIPath(context.RDV)
+                    DefaultPath2 = GetDefaultINIPath("Word")
+                    configSource = GetActiveConfigSource(context)
+                End If
                 Dim sourceKind As ConfigurationSourceKind = ConfigurationResourceLoader.ClassifyConfigurationSource(configSource)
 
                 If sourceKind = ConfigurationSourceKind.UnsupportedUri Then
@@ -78,7 +102,7 @@ Namespace SharedLibrary
                 End If
 
                 If sourceKind = ConfigurationSourceKind.FileSystem AndAlso Not System.IO.File.Exists(ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")) Then
-                    If FirstTime Then
+                    If FirstTime AndAlso Not IsHeadlessExecution Then
                         Using frm As New InitialConfig(context)
                             Dim __safeDialogOwner92 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
                             If __safeDialogOwner92 IsNot Nothing Then
@@ -274,7 +298,7 @@ Namespace SharedLibrary
                 context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), DEFAULT_WEB_SERVER_BLOCK)
 
                 ' Restore shared user settings from the registry backup if My.Settings was lost.
-                TryRestoreSharedUserSettingsFromRegistry()
+                If Not IsHeadlessExecution Then TryRestoreSharedUserSettingsFromRegistry()
 
                 ' Load per-user overrides from My.Settings.
                 context.INI_DefaultPrefix = My.Settings.DefaultPrefix
@@ -422,11 +446,13 @@ Namespace SharedLibrary
 
                 context.INI_AgentResourcesPath = If(configDict.ContainsKey("AgentResourcesPath"), configDict("AgentResourcesPath"), "")
                 context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
-                Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
+                If Not IsHeadlessExecution Then Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
 
                 ' Restore persisted Skill-author mode (My.Settings) now that resource paths are known,
                 ' so the local .inky tree can be ensured. Runs for both Word and Outlook via shared config load.
-                Try : Agents.SkillAuthorMode.RestorePersistedState() : Catch : End Try
+                If Not IsHeadlessExecution Then
+                    Try : Agents.SkillAuthorMode.RestorePersistedState() : Catch : End Try
+                End If
 
                 context.INI_ChunkOCR = If(configDict.ContainsKey("ChunkOCR"), CInt(configDict("ChunkOCR")), DEFAULT_CHUNK_OCR_PAGES)
 
@@ -482,11 +508,15 @@ Namespace SharedLibrary
 
                 End If
 
+                ' Semantic Archives: canonical INI defaults plus explicit, independent per-user overrides.
+                SemanticArchiveConfiguration.LoadInto(context, configDict)
+
                 ' Knowledge Store settings
                 context.INI_KnowledgeStorePath = If(configDict.ContainsKey("KnowledgeStorePath"), configDict("KnowledgeStorePath"), "")
                 context.INI_KnowledgeStorePathLocal = If(configDict.ContainsKey("KnowledgeStorePathLocal"), configDict("KnowledgeStorePathLocal"), "")
                 context.INI_KnowledgeStoreOwner = If(configDict.ContainsKey("KnowledgeStoreOwner"), configDict("KnowledgeStoreOwner"), "")
                 context.INI_KnowledgeStoreUseLLMIndex = ParseBoolean(configDict, "KnowledgeStoreUseLLMIndex")
+                RetrievalSourceDiscovery.RequestRefresh(context)
 
 
                 ' Process SecondAPI configuration if enabled.
@@ -535,7 +565,7 @@ Namespace SharedLibrary
                 context.Location = context.INI_Location.Trim()
 
                 ' Resolve Codebasis (used to decode encrypted API keys) if required.
-                If context.INI_APIEncrypted OrElse context.INI_APIEncrypted_2 Then
+                If requireModelConfiguration AndAlso (context.INI_APIEncrypted OrElse context.INI_APIEncrypted_2) Then
                     If IsEmptyOrBlank(Int_CodeBasis) Then
                         context.Codebasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
                     Else
@@ -550,6 +580,17 @@ Namespace SharedLibrary
                 ' Enforce licensing before continuing setup.
                 If Not LicenseOK(context, configDict) Then
                     ShowCustomMessageBox($"{AN} disabled due to invalid or expired license.")
+                    Return
+                End If
+
+                ' Rights-only unattended maintenance needs source/storage configuration and
+                ' the same licence decision, but never model setup, keys or authentication.
+                If IsHeadlessExecution AndAlso Not requireModelConfiguration Then
+                    context.INI_APIDebug = False
+                    context.DecodedAPI = System.String.Empty
+                    context.DecodedAPI_2 = System.String.Empty
+                    context.GPTSetupError = False
+                    context.INIloaded = True
                     Return
                 End If
 
@@ -603,11 +644,11 @@ Namespace SharedLibrary
                 End If
 
                 ' Detect multi-model configurations from INI keys (MultiModel_<Key>_<N>).
-                PrimaryModelManager.DetectAndStoreModels(configDict)
+                If Not IsHeadlessExecution Then PrimaryModelManager.DetectAndStoreModels(configDict)
 
                 ' Re-apply the previously selected model so a config reload does not
                 ' silently revert the user's selection to the base INI values.
-                If PrimaryModelManager.GetAvailableModels().Count > 1 Then
+                If Not IsHeadlessExecution AndAlso PrimaryModelManager.GetAvailableModels().Count > 1 Then
                     Dim saved = PrimaryModelManager.LoadSavedModelNumber()
                     If Not PrimaryModelManager.SelectModel(context, saved) Then
                         PrimaryModelManager.SelectModel(context, PrimaryModelManager.GetAvailableModels()(0))
@@ -618,6 +659,7 @@ Namespace SharedLibrary
                 context.INIloaded = True
 
             Catch ex As System.Exception
+                If IsHeadlessExecution Then Throw
                 Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in InitializeConfig: {ex.Message}", "Error")
             End Try
         End Sub
@@ -756,6 +798,7 @@ Namespace SharedLibrary
 
                 ' If there are missing settings, prompt user to complete them.
                 If missingSettings.Count > 0 Then
+                    If IsHeadlessExecution Then Throw New System.InvalidOperationException("configuration_missing: " & System.String.Join(", ", missingSettings.Keys))
                     usercompleted = MissingSettingsWindow(missingSettings, context)
                     If Not usercompleted Then
                         ShowCustomMessageBox($"You have not provided all required parameters, which is why {AN} will not operate properly. Update '{AN2}.ini' (all values are described in the manual) before you continue or retry and add the parameters.")

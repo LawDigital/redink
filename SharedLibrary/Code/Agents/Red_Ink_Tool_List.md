@@ -11,6 +11,7 @@ Notes:
 - `python_execute` requires the `redink-pythonagent` helper to be installed and configured; Python execution is unavailable without it.
 - The `Outlook` column refers to Outlook tooling outside AutoPilot, primarily Local Chat / Agent mode.
 - `AutoPilot` is listed separately because it does not expose the full Outlook tool surface.
+- `semantic_archive_list`, `semantic_archive_search` and `semantic_archive_read` are selectable when `SemanticArchiveCatalogPathLocal` is configured. Discovery uses only the selected catalog metadata. Search/read also require published usable content and current source access. Local scope is the explicit session choice, otherwise saved defaults, otherwise enabled catalog archives; explicitly choosing none remains an opt-out. A normal agent run can use them without an `(sa)` trigger; tool arguments never expand the host-resolved scope. AutoPilot mail, voicemail and scheduled runs additionally require fresh independently verified requester authorization and otherwise return `requester_identity_unverified`.
 
 
 ## Skill/agent resource dependency semantics
@@ -32,6 +33,9 @@ Notes:
 | `internet_search` | Searches the public internet and returns readable content from top results. | Yes | Yes | Yes |
 | `web_grounding` | Uses a web-enabled model to perform cited live-web research. | Yes | Yes | Yes |
 | `knowledge_search` | Searches the user's local knowledge store for relevant internal content. | Yes | Yes | Yes |
+| `semantic_archive_list` | Lists host-selected enabled archive IDs, names and descriptions without traversing originals. Bounded pages use NextOffset and CatalogRevision. Descriptors are not document evidence. | Yes | Yes | Yes |
+| `semantic_archive_search` | Finds original files in the host-selected Semantic Archives; returns scoped opaque hit/continuation references and bounded coverage. Available only with SemanticArchiveCatalogPathLocal configured and a host-resolved archive scope (local explicit/default/enabled-catalog selection, remote request-bound selection). | Yes | Yes | Yes |
+| `semantic_archive_read` | Loads bounded exact excerpts from authorized archive hit references, rechecking requester access, live validity, generation and provenance. Existing document indexes always use the shared section selector, including literal-text hits; an empty/failed indexed selection does not fall back to whole-file text. | Yes | Yes | Yes |
 | `log_count` | Deterministically counts current-host skill invocations from `INI_LogPath`; returns statistics only for skills in the caller's effective permission scope. | No | Yes | Yes |
 | `tool_loader` | Lazily loads full tool definitions only when a specific tool is needed. | Yes | Yes | Yes |
 | `resolve_capability_route` | Internal top-level routing handshake. Before substantive ordinary tooling, selects a specifically applicable advertised skill; otherwise a suitable top-level agent; otherwise `none`. Uses manifest metadata only and does not preload skill/agent bodies. Availability is host/runtime controlled. | Yes | Yes | Yes |

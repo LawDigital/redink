@@ -693,3 +693,62 @@ Cumulative H24d source ZIP contains exactly15 genuinely changed VB files; increm
 - [x] Recovery state advanced to this no-change closure checkpoint; final standalone governance and hashes regenerated from the released bytes.
 - [ ] Windows/Visual Studio 2022 compile NOT RUN.
 - [ ] Office/VSTO runtime NOT RUN.
+
+## Semantic Archive — current status (2026-10-04)
+
+- [x] Add Semantic Archive administration, source roots, catalog discovery, search/read tools and Word/Outlook integration.
+- [x] Keep all externally configurable Semantic Archive defaults in `SharedMethods.Constants.vb` and wire global configuration through the existing Settings/ConfigWizard contracts.
+- [x] Add default-on per-source office/image extension filtering and always exclude Knowledge Store `.redink` output plus Semantic Archive generated output from ingestion.
+- [x] Reuse the existing `text_export_to_text` extraction path and preserve native text before selective OCR.
+- [x] Add shared reusable per-document artifacts, private fallback, current source-permission rechecks and background permission reconciliation.
+- [x] Consolidate Semantic Archive generated state under `sa-archives` and remove the earlier separate work/lock/staging top-level layout.
+- [x] Make direct local archive discovery available to the model and add `semantic_archive_list`.
+- [x] Fix PDF text-layer coverage so verified native extraction can become searchable.
+- [x] Add selective OCR and configurable bounded OCR page batching while retaining per-page coverage verification.
+- [x] Keep logical document identity independent of OCR/extraction policy and prune retired/tombstone records from the active generation so repeated refresh, reindex and re-extract cannot multiply source records.
+- [x] Allow OCR batches from 1 to 75 pages, mark OCR batch-size edits dirty so Save is enabled, and keep the default at 16.
+- [x] Simplify the normal Semantic Archive diagnostics/progress view while retaining raw queue, generation, routing, permission and identity details behind Show technical details.
+- [x] Intercept interactive local `file://` source links in the Outlook web UI before browser navigation and open them through the existing host path handler.
+- [x] Host automatic Semantic Archive content and permission maintenance in Outlook only; Word retains manual Semantic Archive commands and independent Knowledge Store maintenance.
+- [x] Remove the obsolete `SemanticArchiveDerivedOutputRoot` / “Legacy private folder” compatibility path; private derivatives now use `SemanticArchiveShadowArtifactRoot` or the per-user LocalAppData fallback.
+- [x] Add a unique high-confidence exact-metadata fast path so obvious archive hits can skip semantic hierarchy model routing and proceed directly to exact evidence reading.
+- [x] Show a visible “Querying Semantic Archive…” progress indicator in Word and Outlook Freestyle when `(sa)` is requested.
+- [x] Separate concise user diagnostics from optional technical diagnostics.
+- [x] Provide original-source references for Semantic Archive evidence; unattended delivery must not rely on a local user link.
+- [x] Remove feature-specific test/QA/report artifacts from the product repository; temporary verification stays external.
+- [ ] Run a clean Windows/Visual Studio 2022 build of SharedLibrary, Word, Outlook, Excel and optional Semantic Archive Worker after the latest OCR batching changes.
+- [ ] Run Word and Outlook smoke tests for Semantic Archive administration, refresh, search/read, source links and dialog-owner behavior.
+- [ ] Verify selective OCR batching with representative native-text, mixed text/scan and full-scan PDFs; confirm all requested OCR pages are accounted for before marking extraction complete.
+- [ ] Verify a second Windows user reuses shared artifacts without repeating extraction/indexer work and cannot retrieve sources they cannot currently read.
+- [ ] Verify UNC archive/source/shared-artifact paths and path-length handling on the target SMB environment.
+- [ ] Verify AutoPilot attaches only original documents actually read as evidence and does not expose unusable local/UNC links.
+
+
+## Semantic Archive — local catalog / Freestyle sources / search strategy (2026-10-04)
+
+- [x] Diagnose the supplied First/Second logs: search took 120.081/32.769 seconds with 15/17 routing model calls; the earlier exact-metadata shortcut did not execute. The first run stopped at the search deadline. The logs do not identify the individual slow routing request or prove a specific provider fault.
+- [x] Rename the private catalog setting to `SemanticArchiveCatalogPathLocal` and context property to `INI_SemanticArchiveCatalogPathLocal` across ConfigWizard, Settings/load/save/reset/export, Word, Outlook, Excel, Worker and shared consumers. The directory value and existing index data stay unchanged. Report old-development-key use without introducing an alias or silent migration.
+- [x] Route SA filesystem paths through the existing shared environment/Red Ink placeholder helper; retain containment, Windows limits and permission checks. Include source input, derivative paths, exclusions, source URIs and worker log arguments.
+- [x] Add a cached Sources menu in the existing Word/Outlook Freestyle footer. Show SA first and KB second, descriptions as tooltips, insert explicit source triggers, keep form height unchanged. Discovery is background-only with independent single-flight caches and read-only catalog APIs; it creates no registry entries/directories and does not enumerate original files or call a model.
+- [x] Add bounded direct document-card ranking for at most 64 source records using the existing semantic selector, with no keyword eligibility filter. Keep large-archive hierarchy navigation, complete-record prompt limits, current authorization and exact read contracts. Retain hierarchy continuation after a metadata-only shortcut instead of claiming the hierarchy was traversed.
+- [x] Implement the central descriptor library and managed subscriptions in source; see the subscription section below for behavior and remaining native validation.
+- [ ] Measure both new search routes on Windows with the user's 42-document generation and compare `Coverage.RetrievalStrategy` / `ModelCalls` / `ElapsedMilliseconds`. Do not infer measured speed gains from static checks.
+- [ ] Native VS2022/VB/VSTO build, Outlook/Word Freestyle layout at different DPI settings, real `%DESKTOP%`/`%DOCUMENTS%`/UNC behavior and live ACL-change tests remain unexecuted in this environment.
+- [ ] Deployment: rename existing INI `SemanticArchiveCatalogPath` (or `SemanticIndexArchivePath`) to `SemanticArchiveCatalogPathLocal`, retaining the same directory. Rebuild SharedLibrary and hosts. No index deletion/re-extraction is required for this rename or query/UI changes.
+
+## Semantic Archive — library subscriptions and Freestyle scope editing (2026-10-04)
+
+- [x] Confirm the supplied latest Local Agent log: flat document-card search used 5 model calls and 9.650 seconds internally (9.721 seconds tool total); exact read used 195 ms tool time. This is a measured prior-patch result, not a benchmark of this patch. No Freestyle log proves the duplicate-query hypothesis.
+- [x] Add `SemanticArchiveCatalogLibraryPath`, default empty, through ConfigWizard, Settings/read/write/reset/export, SharedContext and Word/Outlook/Excel property/setting descriptions. Retain centrally provisioned library configuration on ordinary settings reinitialization, like the local catalog location; full reset uses the empty constant.
+- [x] Add local-author Publish / Update library, Withdraw from library and Sync library actions in the existing admin console. Only local definitions can publish; subscribers can opt out/re-enable and refresh content, not edit centrally managed source/processing definitions. Library synchronization remains accessible even with no local archive yet.
+- [x] Store central per-archive definitions with publisher ownership, bounded strict JSON, inherited reader policy, protected writer ACL, per-entry exclusive lock and atomic replacement. Preserve existing descriptor audience on update. Reject nonportable local/mapped roots when publishing to a UNC library. Original files are not copied and retain their own rights.
+- [x] Implement automatic revisioned local subscriptions with stable IDs, opt-out, withdrawal suspension, recovery after restored access, anti-rollback/publisher checks and local catalog revision conflict handling. Identical publish retries do not add revisions. Failed local bookkeeping after a central commit is explicit and recoverable by identical retry. Private authored archives stay separate.
+- [x] Gate every operational SA path on the local setting. Library-only configuration leaves SA unavailable; explicit disabled requests return a configuration result rather than reading/indexing data. Hide SA source-menu/ribbon choices when local configuration is absent.
+- [x] Synchronize library metadata in the background at configuration/source-overview warm-up and periodically in the existing Outlook maintenance coordinator (300-second library interval). Subscription content and permission maintenance require no per-user enable switch, but still respect source authorization, configured windows, idle cancellation and the existing writer locks. Word does not acquire automatic content indexing.
+- [x] Check current central authority for subscribed search/read/list/build and evidence disclosure; preserve the existing current-original ACL/hash checks and independent unattended requester authorization. Offline/denied/unverified central definitions are not usable merely because a private index exists.
+- [x] Make source selection replace scope-only SA/KB controls, prefer unique readable SA names, deduplicate case/spacing-equivalent source controls and make Ctrl+P restoration idempotent without deleting unrelated task text or explicit source queries. Deduplicate equivalent resolved inline SA requests as a second boundary.
+- [x] Preserve prior extraction/OCR batching, stable source identity, shared artifact validation, source links/AutoPilot delivery and the flat-card search strategy. No existing source/index directory needs deleting or re-extracting for this patch. First-time subscribers still need their initial rights-filtered private projection.
+- [ ] Perform clean VS2022/VB/VSTO builds for SharedLibrary, Word, Outlook, Excel and optional Worker. No VB compiler or native Windows/Office runtime was available during this implementation.
+- [ ] Native acceptance: configure only Library vs only Local vs both; cold-start a new subscriber without a catalog; publish/update/withdraw/re-publish; test subscriber opt-out/re-enable, definition write/owner/reader ACLs, UNC shares and failed/offline/interrupted atomic commits. Confirm same entry ID and no duplicate records across repeated sync/refresh.
+- [ ] Verify real multi-user source ACL removal/restoration, two concurrent publishers, simultaneous subscriber synchronization and artifact reuse; confirm private archives never publish automatically. The central library must be pre-provisioned: publishers may create files but must not be able to replace other entries via directory/ancestor delete/ACL rights.
+- [ ] Native Freestyle acceptance in Word and Outlook: existing `(sa)` then select a named archive; Ctrl+P once/repeatedly/reopen; equivalent KB scope; distinct explicit queries; form height/owner/cancel behavior and empty-library handling. Normal users need Outlook running and eligible for automatic content/permission work; initial preparation is not instantaneous.

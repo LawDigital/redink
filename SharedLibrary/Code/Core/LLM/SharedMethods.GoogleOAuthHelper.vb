@@ -104,11 +104,11 @@ Namespace SharedLibrary
             ''' </summary>
             ''' <param name="data">Data to sign.</param>
             ''' <returns>Signature bytes.</returns>
-            Private Shared Function SignData(data As Byte()) As Byte()
+            Private Shared Function SignData(data As Byte(), signingKey As System.String) As Byte()
                 Dim rsaKey As RsaPrivateCrtKeyParameters
 
                 ' Normalize line endings for BouncyCastle's PEM reader:
-                Dim formattedPrivateKey As String = private_key _
+                Dim formattedPrivateKey As String = signingKey _
                     .Replace(vbCrLf, vbLf) _
                     .Replace(vbCr, vbLf) _
                     .Replace("\n", vbLf) _
@@ -132,15 +132,21 @@ Namespace SharedLibrary
             ''' </summary>
             ''' <returns>Compact JWT string (`Base64Url(header).Base64Url(payload).Base64Url(signature)`).</returns>
             Public Shared Function GenerateJWT() As String
+                Return GenerateJWT(client_email, private_key, scopes, token_uri, token_life)
+            End Function
+
+            Public Shared Function GenerateJWT(clientEmail As System.String, signingKey As System.String,
+                                               requestedScopes As System.String, tokenEndpoint As System.String,
+                                               lifetime As System.Int64) As System.String
                 Dim issuedAt As Long = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                Dim lifetimeSeconds As Long = If(token_life > 0, token_life, 3600)
+                Dim lifetimeSeconds As Long = If(lifetime > 0, lifetime, 3600)
                 Dim expiry As Long = issuedAt + lifetimeSeconds
 
                 Dim header = New With {.alg = "RS256", .typ = "JWT"}
                 Dim payload = New With {
-                                        .iss = client_email,
-                                        .scope = scopes,
-                                        .aud = token_uri,
+                                        .iss = clientEmail,
+                                        .scope = requestedScopes,
+                                        .aud = tokenEndpoint,
                                         .exp = expiry,
                                         .iat = issuedAt
                                     }
@@ -148,7 +154,7 @@ Namespace SharedLibrary
                 Dim headerBase64 = Base64UrlEncode(JsonConvert.SerializeObject(header))
                 Dim payloadBase64 = Base64UrlEncode(JsonConvert.SerializeObject(payload))
                 Dim unsignedToken = $"{headerBase64}.{payloadBase64}"
-                Dim signature = SignData(Encoding.UTF8.GetBytes(unsignedToken))
+                Dim signature = SignData(Encoding.UTF8.GetBytes(unsignedToken), signingKey)
                 Dim signatureBase64 = Base64UrlEncode(signature)
 
                 Return $"{unsignedToken}.{signatureBase64}"
@@ -161,31 +167,41 @@ Namespace SharedLibrary
             ''' Requests an OAuth access token by exchanging a signed JWT assertion at the configured token endpoint.
             ''' </summary>
             ''' <returns>Access token string on success; otherwise an empty string.</returns>
-            Public Shared Async Function GetAccessToken() As Task(Of String)
+            Public Shared Async Function GetAccessToken() As System.Threading.Tasks.Task(Of System.String)
+                Return Await GetAccessToken(client_email, private_key, scopes, token_uri, token_life, False).ConfigureAwait(False)
+            End Function
+
+            ' The common implementation takes immutable per-call inputs. Isolated callers never
+            ' assign the public legacy credential fields, even while another chat refreshes OAuth.
+            Public Shared Async Function GetAccessToken(clientEmail As System.String, signingKey As System.String,
+                                                        requestedScopes As System.String, tokenEndpoint As System.String,
+                                                        lifetime As System.Int64, silent As System.Boolean,
+                                                        Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of System.String)
+                cancellationToken.ThrowIfCancellationRequested()
                 Try
                     ' Validate configuration before attempting request
-                    If String.IsNullOrWhiteSpace(client_email) Then
-                        ShowCustomMessageBox("OAuth configuration error: client_email is not configured.")
+                    If String.IsNullOrWhiteSpace(clientEmail) Then
+                        ReportOAuthFailure("OAuth configuration error: client_email is not configured.", silent)
                         Return ""
                     End If
 
-                    If String.IsNullOrWhiteSpace(private_key) Then
-                        ShowCustomMessageBox("OAuth configuration error: private_key is not configured.")
+                    If String.IsNullOrWhiteSpace(signingKey) Then
+                        ReportOAuthFailure("OAuth configuration error: private_key is not configured.", silent)
                         Return ""
                     End If
 
-                    If String.IsNullOrWhiteSpace(token_uri) Then
-                        ShowCustomMessageBox("OAuth configuration error: token_uri is not configured.")
+                    If String.IsNullOrWhiteSpace(tokenEndpoint) Then
+                        ReportOAuthFailure("OAuth configuration error: token_uri is not configured.", silent)
                         Return ""
                     End If
 
                     Dim jwt As String
                     Try
-                        jwt = GenerateJWT()
-                    Catch ex As Exception
-                        ShowCustomMessageBox($"Error generating OAuth JWT token:{vbCrLf}{vbCrLf}" &
+                        jwt = GenerateJWT(clientEmail, signingKey, requestedScopes, tokenEndpoint, lifetime)
+                    Catch ex As System.Exception
+                        ReportOAuthFailure($"Error generating OAuth JWT token:{vbCrLf}{vbCrLf}" &
                                            $"This usually indicates a problem with the private key format.{vbCrLf}{vbCrLf}" &
-                                           $"Details: {ex.Message}")
+                                           $"Details: {ex.Message}", silent)
                         Return ""
                     End Try
 
@@ -199,7 +215,7 @@ Namespace SharedLibrary
                         client.Timeout = TimeSpan.FromSeconds(30)
 
                         Dim content As New FormUrlEncodedContent(formData)
-                        Dim response = Await client.PostAsync(token_uri, content)
+                        Dim response = Await client.PostAsync(tokenEndpoint, content, cancellationToken)
 
                         Dim responseBody = Await response.Content.ReadAsStringAsync()
 
@@ -209,37 +225,47 @@ Namespace SharedLibrary
                                 If tokenData IsNot Nothing AndAlso tokenData.ContainsKey("access_token") Then
                                     Return tokenData("access_token")?.ToString()
                                 Else
-                                    ShowCustomMessageBox("OAuth error: The token response did not contain an access_token.")
+                                    ReportOAuthFailure("OAuth error: The token response did not contain an access_token.", silent)
                                     Return ""
                                 End If
-                            Catch ex As Exception
-                                ShowCustomMessageBox($"OAuth error: Failed to parse token response.{vbCrLf}{vbCrLf}Details: {ex.Message}")
+                            Catch ex As System.Exception
+                                ReportOAuthFailure($"OAuth error: Failed to parse token response.{vbCrLf}{vbCrLf}Details: {ex.Message}", silent)
                                 Return ""
                             End Try
                         Else
                             ' Try to extract error details from Google's error response
                             Dim errorMessage = BuildOAuthErrorMessage(response.StatusCode, response.ReasonPhrase, responseBody)
-                            ShowCustomMessageBox(errorMessage)
+                            ReportOAuthFailure(errorMessage, silent)
                             Return ""
                         End If
                     End Using
 
-                Catch ex As HttpRequestException
-                    ShowCustomMessageBox($"Network error while requesting OAuth token:{vbCrLf}{vbCrLf}" &
+                Catch ex As System.OperationCanceledException When cancellationToken.IsCancellationRequested
+                    Throw
+
+                Catch ex As System.Net.Http.HttpRequestException
+                    ReportOAuthFailure($"Network error while requesting OAuth token:{vbCrLf}{vbCrLf}" &
                                        $"Unable to connect to the authentication server. Please check your internet connection.{vbCrLf}{vbCrLf}" &
-                                       $"Details: {ex.Message}")
+                                       $"Details: {ex.Message}", silent)
                     Return ""
 
-                Catch ex As TaskCanceledException
-                    ShowCustomMessageBox("OAuth request timed out." & vbCrLf & vbCrLf &
-                                       "The authentication server did not respond in time. Please try again later.")
+                Catch ex As System.Threading.Tasks.TaskCanceledException
+                    ReportOAuthFailure("OAuth request timed out." & vbCrLf & vbCrLf &
+                                       "The authentication server did not respond in time. Please try again later.", silent)
                     Return ""
 
-                Catch ex As Exception
-                    ShowCustomMessageBox($"Unexpected error during OAuth authentication:{vbCrLf}{vbCrLf}{ex.Message}")
+                Catch ex As System.Exception
+                    ReportOAuthFailure($"Unexpected error during OAuth authentication:{vbCrLf}{vbCrLf}{ex.Message}", silent)
                     Return ""
                 End Try
             End Function
+
+            Private Shared Sub ReportOAuthFailure(message As System.String, silent As System.Boolean)
+                If silent Then
+                    Throw New System.InvalidOperationException("The isolated OAuth token request failed; verify the configured credentials and authentication endpoint.")
+                End If
+                ShowCustomMessageBox(message)
+            End Sub
 
             ''' <summary>
             ''' Builds a user-friendly error message from an OAuth error response.

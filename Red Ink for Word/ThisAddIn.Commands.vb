@@ -1172,6 +1172,12 @@ Partial Public Class ThisAddIn
                 {"ToolingLogWindow", "Agents: Show log window"},
                 {"ToolingDryRun", $"Agents: Show {ToolFriendlyName.ToLower} overview before running"},
                 {"ToolingMaximumIterations", $"Agents: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
+                {"SemanticArchiveCatalogPathLocal", "Semantic Archives: Catalog directory"},
+                {"SemanticArchiveCatalogLibraryPath", "Semantic Archives: Central library directory"},
+                {"SemanticArchiveBackgroundIndexingEnabled", "Semantic Archives: Background indexing"},
+                {"SemanticArchiveBackgroundIndexingWindow", "Semantic Archives: Background processing window"},
+                {"SemanticArchivePermissionMaintenanceEnabled", "Semantic Archives: Automatic permission maintenance"},
+                {"SemanticArchivePermissionMaintenanceWindow", "Semantic Archives: Permission maintenance window"},
                 {"KnowledgeStorePath", "Knowledge store file (central)"},
                 {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
                 {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},
@@ -1223,6 +1229,12 @@ Partial Public Class ThisAddIn
                 {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
                 {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
                 {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."},
+                {"SemanticArchiveCatalogPathLocal", "Directory containing redink-sa-catalog.json and semantic archive indexes; supports environment variables. Empty disables archive search and indexing."},
+                {"SemanticArchiveCatalogLibraryPath", "Optional central directory of per-archive definitions. Requires a local catalog path. Readable entries are automatically subscribed; write access is required to publish, update or withdraw. Supports SharedMethods placeholders."},
+                {"SemanticArchiveBackgroundIndexingEnabled", "Independent per-user switch for automatic archive indexing while Word or Outlook is running. Defaults to off. Manual maintenance and published search remain available."},
+                {"SemanticArchiveBackgroundIndexingWindow", "Independent local-time window, e.g. allow:22:00-06:00;12:00-13:00 or deny:08:00-18:00. Empty allows any time; archive preferences can narrow it."},
+                {"SemanticArchivePermissionMaintenanceEnabled", "Controls independent background reconciliation of generated artifact permissions while Word or Outlook is running. Content indexing may remain off; retrieval still checks current source access."},
+                {"SemanticArchivePermissionMaintenanceWindow", "Independent local-time window for automatic permission maintenance, e.g. allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. Empty permits any time. Separate from the content-indexing window."},
                 {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
                 {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
                 {"KnowledgeStoreUseLLMIndex", "When enabled, the indexer uses the LLM to generate richer summaries and keywords (uses API credits)"},
@@ -1236,6 +1248,7 @@ Partial Public Class ThisAddIn
 
         ApplyEffectiveToolingLogWindowSettingToContext()
         ShowSettingsWindow(Settings, SettingsTips)
+        InitializeKnowledgeStoreService()
 
         If hadToolingLogOverrideBefore OrElse _context.INI_ToolingLogWindow <> toolingLogSettingBefore Then
             SetToolingLogWindowOverride(_context.INI_ToolingLogWindow)

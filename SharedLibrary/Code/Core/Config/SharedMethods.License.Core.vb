@@ -410,6 +410,7 @@ Namespace SharedLibrary
         ''' <returns><see langword="True"/> when a license flow succeeds; otherwise <see langword="False"/>.</returns>
         Private Shared Function ShowLicenseTypeSelectionDialog(context As ISharedContext) As Boolean
 
+            RequireInteractiveExecution("license_selection")
             ' Check if private license is still available for this version
             Dim privateAvailable As Boolean = IsPrivateLicenseAvailable(context)
             Dim DisablePrivateText As String
@@ -1910,6 +1911,8 @@ Namespace SharedLibrary
         ''' <param name="details">Optional event details; line breaks are indented.</param>
         ''' <param name="alwaysLog">Controls whether the event is recorded regardless of other conditions.</param>
         Private Shared Sub LogLicenseEvent(eventType As String, details As String, Optional alwaysLog As Boolean = False)
+            ' Unattended hosts report status codes, never license API payloads or credentials.
+            If IsHeadlessExecution Then Return
             Try
                 Dim message As String = $"[License] [{eventType}]"
                 If Not String.IsNullOrWhiteSpace(details) Then

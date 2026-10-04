@@ -443,7 +443,8 @@ Partial Public Class ThisAddIn
                 cancellationToken.ThrowIfCancellationRequested()
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
-        authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw)).ConfigureAwait(False)
+        authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
+        semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope)).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)

@@ -110,6 +110,7 @@ Partial Class Ribbon1
         Me.RI_FreestyleRepeat = Me.Factory.CreateRibbonButton
         Me.RI_Chat2 = Me.Factory.CreateRibbonButton
         Me.RI_DiscussInky = Me.Factory.CreateRibbonButton
+        Me.RI_SemanticArchives = Me.Factory.CreateRibbonButton
         Me.RI_Search = Me.Factory.CreateRibbonButton
         Me.Menu2 = Me.Factory.CreateRibbonMenu
         Me.RI_Translator = Me.Factory.CreateRibbonButton
@@ -482,6 +483,7 @@ Partial Class Ribbon1
         '
         'Menu3
         '
+        Me.Menu3.Items.Add(Me.RI_SemanticArchives)
         Me.Menu3.Items.Add(Me.RI_Summarize)
         Me.Menu3.Items.Add(Me.RI_Explain)
         Me.Menu3.Items.Add(Me.RI_ArgueAgainst)
@@ -691,6 +693,12 @@ Partial Class Ribbon1
         Me.RI_DiscussInky.ShowImage = True
         '
         'RI_Search
+        '
+        Me.RI_SemanticArchives.Label = "Semantic Archives"
+        Me.RI_SemanticArchives.Name = "RI_SemanticArchives"
+        Me.RI_SemanticArchives.OfficeImageId = "DatabaseCopyDatabaseFile"
+        Me.RI_SemanticArchives.ScreenTip = "Create, manage and index semantic archives"
+        Me.RI_SemanticArchives.ShowImage = True
         '
         Me.RI_Search.Label = "Context Search"
         Me.RI_Search.Name = "RI_Search"
@@ -1300,6 +1308,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Regex As RibbonButton
     Friend WithEvents RI_Import As RibbonButton
     Friend WithEvents RI_Chat2 As RibbonButton
+    Friend WithEvents RI_SemanticArchives As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_Search As RibbonButton
     Friend WithEvents RI_Transcriptor As RibbonButton
     Friend WithEvents RI_TalkToMe As RibbonButton

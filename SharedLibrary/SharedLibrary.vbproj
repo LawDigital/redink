@@ -286,6 +286,7 @@
     </Reference>
     <Reference Include="System.ComponentModel.Composition" />
     <Reference Include="System.ComponentModel.DataAnnotations" />
+    <Reference Include="System.Configuration" />
     <Reference Include="System.Data" />
     <Reference Include="System.Deployment" />
     <Reference Include="System.Design" />
@@ -452,6 +453,56 @@
     <Import Include="System.Threading.Tasks" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.StoragePrivacy.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveBuilder.Scan.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveBuilder.Diagnostics.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.DiagnosticPresentation.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveQueueIndex.vb" />
+    <Compile Include="Code\Agents\SemanticArchiveTools.vb" />
+    <Compile Include="Code\Agents\TextExportService.vb" />
+    <Compile Include="Code\CommonFeatures\Maintenance\BackgroundMaintenanceCoordinator.vb" />
+    <Compile Include="Code\CommonFeatures\Maintenance\OfficeMaintenanceService.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.Access.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveRequesterAuthorization.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.Schema.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.Inventory.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.Storage.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.Validation.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveBuilder.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveHierarchy.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveHostIntegration.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveCatalogDiscovery.vb" />
+    <Compile Include="Code\CommonFeatures\RetrievalSourceDiscovery.vb" />
+    <Compile Include="Code\CommonFeatures\RetrievalPromptEditing.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveLibrary.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveLibrary.Security.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveMaintenanceProvider.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveMetadata.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveIndexPolicy.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveRunScope.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveSearchService.Read.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveSearchService.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveSearchService.Literal.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveTriggerHelper.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveWorkQueue.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SharedMethods.SemanticArchive.Navigation.vb" />
+    <Compile Include="Code\Core\IO\GeneratedOutputRegistry.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.ArtifactPermissions.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.ArtifactPlacement.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.ArtifactSecurity.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.ArtifactSharePolicy.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.ArtifactMaintenanceLocations.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.PathBudget.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveBuilder.Cooperative.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveCooperativeStore.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchivePermissionMaintenance.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveWorkQueue.Discovery.vb" />
+    <Compile Include="Code\Core\Config\SharedMethods.HeadlessExecution.vb" />
+    <Compile Include="Code\Core\IO\GeneratedOutputRegistry.Namespaces.vb" />
+    <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.IsolatedModelCalls.vb" />
     <Compile Include="Code\Agents\ActionPromiseValidator.vb" />
     <Compile Include="Code\Agents\AgentGate.vb" />
     <Compile Include="Code\Agents\AgentResources.vb" />
@@ -619,6 +670,7 @@
     <Compile Include="Code\Core\Config\SharedMethods.UpdateIni.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.LoadConfig.vb" />
+    <Compile Include="Code\Core\Config\SemanticArchiveConfiguration.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.Settings.vb" />
     <Compile Include="Code\Core\Security\LocalHttpBrowserSecurity.vb" />
     <Compile Include="Code\Core\Security\SharedMethods.SafeExternalLinks.vb" />

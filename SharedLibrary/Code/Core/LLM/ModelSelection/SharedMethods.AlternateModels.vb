@@ -58,7 +58,7 @@ Namespace SharedLibrary
         ''' <param name="context">Shared context used for defaults and API key resolution.</param>
         ''' <param name="Description">Model display description (typically taken from the INI section name).</param>
         ''' <returns>A populated <see cref="ModelConfig"/> instance.</returns>
-        Public Shared Function CreateModelConfigFromDict(ByVal configDict As Dictionary(Of String, String), context As ISharedContext, Description As String) As ModelConfig
+        Public Shared Function CreateModelConfigFromDict(ByVal configDict As Dictionary(Of String, String), context As ISharedContext, Description As String, Optional strictErrors As System.Boolean = False) As ModelConfig
             Dim mc As New ModelConfig()
 
             Try
@@ -128,6 +128,9 @@ Namespace SharedLibrary
                 mc.ToolPriority = GetConfigInt(configDict, "ToolPriority", 100)
 
             Catch ex As System.Exception
+                If strictErrors Then
+                    Throw New System.InvalidOperationException("The configured model could not be materialized (" & ex.GetType().Name & ").", ex)
+                End If
                 If TypeOf ex Is InvalidOperationException AndAlso
                    ex.Message.Equals("Missing CodeBasis for encrypted alternate model API key.", StringComparison.Ordinal) Then
 
@@ -270,7 +273,9 @@ Namespace SharedLibrary
                 context.INI_Model_Parameter3 = If(Not String.IsNullOrEmpty(config.Parameter3), config.Parameter3, "")
                 context.INI_Model_Parameter4 = If(Not String.IsNullOrEmpty(config.Parameter4), config.Parameter4, "")
                 context.SP_MergePrompt = If(Not String.IsNullOrEmpty(config.MergePrompt), config.MergePrompt, "")
-                SP_QueryPrompt = If(Not String.IsNullOrEmpty(config.QueryPrompt), config.QueryPrompt, "")
+                If Not TypeOf context Is IsolatedModelCallContext Then
+                    SP_QueryPrompt = If(Not String.IsNullOrEmpty(config.QueryPrompt), config.QueryPrompt, "")
+                End If
 
                 ' === APPLY TOOLING PROPERTIES ===
                 ' These are shared/module-level variables used by LLM() for tool-related behavior.
@@ -285,6 +290,7 @@ Namespace SharedLibrary
                 ErrorFlag = False
 
             Catch ex As System.Exception
+                If TypeOf context Is IsolatedModelCallContext Then Throw
                 If Not ErrorFlag Then
                     Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ApplyModelConfig: " & ex.Message, "Error")
                 End If
@@ -324,6 +330,7 @@ Namespace SharedLibrary
             Public Property FileLength As Long
             Public Property LastWriteUtcTicks As Long
             Public Property Sections As List(Of AlternativeModelIniSection)
+            Public Property StrictValidated As System.Boolean
         End Class
 
         Private Shared ReadOnly _alternativeModelIniCacheSync As New Object()
@@ -343,7 +350,7 @@ Namespace SharedLibrary
             End Try
         End Function
 
-        Private Shared Function ParseAlternativeModelIniSections(ByVal lines As IEnumerable(Of String)) As List(Of AlternativeModelIniSection)
+        Private Shared Function ParseAlternativeModelIniSections(ByVal lines As IEnumerable(Of String), Optional strictParsing As System.Boolean = False) As List(Of AlternativeModelIniSection)
             Dim sections As New List(Of AlternativeModelIniSection)()
             Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
             Dim description As String = ""
@@ -353,6 +360,18 @@ Namespace SharedLibrary
 
                 If String.IsNullOrEmpty(trimmedLine) OrElse trimmedLine.StartsWith(";") Then
                     Continue For
+                End If
+
+                If strictParsing Then
+                    If trimmedLine.StartsWith("#", System.StringComparison.Ordinal) Then Continue For
+                    If trimmedLine.StartsWith("[", System.StringComparison.Ordinal) AndAlso
+                       (Not trimmedLine.EndsWith("]", System.StringComparison.Ordinal) OrElse trimmedLine.Length <= 2) Then
+                        Throw New System.IO.InvalidDataException("The alternate-model configuration contains an invalid section header.")
+                    End If
+                    If Not trimmedLine.StartsWith("[", System.StringComparison.Ordinal) AndAlso
+                       (System.String.IsNullOrWhiteSpace(description) OrElse trimmedLine.IndexOf("="c) <= 0) Then
+                        Throw New System.IO.InvalidDataException("The alternate-model configuration contains a value outside a valid section or an invalid assignment.")
+                    End If
                 End If
 
                 If trimmedLine.StartsWith("[") AndAlso trimmedLine.EndsWith("]") Then
@@ -387,10 +406,12 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function GetAlternativeModelIniSections(ByVal iniFilePath As String,
-                                                               ByRef cacheHit As Boolean) As List(Of AlternativeModelIniSection)
+                                                               ByRef cacheHit As Boolean,
+                                                               Optional requireReadable As System.Boolean = False) As List(Of AlternativeModelIniSection)
             cacheHit = False
             Dim normalizedPath As String = NormalizeAlternativeModelIniPath(iniFilePath)
             If String.IsNullOrWhiteSpace(normalizedPath) Then
+                If requireReadable Then Throw New System.IO.IOException("The configured alternate-model source could not be resolved.")
                 Return New List(Of AlternativeModelIniSection)()
             End If
 
@@ -400,6 +421,7 @@ Namespace SharedLibrary
             ' Network/source resolution happens before this lock and is therefore not serialized here.
             SyncLock _alternativeModelIniCacheSync
                 If Not File.Exists(normalizedPath) Then
+                    If requireReadable Then Throw New System.IO.IOException("The configured alternate-model source is missing or unreadable.")
                     Return New List(Of AlternativeModelIniSection)()
                 End If
 
@@ -412,13 +434,14 @@ Namespace SharedLibrary
                    cached IsNot Nothing AndAlso
                    cached.FileLength = beforeLength AndAlso
                    cached.LastWriteUtcTicks = beforeTicks AndAlso
-                   cached.Sections IsNot Nothing Then
+                   cached.Sections IsNot Nothing AndAlso
+                   (Not requireReadable OrElse cached.StrictValidated) Then
                     cacheHit = True
                     Return cached.Sections
                 End If
 
                 Dim parsed As List(Of AlternativeModelIniSection) =
-                    ParseAlternativeModelIniSections(File.ReadAllLines(normalizedPath))
+                    ParseAlternativeModelIniSections(File.ReadAllLines(normalizedPath), strictParsing:=requireReadable)
 
                 Dim afterInfo As New FileInfo(normalizedPath)
                 Dim afterLength As Long = afterInfo.Length
@@ -428,7 +451,8 @@ Namespace SharedLibrary
                     _alternativeModelIniCache(normalizedPath) = New AlternativeModelIniCacheEntry With {
                         .FileLength = afterLength,
                         .LastWriteUtcTicks = afterTicks,
-                        .Sections = parsed
+                        .Sections = parsed,
+                        .StrictValidated = requireReadable
                     }
                 End If
 
@@ -848,6 +872,28 @@ Namespace SharedLibrary
                                                Optional ByVal UseCase As Integer = 1) As Boolean
             If String.IsNullOrWhiteSpace(Task) Then Return False
 
+            ' Nested OCR/media helpers receive private call contexts too. They must not write
+            ' the module's originalConfig or SP_QueryPrompt used by concurrent chat/UI calls.
+            If TypeOf context Is IsolatedModelCallContext Then
+                Dim pinned As IsolatedSpecialTaskModel = DirectCast(context, IsolatedModelCallContext).PinnedResolution
+                If pinned IsNot Nothing AndAlso System.String.Equals(pinned.TaskName, Task.Trim(), System.StringComparison.OrdinalIgnoreCase) Then
+                    If Not pinned.UsesSecondApi Then Return False
+                    Dim pinnedModel As ModelConfig = GetCurrentConfig(pinned.Context)
+                    pinnedModel.Parameter1 = pinned.Context.INI_Model_Parameter1
+                    pinnedModel.Parameter2 = pinned.Context.INI_Model_Parameter2
+                    pinnedModel.Parameter3 = pinned.Context.INI_Model_Parameter3
+                    pinnedModel.Parameter4 = pinned.Context.INI_Model_Parameter4
+                    ApplyModelConfig(context, pinnedModel)
+                    Return True
+                End If
+                Dim isolatedModel As ModelConfig = Nothing
+                Dim contextTokens As System.Int32
+                If Not TryResolveIsolatedTaskAssignment(context, iniFilePath, Task.Trim(), isolatedModel, contextTokens) Then Return False
+                ApplyModelConfig(context, isolatedModel)
+                ValidateIsolatedModelConfiguration(context, True)
+                Return True
+            End If
+
             Try
                 originalConfigLoaded = False
                 originalConfig = GetCurrentConfig(context)
@@ -905,6 +951,7 @@ Namespace SharedLibrary
             Public ActiveConfig As ModelConfig
             Public OriginalConfigSnapshot As ModelConfig
             Public OriginalConfigLoadedSnapshot As Boolean
+            Public RestoreModuleState As System.Boolean
         End Structure
 
         Public Shared Function CaptureModelConfigScope(ByVal context As ISharedContext) As ModelConfigScopeSnapshot
@@ -914,8 +961,11 @@ Namespace SharedLibrary
                 snapshot.ActiveConfig = GetCurrentConfig(context)
             End If
 
-            snapshot.OriginalConfigSnapshot = originalConfig
-            snapshot.OriginalConfigLoadedSnapshot = originalConfigLoaded
+            snapshot.RestoreModuleState = Not TypeOf context Is IsolatedModelCallContext
+            If snapshot.RestoreModuleState Then
+                snapshot.OriginalConfigSnapshot = originalConfig
+                snapshot.OriginalConfigLoadedSnapshot = originalConfigLoaded
+            End If
 
             Return snapshot
         End Function
@@ -929,8 +979,10 @@ Namespace SharedLibrary
             Catch
             End Try
 
-            originalConfig = snapshot.OriginalConfigSnapshot
-            originalConfigLoaded = snapshot.OriginalConfigLoadedSnapshot
+            If snapshot.RestoreModuleState Then
+                originalConfig = snapshot.OriginalConfigSnapshot
+                originalConfigLoaded = snapshot.OriginalConfigLoadedSnapshot
+            End If
         End Sub
 
     End Class
