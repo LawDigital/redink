@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+
+' =============================================================================
+' File: SemanticArchiveCooperativeStore.vb
+' Purpose:
+'   Shared immutable extraction manifests, identity/signature validation and writer
+'   claims.
+'
+' Architecture / Function:
+'   Allows verified extract reuse across producers while private semantic state and
+'   source permissions remain independent.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

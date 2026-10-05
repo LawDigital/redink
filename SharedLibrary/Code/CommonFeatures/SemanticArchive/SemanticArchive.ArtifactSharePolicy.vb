@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchive.ArtifactSharePolicy.vb
+' Purpose:
+'   SMB share-protection inspection and source/destination protection-domain comparison.
+'
+' Architecture / Function:
+'   Complements filesystem ACL checks with share-level constraints before accepting
+'   shared derivative placement.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

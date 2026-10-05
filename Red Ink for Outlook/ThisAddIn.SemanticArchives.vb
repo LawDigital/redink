@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Local source selection and requester-bound unattended Semantic Archive authorization.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: ThisAddIn.SemanticArchives.vb
+' Purpose:
+'   Outlook archive selection and requester-bound Semantic Archive authorization for
+'   unattended runs.
+'
+' Architecture / Function:
+'   Separates interactive selections from independently verified AutoPilot requester
+'   grants; arguments never grant source rights.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

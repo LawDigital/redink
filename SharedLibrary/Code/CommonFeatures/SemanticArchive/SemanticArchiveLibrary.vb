@@ -1,5 +1,18 @@
 ' Part of "Red Ink" (SharedLibrary)
 ' Central definitions only. Original content, private generations and source ACLs remain separate.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveLibrary.vb
+' Purpose:
+'   Central archive-definition publication, revisions, withdrawals and personal
+'   subscription synchronization.
+'
+' Architecture / Function:
+'   Publishes definitions only, preserves subscriber intent/private data and revalidates
+'   readable library authority.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

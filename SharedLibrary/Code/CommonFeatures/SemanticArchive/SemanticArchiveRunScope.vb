@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Host-owned archive selections and opaque, run-local retrieval references.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveRunScope.vb
+' Purpose:
+'   Selected-archive scopes, authoritative narrowing and retrieval
+'   continuation/checkpoint state.
+'
+' Architecture / Function:
+'   Retains explicit selection/authorization context and records used source references
+'   without broadening scope.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

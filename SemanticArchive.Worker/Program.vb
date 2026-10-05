@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (Red Ink Semantic Archive Worker)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: Program.vb
+' Purpose:
+'   Headless console entry point for bounded/resumable Semantic Archive operations and
+'   JSON lifecycle logging.
+'
+' Architecture / Function:
+'   Loads normal configuration/licensing, invokes the shared builder and reports append-
+'   only stderr progress with cancellation.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

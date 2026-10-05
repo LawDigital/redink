@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Server inventory/export is independent of the Outlook offline cache and never uses search ranking.
+
+' =============================================================================
+' File: M365Service.MailExport.vb
+' Purpose:
+'   Graph folder-mail inventory and message/attachment retrieval for export beyond the
+'   Outlook offline cache.
+'
+' Architecture / Function:
+'   Uses paged server collection retrieval rather than search ranking; callers retain
+'   export scope and cancellation.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

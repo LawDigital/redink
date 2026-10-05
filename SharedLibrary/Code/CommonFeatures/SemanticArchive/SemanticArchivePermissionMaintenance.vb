@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchivePermissionMaintenance.vb
+' Purpose:
+'   Per-user permission-maintenance controls and coordinator-backed reconciliation
+'   provider.
+'
+' Architecture / Function:
+'   Rechecks derivative protection against current source access independently of
+'   ordinary content indexing.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

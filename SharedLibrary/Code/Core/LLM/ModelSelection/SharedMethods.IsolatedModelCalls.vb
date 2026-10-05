@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SharedMethods.IsolatedModelCalls.vb
+' Purpose:
+'   Isolated model-call contexts, special-task selection and serialized semantic-request
+'   budget validation.
+'
+' Architecture / Function:
+'   Pins effective model/prompt configuration without mutating host settings and rejects
+'   oversized request envelopes explicitly.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

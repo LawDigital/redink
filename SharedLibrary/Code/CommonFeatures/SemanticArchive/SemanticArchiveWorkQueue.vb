@@ -1,6 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
 
+
+' =============================================================================
+' File: SemanticArchiveWorkQueue.vb
+' Purpose:
+'   Durable work items, build options/results, scan checkpoints and retry-stage state.
+'
+' Architecture / Function:
+'   Persists resumable work under explicit operation contracts without equating queued
+'   work with a published complete generation.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (Red Ink Semantic Archive Worker)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: WorkerOptions.vb
+' Purpose:
+'   Parses worker archive/document scopes, operations, limits and centrally defined
+'   command defaults.
+'
+' Architecture / Function:
+'   Validates ambiguous or out-of-range arguments before processing; explicit operation
+'   IDs support checkpoint continuation.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+
+' =============================================================================
+' File: SemanticArchive.DiagnosticPresentation.vb
+' Purpose:
+'   Structured source diagnostics and separation of concise user messages from technical
+'   details.
+'
+' Architecture / Function:
+'   Parses bounded diagnostic fields for presentation without treating operational IDs
+'   or raw traces as user-facing prose.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

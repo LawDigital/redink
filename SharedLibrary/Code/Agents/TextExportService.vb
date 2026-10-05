@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: TextExportService.vb
+' Purpose:
+'   Typed shared text/Markdown extraction and publication service with
+'   coverage/provenance metadata.
+'
+' Architecture / Function:
+'   Routes callers through the same source-snapshot/export pipeline and explicit
+'   extraction status; supplies bounded STA reader dispatch.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

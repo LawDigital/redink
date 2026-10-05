@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Optional explicit literal inspection, independent of metadata/semantic eligibility.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveSearchService.Literal.vb
+' Purpose:
+'   Bounded literal-original-text channel over validated UTF-8 streams.
+'
+' Architecture / Function:
+'   Verifies source/representation association and coverage while keeping exact literal
+'   matching separate from semantic ranking.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

@@ -657,7 +657,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Core\Config\IniImportManager.vb" />
-    <Compile Include="Code\CommonFeatures\MarkdownEditorForm.vb" />
+    <Compile Include="Code\CommonFeatures\MarkdownEditorForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Code\CommonFeatures\QuickTranslateWidget.vb">
       <SubType>Form</SubType>
     </Compile>

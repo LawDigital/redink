@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Shared SA tools. Model arguments never create scope, identities, or path authority.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveTools.vb
+' Purpose:
+'   Shared Semantic Archive tool schemas and execution against authorized run scopes and
+'   opaque evidence references.
+'
+' Architecture / Function:
+'   Model arguments select within existing authority; they cannot create requester
+'   identities, grants or filesystem access.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

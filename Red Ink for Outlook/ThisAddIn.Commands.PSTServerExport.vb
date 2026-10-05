@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.Commands.PSTServerExport.vb
+' Purpose:
+'   Complements Outlook/PST text export with server mail inventory, cache
+'   synchronization and missing-message retrieval.
+'
+' Architecture / Function:
+'   Combines local and Graph-backed export paths with cancellation, deduplication and
+'   explicit coverage/failure accounting.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

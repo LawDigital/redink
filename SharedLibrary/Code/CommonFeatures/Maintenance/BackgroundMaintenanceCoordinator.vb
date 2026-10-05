@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: BackgroundMaintenanceCoordinator.vb
+' Purpose:
+'   Generic background-provider scheduling, idle gating, interactive-work cancellation
+'   and processing windows.
+'
+' Architecture / Function:
+'   Coordinates registered providers independently of host/business tools and yields
+'   when interactive work takes priority.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

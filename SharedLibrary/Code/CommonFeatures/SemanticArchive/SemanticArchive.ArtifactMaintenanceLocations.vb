@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchive.ArtifactMaintenanceLocations.vb
+' Purpose:
+'   Bounded artifact-location permission reconciliation with resumable maintenance
+'   routes.
+'
+' Architecture / Function:
+'   Reconciles current source protection across recognized derivative locations without
+'   granting broader source access.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

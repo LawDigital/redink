@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchive.ArtifactPlacement.vb
+' Purpose:
+'   Plans private/shared derivative locations and validates recognized artifact
+'   namespaces.
+'
+' Architecture / Function:
+'   Creates/open claims within approved locations while source identity remains
+'   independent of storage policy.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

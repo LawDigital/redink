@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
 
+
+' =============================================================================
+' File: SemanticArchiveMetadata.vb
+' Purpose:
+'   Isolated semantic document/container descriptions, bounded cards and routing-card
+'   composition.
+'
+' Architecture / Function:
+'   Builds metadata from authorized extraction evidence using effective generator
+'   options; formatting does not prove full source coverage.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

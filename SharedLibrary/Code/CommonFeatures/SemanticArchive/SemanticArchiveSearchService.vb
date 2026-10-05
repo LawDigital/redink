@@ -1,5 +1,18 @@
 ' Part of "Red Ink" (SharedLibrary)
 ' Bounded, generation-pinned archive search. Models select metadata; the host resolves IDs.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveSearchService.vb
+' Purpose:
+'   Authorized semantic DAG retrieval, small-catalog document-card selection and bounded
+'   continuation.
+'
+' Architecture / Function:
+'   Separates metadata candidate ranking from exact evidence reads and exposes
+'   inspected/remaining coverage explicitly.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

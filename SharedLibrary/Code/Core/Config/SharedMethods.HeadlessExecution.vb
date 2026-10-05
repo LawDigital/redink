@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Explicit async-flow boundary for unattended hosts; interactive Office calls are unchanged.
+
+' =============================================================================
+' File: SharedMethods.HeadlessExecution.vb
+' Purpose:
+'   Async-flow headless execution scope that rejects interaction required by unattended
+'   operations.
+'
+' Architecture / Function:
+'   Leaves interactive Office behavior unchanged and reports attempted
+'   dialogs/authentication interactions as explicit failures.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

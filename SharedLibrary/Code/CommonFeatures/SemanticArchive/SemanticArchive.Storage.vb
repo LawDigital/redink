@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Exact named catalog, immutable generations, durable atomic publication and fencing.
+
+' =============================================================================
+' File: SemanticArchive.Storage.vb
+' Purpose:
+'   Named-catalog persistence, immutable generations, writer fencing and atomic
+'   publication.
+'
+' Architecture / Function:
+'   Validates the configured catalog and committed generations; descriptor-only reads do
+'   not initialize or traverse archive storage.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

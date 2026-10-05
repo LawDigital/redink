@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Trusted host extension for independently verified, request-bound remote authority.
+
+' =============================================================================
+' File: SemanticArchiveRequesterAuthorization.vb
+' Purpose:
+'   Request-bound unattended principal claims, verified grants and pluggable authorizer
+'   contracts.
+'
+' Architecture / Function:
+'   Unverified requests cannot acquire source-read authority merely from sender text,
+'   tool arguments or worker execution.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

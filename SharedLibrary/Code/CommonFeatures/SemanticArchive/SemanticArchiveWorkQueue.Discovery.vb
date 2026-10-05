@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Durable bounded discovery state; no source contents or model summaries are retained here.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveWorkQueue.Discovery.vb
+' Purpose:
+'   Resumable directory-discovery cursors and separately scheduled permission retry
+'   work.
+'
+' Architecture / Function:
+'   Keeps deferred permission checks from blocking independent discovery/content jobs.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

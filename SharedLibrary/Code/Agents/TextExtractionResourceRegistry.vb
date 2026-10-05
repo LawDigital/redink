@@ -4,6 +4,18 @@
 ' Session-scoped immutable extraction-resource registry. The registry is transport-,
 ' model-, provider-, organization- and document-type agnostic. Adapter-specific code
 ' supplies a configuration fingerprint and performs the actual extraction.
+
+' =============================================================================
+' File: TextExtractionResourceRegistry.vb
+' Purpose:
+'   Session-scoped immutable source/extraction resources, single-flight reuse and
+'   published-output associations.
+'
+' Architecture / Function:
+'   Keys reuse by source bytes and effective adapter/configuration/options; failed or
+'   cancelled extraction is not successful cached content.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

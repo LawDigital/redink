@@ -1,5 +1,18 @@
 ' Part of "Red Ink" (SharedLibrary)
 ' Deterministic edits of user-authored source controls; never parses retrieved content.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: RetrievalPromptEditing.vb
+' Purpose:
+'   Deterministic selection, history restoration and deduplication of user-authored
+'   retrieval-source controls.
+'
+' Architecture / Function:
+'   Edits prompt control syntax only; retrieved document content is never interpreted as
+'   a user scope instruction.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

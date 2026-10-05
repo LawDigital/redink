@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchive.ArtifactSecurity.vb
+' Purpose:
+'   Source-permission snapshots, protection-domain validation and stable ancestor
+'   security checks.
+'
+' Architecture / Function:
+'   Artifact authorization depends on current verified source/ancestor protection rather
+'   than cached visibility alone.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

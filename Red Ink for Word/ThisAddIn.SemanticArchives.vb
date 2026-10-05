@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink for Word"
 ' Explicit local archive source selection; archive tools never derive grants from arguments.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: ThisAddIn.SemanticArchives.vb
+' Purpose:
+'   Word session-level Semantic Archive source selection and explicit retrieval scope.
+'
+' Architecture / Function:
+'   Uses the shared archive selector and run-scope contract; does not register automatic
+'   archive maintenance.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

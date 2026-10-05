@@ -1,5 +1,18 @@
 ' Part of "Red Ink" (SharedLibrary)
 ' ACL-protected descriptor publication. No source ACL is altered and no indexed text is published here.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveLibrary.Security.vb
+' Purpose:
+'   Publisher ownership, descriptor ACLs, stable ancestors and library mutation
+'   protection.
+'
+' Architecture / Function:
+'   Uses the administrator-provisioned library as a trust anchor and rejects
+'   unverifiable/writable publication descriptors.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

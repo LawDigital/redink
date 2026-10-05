@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' First-deployment access domain: private generated plaintext for one Windows user.
+
+' =============================================================================
+' File: SemanticArchive.StoragePrivacy.vb
+' Purpose:
+'   Private catalog/artifact location validation, creation and Windows access
+'   protection.
+'
+' Architecture / Function:
+'   Requires verified private storage rather than assuming a directory name or user-
+'   local path implies safe permissions.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Bounded resumable source discovery and independent permission reconciliation.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveBuilder.Scan.vb
+' Purpose:
+'   Bounded source discovery, scan checkpoints and eligibility/coverage reconciliation.
+'
+' Architecture / Function:
+'   Advances resumable directory work and excludes generated outputs while retaining
+'   explicit source-access failures.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

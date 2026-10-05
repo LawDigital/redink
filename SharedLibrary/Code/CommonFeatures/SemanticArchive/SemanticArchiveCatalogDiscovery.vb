@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Catalog-only discovery: no document traversal, model calls, or new authority.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveCatalogDiscovery.vb
+' Purpose:
+'   Authorized catalog descriptors, bounded overview pages and source-selection
+'   metadata.
+'
+' Architecture / Function:
+'   Uses read-only discovery for configured catalogs; metadata visibility is not
+'   document-read authority.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

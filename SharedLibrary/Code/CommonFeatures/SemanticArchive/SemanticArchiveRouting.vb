@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Semantic routing DAG built from document-card semantics. The storage range tree remains authoritative for persistence.
+
+' =============================================================================
+' File: SemanticArchiveRouting.vb
+' Purpose:
+'   Current semantic DAG construction, bounded grouping and validated routing
+'   persistence.
+'
+' Architecture / Function:
+'   Prunes empty groups and maintains graph relationships; search does not fall back to
+'   obsolete routing formats.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

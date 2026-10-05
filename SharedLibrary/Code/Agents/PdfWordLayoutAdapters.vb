@@ -2,6 +2,18 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' Optional provider-agnostic PDF-to-Word layout-conversion adapter contract.
+
+' =============================================================================
+' File: PdfWordLayoutAdapters.vb
+' Purpose:
+'   Provider-neutral PDF-to-Word layout conversion request/result contracts and optional
+'   adapter registry.
+'
+' Architecture / Function:
+'   Adapters register and resolve through one shared boundary; the contract does not
+'   select a provider-specific implementation.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

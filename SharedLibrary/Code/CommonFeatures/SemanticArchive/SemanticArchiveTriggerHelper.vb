@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' SA syntax is parsed only from authoritative user input; KB grammar remains separate.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveTriggerHelper.vb
+' Purpose:
+'   User-authored archive trigger parsing, source selection and inline retrieval result
+'   assembly.
+'
+' Architecture / Function:
+'   Normalizes equivalent scoped requests and never parses retrieved content as user
+'   control syntax.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

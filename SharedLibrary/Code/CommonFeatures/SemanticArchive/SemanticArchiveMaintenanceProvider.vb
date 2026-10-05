@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchiveMaintenanceProvider.vb
+' Purpose:
+'   Configured archive-content maintenance provider and per-user background processing
+'   controls.
+'
+' Architecture / Function:
+'   Registers cancellable bounded work with the generic coordinator; host wiring
+'   determines automatic versus explicit use.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

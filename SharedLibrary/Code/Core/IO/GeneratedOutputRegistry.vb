@@ -3,6 +3,17 @@
 '
 ' Exact, durable output exclusions shared by scanners and publishers. Register before
 ' publishing; a directory basename is never a reason to exclude unrelated input.
+
+' =============================================================================
+' File: GeneratedOutputRegistry.vb
+' Purpose:
+'   Durable owner-scoped generated-output exclusions with physical path validation.
+'
+' Architecture / Function:
+'   Publishers/scanners share exact registered roots; unrelated sources are never
+'   excluded solely by a familiar directory basename.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

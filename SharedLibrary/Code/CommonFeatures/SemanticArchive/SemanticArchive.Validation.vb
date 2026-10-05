@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Strict immutable/reference validation and generation-independent live validity.
+
+' =============================================================================
+' File: SemanticArchive.Validation.vb
+' Purpose:
+'   Validation of catalog definitions, manifests, cards, representations and current
+'   routing artifacts.
+'
+' Architecture / Function:
+'   Rejects invalid or unsupported persisted state instead of letting readers silently
+'   consume an unverified graph.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

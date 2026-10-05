@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Exact original extracted evidence, with independent current-source authorization.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveSearchService.Read.vb
+' Purpose:
+'   Exact evidence excerpts, resumable document reads and disclosure-time authorization
+'   revalidation.
+'
+' Architecture / Function:
+'   Consumes opaque hit references from the scoped search and does not treat derived
+'   visibility as a fresh source grant.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Host-owned authorization and physical source/artifact containment. Unknown denies.
+
+' =============================================================================
+' File: SemanticArchive.Access.vb
+' Purpose:
+'   Access contexts, source authorization decisions and canonical/contained Windows path
+'   guards.
+'
+' Architecture / Function:
+'   Source authority remains tied to a verified principal and current access checks;
+'   path normalization does not create grants.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

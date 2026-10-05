@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: OfficeMaintenanceService.vb
+' Purpose:
+'   Office composition root for configured background-maintenance providers.
+'
+' Architecture / Function:
+'   Wires providers to the generic coordinator; scheduling, cancellation and retry rules
+'   remain outside this composition root.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

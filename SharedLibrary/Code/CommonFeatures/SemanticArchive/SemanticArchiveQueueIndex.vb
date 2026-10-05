@@ -1,6 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
 
+
+' =============================================================================
+' File: SemanticArchiveQueueIndex.vb
+' Purpose:
+'   Persisted work-queue headers, due ordering and discovery/permission state indexes.
+'
+' Architecture / Function:
+'   Caches bounded queue metadata and invalidates/reconciles it when persisted work
+'   changes.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

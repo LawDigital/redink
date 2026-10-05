@@ -1,6 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Semantic Archive control-plane, immutable generation and provenance contracts.
+
+' =============================================================================
+' File: SemanticArchive.Schema.vb
+' Purpose:
+'   Catalog, archive, binding, generation, card and semantic-routing data contracts.
+'
+' Architecture / Function:
+'   Provides shared serialization models and configuration conversion; source identity
+'   and processing/storage policy remain separate.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

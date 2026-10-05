@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Passive mail assessment: no browser, tooling loop, attachment saving or document opening.
+
+' =============================================================================
+' File: ThisAddIn.Commands.CheckPhishing.vb
+' Purpose:
+'   Passive single-mail phishing assessment with localized, validated and HTML-encoded
+'   risk/confidence reports.
+'
+' Architecture / Function:
+'   Collects mail text, literal link targets and attachment metadata without fetching
+'   links or opening/executing attachments.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

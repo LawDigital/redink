@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Host boundary for explicit archive requests, source selection and mixed retrieval.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchiveHostIntegration.vb
+' Purpose:
+'   Host-neutral archive enable gates, scoped tool exposure and authorized request
+'   preparation.
+'
+' Architecture / Function:
+'   Checks configured availability and run authority before exposing tools or resolving
+'   archive operations.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

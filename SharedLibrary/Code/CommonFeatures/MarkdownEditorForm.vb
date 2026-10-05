@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Shared modeless offline editor; native file privileges are limited to user-selected paths.
+
+' =============================================================================
+' File: MarkdownEditorForm.vb
+' Purpose:
+'   Shared modeless WebView2 Markdown editor with native files, persistent profiles,
+'   floating mode and recovery.
+'
+' Architecture / Function:
+'   Mediates selected file/folder access, conflict-checked atomic saves and acknowledged
+'   recovery; supports saved Outlook startup placement and repeat-click rescue.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

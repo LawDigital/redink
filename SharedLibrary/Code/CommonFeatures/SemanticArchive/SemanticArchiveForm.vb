@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchiveForm.vb
+' Purpose:
+'   Shared archive administration/source-selection UI, build progress and diagnostic
+'   detail views.
+'
+' Architecture / Function:
+'   Coordinates explicit archive operations, maintenance settings and library
+'   publication/subscription through existing shared services.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

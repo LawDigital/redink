@@ -1,4 +1,18 @@
 ﻿' Preflight private control paths before extraction or model work begins.
+
+' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SemanticArchive.PathBudget.vb
+' Purpose:
+'   Windows path-length budgets for archive trees and same-directory atomic write
+'   temporaries.
+'
+' Architecture / Function:
+'   Checks required suffix/temporary space before writes rather than discovering length
+'   failures after publication starts.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

@@ -1,6 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
 
+
+' =============================================================================
+' File: SemanticArchiveHierarchy.vb
+' Purpose:
+'   Active document/container hierarchy maintenance and ancestor-card updates.
+'
+' Architecture / Function:
+'   Prunes removed records and rebuilds affected aggregate/container state without
+'   changing stable source identities.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

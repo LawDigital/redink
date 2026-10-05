@@ -1,6 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' A bounded, private last-batch record. Source-specific details are authorized again before display.
+
+' =============================================================================
+' File: SemanticArchiveBuilder.Diagnostics.vb
+' Purpose:
+'   Bounded operation diagnostics, stage/progress records and protected persistence.
+'
+' Architecture / Function:
+'   Records structured engineering evidence alongside build outcomes without making
+'   diagnostics authoritative retrieval content.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

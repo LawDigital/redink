@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+
+' =============================================================================
+' File: SemanticArchiveIndexPolicy.vb
+' Purpose:
+'   Document-section indexing thresholds and effective semantic representation
+'   signatures.
+'
+' Architecture / Function:
+'   Separates policy-derived index signatures from stable document identity.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' Canonical SemanticArchive configuration names and personal processing controls.
+
+' =============================================================================
+' File: SemanticArchiveConfiguration.vb
+' Purpose:
+'   Canonical Semantic Archive INI names, shared configuration lifecycle and personal
+'   maintenance controls.
+'
+' Architecture / Function:
+'   Keeps global archive configuration distinct from per-user controls and validates
+'   catalog activation before publishing configuration changes.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

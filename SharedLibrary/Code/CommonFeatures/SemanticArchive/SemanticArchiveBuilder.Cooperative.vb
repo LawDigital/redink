@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+
+' =============================================================================
+' File: SemanticArchiveBuilder.Cooperative.vb
+' Purpose:
+'   Builder integration with cooperative shared extracts and validated local
+'   representation reuse.
+'
+' Architecture / Function:
+'   Preserves valid local text during index-only work and validates shared
+'   identity/signatures before adopting an extract.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

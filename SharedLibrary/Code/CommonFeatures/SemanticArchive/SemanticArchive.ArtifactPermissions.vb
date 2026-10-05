@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchive.ArtifactPermissions.vb
+' Purpose:
+'   Artifact creation protection and bounded permission-repair sessions for derived
+'   files/directories.
+'
+' Architecture / Function:
+'   Uses captured protection context and resumable repair state; does not rewrite
+'   unrelated source or ancestor permissions.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

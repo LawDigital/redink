@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
 
+
+' =============================================================================
+' File: SharedMethods.SemanticArchive.Navigation.vb
+' Purpose:
+'   Writes validated archive navigation indexes and references to generated/source
+'   artifacts.
+'
+' Architecture / Function:
+'   Uses the existing archive/path/permission contracts rather than creating a separate
+'   search or extraction format.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

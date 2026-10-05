@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SemanticArchive.Inventory.vb
+' Purpose:
+'   Searchable-document inventory aggregation and count/eligibility validation.
+'
+' Architecture / Function:
+'   Builds inventories from active document records, excluding unusable or retired
+'   representations.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

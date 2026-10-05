@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
 
+
+' =============================================================================
+' File: SemanticArchiveBuilder.vb
+' Purpose:
+'   Incremental archive build/extract/index/repair orchestration and generation
+'   publication.
+'
+' Architecture / Function:
+'   Reuses the shared text-export pipeline, retries by failed stage and activates only
+'   validated generation state.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

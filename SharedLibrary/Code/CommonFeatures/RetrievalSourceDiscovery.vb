@@ -1,6 +1,19 @@
 ' Part of "Red Ink" (SharedLibrary)
 ' Cached source-menu snapshots. Library provisioning is a separate background service.
 ' No model calls, document traversal or UI-thread I/O during menu enumeration.
+
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: RetrievalSourceDiscovery.vb
+' Purpose:
+'   Independent cached Knowledge Store/Semantic Archive snapshots for responsive source
+'   menus.
+'
+' Architecture / Function:
+'   Loads descriptors in background without menu-time model calls, document traversal or
+'   UI-thread source I/O; library provisioning is separate.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

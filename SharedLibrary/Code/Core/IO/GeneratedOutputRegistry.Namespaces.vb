@@ -1,5 +1,18 @@
 ﻿' Shared artifact namespaces are recognized by an immutable protocol marker.
 ' No per-document registry entries are needed, including for another producer's output.
+
+' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: GeneratedOutputRegistry.Namespaces.vb
+' Purpose:
+'   Immutable protocol markers for recognizing shared generated-artifact namespaces.
+'
+' Architecture / Function:
+'   Identifies marked output namespaces without per-document registrations or directory-
+'   name guessing.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

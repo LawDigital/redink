@@ -1,5 +1,17 @@
 ﻿' Part of "Red Ink" (Red Ink Semantic Archive Worker)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: WorkerDrainPolicy.vb
+' Purpose:
+'   Determines whether another worker batch can make progress without looping
+'   indefinitely on deferred work.
+'
+' Architecture / Function:
+'   Continues only while runnable work and observed progress remain; cancellation,
+'   writer contention and required selection stop draining.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 
