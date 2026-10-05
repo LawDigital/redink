@@ -118,6 +118,8 @@ Namespace SharedLibrary
                 Optional existingClientSecret As String = "",
                 Optional silent As Boolean = False) As Task(Of MCPProtectedResourceOAuthResult)
 
+            RequireInteractiveExecution("MCP protected-resource authorization", "noninteractive_auth_required")
+
             LogMCPOAuth("AcquireMCPProtectedResourceOAuthAsync: starting", "protectedResourceUrl=" & protectedResourceUrl)
 
             Dim challenge = Await GetBearerChallengeAsync(protectedResourceUrl).ConfigureAwait(False)
@@ -282,6 +284,7 @@ Namespace SharedLibrary
                 oauthEndpointConfig As String,
                 silent As Boolean) As Task(Of MCPProtectedResourceOAuthResult)
 
+            RequireInteractiveExecution("OAuth authorization", "noninteractive_auth_required")
             Dim parts = oauthEndpointConfig.Split(New String() {"¦"}, StringSplitOptions.None)
             If parts.Length < 2 Then
                 Throw New Exception("OAuth2Endpoint must be '<authorization endpoint>¦<token endpoint>[¦resource]' or 'device:<device endpoint>¦<token endpoint>[¦resource]'.")

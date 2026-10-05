@@ -186,6 +186,7 @@ Namespace SharedLibrary
         ''' Returns True if the path is inside a .redink/ metadata folder.
         ''' </summary>
         Private Shared Function IsMetadataPath(filePath As String) As Boolean
+            If GeneratedOutputRegistry.IsGeneratedPath(filePath) Then Return True
             Dim sep1 = $"{Path.DirectorySeparatorChar}.redink{Path.DirectorySeparatorChar}"
             Dim sep2 = $"{Path.AltDirectorySeparatorChar}.redink{Path.AltDirectorySeparatorChar}"
             Return filePath.IndexOf(sep1, StringComparison.OrdinalIgnoreCase) >= 0 OrElse
@@ -200,10 +201,11 @@ Namespace SharedLibrary
         ''' Performs a full directory scan of all active stores and enqueues files
         ''' that are not yet in the manifest (or have been modified since last index).
         ''' </summary>
-        Public Sub RunPeriodicScan()
+        Public Sub RunPeriodicScan(Optional cancellationToken As System.Threading.CancellationToken = Nothing)
             Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
 
             For Each store In stores
+                cancellationToken.ThrowIfCancellationRequested()
                 If Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then Continue For
                 If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then Continue For
                 If Not Directory.Exists(store.ResolvedSourcePath) Then Continue For
@@ -223,6 +225,7 @@ Namespace SharedLibrary
                         End Try
 
                         For Each filePath In files
+                            cancellationToken.ThrowIfCancellationRequested()
                             If IsMetadataPath(filePath) Then Continue For
 
                             Dim entry = manifest.FindByPath(filePath)
@@ -244,7 +247,9 @@ Namespace SharedLibrary
                             End If
                         Next
                     Next
-                Catch ex As Exception
+                Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As System.Exception
                     Debug.WriteLine($"KSWatcher: Scan error for '{store.Name}': {ex.Message}")
                 End Try
             Next
@@ -258,7 +263,11 @@ Namespace SharedLibrary
         ''' Dequeues up to maxFiles pending files and indexes them.
         ''' Thread-safe via SemaphoreSlim.
         ''' </summary>
-        Public Async Function ProcessPendingAsync(Optional maxFiles As Integer = MaxFilesPerTick) As Task(Of List(Of IndexResult))
+        Public Async Function ProcessPendingAsync(Optional maxFiles As Integer = MaxFilesPerTick,
+                                                  Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+                                                  Optional executionContext As ISharedContext = Nothing) As System.Threading.Tasks.Task(Of List(Of IndexResult))
+            ' Automatic callers supply a private model context; watcher configuration remains live.
+            Dim callContext As ISharedContext = If(executionContext, _context)
             Dim results As New List(Of IndexResult)()
             If Not Await _processLock.WaitAsync(0).ConfigureAwait(False) Then
                 Return results
@@ -270,7 +279,7 @@ Namespace SharedLibrary
                 Dim processed As Integer = 0
                 Dim startCount As Integer = _pendingFiles.Count
 
-                If startCount > 0 AndAlso _context.INI_KnowledgeStoreUseLLMIndex Then
+                If startCount > 0 AndAlso callContext.INI_KnowledgeStoreUseLLMIndex Then
                     Try
                         trayIcon = New System.Windows.Forms.NotifyIcon()
                         trayIcon.Icon = System.Drawing.SystemIcons.Information
@@ -295,9 +304,9 @@ Namespace SharedLibrary
                     Dim resolvedStore As KnowledgeStoreCatalog.KnowledgeStoreDefinition = Nothing
                     Dim sample = storeGroup.First()
 
-                    resolvedStore = KnowledgeStoreCatalog.GetStoreById(sample.StoreId, _context)
+                    resolvedStore = KnowledgeStoreCatalog.GetStoreById(sample.StoreId, callContext)
                     If resolvedStore Is Nothing AndAlso Not String.IsNullOrWhiteSpace(sample.StoreName) Then
-                        Dim matches = KnowledgeStoreCatalog.GetStoresByName(sample.StoreName, _context)
+                        Dim matches = KnowledgeStoreCatalog.GetStoresByName(sample.StoreName, callContext)
                         If matches.Count = 1 Then resolvedStore = matches(0)
                     End If
 
@@ -313,6 +322,10 @@ Namespace SharedLibrary
 
                     Try
                         For Each pending In storeGroup
+                            If cancellationToken.IsCancellationRequested Then
+                                _pendingFiles.Enqueue(pending)
+                                Continue For
+                            End If
                             Dim safeFileName = Path.GetFileName(pending.FilePath)
 
                             If trayIcon IsNot Nothing Then
@@ -323,6 +336,14 @@ Namespace SharedLibrary
                             Dim result As New IndexResult() With {.FilePath = pending.FilePath}
 
                             Try
+                                ' Output registration may have changed after this event was queued.
+                                If IsMetadataPath(pending.FilePath) Then
+                                    result.ErrorMessage = "Generated or metadata output excluded from ingestion."
+                                    results.Add(result)
+                                    processed += 1
+                                    Continue For
+                                End If
+
                                 If Not File.Exists(pending.FilePath) Then
                                     result.ErrorMessage = "File no longer exists."
                                     results.Add(result)
@@ -330,7 +351,7 @@ Namespace SharedLibrary
                                     Continue For
                                 End If
 
-                                If resolvedStore Is Nothing OrElse Not KnowledgeStoreCatalog.CanCurrentUserWrite(resolvedStore, _context) Then
+                                If resolvedStore Is Nothing OrElse Not KnowledgeStoreCatalog.CanCurrentUserWrite(resolvedStore, callContext) Then
                                     result.ErrorMessage = "Store not found or not writable."
                                     results.Add(result)
                                     processed += 1
@@ -340,8 +361,8 @@ Namespace SharedLibrary
                                 Dim processResult = Await KnowledgeStoreProcessingService.ProcessDocumentAsync(
                                     store:=resolvedStore,
                                     filePath:=pending.FilePath,
-                                    context:=_context,
-                                    useLlmIndex:=_context.INI_KnowledgeStoreUseLLMIndex,
+                                    context:=callContext,
+                                    useLlmIndex:=callContext.INI_KnowledgeStoreUseLLMIndex,
                                     isBackground:=True).ConfigureAwait(False)
 
                                 If Not processResult.Success OrElse processResult.Entry Is Nothing Then
@@ -371,7 +392,7 @@ Namespace SharedLibrary
                     End Try
 
                     If batchOpened Then
-                        Await KnowledgeWikiService.EndEmbeddingBatchAsync(_context).ConfigureAwait(False)
+                        Await KnowledgeWikiService.EndEmbeddingBatchAsync(callContext).ConfigureAwait(False)
                     End If
 
                     If captured IsNot Nothing Then captured.Throw()

@@ -611,6 +611,8 @@ Namespace SharedLibrary
 
                                                    ' Immediately apply the running background state without a restart
                                                    KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
+                                                   SemanticArchiveMaintenanceProvider.ApplyCurrentSettings(CapturedContext)
+                                                   SemanticArchivePermissionMaintenanceProvider.ApplyCurrentSettings()
 
                                                    CapturedContext.MenusAdded = False
                                                End Sub
@@ -773,8 +775,19 @@ Namespace SharedLibrary
                                                CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
                                            End If
 
+                                           Try
+                                               SemanticArchiveConfiguration.SavePendingUserSettings(CapturedContext)
+                                           Catch ex As System.Exception
+                                               Using SharedMethods.PushDialogOwner(settingsForm)
+                                                   ShowCustomMessageBox("The Semantic Archive preferences could not be saved: " & ex.Message)
+                                               End Using
+                                               Return
+                                           End Try
+
                                            ' Immediately apply the running background state without a restart
                                            KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
+                                           SemanticArchiveMaintenanceProvider.ApplyCurrentSettings(CapturedContext)
+                                           SemanticArchivePermissionMaintenanceProvider.ApplyCurrentSettings()
 
                                            CapturedContext.MenusAdded = False
                                            settingsForm.Close()
@@ -787,6 +800,17 @@ Namespace SharedLibrary
                                                settingsForm.Close()
                                            End Sub
 
+
+            AddHandler settingsForm.FormClosed,
+                Sub(sender As System.Object, e As System.Windows.Forms.FormClosedEventArgs)
+                    Try
+                        ' Switch/expert actions may have staged SA edits before the user cancels or closes this dialog.
+                        SemanticArchiveConfiguration.DiscardPendingUserSettings(CapturedContext)
+                    Catch ex As System.Exception
+                        ' Pending writes have already been removed even when reloading user preferences fails.
+                        System.Diagnostics.Trace.TraceError("Semantic Archive settings draft discarded; effective preferences could not be reloaded: " & ex.Message)
+                    End Try
+                End Sub
 
             ' (5) Recalculate final form size AFTER buttons are placed
             settingsForm.ClientSize = New System.Drawing.Size(
@@ -1701,13 +1725,14 @@ Namespace SharedLibrary
         ''' <param name="settingKey">Setting key to check.</param>
         ''' <returns><c>True</c> if the key is listed as Boolean; otherwise, <c>False</c>.</returns>
         Public Shared Function IsBooleanSetting(settingKey As String) As Boolean
+            settingKey = SemanticArchiveConfiguration.CanonicalizeIniKey(settingKey)
             ' Determine if a setting is a Boolean based on its key
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "PlayWrightUseLocalCache", "EnablePrivacyForSearch",
-        "DictionarySegmentPrompt", "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
+        "DictionarySegmentPrompt", "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing", "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing", "SemanticArchivePermissionMaintenanceEnabled"
             }
             Return booleanSettings.Contains(settingKey)
         End Function
@@ -1720,6 +1745,7 @@ Namespace SharedLibrary
         ''' <param name="context">Shared context containing the in-memory configuration values.</param>
         ''' <returns>The setting value as a string, or an empty string if the key is not handled.</returns>
         Public Shared Function GetSettingValue(settingName As String, ByRef context As ISharedContext) As String
+            settingName = SemanticArchiveConfiguration.CanonicalizeIniKey(settingName)
             ' Return the value of the setting based on its name
             Select Case settingName
                 Case "APIKey"
@@ -2113,6 +2139,18 @@ Namespace SharedLibrary
                     Return context.INI_AssemblePath
                 Case "AssemblePathLocal"
                     Return context.INI_AssemblePathLocal
+                Case "SemanticArchiveCatalogPathLocal"
+                    Return context.INI_SemanticArchiveCatalogPathLocal
+                Case "SemanticArchiveCatalogLibraryPath"
+                    Return context.INI_SemanticArchiveCatalogLibraryPath
+                Case "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing"
+                    Return context.INI_SemanticArchiveBackgroundIndexing.ToString()
+                Case "SemanticArchiveBackgroundIndexingWindow"
+                    Return context.INI_SemanticArchiveBackgroundIndexingWindow
+                Case "SemanticArchivePermissionMaintenanceEnabled"
+                    Return context.INI_SemanticArchivePermissionMaintenanceEnabled.ToString()
+                Case "SemanticArchivePermissionMaintenanceWindow"
+                    Return context.INI_SemanticArchivePermissionMaintenanceWindow
                 Case "KnowledgeStorePath"
                     Return context.INI_KnowledgeStorePath
                 Case "KnowledgeStorePathLocal"
@@ -2152,6 +2190,7 @@ Namespace SharedLibrary
         ''' <param name="value">String representation of the value to assign (parsed for numeric/Boolean keys).</param>
         ''' <param name="context">Shared context that receives the updated in-memory configuration values.</param>
         Public Shared Sub SetSettingValue(settingName As String, value As String, ByRef context As ISharedContext)
+            settingName = SemanticArchiveConfiguration.CanonicalizeIniKey(settingName)
             ' Set the value of the setting based on its name
 
             Select Case Trim(settingName)
@@ -2525,6 +2564,13 @@ Namespace SharedLibrary
                     context.INI_AssemblePath = value
                 Case "AssemblePathLocal"
                     context.INI_AssemblePathLocal = value
+                Case "SemanticArchiveCatalogPathLocal"
+                    context.INI_SemanticArchiveCatalogPathLocal = value
+                Case "SemanticArchiveCatalogLibraryPath"
+                    context.INI_SemanticArchiveCatalogLibraryPath = value
+                Case "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing", "SemanticArchiveBackgroundIndexingWindow",
+                     "SemanticArchivePermissionMaintenanceEnabled", "SemanticArchivePermissionMaintenanceWindow"
+                    SemanticArchiveConfiguration.StagePersonalControl(context, settingName, value)
                 Case "KnowledgeStorePath"
                     context.INI_KnowledgeStorePath = value
                 Case "KnowledgeStorePathLocal"
@@ -2677,6 +2723,11 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="context">Shared context providing the in-memory configuration values to persist.</param>
         Public Shared Sub UpdateAppConfig(ByRef context As ISharedContext)
+            UpdateAppConfigCore(context, Nothing)
+        End Sub
+
+        Private Shared Sub UpdateAppConfigCore(ByRef context As ISharedContext,
+                                              semanticArchiveIniValues As System.Collections.Generic.IDictionary(Of System.String, System.String))
             Try
 
                 Dim IniFilePath As String = ""
@@ -2719,6 +2770,12 @@ Namespace SharedLibrary
                 TempIniFilePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(IniFilePath), $"{AN2}_temp.ini")
 
                 ' Define all expected keys and their default or in-memory values
+                ' Export configured INI defaults, not unrelated personal overrides or unsaved live edits.
+                Dim semanticArchiveConfigured As SemanticArchiveConfiguration.ControlsSnapshot = SemanticArchiveConfiguration.ReadConfiguredControls(context)
+                If semanticArchiveIniValues IsNot Nothing Then
+                    ' Expert edits stay local to this write plan. Only InitializeConfig after a successful write activates them.
+                    semanticArchiveConfigured = SemanticArchiveConfiguration.MergeConfiguredControls(semanticArchiveConfigured, semanticArchiveIniValues)
+                End If
                 Dim expectedKeys As New Dictionary(Of String, String) From {
                     {"APIKey", context.INI_APIKeyBack},
                     {"Endpoint", context.INI_Endpoint},
@@ -3012,10 +3069,16 @@ Namespace SharedLibrary
                     {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"SemanticArchiveCatalogPathLocal", context.INI_SemanticArchiveCatalogPathLocal},
+                    {"SemanticArchiveCatalogLibraryPath", context.INI_SemanticArchiveCatalogLibraryPath},
                     {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
                     {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
                     {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
                     {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
+                    {"SemanticArchiveBackgroundIndexingEnabled", semanticArchiveConfigured.BackgroundEnabled.ToString()},
+                    {"SemanticArchiveBackgroundIndexingWindow", semanticArchiveConfigured.BackgroundWindow},
+                    {"SemanticArchivePermissionMaintenanceEnabled", semanticArchiveConfigured.PermissionEnabled.ToString()},
+                    {"SemanticArchivePermissionMaintenanceWindow", semanticArchiveConfigured.PermissionWindow},
                     {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
                     {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow},
                     {"FormulaInstruction", context.INI_FormulaInstruction},
@@ -3065,6 +3128,8 @@ Namespace SharedLibrary
                     If keyValue.Length = 2 Then
                         Dim key As String = keyValue(0).Trim()
                         Dim value As String = keyValue(1).Trim()
+                        key = SemanticArchiveConfiguration.CanonicalizeIniKey(key)
+                        If SemanticArchiveConfiguration.IsGlobalKey(key) AndAlso foundKeys.Contains(key) Then Continue For
 
                         ' Update values for known keys
                         If expectedKeys.ContainsKey(key) Then
@@ -3155,6 +3220,7 @@ Namespace SharedLibrary
                     BackupSharedUserSettingsToRegistry()
                 End If
 
+                SemanticArchiveConfiguration.SavePendingUserSettings(context)
                 context.INIloaded = False
 
                 If IniFilePath = DefaultPath Then
@@ -3337,7 +3403,13 @@ Namespace SharedLibrary
                 {"SP_Assemble_Execute", Default_SP_Assemble_Execute},
                 {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize},
                 {"LicenseCounterMethod", DEFAULT_LICENSECOUNTERMETHOD},
-                {"LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON}
+                {"LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON},
+                {"SemanticArchiveCatalogPathLocal", DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL},
+                {"SemanticArchiveCatalogLibraryPath", DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH},
+                {"SemanticArchiveBackgroundIndexingEnabled", DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED},
+                {"SemanticArchiveBackgroundIndexingWindow", DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_WINDOW},
+                {"SemanticArchivePermissionMaintenanceEnabled", DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED},
+                {"SemanticArchivePermissionMaintenanceWindow", DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_WINDOW}
             }
         End Function
 
@@ -3550,6 +3622,8 @@ Namespace SharedLibrary
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"SemanticArchiveCatalogPathLocal", context.INI_SemanticArchiveCatalogPathLocal},
+                    {"SemanticArchiveCatalogLibraryPath", context.INI_SemanticArchiveCatalogLibraryPath},
                     {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
                     {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
                     {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
@@ -3586,10 +3660,13 @@ Namespace SharedLibrary
                     {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow}
                 }
 
+                ' This reset is scoped to the INI: preserve the catalog pointer and all existing
+                ' personal My.Settings choices; remove optional SA INI controls so central defaults apply.
+                ' No catalog, generation, source or derived artifact is removed.
                 ' Read the original ini file content
                 Dim originalContent As String = System.IO.File.ReadAllText(IniFilePath)
                 Dim updatedContent As New StringBuilder()
-                Dim foundKeys As New HashSet(Of String)()
+                Dim foundKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
                 ' Split into lines and process each line
                 Dim iniLines As String() = originalContent.Split({vbCrLf}, StringSplitOptions.None)
@@ -3607,6 +3684,9 @@ Namespace SharedLibrary
                     If keyValue.Length = 2 Then
                         Dim key As String = keyValue(0).Trim()
                         Dim value As String = keyValue(1).Trim()
+                        key = SemanticArchiveConfiguration.CanonicalizeIniKey(key)
+                        If SemanticArchiveConfiguration.IsOperationalKey(key) Then Continue For
+                        If SemanticArchiveConfiguration.IsGlobalKey(key) AndAlso foundKeys.Contains(key) Then Continue For
 
                         ' Retain keys that are in the expectedKeys dictionary
                         If expectedKeys.ContainsKey(key) Then
@@ -4290,6 +4370,7 @@ Namespace SharedLibrary
         Public Shared Sub ShowExpertConfiguration(ByRef context As ISharedContext, ownerform As Form, Optional temporaryNoLocalConfigOverride As Boolean = False, Optional originalNoLocalConfigValue As Boolean = False)
             ' Dictionary to store variable names and their current values
             Dim variableValues As New Dictionary(Of String, Object)
+            Dim semanticArchiveConfigured As SemanticArchiveConfiguration.ControlsSnapshot = SemanticArchiveConfiguration.ReadConfiguredControls(context)
 
             ' Populate the dictionary with all the required variables
             variableValues.Add("APIKey", context.INI_APIKeyBack) ' Use Context.INI_APIKeyBack, display as Context.INI_APIKey
@@ -4463,6 +4544,12 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("AssemblePath", context.INI_AssemblePath)
             variableValues.Add("AssemblePathLocal", context.INI_AssemblePathLocal)
+            variableValues.Add("SemanticArchiveCatalogPathLocal", context.INI_SemanticArchiveCatalogPathLocal)
+            variableValues.Add("SemanticArchiveCatalogLibraryPath", context.INI_SemanticArchiveCatalogLibraryPath)
+            variableValues.Add("SemanticArchiveBackgroundIndexingEnabled", semanticArchiveConfigured.BackgroundEnabled)
+            variableValues.Add("SemanticArchiveBackgroundIndexingWindow", semanticArchiveConfigured.BackgroundWindow)
+            variableValues.Add("SemanticArchivePermissionMaintenanceEnabled", semanticArchiveConfigured.PermissionEnabled)
+            variableValues.Add("SemanticArchivePermissionMaintenanceWindow", semanticArchiveConfigured.PermissionWindow)
             variableValues.Add("KnowledgeStorePath", context.INI_KnowledgeStorePath)
             variableValues.Add("KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal)
             variableValues.Add("KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner)
@@ -4898,6 +4985,14 @@ Namespace SharedLibrary
                     If updatedValues.ContainsKey("ISearch_ResponseURLStart") Then context.INI_ISearch_ResponseURLStart = CStr(updatedValues("ISearch_ResponseURLStart"))
                     If updatedValues.ContainsKey("AssemblePath") Then context.INI_AssemblePath = CStr(updatedValues("AssemblePath"))
                     If updatedValues.ContainsKey("AssemblePathLocal") Then context.INI_AssemblePathLocal = CStr(updatedValues("AssemblePathLocal"))
+                    If updatedValues.ContainsKey("SemanticArchiveCatalogPathLocal") Then context.INI_SemanticArchiveCatalogPathLocal = CStr(updatedValues("SemanticArchiveCatalogPathLocal"))
+                    If updatedValues.ContainsKey("SemanticArchiveCatalogLibraryPath") Then context.INI_SemanticArchiveCatalogLibraryPath = CStr(updatedValues("SemanticArchiveCatalogLibraryPath"))
+                    Dim semanticArchiveUpdates As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+                    For Each semanticArchiveKey As System.String In SemanticArchiveConfiguration.GlobalKeys()
+                        If SemanticArchiveConfiguration.IsOperationalKey(semanticArchiveKey) AndAlso updatedValues.ContainsKey(semanticArchiveKey) Then
+                            semanticArchiveUpdates(semanticArchiveKey) = System.Convert.ToString(updatedValues(semanticArchiveKey), System.Globalization.CultureInfo.InvariantCulture)
+                        End If
+                    Next
                     If updatedValues.ContainsKey("KnowledgeStorePath") Then context.INI_KnowledgeStorePath = CStr(updatedValues("KnowledgeStorePath"))
                     If updatedValues.ContainsKey("KnowledgeStorePathLocal") Then context.INI_KnowledgeStorePathLocal = CStr(updatedValues("KnowledgeStorePathLocal"))
                     If updatedValues.ContainsKey("KnowledgeStoreOwner") Then context.INI_KnowledgeStoreOwner = CStr(updatedValues("KnowledgeStoreOwner"))
@@ -4913,7 +5008,7 @@ Namespace SharedLibrary
                     End If
 
                     ' Call UpdateAppConfig after all updates
-                    UpdateAppConfig(context)
+                    UpdateAppConfigCore(context, semanticArchiveUpdates)
                 End If
         End Sub
 

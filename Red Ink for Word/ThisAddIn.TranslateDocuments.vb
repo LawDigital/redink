@@ -1791,6 +1791,12 @@ Partial Public Class ThisAddIn
         Else
             Dim effectivePrompt As String = If(String.IsNullOrWhiteSpace(_correctPromptOverride), SP_Correct_Document, _correctPromptOverride)
             systemPrompt = InterpolateAtRuntime(effectivePrompt)
+            If _isFreestyle Then
+                Dim prepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Current
+                If prepared IsNot Nothing AndAlso prepared.HasTrigger Then
+                    systemPrompt &= System.Environment.NewLine & prepared.ContextText
+                End If
+            End If
         End If
 
         systemPrompt = systemPrompt & vbCrLf & vbCrLf &

@@ -1432,6 +1432,7 @@ Partial Public Class ThisAddIn
             Dim DoAssemble As Boolean = False
             Dim DoShowModel As Boolean = False
             Dim DoKB As Boolean = False
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
 
             ' Build instruction strings for user guidance
             Dim MarkupInstruct As String = $"start With '{MarkupPrefixAll}' for markups"
@@ -1450,6 +1451,7 @@ Partial Public Class ThisAddIn
             Dim LibInstruct As String = $"; add '{LibTrigger}' for library search"
             Dim NetInstruct As String = $"; add '{NetTrigger}' for internet search"
             Dim KBInstruct As String = $"; add '{KnowledgeTriggerHelper.KbTrigger}' to search all stores or use '{KnowledgeTriggerHelper.KbTriggerPrefix}your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}store:StoreName your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}tag:TagName your query)' for Knowledge Store retrieval"
+            Dim SemanticArchiveInstruct As System.String = "; add '(sa)' to retrieve evidence from the selected Semantic Archives, or '(sa: archive:""Name"" query)' for a named archive"
             Dim PureInstruct As String = $"; use '{PurePrefix}' for direct prompting"
             Dim FileInstruct As String = $"; use '{FilePrefix}' for modifying file(s)"
             Dim AssembleInstruct As String = $"; use '{AssemblePrefix}' for assembling a document from templates"
@@ -1506,6 +1508,9 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePath) OrElse
                Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePathLocal) Then
                 AddOnInstruct += KBInstruct.Replace("; add", ", ")
+            End If
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+                AddOnInstruct += SemanticArchiveInstruct.Replace("; add", ", ")
             End If
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) Then
                 AddOnInstruct += MyStyleInstruct.Replace("; add", ", ")
@@ -1594,6 +1599,7 @@ SkipPromptInput:
                 End Try
 
                 Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                .SourceMenuProvider = Global.SharedLibrary.SharedLibrary.RetrievalSourceDiscovery.CreateMenuProvider(_context),
                     .Title = $"{AN} Freestyle",
                     .Heading = "What would you like Red Ink to do?",
                     .ModeCaption = "Output",
@@ -2028,6 +2034,21 @@ SkipPromptInput:
 
                 End If
 
+                If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+                    sourcesSection.Options.Add(
+                        New Global.SharedLibrary.SharedLibrary.SharedMethods.FreestylePromptToggleOption() With {
+                            .Id = "semantic_archive",
+                            .Text = "Semantic Archives",
+                            .Trigger = "(sa)",
+                            .ManualSyntax = "(sa) / (sa: query) / (sa: archive:""Name"" query)",
+                            .Description = "Retrieve exact excerpts from the selected archives. Leave blank to use this prompt as the query; use mode:files for file locations only. Archive selection is separate from enabling agent tools.",
+                            .ArgumentPrefix = "(sa:",
+                            .ArgumentSuffix = ")",
+                            .ArgumentHint = "Optional: query, archive:""Name"" query, or mode:files query",
+                            .ArgumentRequired = False
+                        })
+                End If
+
                 If sourcesSection.Options.Count > 0 Then
                     promptOptions.Sections.Add(sourcesSection)
                 End If
@@ -2314,6 +2335,7 @@ SkipPromptInput:
                 AddItem("kbreindex", "Force full re-index of all knowledge stores (regenerates all metadata, uses API credits).")
                 AddItem("kbrefreshvectors", "Rebuild embeddings from existing wiki pages only (use after changing the embedding model).")
                 AddItem("kbaddstore", "Add a new Knowledge Store (Name|Path).")
+                AddItem("sastore", "Manage Semantic Archives, source roots, indexing and diagnostics.")
                 AddItem("kbstore", "Show the list of Knowledge Stores and their status.")
                 AddItem("kbschema", "Open the selected Knowledge Store schema in the internal JSON editor.")
                 AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
@@ -2793,6 +2815,11 @@ SkipPromptInput:
                         ShowCustomMessageBox($"Could not create directory at '{resolvedPath}'. Error: {ex.Message}", $"{AN} Knowledge Store")
                     End Try
                 End If
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "sastore", System.StringComparison.OrdinalIgnoreCase) Then
+                SharedLibrary.SharedLibrary.SharedMethods.ShowSemanticArchiveConsole(_context)
                 Return
             End If
 
@@ -3887,6 +3914,37 @@ SkipPromptInput:
 
             ' Handles {doc}, {dir}, {url} and {path} triggers with unified document numbering
 
+            ' Resolve source control syntax from the user's instruction before any
+            ' external file, selected document or retrieved text is inserted.
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(OtherPrompt) Then
+                Dim saSplash As New SLib.SplashScreen("Querying Semantic Archive...   ")
+                saSplash.Show()
+                System.Windows.Forms.Application.DoEvents()
+                Try
+                    archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                Finally
+                    If saSplash.InvokeRequired Then
+                        saSplash.Invoke(Sub()
+                                            saSplash.Close()
+                                            saSplash.Dispose()
+                                        End Sub)
+                    Else
+                        saSplash.Close()
+                        saSplash.Dispose()
+                    End If
+                End Try
+                OtherPrompt = archivePrepared.CleanPrompt
+                OtherPromptUnfilled = OtherPrompt.Trim()
+                DoKB = False ' A mixed request has already dispatched both providers independently.
+                If Not System.String.Equals(archivePrepared.Status, "ok", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(archivePrepared.Status, "partial", System.StringComparison.OrdinalIgnoreCase) Then
+                    ShowCustomMessageBox("Semantic Archive: " & archivePrepared.Status &
+                        If(System.String.IsNullOrWhiteSpace(archivePrepared.ContextText), "", System.Environment.NewLine & archivePrepared.ContextText),
+                        $"{AN} Semantic Archive")
+                End If
+            End If
+
             Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
             If Not fileResult.Success Then
                 Return
@@ -3908,7 +3966,9 @@ SkipPromptInput:
                 End If
 
                 Try
-                    Await AssembleDocumentFromTemplates(OtherPrompt, assembleContext, UseSecondAPI)
+                    Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                        Await AssembleDocumentFromTemplates(OtherPrompt, assembleContext, UseSecondAPI, semanticArchivePrepared:=archivePrepared)
+                    End Using
                 Catch ex As System.Exception
                     ShowCustomMessageBox("Error in Freestyle ('Assemble:'): " & ex.Message, "Error")
                 End Try
@@ -3923,7 +3983,9 @@ SkipPromptInput:
 
             If DoForm Then
                 Try
-                    Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI)
+                    Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                        Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI, semanticArchivePrepared:=archivePrepared)
+                    End Using
                 Catch ex As System.Exception
                     ShowCustomMessageBox("Error in Freestyle ('Form:'): " & ex.Message, "Error")
                 End Try
@@ -4095,7 +4157,13 @@ SkipPromptInput:
 
             If DoFiles Then
                 Try
-                    CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI, True)
+                    If archivePrepared Is Nothing Then
+                        CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI, True)
+                    Else
+                        Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                            Await CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI, True)
+                        End Using
+                    End If
                 Catch ex As System.Exception
                     ' Handle any unexpected errors during freestyle execution
                     ShowCustomMessageBox("Error in Freestyle ('File:'): " & ex.Message, "Error")
@@ -4217,7 +4285,13 @@ SkipPromptInput:
             ' === Execute LLM processing with configured parameters ===
 
             ' Invoke ProcessSelectedText with all configured options
-            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel)
+            Dim processingPrompt As System.String = InterpolateAtRuntime(SysPrompt)
+            If archivePrepared IsNot Nothing AndAlso archivePrepared.HasTrigger Then
+                processingPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+            End If
+            Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                Dim result As String = Await ProcessSelectedText(processingPrompt, True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel)
+            End Using
 
         Catch ex As System.Exception
             ' Handle any unexpected errors during freestyle execution

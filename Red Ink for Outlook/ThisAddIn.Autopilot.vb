@@ -3095,7 +3095,7 @@ Partial Public Class ThisAddIn
             If Not MatchesFilterRules(mailInfo) Then : ApDashboardLog("SKIP (no filter match): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
             If MatchesNegativeFilters(mailInfo) Then : ApDashboardLog("SKIP (negative filter): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
 
-            ' Cross-mail continuation is opt-in and bound to the authenticated sender plus
+            ' Cross-mail continuation is opt-in and bound to the configured sender address plus
             ' Outlook ConversationID. A plain follow-up never silently resumes old state.
             workflowContinuationKey = BuildAutoPilotWorkflowContinuationKey(mailInfo)
             workflowContinuationRetentionDays = ResolveAutoPilotWorkflowContinuationRetentionDays()
@@ -3366,7 +3366,17 @@ Partial Public Class ThisAddIn
                 ' ── Build LLM prompt ──
                 ' Use only processable attachments in the prompt so the LLM doesn't see
                 ' [OVER SIZE LIMIT] tags that trigger unwanted tool recommendations.
-                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments)
+                Dim archiveAuthoritativeRequest As System.String = If(System.String.IsNullOrWhiteSpace(mailInfo.FormattingAwareBody), mailInfo.Body, mailInfo.FormattingAwareBody)
+                Dim archiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope =
+                    Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                        Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.AutoPilotMail, mailInfo.EntryID, mailInfo.SenderEmail, ct)
+                Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest =
+                    Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, archiveAuthoritativeRequest, archiveScope,
+                        allowInteractiveSelection:=False, cancellationToken:=ct)
+                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments,
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+                If archivePrepared.HasTrigger Then userPrompt &= System.Environment.NewLine & archivePrepared.ContextText
                 If oversizedNote IsNot Nothing Then
                     userPrompt &= oversizedNote
                 End If
@@ -3506,6 +3516,7 @@ Partial Public Class ThisAddIn
                             resumeWorkflowFromCheckpoint:=resumeBlockedWorkflow,
                             workflowContinuationKey:=workflowContinuationKey,
                             workflowContinuationRetentionDays:=workflowContinuationRetentionDays,
+                            semanticArchivePrepared:=archivePrepared,
                             transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                     Else
                         ' Use no-tools system prompt when tooling is disabled
@@ -3662,6 +3673,7 @@ Partial Public Class ThisAddIn
 
                 ' Collect registry-backed and bounded legacy-compatible result attachments.
                 Dim resultAttachments As List(Of String) = CollectResultAttachments(tempDir, attachmentPaths)
+                AddSemanticArchiveEvidenceAttachments(resultAttachments, archiveScope, tempDir)
                 preparedDeliverablesPresent = (resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0)
 
                 If resultAttachments.Count > 0 Then
@@ -5305,6 +5317,32 @@ Partial Public Class ThisAddIn
     ''' never promotes a staging file to an ArtifactDelivery Final, and is disabled whenever
     ''' an expected-artifact contract has been explicitly declared, including the intentional empty contract [].
     ''' </summary>
+    Private Sub AddSemanticArchiveEvidenceAttachments(resultAttachments As System.Collections.Generic.List(Of System.String),
+                                                      scope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope,
+                                                      tempDir As System.String)
+        If resultAttachments Is Nothing OrElse scope Is Nothing OrElse System.String.IsNullOrWhiteSpace(tempDir) Then Return
+        Dim existing As New System.Collections.Generic.HashSet(Of System.String)(resultAttachments, System.StringComparer.OrdinalIgnoreCase)
+        For Each sourcePath As System.String In scope.GetUsedSourcePaths()
+            If System.String.IsNullOrWhiteSpace(sourcePath) OrElse Not System.IO.File.Exists(sourcePath) Then Continue For
+            Try
+                If _apConfig IsNot Nothing AndAlso New System.IO.FileInfo(sourcePath).Length > _apConfig.MaxAttachmentBytes Then
+                    ApDashboardLog("Semantic Archive evidence file exceeds the configured AutoPilot attachment limit and was not attached: " & System.IO.Path.GetFileName(sourcePath), "warn")
+                    Continue For
+                End If
+                Dim staged As System.String = MaterializeAutoPilotDeliveryPath(sourcePath, tempDir)
+                If Not System.String.IsNullOrWhiteSpace(staged) AndAlso System.IO.File.Exists(staged) Then
+                    Dim normalized As System.String = System.IO.Path.GetFullPath(staged)
+                    If existing.Add(normalized) Then
+                        resultAttachments.Add(normalized)
+                        ApDashboardLog("Semantic Archive evidence attached: " & System.IO.Path.GetFileName(sourcePath), "info")
+                    End If
+                End If
+            Catch ex As System.Exception
+                ApDashboardLog("Could not attach Semantic Archive evidence file '" & System.IO.Path.GetFileName(sourcePath) & "': " & ex.Message, "warn")
+            End Try
+        Next
+    End Sub
+
     Private Function CollectResultAttachments(
         tempDir As String,
         originalAttachments As List(Of AutoPilotAttachmentInfo),
@@ -6097,7 +6135,8 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>Builds the user prompt from the mail content and attachments.</summary>
-    Private Shared Function BuildUserPromptFromMail(info As AutoPilotMailInfo, attachments As List(Of AutoPilotAttachmentInfo)) As String
+    Private Shared Function BuildUserPromptFromMail(info As AutoPilotMailInfo, attachments As List(Of AutoPilotAttachmentInfo),
+                                                   Optional authoritativeBodyOverride As System.String = Nothing) As System.String
         Dim sb As New StringBuilder()
         sb.AppendLine("[INCOMING EMAIL]")
         sb.AppendLine($"From: {info.SenderName} <{info.SenderEmail}>")
@@ -6110,6 +6149,8 @@ Partial Public Class ThisAddIn
         If Not hasFormattingMap Then
             body = If(info.Body, "")
         End If
+
+        If authoritativeBodyOverride IsNot Nothing Then body = authoritativeBodyOverride
 
         If body.Length > 25000 Then
             body = body.Substring(0, 25000) & vbCrLf & "[... truncated ...]"
@@ -8497,6 +8538,7 @@ Partial Public Class ThisAddIn
             ' Save references before Finally clears them
             Dim savedAttachments = _apCurrentAttachments
             voicemailAttachmentsForRecovery = savedAttachments
+            Dim voicemailArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing
 
             Try
                 senderDesignScope = SharedLibrary.Agents.DesignRepository.PushAccessScope(
@@ -8512,7 +8554,16 @@ Partial Public Class ThisAddIn
                 SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({_apCurrentTempDir})
 
                 ' Build prompt with the transcription as the "email body"
-                Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing)
+                voicemailArchiveScope =
+                    Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                        Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.Voicemail, mailInfo.EntryID, recipientEmail, ct)
+                Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest =
+                    Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, voicemailMailInfo.Body, voicemailArchiveScope,
+                        allowInteractiveSelection:=False, cancellationToken:=ct)
+                Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing,
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+                If archivePrepared.HasTrigger Then userPrompt &= System.Environment.NewLine & archivePrepared.ContextText
                 Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
 
                 ' ── Inject per-sender policy system-prompt instruction (keyed on the caller's mapped email) ──
@@ -8566,6 +8617,7 @@ Partial Public Class ThisAddIn
                         memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
                         memoryGroundingModeIsExplicit:=True,
                         toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(recipientName, voicemailMailInfo.Subject),
+                        semanticArchivePrepared:=archivePrepared,
                         transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -8656,6 +8708,7 @@ Partial Public Class ThisAddIn
 
             ' Collect any result attachments (use saved reference, not cleared field)
             Dim resultAttachments = CollectResultAttachments(tempDir, savedAttachments)
+            AddSemanticArchiveEvidenceAttachments(resultAttachments, voicemailArchiveScope, tempDir)
             voicemailPreparedDeliverablesPresent =
                 resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0
 

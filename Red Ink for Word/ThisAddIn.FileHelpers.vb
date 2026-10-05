@@ -120,7 +120,7 @@ Partial Public Class ThisAddIn
                             OcrAdditionalInstruction,
                             ShowOCRProgress,
                             ReturnMarkdown,
-                            CancellationToken)
+                            CancellationToken:=CancellationToken)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".eml"

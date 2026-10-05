@@ -719,6 +719,90 @@ Namespace My
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property SemanticArchiveBackgroundIndexingEnabled() As System.Boolean
+            Get
+                Return CType(Me("SemanticArchiveBackgroundIndexingEnabled"), System.Boolean)
+            End Get
+            Set
+                Me("SemanticArchiveBackgroundIndexingEnabled") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
+        Public Property SemanticArchivePermissionMaintenanceEnabled() As System.Boolean
+            Get
+                Return CType(Me("SemanticArchivePermissionMaintenanceEnabled"), System.Boolean)
+            End Get
+            Set
+                Me("SemanticArchivePermissionMaintenanceEnabled") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property SemanticArchiveSettingsVersion() As System.Int32
+            Get
+                Return CType(Me("SemanticArchiveSettingsVersion"), System.Int32)
+            End Get
+            Set
+                Me("SemanticArchiveSettingsVersion") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
+        Public Property EnableSAPermissionMaintenance() As Boolean
+            Get
+                Return CType(Me("EnableSAPermissionMaintenance"), Boolean)
+            End Get
+            Set
+                Me("EnableSAPermissionMaintenance") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SemanticArchivePermissionMaintenanceWindow() As String
+            Get
+                Return CType(Me("SemanticArchivePermissionMaintenanceWindow"), String)
+            End Get
+            Set
+                Me("SemanticArchivePermissionMaintenanceWindow") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property EnableSABackgroundIndexing() As Boolean
+            Get
+                Return CType(Me("EnableSABackgroundIndexing"), Boolean)
+            End Get
+            Set
+                Me("EnableSABackgroundIndexing") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SemanticArchiveBackgroundIndexingWindow() As String
+            Get
+                Return CType(Me("SemanticArchiveBackgroundIndexingWindow"), String)
+            End Get
+            Set
+                Me("SemanticArchiveBackgroundIndexingWindow") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
         Public Property EnableKBBackgroundIndexing() As Boolean
             Get
                 Return CType(Me("EnableKBBackgroundIndexing"),Boolean)

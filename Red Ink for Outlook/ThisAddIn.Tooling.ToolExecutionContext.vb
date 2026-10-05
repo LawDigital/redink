@@ -42,6 +42,9 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Class ToolExecutionContext
 
+        ''' <summary>Host-authorized archive selection and retained search/read handles; inherited only from the parent run.</summary>
+        Public Property SemanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope
+
         ''' <summary>Tools selected for this session.</summary>
         Public Property SelectedTools As List(Of ModelConfig)
 

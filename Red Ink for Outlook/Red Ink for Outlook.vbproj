@@ -478,6 +478,7 @@
   -->
   <ItemGroup>
     <AppDesigner Include="My Project\" />
+    <Compile Include="ThisAddIn.SemanticArchives.vb" />
     <Compile Include="DragDropForm.Designer.vb">
       <DependentUpon>DragDropForm.vb</DependentUpon>
     </Compile>

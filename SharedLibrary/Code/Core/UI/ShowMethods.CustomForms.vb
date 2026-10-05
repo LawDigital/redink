@@ -401,6 +401,7 @@ Namespace SharedLibrary
                                                     Optional InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing
                                                 ) As String
 
+            RequireInteractiveExecution("input_dialog")
             ' Screen working area (accounts for taskbar, etc.).
             Dim wa As System.Drawing.Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
 
@@ -825,6 +826,7 @@ Namespace SharedLibrary
                         Optional nonModal As Boolean = False
                     ) As Integer
 
+            RequireInteractiveExecution("confirmation_dialog")
             ' Screen working area.
             Dim wa As Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
             Dim maxScreenHeight As Integer = CInt(wa.Height * 0.5)
@@ -1156,6 +1158,7 @@ Namespace SharedLibrary
     Optional extraButtonAction As System.Action = Nothing,
     Optional CloseAfterExtra As Boolean = False
 )
+            RequireInteractiveExecution("message_dialog")
             If System.String.IsNullOrWhiteSpace(header) Then header = AN
             Dim isTruncated As System.Boolean = False
             If bodyText IsNot Nothing AndAlso bodyText.Length > 10000 Then
@@ -1727,6 +1730,7 @@ Namespace SharedLibrary
             Optional nonModal As Boolean = False,
             Optional onClose As System.Action = Nothing
         )
+            RequireInteractiveExecution("html_dialog")
             ' For non-modal on the current thread
             If nonModal Then
                 ShowHTMLCustomMessageBoxNonModal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose)
@@ -3297,6 +3301,14 @@ Namespace SharedLibrary
         End Class
 
 
+        ''' <summary>Host-prepared source descriptors. Displaying the menu must not perform I/O.</summary>
+        Public NotInheritable Class FreestylePromptSource
+            Public Property Group As System.String = System.String.Empty
+            Public Property Caption As System.String = System.String.Empty
+            Public Property Description As System.String = System.String.Empty
+            Public Property InsertText As System.String = System.String.Empty
+        End Class
+
         Public Class FreestylePromptOptions
 
             Public Property Title As System.String
@@ -3304,6 +3316,7 @@ Namespace SharedLibrary
             Public Property ModeCaption As System.String
             Public Property ModelText As System.String
             Public Property ContextStatusText As System.String
+            Public Property SourceMenuProvider As System.Func(Of System.Collections.Generic.IReadOnlyList(Of FreestylePromptSource))
 
             Public Property InitialPrompt As System.String
             Public Property LastPrompt As System.String
@@ -5089,7 +5102,9 @@ Namespace SharedLibrary
                                     .Margin = New System.Windows.Forms.Padding(0)
                                 }
 
+                                footer.ColumnCount = If(options.SourceMenuProvider Is Nothing, 2, 3)
                                 footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                If options.SourceMenuProvider IsNot Nothing Then footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
                                 footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
                                 footer.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
 
@@ -5100,6 +5115,16 @@ Namespace SharedLibrary
                                     .Anchor = System.Windows.Forms.AnchorStyles.Left,
                                     .Margin = New System.Windows.Forms.Padding(0, 7, largeGap, 0)
                                 }
+
+                                If options.SourceMenuProvider IsNot Nothing Then
+                                    ' Keep the existing footer to one line even at narrow widths.
+                                    statusLabel.AutoSize = False
+                                    statusLabel.AutoEllipsis = True
+                                    statusLabel.Width = 1
+                                    statusLabel.Height = standardFont.Height
+                                    statusLabel.Anchor = System.Windows.Forms.AnchorStyles.Left Or System.Windows.Forms.AnchorStyles.Right
+                                    promptToolTip.SetToolTip(statusLabel, If(options.ContextStatusText, System.String.Empty))
+                                End If
 
                                 Dim actionFlow As New System.Windows.Forms.FlowLayoutPanel() With {
                                     .AutoSize = True,
@@ -5197,7 +5222,58 @@ Namespace SharedLibrary
                                 actionFlow.Controls.Add(runButton)
 
                                 footer.Controls.Add(statusLabel, 0, 0)
-                                footer.Controls.Add(actionFlow, 1, 0)
+                                footer.Controls.Add(actionFlow, If(options.SourceMenuProvider Is Nothing, 1, 2), 0)
+
+                                If options.SourceMenuProvider IsNot Nothing Then
+                                    ' Reuse the existing footer row. No extra row or dialog, and no catalog I/O here.
+                                    Dim sourcesLink As New System.Windows.Forms.LinkLabel() With {
+                                        .Text = "Sources " & Microsoft.VisualBasic.ChrW(&H25BE),
+                                        .Font = standardFont, .AutoSize = True,
+                                        .Anchor = System.Windows.Forms.AnchorStyles.Right,
+                                        .Margin = New System.Windows.Forms.Padding(0, 7, normalGap, 0)}
+                                    Dim sourcesMenu As New System.Windows.Forms.ContextMenuStrip() With {.ShowItemToolTips = True}
+                                    promptToolTip.SetToolTip(sourcesLink, "Available Semantic Archives and Knowledge Stores from the cached catalog overview. Choosing a source inserts its query trigger. Document access is checked when the request runs.")
+                                    AddHandler freestyleForm.Disposed, Sub() sourcesMenu.Dispose()
+                                    AddHandler sourcesLink.LinkClicked,
+                                        Sub(sender As System.Object, e As System.Windows.Forms.LinkLabelLinkClickedEventArgs)
+                                            While sourcesMenu.Items.Count > 0
+                                                Dim retired As System.Windows.Forms.ToolStripItem = sourcesMenu.Items(0)
+                                                sourcesMenu.Items.RemoveAt(0)
+                                                retired.Dispose()
+                                            End While
+                                            Dim groups As New System.Collections.Generic.Dictionary(Of System.String, System.Windows.Forms.ToolStripMenuItem)(System.StringComparer.Ordinal)
+                                            Try
+                                                Dim snapshot As System.Collections.Generic.IReadOnlyList(Of FreestylePromptSource) = options.SourceMenuProvider.Invoke()
+                                                If snapshot IsNot Nothing Then
+                                                    For Each source As FreestylePromptSource In snapshot
+                                                        If source Is Nothing Then Continue For
+                                                        Dim group As System.Windows.Forms.ToolStripMenuItem = Nothing
+                                                        Dim groupName As System.String = If(source.Group, System.String.Empty)
+                                                        If Not groups.TryGetValue(groupName, group) Then
+                                                            group = New System.Windows.Forms.ToolStripMenuItem(groupName.Replace("&", "&&"))
+                                                            groups.Add(groupName, group)
+                                                            sourcesMenu.Items.Add(group)
+                                                        End If
+                                                        Dim menuItem As New System.Windows.Forms.ToolStripMenuItem(If(source.Caption, System.String.Empty).Replace("&", "&&")) With {
+                                                            .ToolTipText = source.Description, .Enabled = Not System.String.IsNullOrWhiteSpace(source.InsertText)}
+                                                        Dim insertion As System.String = source.InsertText
+                                                        AddHandler menuItem.Click,
+                                                            Sub()
+                                                                promptTextBox.Text = RetrievalPromptEditing.SelectSource(promptTextBox.Text, insertion)
+                                                                promptTextBox.SelectionStart = promptTextBox.TextLength
+                                                                promptTextBox.Focus()
+                                                            End Sub
+                                                        group.DropDownItems.Add(menuItem)
+                                                    Next
+                                                End If
+                                            Catch ex As System.Exception
+                                                System.Diagnostics.Trace.WriteLine("[Freestyle] Source menu snapshot unavailable: " & ex.GetType().FullName)
+                                            End Try
+                                            If sourcesMenu.Items.Count = 0 Then sourcesMenu.Items.Add(New System.Windows.Forms.ToolStripMenuItem("Source overview is not available yet.") With {.Enabled = False})
+                                            sourcesMenu.Show(sourcesLink, New System.Drawing.Point(0, sourcesLink.Height))
+                                        End Sub
+                                    footer.Controls.Add(sourcesLink, 1, 0)
+                                End If
 
                                 root.Controls.Add(footer, 0, 3)
 
@@ -5499,7 +5575,9 @@ Namespace SharedLibrary
                                         End If
 
                                         If e.KeyCode = System.Windows.Forms.Keys.P AndAlso e.Modifiers = System.Windows.Forms.Keys.Control AndAlso Not System.String.IsNullOrEmpty(options.LastPrompt) Then
-                                            SharedMethods.InsertFreestyleTextAtCaret(promptTextBox, options.LastPrompt)
+                                            promptTextBox.Text = RetrievalPromptEditing.RestoreHistory(promptTextBox.Text, options.LastPrompt, promptTextBox.SelectionStart)
+                                            promptTextBox.SelectionStart = promptTextBox.TextLength
+                                            e.Handled = True
                                             e.SuppressKeyPress = True
                                         End If
 
@@ -5613,7 +5691,7 @@ Namespace SharedLibrary
                                 ' =========================================================
 
                                 returnValue.Accepted = True
-                                returnValue.Prompt = promptTextBox.Text
+                                returnValue.Prompt = RetrievalPromptEditing.NormalizeScopes(promptTextBox.Text)
                                 returnValue.KnownPrefixes.AddRange(SharedMethods.GetFreestylePromptKnownPrefixes(options.Modes))
 
                                 Dim finalSelectedMode As FreestylePromptMode = TryCast(modeCombo.SelectedItem, FreestylePromptMode)
@@ -5736,7 +5814,7 @@ Namespace SharedLibrary
 
             Next
 
-            Return prompt.Trim()
+            Return RetrievalPromptEditing.NormalizeScopes(prompt).Trim()
 
         End Function
 

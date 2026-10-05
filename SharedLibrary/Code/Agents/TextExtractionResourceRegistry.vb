@@ -27,6 +27,8 @@ Namespace Agents
         Public Property OcrSkipped As System.Nullable(Of System.Boolean) = Nothing
         Public Property OcrDurationMilliseconds As System.Nullable(Of System.Int64) = Nothing
         Public Property ExtractionComplete As System.Nullable(Of System.Boolean) = Nothing
+        Public Property ExtractionCoverageBasis As System.String = "unverified"
+        Public Property ExtractionWarnings As New System.Collections.Generic.List(Of System.String)()
         Public Property ContentFormat As System.String = "unknown"
         Public Property ProcessedRanges As New System.Collections.Generic.List(Of TextExtractionProcessedRange)()
     End Class
@@ -35,6 +37,7 @@ Namespace Agents
         Public Property ResourceId As System.String = System.String.Empty
         Public Property SourceIdentifier As System.String = System.String.Empty
         Public Property SourceSha256 As System.String = System.String.Empty
+        Public Property SourceByteCount As System.Int64
         Public Property AdapterId As System.String = System.String.Empty
         Public Property AdapterVersion As System.String = System.String.Empty
         Public Property ConfigurationFingerprint As System.String = System.String.Empty
@@ -50,6 +53,7 @@ Namespace Agents
             Public Property OriginalPath As System.String = System.String.Empty
             Public Property SnapshotPath As System.String = System.String.Empty
             Public Property Sha256 As System.String = System.String.Empty
+            Public Property ByteCount As System.Int64
         End Class
 
         Private Shared ReadOnly SessionId As System.String = System.Guid.NewGuid().ToString("N")
@@ -73,7 +77,8 @@ Namespace Agents
                 configurationFingerprint As System.String,
                 optionsFingerprint As System.String,
                 extractor As System.Func(Of System.String, System.Threading.CancellationToken, System.Threading.Tasks.Task(Of TextExtractionPayload)),
-                cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of TextExtractionResource)
+                cancellationToken As System.Threading.CancellationToken,
+                Optional forceFresh As System.Boolean = False) As System.Threading.Tasks.Task(Of TextExtractionResource)
 
             If extractor Is Nothing Then Throw New System.ArgumentNullException(NameOf(extractor))
             Dim captured As CapturedSource = CaptureSource(source, workingDirectory)
@@ -85,8 +90,19 @@ Namespace Agents
                                                 configurationFingerprint,
                                                 optionsFingerprint)
             Try
+                cancellationToken.ThrowIfCancellationRequested()
+                If forceFresh Then
+                    ' Explicit re-extraction must neither return a prior cache entry nor
+                    ' join work started before the request. Keep ordinary reuse/singleflight.
+                    Dim discarded As TextExtractionResource = Nothing
+                    Cache.TryRemove(key, discarded)
+                    Dim fresh As TextExtractionResource = Await CreateResourceAsync(key, captured, adapterId, adapterVersion,
+                        configurationFingerprint, optionsFingerprint, extractor, cancellationToken).ConfigureAwait(False)
+                    If fresh IsNot Nothing Then fresh.ReuseStatus = "forced_fresh"
+                    Return fresh
+                End If
                 Dim cached As TextExtractionResource = Nothing
-                If Cache.TryGetValue(key, cached) AndAlso cached IsNot Nothing AndAlso cached.Payload IsNot Nothing AndAlso cached.Payload.Success Then
+                If Cache.TryGetValue(key, cached) AndAlso cached IsNot Nothing AndAlso IsCacheablePayload(cached.Payload) Then
                     DeleteCapturedSource(captured)
                     Return CloneWithReuse(cached, "session_cache_hit")
                 End If
@@ -137,6 +153,7 @@ Namespace Agents
                     .ResourceId = "txr-" & key.Substring(0, 24),
                     .SourceIdentifier = captured.OriginalPath,
                     .SourceSha256 = captured.Sha256,
+                    .SourceByteCount = captured.ByteCount,
                     .AdapterId = If(adapterId, System.String.Empty),
                     .AdapterVersion = If(adapterVersion, System.String.Empty),
                     .ConfigurationFingerprint = If(configurationFingerprint, System.String.Empty),
@@ -146,7 +163,7 @@ Namespace Agents
                     .Payload = payload
                 }
 
-                If payload IsNot Nothing AndAlso payload.Success Then
+                If IsCacheablePayload(payload) Then
                     Cache(key) = resource
                     CleanupSessionCache()
                 End If
@@ -154,6 +171,14 @@ Namespace Agents
             Finally
                 DeleteCapturedSource(captured)
             End Try
+        End Function
+
+        Private Shared Function IsCacheablePayload(payload As TextExtractionPayload) As System.Boolean
+            ' A recoverable partial result is not a completed extraction. Return it to
+            ' this caller, but allow a subsequent retry to run the extractor again.
+            ' Preserve existing reuse for adapters that do not yet report completeness.
+            Return payload IsNot Nothing AndAlso payload.Success AndAlso
+                (Not payload.ExtractionComplete.HasValue OrElse payload.ExtractionComplete.Value)
         End Function
 
         Private Shared Function CaptureSource(source As System.String, workingDirectory As System.String) As CapturedSource
@@ -168,11 +193,13 @@ Namespace Agents
                 System.IO.Path.Combine(directory, ".ri-source-" & System.Guid.NewGuid().ToString("N") & extension), PathAccess.Write)
 
             Dim hash As System.String
+            Dim capturedByteCount As System.Int64
             Try
                 Using input As New System.IO.FileStream(sourcePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
                     Using output As New System.IO.FileStream(snapshotPath, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None)
                         input.CopyTo(output)
                         output.Flush(True)
+                        capturedByteCount = output.Length
                     End Using
                 End Using
                 Using snapshotStream As New System.IO.FileStream(snapshotPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
@@ -180,7 +207,7 @@ Namespace Agents
                         hash = System.BitConverter.ToString(algorithm.ComputeHash(snapshotStream)).Replace("-", System.String.Empty).ToLowerInvariant()
                     End Using
                 End Using
-                Return New CapturedSource With {.OriginalPath = sourcePath, .SnapshotPath = snapshotPath, .Sha256 = hash}
+                Return New CapturedSource With {.OriginalPath = sourcePath, .SnapshotPath = snapshotPath, .Sha256 = hash, .ByteCount = capturedByteCount}
             Catch
                 Try
                     If System.IO.File.Exists(snapshotPath) Then System.IO.File.Delete(snapshotPath)
@@ -247,6 +274,7 @@ Namespace Agents
                 .ResourceId = source.ResourceId,
                 .SourceIdentifier = source.SourceIdentifier,
                 .SourceSha256 = source.SourceSha256,
+                .SourceByteCount = source.SourceByteCount,
                 .AdapterId = source.AdapterId,
                 .AdapterVersion = source.AdapterVersion,
                 .ConfigurationFingerprint = source.ConfigurationFingerprint,

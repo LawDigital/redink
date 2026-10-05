@@ -505,6 +505,7 @@ Partial Class Ribbon2
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.SearchTools = Me.Factory.CreateRibbonMenu
+        Me.RI_SemanticArchives = Me.Factory.CreateRibbonButton
         Me.RI_KnowledgeStores = Me.Factory.CreateRibbonButton
         Me.RI_SchedulerDashboard = Me.Factory.CreateRibbonButton
         Me.RI_PSTExport = Me.Factory.CreateRibbonButton
@@ -750,6 +751,7 @@ Partial Class Ribbon2
         '
         'SearchTools
         '
+        Me.SearchTools.Items.Add(Me.RI_SemanticArchives)
         Me.SearchTools.Items.Add(Me.RI_KnowledgeStores)
         Me.SearchTools.Items.Add(Me.RI_SchedulerDashboard)
         Me.SearchTools.Items.Add(Me.RI_PSTExport)
@@ -760,6 +762,12 @@ Partial Class Ribbon2
         Me.SearchTools.ShowImage = True
         '
         'RI_KnowledgeStores
+        '
+        Me.RI_SemanticArchives.Label = "Semantic Archives"
+        Me.RI_SemanticArchives.Name = "RI_SemanticArchives"
+        Me.RI_SemanticArchives.OfficeImageId = "DatabaseCopyDatabaseFile"
+        Me.RI_SemanticArchives.ScreenTip = "Create, manage and index semantic archives"
+        Me.RI_SemanticArchives.ShowImage = True
         '
         Me.RI_KnowledgeStores.Label = "Knowledge Stores Admin"
         Me.RI_KnowledgeStores.Name = "RI_KnowledgeStores"
@@ -953,6 +961,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_ApplyMyStyle As RibbonButton
     Friend WithEvents RI_DefineMyStyle As RibbonButton
     Friend WithEvents SearchTools As RibbonMenu
+    Friend WithEvents RI_SemanticArchives As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_KnowledgeStores As RibbonButton
     Friend WithEvents RI_SchedulerDashboard As RibbonButton
     Friend WithEvents RI_PSTExport As RibbonButton

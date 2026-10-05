@@ -2334,7 +2334,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId||__jobCanceled)return;__jobCanceled=true;cancelBtn.disabled=true;setTypingStatus('Cancelling…');await api('inky_cancel',{Job:__currentJobId});});")
-        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
+        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();e.stopPropagation();if(e.stopImmediatePropagation)e.stopImmediatePropagation();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}},true);")
         html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});syncRuntimeStatus(r);updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
@@ -3880,6 +3880,32 @@ Partial Public Class ThisAddIn
                             st = LoadInkyState()
                         End If
 
+                        ' Capture only the current user instruction as retrieval authority.
+                        ' A saved dialog, attachment, or workspace listing cannot select archives.
+                        Dim archiveRequestForJob As System.String = textBody
+                        Dim archiveScopeForJob As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope
+                        If Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            archiveScopeForJob = Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                                Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.ScheduledTask, scheduledTaskId, System.String.Empty, System.Threading.CancellationToken.None).ConfigureAwait(False)
+                        Else
+                            archiveScopeForJob = CreateSelectedSemanticArchiveRunScope()
+                        End If
+                        Dim hasArchiveRequestForJob As System.Boolean = Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(archiveRequestForJob)
+                        If hasArchiveRequestForJob AndAlso archiveScopeForJob IsNot Nothing AndAlso
+                           archiveScopeForJob.AccessContext.DenialCode.Length = 0 AndAlso
+                           archiveScopeForJob.SelectedArchiveIds.Count = 0 AndAlso System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            Dim hasNamedArchive As System.Boolean = False
+                            For Each archiveRequest As Global.SharedLibrary.SharedLibrary.SemanticArchiveRequest In Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.Parse(archiveRequestForJob)
+                                If archiveRequest.ArchiveSelectors.Count > 0 Then hasNamedArchive = True
+                            Next
+                            If Not hasNamedArchive Then
+                                Await SwitchToUi(Sub()
+                                                     Dim selectedScope = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.ShowArchiveScopePicker(_context, archiveScopeForJob)
+                                                     If selectedScope IsNot Nothing Then archiveScopeForJob = selectedScope
+                                                 End Sub).ConfigureAwait(False)
+                            End If
+                        End If
+
                         ' ------------------ (C) Append user turn immediately ------------------
                         Dim userTurn As New ChatTurn With {
                             .Role = "user",
@@ -3897,7 +3923,11 @@ Partial Public Class ThisAddIn
                         sbDialog.AppendLine("<DIALOG>")
                         For Each t In clipped
                             If t.Role = "user" Then
-                                sbDialog.AppendLine("[USER] " & t.Markdown)
+                                Dim turnText As System.String = t.Markdown
+                                If hasArchiveRequestForJob AndAlso System.Object.ReferenceEquals(t, clipped(clipped.Count - 1)) Then
+                                    turnText = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.RemoveRequestControlSpans(archiveRequestForJob)
+                                End If
+                                sbDialog.AppendLine("[USER] " & turnText)
                             Else
                                 sbDialog.AppendLine("[ASSISTANT] " & t.Markdown)
                             End If
@@ -4120,11 +4150,19 @@ Partial Public Class ThisAddIn
                                 Dim agentOutputFiles As List(Of String) = Nothing
                                 Dim scheduledTaskFinalized As Boolean = False
                                 Dim runIsolationOwned As Boolean = False
+                                Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
                                 Try
                                     ' Serialize the complete Local Agent run because model configuration,
                                     ' current attachments, PathPolicy and delivery state are shared host state.
                                     SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(jobCts.Token).GetAwaiter().GetResult()
                                     runIsolationOwned = True
+
+                                    If hasArchiveRequestForJob Then
+                                        archivePrepared = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                                            _context, archiveRequestForJob, archiveScopeForJob,
+                                            allowInteractiveSelection:=False, cancellationToken:=jobCts.Token).GetAwaiter().GetResult()
+                                        sysPromptBase &= System.Environment.NewLine & archivePrepared.ContextText
+                                    End If
 
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -4203,7 +4241,9 @@ Partial Public Class ThisAddIn
                                                     workflowId:=workflowIdForJob,
                                                     resumeWorkflowFromCheckpoint:=isLocalChatRetry,
                                                     workflowContinuationKey:=continuationKeyForJob,
-                                                    workflowContinuationRetentionDays:=continuationRetentionDays
+                                                    workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -4235,7 +4275,9 @@ Partial Public Class ThisAddIn
                                                 workflowId:=workflowIdForJob,
                                                 resumeWorkflowFromCheckpoint:=isLocalChatRetry,
                                                 workflowContinuationKey:=continuationKeyForJob,
-                                                workflowContinuationRetentionDays:=continuationRetentionDays
+                                                workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                             ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -4308,7 +4350,9 @@ Partial Public Class ThisAddIn
                                                     workflowId:=workflowIdForJob,
                                                     resumeWorkflowFromCheckpoint:=isLocalChatRetry,
                                                     workflowContinuationKey:=continuationKeyForJob,
-                                                    workflowContinuationRetentionDays:=continuationRetentionDays
+                                                    workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes

@@ -643,6 +643,10 @@ Public Class frmAIChat
             baseInstructions &= $" Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request."
         End If
 
+        If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+            baseInstructions &= " Type '(sa)' to retrieve evidence from the selected Semantic Archives, or '(sa: archive:""Name"" query)' for a named archive. This also works without agent tools."
+        End If
+
         lblInstructions.Text = baseInstructions
         lblInstructions.AutoSize = True
         lblInstructions.Height = 50
@@ -979,6 +983,16 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             ' STEP 2: Build Conversation Context
             ' ──────────────────────────────────────────────────────────────
+            ' Only the current input box text can request an archive or select scope.
+            ' Source documents and stored conversation text are appended afterwards.
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(userPrompt) Then
+                archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, userPrompt, Globals.ThisAddIn.CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+            End If
+            Dim retrievalUserPrompt As System.String = If(archivePrepared Is Nothing, userPrompt, archivePrepared.CleanPrompt)
+
             Dim conversationSoFar As String = BuildConversationString(_chatHistory)
 
             ' Append OldChat if present (preserved from model switch or previous session)
@@ -1264,7 +1278,7 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             If HasLoadedIndex() Then
                 Dim indexExcerpt As String = Await BuildIndexExcerptAsync(
-                    userPrompt,
+                    retrievalUserPrompt,
                     conversationSoFar,
                     Sub(status)
                         Try
@@ -1289,7 +1303,7 @@ Public Class frmAIChat
             End If
 
             ' Finalize the prompt with the current user message and conversation history.
-            fullPrompt.AppendLine("User: " & userPrompt)
+            fullPrompt.AppendLine("User: " & retrievalUserPrompt)
             fullPrompt.AppendLine($"The conversation so far (not including any previously added text document):{vbLf}{conversationSoFar}")
             Debug.WriteLine(fullPrompt.ToString())
 
@@ -1340,7 +1354,8 @@ Public Class frmAIChat
                         pinnedWordDocumentName:=requestTargetDocumentName,
                         pinnedWordDocumentFullName:=requestTargetDocumentFullName,
                         pinnedWordSelectionStart:=requestTargetSelectionStart,
-                        pinnedWordSelectionEnd:=requestTargetSelectionEnd)
+                        pinnedWordSelectionEnd:=requestTargetSelectionEnd,
+                        semanticArchivePrepared:=archivePrepared)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
