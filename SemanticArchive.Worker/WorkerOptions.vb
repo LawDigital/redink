@@ -30,18 +30,23 @@ Namespace SemanticArchiveWorker
             Dim values As System.String() = If(arguments, New System.String() {})
             Dim index As System.Int32 = 0
 
-            ' Friendly shorthand: redink-sa-worker.exe refresh "Archive Name"
-            ' drains the selected archive with the standard Red Ink configuration and all documents.
+            ' Friendly shorthand: redink-sa-worker.exe repair "Archive A" "Archive B"
+            ' drains one or more selected archives with the standard Red Ink configuration
+            ' and all documents. Positional archive selectors end at the first -- option.
             If values.Length > 0 AndAlso Not values(0).StartsWith("-", System.StringComparison.Ordinal) Then
                 result.Operation = NormalizeOperation(values(0))
-                If values.Length < 2 OrElse System.String.IsNullOrWhiteSpace(values(1)) OrElse values(1).StartsWith("--", System.StringComparison.Ordinal) Then
-                    Throw New System.ArgumentException("The shorthand syntax requires an archive name or stable ID after the operation.")
-                End If
-                result.ArchiveSelectors.Add(values(1).Trim())
+                index = 1
+                While index < values.Length AndAlso Not values(index).StartsWith("--", System.StringComparison.Ordinal)
+                    Dim selector As System.String = values(index).Trim()
+                    If selector.Length = 0 Then Throw New System.ArgumentException("The shorthand syntax contains an empty archive name or stable ID.")
+                    If result.ArchiveSelectors.Exists(Function(existing As System.String) System.String.Equals(existing, selector, System.StringComparison.OrdinalIgnoreCase)) Then Throw New System.ArgumentException("Duplicate archive selector.")
+                    result.ArchiveSelectors.Add(selector)
+                    index += 1
+                End While
+                If result.ArchiveSelectors.Count = 0 Then Throw New System.ArgumentException("The shorthand syntax requires at least one archive name or stable ID after the operation.")
                 result.AllDocuments = True
                 result.LoopContinuously = True
                 modeChosen = True
-                index = 2
             End If
 
             While index < values.Length
@@ -111,10 +116,10 @@ Namespace SemanticArchiveWorker
         Private Shared Function NormalizeOperation(value As System.String) As System.String
             Dim operation As System.String = If(value, "").Trim().ToLowerInvariant()
             Select Case operation
-                Case "refresh", "retry", "reindex", "extract", "permissions"
+                Case "refresh", "retry", "repair", "reindex", "extract", "permissions"
                     Return operation
                 Case Else
-                    Throw New System.ArgumentException("Operation must be refresh, retry, reindex, extract or permissions.")
+                    Throw New System.ArgumentException("Operation must be refresh, retry, repair, reindex, extract or permissions.")
             End Select
         End Function
 

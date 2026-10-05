@@ -333,6 +333,7 @@ Namespace SharedLibrary
                          cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Collections.Generic.List(Of SemanticArchiveExcerpt))
             Dim result As New System.Collections.Generic.List(Of SemanticArchiveExcerpt)()
             coverage.IndexedFilesInspected += 1
+            coverage.SectionIndexesQueried += 1
             Dim indexPath As System.String = _store.ValidateIndexPath(hit.Generation, document, _scope.AccessContext)
             Dim cache As SharedMethods.SemanticSearchIndexCacheItem = Await SharedMethods.TryGetSemanticSearchIndexAsync(indexPath, cancellationToken).ConfigureAwait(False)
             If cache Is Nothing OrElse cache.IndexDocument Is Nothing OrElse cache.OrderedEntries.Count <> document.Index.EntryCount OrElse
@@ -348,7 +349,7 @@ Namespace SharedLibrary
             End If
             Dim readState As SemanticArchiveDocumentReadState = hit.ReadState
             While (readState.NextSectionIndex < cache.OrderedEntries.Count OrElse readState.DeferredSectionIds.Count > 0) AndAlso coverage.ModelCalls < budgets.MaxModelCalls AndAlso
-                  timer.ElapsedMilliseconds < CLng(budgets.MaxElapsedSeconds) * 1000L AndAlso readState.PendingSections.Count < 24
+                  timer.ElapsedMilliseconds < CLng(budgets.MaxElapsedSeconds) * 1000L AndAlso readState.PendingSections.Count < System.Math.Min(24, maximumExcerpts)
                 cancellationToken.ThrowIfCancellationRequested()
                 If Not _store.CanReadDocument(_scope.AccessContext, hit.Generation, document) Then Throw New System.UnauthorizedAccessException("Source access was revoked before section metadata exposure.")
                 Dim group As New System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry)()
@@ -366,6 +367,7 @@ Namespace SharedLibrary
                     cursor += 1
                 End While
                 Dim options As SharedMethods.SemanticSearchRetrievalOptions = SelectionOptions(8, budgets, coverage)
+                options.MaximumSelectionModelCalls = 1
                 Dim selection As SharedMethods.SemanticSearchSelectionResult = Await SharedMethods.SelectSemanticSearchEntriesAsync(_context, SectionSelectionQuestion(hit, group), group, options, cancellationToken).ConfigureAwait(False)
                 coverage.SectionsConsidered += selection.CandidatesConsidered
                 If fromDeferred Then
@@ -381,13 +383,16 @@ Namespace SharedLibrary
                     chosenIds.Add(chosen.Id)
                     If cache.EntriesById.ContainsKey(chosen.Id) AndAlso Not readState.LoadedSections.Contains(chosen.Id) Then readState.PendingSections.Add(chosen)
                 Next
-                If selection.PotentiallyMissingInformation AndAlso chosenIds.Count > 0 Then
+                If selection.PotentiallyMissingInformation OrElse Not selection.CoverageComplete Then
                     For considered As System.Int32 = 0 To System.Math.Min(selection.CandidatesConsidered, group.Count) - 1
                         Dim id As System.String = group(considered).Id
-                        If Not chosenIds.Contains(id) AndAlso Not readState.LoadedSections.Contains(id) AndAlso readState.DeferredSectionSet.Add(id) Then readState.DeferredSectionIds.Add(id)
+                        If Not chosenIds.Contains(id) AndAlso Not selection.RejectedEntryIds.Contains(id) AndAlso Not readState.LoadedSections.Contains(id) AndAlso readState.DeferredSectionSet.Add(id) Then readState.DeferredSectionIds.Add(id)
                     Next
                 End If
-                If Not selection.CoverageComplete Then
+                If selection.CandidatesConsidered = 0 OrElse (selection.PotentiallyMissingInformation AndAlso chosenIds.Count = 0 AndAlso selection.RejectedEntryIds.Count = 0) OrElse
+                   (fromDeferred AndAlso readState.PendingSections.Count = 0 AndAlso selection.RejectedEntryIds.Count = 0) Then
+                    ' An incomplete empty selection is not an irrelevant-section proof.
+                    ' Defer it without repeating the identical request in this read.
                     coverage.Diagnostics.Add("section_selection_budget: Remaining section metadata is retained for a subsequent read.")
                     Exit While
                 End If

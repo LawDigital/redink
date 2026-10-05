@@ -473,6 +473,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveHierarchy.vb" />
+    <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveRouting.vb" />
     <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveHostIntegration.vb" />
     <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveCatalogDiscovery.vb" />
     <Compile Include="Code\CommonFeatures\RetrievalSourceDiscovery.vb" />

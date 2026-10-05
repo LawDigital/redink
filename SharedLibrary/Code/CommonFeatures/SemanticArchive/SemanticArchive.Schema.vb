@@ -349,6 +349,32 @@ Namespace SharedLibrary
         Public Property Artifact As SemanticArchiveArtifactReference
     End Class
 
+
+    Public NotInheritable Class SemanticArchiveRoutingGroup
+        Public Property GroupId As System.String = ""
+        Public Property RouteKind As System.String = ""
+        Public Property Level As System.Int32
+        Public Property Card As SemanticArchiveCard
+        Public Property ChildGroupIds As New System.Collections.Generic.List(Of System.String)()
+        Public Property DocumentIds As New System.Collections.Generic.List(Of System.String)()
+        Public Property RepresentativeDocumentIds As New System.Collections.Generic.List(Of System.String)()
+        Public Property MembershipSignature As System.String = ""
+        Public Property ContentSignature As System.String = ""
+    End Class
+
+    Public NotInheritable Class SemanticArchiveRoutingGraph
+        ' Zero is invalid: a missing persisted version must not become current by default.
+        Public Property SchemaVersion As System.Int32
+        Public Property ProfileSignature As System.String = ""
+        Public Property MaxChildrenPerGroup As System.Int32 = 48
+        Public Property RootGroupIds As New System.Collections.Generic.List(Of System.String)()
+        Public Property Groups As New System.Collections.Generic.Dictionary(Of System.String, SemanticArchiveRoutingGroup)(System.StringComparer.Ordinal)
+        Public Property DocumentParentGroupIds As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of System.String))(System.StringComparer.Ordinal)
+        ' Required current-format signatures; old routing formats are not migrated.
+        Public Property DocumentCardSignatures As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+        Public Property DocumentCount As System.Int32
+    End Class
+
     Public NotInheritable Class SemanticArchiveGenerationManifest
         Public Property Inventory As New SemanticArchiveInventory()
         Public Property SchemaVersion As System.Int32 = SemanticArchiveStore.GenerationSchemaVersion
@@ -364,6 +390,7 @@ Namespace SharedLibrary
         Public Property Nodes As New System.Collections.Generic.Dictionary(Of System.String, SemanticArchiveNodeDescriptor)(System.StringComparer.Ordinal)
         Public Property DocumentShards As New System.Collections.Generic.List(Of SemanticArchiveDocumentShardDescriptor)()
         Public Property TermShards As New System.Collections.Generic.List(Of SemanticArchiveArtifactReference)()
+        Public Property RoutingGraphArtifact As SemanticArchiveArtifactReference
         Public Property DocumentCount As System.Int32
         Public Property TotalDocumentCount As System.Int32
         Public Property FailureCount As System.Int32

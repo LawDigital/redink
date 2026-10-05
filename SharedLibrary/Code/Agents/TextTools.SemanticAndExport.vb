@@ -1065,7 +1065,8 @@ Namespace Agents
                                 Await TryExtractTextForExportAsync(snapshotPath, context, ocrPdf, token, executionOptions).ConfigureAwait(False)
                             Return ConvertToExtractionPayload(localResult)
                         End Function,
-                        cancellationToken).ConfigureAwait(False)
+                        cancellationToken,
+                        forceFresh:=executionOptions IsNot Nothing AndAlso executionOptions.ForceFreshExtraction).ConfigureAwait(False)
 
                     result = ConvertFromExtractionPayload(If(resource Is Nothing, Nothing, resource.Payload))
                 Finally
@@ -1207,9 +1208,15 @@ Namespace Agents
                                                                       context As ISharedContext,
                                                                       ocrPdf As System.Boolean) As System.String
             Dim extension As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
-            If extension = ".pdf" AndAlso ocrPdf Then
-                If context IsNot Nothing Then SharedMethods.ResolveIsolatedSpecialTaskModel(context, "OCR")
-                Return SharedMethods.GetOcrConfigurationFingerprint(context)
+            If extension = ".pdf" Then
+                ' Version the PDF extraction contract only. Existing non-PDF extracts
+                ' do not become stale merely because PDF reading/OCR was corrected.
+                Dim ocrFingerprint As System.String = "disabled"
+                If ocrPdf Then
+                    If context IsNot Nothing Then SharedMethods.ResolveIsolatedSpecialTaskModel(context, "OCR")
+                    ocrFingerprint = SharedMethods.GetOcrConfigurationFingerprint(context)
+                End If
+                Return TextExtractionResourceRegistry.HashString("pdf-layout-and-page-ocr-v1|" & ocrFingerprint)
             End If
             If SharedMethods.IsBinaryMediaExtension(extension) AndAlso context IsNot Nothing Then
                 Dim resolved As SharedMethods.IsolatedSpecialTaskModel = SharedMethods.ResolveIsolatedSpecialTaskModel(
@@ -1219,6 +1226,12 @@ Namespace Agents
             If extension = ".doc" Then
                 Return TextExtractionResourceRegistry.HashString("legacy-word|enabled=" &
                     (context IsNot Nothing AndAlso context.INI_AllowLegacyDocFiles).ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End If
+            If extension = ".docx" OrElse extension = ".docm" Then
+                ' The sandboxed DOCX reader either parses the complete declared Word
+                ' package successfully or returns a structured reader error. Version
+                ' this coverage contract without invalidating unrelated file formats.
+                Return TextExtractionResourceRegistry.HashString("openxml-word-full-coverage-v2")
             End If
             Return TextExtractionResourceRegistry.HashString(
                 "adapter=" & GetExtractionAdapterId(sourcePath) & "|ocr_pdf=" &
@@ -1304,8 +1317,18 @@ Namespace Agents
 
                 Case ".docx", ".docm"
                     Dim docxError As System.String = Nothing
-                    Dim docxText As System.String = SharedMethods.ReadDocxSandboxed(filePath, readError:=docxError)
-                    Return NormalizeLegacyExtractionResult(docxText, "word", docxError)
+                    Dim docxCoverageComplete As System.Nullable(Of System.Boolean) = Nothing
+                    Dim docxText As System.String = SharedMethods.ReadDocxSandboxed(filePath, False, docxError, docxCoverageComplete)
+                    Dim docxResult As TextExtractionOutcome = NormalizeLegacyExtractionResult(docxText, "word", docxError)
+                    If docxResult.Success Then
+                        docxResult.ExtractionComplete = docxCoverageComplete
+                        If docxCoverageComplete.HasValue Then
+                            docxResult.ExtractionCoverageBasis = If(docxCoverageComplete.Value, "openxml_docx_full_read", "openxml_docx_partial_optional_parts")
+                        Else
+                            docxResult.ExtractionCoverageBasis = "reader_coverage_unverified"
+                        End If
+                    End If
+                    Return docxResult
 
                 Case ".xlsx", ".xlsm"
                     Dim xlsxError As System.String = Nothing

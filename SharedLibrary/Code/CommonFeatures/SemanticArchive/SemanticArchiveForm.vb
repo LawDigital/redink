@@ -45,6 +45,7 @@ Namespace SharedLibrary
         Private _loading As Boolean
         Private _catalogActivationBlocked As System.Boolean
         Private _catalogActivationMessage As System.String = ""
+        Private _archiveIndexUnsupported As System.Boolean
         Private _archiveDirty As System.Boolean
         Private _backgroundDirty As System.Boolean
         Private _updatingWrapping As System.Boolean
@@ -127,6 +128,18 @@ Namespace SharedLibrary
         Private ReadOnly _shadowArtifactRoot As New System.Windows.Forms.TextBox() With {.Dock = System.Windows.Forms.DockStyle.Fill}
         Private ReadOnly _documents As New System.Windows.Forms.ListView() With {.Dock = System.Windows.Forms.DockStyle.Fill, .View = System.Windows.Forms.View.Details, .FullRowSelect = True, .MultiSelect = True, .HideSelection = False}
         Private ReadOnly _documentFilter As New System.Windows.Forms.TextBox() With {.Width = 260}
+        Private ReadOnly _documentStateFilter As New System.Windows.Forms.ComboBox() With {.Width = 210, .DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList}
+        Private ReadOnly _documentTechnical As New System.Windows.Forms.CheckBox() With {.Text = "Show IDs / technical details", .AutoSize = True}
+        Private ReadOnly _documentDetails As New System.Windows.Forms.TextBox() With {.Dock = System.Windows.Forms.DockStyle.Fill, .Multiline = True, .ReadOnly = True, .ScrollBars = System.Windows.Forms.ScrollBars.Vertical}
+        Private ReadOnly _documentSelectionStatus As New System.Windows.Forms.Label() With {.AutoSize = True, .Padding = New System.Windows.Forms.Padding(4, 7, 4, 0)}
+        Private ReadOnly _selectLoadedDocuments As System.Windows.Forms.Button = MakeButton("Select loaded matches")
+        Private ReadOnly _clearDocumentSelection As System.Windows.Forms.Button = MakeButton("Clear selection")
+        Private ReadOnly _documentAdvanced As New System.Windows.Forms.Panel() With {.Dock = System.Windows.Forms.DockStyle.Top, .Height = 70, .Visible = False}
+        Private _updatingDocumentRows As System.Boolean
+        Private _documentSortColumn As System.Int32
+        Private _documentSortDescending As System.Boolean
+        Private Const MaintenancePageSize As System.Int32 = 200
+        Private Const MaintenanceLoadedLimit As System.Int32 = 5000
         Private ReadOnly _selectedDocumentIds As New System.Windows.Forms.TextBox() With {.Dock = System.Windows.Forms.DockStyle.Fill, .Multiline = True, .Height = 60, .ScrollBars = System.Windows.Forms.ScrollBars.Vertical}
         Private ReadOnly _documentPageStatus As New System.Windows.Forms.Label() With {.Dock = System.Windows.Forms.DockStyle.Bottom, .Height = 38, .AutoEllipsis = True}
         Private ReadOnly _scopeTags As New System.Windows.Forms.TextBox() With {.Dock = System.Windows.Forms.DockStyle.Fill}
@@ -156,16 +169,16 @@ Namespace SharedLibrary
         Private ReadOnly _saveRoot As System.Windows.Forms.Button = MakeButton("Save source and archive settings")
         Private ReadOnly _refresh As System.Windows.Forms.Button = MakeButton("Refresh archive")
         Private ReadOnly _pause As System.Windows.Forms.Button = MakeButton("Pause")
-        Private ReadOnly _retry As System.Windows.Forms.Button = MakeButton("Retry all failures")
-        Private ReadOnly _rebuild As System.Windows.Forms.Button = MakeButton("Reindex all")
+        Private ReadOnly _retry As System.Windows.Forms.Button = MakeButton("Retry failed")
+        Private ReadOnly _rebuild As System.Windows.Forms.Button = MakeButton("Rebuild semantic index")
         Private ReadOnly _extractAll As System.Windows.Forms.Button = MakeButton("Re-extract/OCR all")
         Private ReadOnly _permissionsAll As System.Windows.Forms.Button = MakeButton("Permissions: all")
-        Private ReadOnly _rebuildSelected As System.Windows.Forms.Button = MakeButton("Reindex selected")
+        Private ReadOnly _rebuildSelected As System.Windows.Forms.Button = MakeButton("Rebuild semantic index (selected)")
         Private ReadOnly _extractSelected As System.Windows.Forms.Button = MakeButton("Re-extract/OCR selected")
         Private ReadOnly _permissionsSelected As System.Windows.Forms.Button = MakeButton("Permissions: selected")
         Private ReadOnly _retrySelected As System.Windows.Forms.Button = MakeButton("Retry selected")
-        Private ReadOnly _loadDocuments As System.Windows.Forms.Button = MakeButton("Load first page")
-        Private ReadOnly _nextDocuments As System.Windows.Forms.Button = MakeButton("Next page")
+        Private ReadOnly _loadDocuments As System.Windows.Forms.Button = MakeButton("Find documents")
+        Private ReadOnly _nextDocuments As System.Windows.Forms.Button = MakeButton("Load more matches")
         Private ReadOnly _inspect As System.Windows.Forms.Button = MakeButton("Refresh status")
         Private ReadOnly _saveBackground As System.Windows.Forms.Button = MakeButton("Save personal settings")
 
@@ -329,7 +342,7 @@ Namespace SharedLibrary
             Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
             AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
-            Size = New System.Drawing.Size(1180, 850)
+            Size = New System.Drawing.Size(1440, 960)
             MinimumSize = New System.Drawing.Size(1000, 740)
             StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
 
@@ -502,11 +515,33 @@ Namespace SharedLibrary
             AddHandler _loadDocuments.Click, Async Sub(sender, args) Await RunConsoleOperationAsync(Function() LoadDocumentPageAsync(True))
             AddHandler _nextDocuments.Click, Async Sub(sender, args) Await RunConsoleOperationAsync(Function() LoadDocumentPageAsync(False))
             AddHandler _documents.SelectedIndexChanged, AddressOf DocumentSelectionChanged
-            AddHandler _documentFilter.TextChanged, Sub(sender, args)
-                                                        ResetDocumentListing()
-                                                        _nextDocuments.Enabled = False
-                                                    End Sub
-            AddHandler _selectedDocumentIds.TextChanged, Sub(sender, args) UpdateSelectedActions()
+            AddHandler _documents.ColumnClick, AddressOf DocumentColumnClicked
+            AddHandler _documentFilter.TextChanged, AddressOf DocumentFilterChanged
+            AddHandler _documentStateFilter.SelectedIndexChanged, AddressOf DocumentFilterChanged
+            AddHandler _selectLoadedDocuments.Click, AddressOf SelectLoadedDocuments
+            AddHandler _clearDocumentSelection.Click, Sub(sender, args)
+                                                         _updatingDocumentRows = True
+                                                         _documents.BeginUpdate()
+                                                         Try
+                                                             For Each item As System.Windows.Forms.ListViewItem In _documents.Items
+                                                                 item.Selected = False
+                                                             Next
+                                                         Finally
+                                                             _documents.EndUpdate()
+                                                             _updatingDocumentRows = False
+                                                         End Try
+                                                         _selectedDocumentIds.Clear()
+                                                         UpdateDocumentDetails()
+                                                     End Sub
+            AddHandler _documentTechnical.CheckedChanged, Sub(sender, args)
+                                                             _documents.Columns(4).Width = If(_documentTechnical.Checked, 270, 0)
+                                                             _documentAdvanced.Visible = _documentTechnical.Checked
+                                                             UpdateDocumentDetails()
+                                                         End Sub
+            AddHandler _selectedDocumentIds.TextChanged, Sub(sender, args)
+                                                            UpdateSelectedActions()
+                                                            UpdateDocumentDetails()
+                                                        End Sub
             AddHandler _pause.Click, Async Sub(sender, args) Await RunConsoleOperationAsync(Function() PauseResumeAsync())
             AddHandler _inspect.Click, Async Sub(sender, args) Await RunConsoleOperationAsync(Function() RefreshDiagnosticsAsync())
             SetBusy(False)
@@ -830,21 +865,21 @@ Namespace SharedLibrary
             SetHelp(_addRootPath, "Add the source folder typed above to this archive. Absolute local and UNC paths are accepted; an existing identical source is selected instead of duplicated. Source read access is enough when derivatives use writable private storage. Existing archive changes are saved first, and a failed addition retains the typed path.")
             SetHelp(_removeRoot, "Remove the selected source from this archive. Original files are retained. Existing changes are saved first.")
             SetHelp(_refresh, "Save archive changes, discover new or changed files, and reuse valid extracted text and indexes.")
-            SetHelp(_rebuild, "Save archive changes, then rebuild semantic metadata and applicable section indexes for all documents. Compatible extracted text can be reused.")
+            SetHelp(_rebuild, "Save archive changes, then rebuild semantic cards, applicable section indexes and routing from validated existing extracted text. This operation never invokes extraction or OCR; documents without a compatible valid extract are reported as needing extraction.")
             SetHelp(_extractAll, "Save archive changes, then extract all text again. OCR is used only where enabled for the source.")
             SetHelp(_permissionsAll, "Save archive changes, then reconcile generated-file permissions for all documents. Original-file permissions never change; insufficient rights can defer repairs.")
-            SetHelp(_retry, "Save archive changes and retry failed work across the selected archive.")
+            SetHelp(_retry, "Save archive changes and retry failed or coverage-excluded work across the selected archive. Missing/empty/incomplete/unknown extraction is freshly extracted/OCRed; verified complete extracts are reused when only indexing or semantic work failed.")
             SetHelp(_pause, "Pause content and permission work in this Office context at safe checkpoints; published search remains available. Resume retains the exact operation and selection. Closing releases this temporary automatic pause.")
             SetHelp(_inspect, "Read current published-generation status and work diagnostics without starting indexing.")
-            SetHelp(_documents, "Published document metadata. Select rows to populate document IDs below. Current source access is checked before disclosing paths; restricted entries display only opaque IDs.")
-            SetHelp(_documentFilter, "Match this text in a source path or stable document ID. Changing the filter resets paging; load the first page to apply it.")
+            SetHelp(_documents, "Matching published documents. Click column headers to sort loaded matches. Multi-select rows for targeted actions. Names, paths and source status require current source access; inaccessible sources appear only in All documents or Source access unavailable.")
+            SetHelp(_documentFilter, "Filter names/paths or document IDs. Changing the filter clears results and selection; Find documents applies it across the published metadata.")
             SetHelp(_selectedDocumentIds, "One stable document ID per line, up to 1,024. Use the first column of the document list. Empty never means all documents.")
-            SetHelp(_loadDocuments, "Read the first bounded page of published metadata without scanning original folders. A page can contain no matches while more records remain.")
-            SetHelp(_nextDocuments, "Continue reading the same published generation. Loading a page replaces displayed rows and their selection.")
-            SetHelp(_rebuildSelected, "Save archive changes and rebuild semantic indexes only for the explicit document IDs below.")
+            SetHelp(_loadDocuments, "Find matching documents across the published metadata. Empty chunks are skipped automatically. Pause cancels the search. No original-directory scan is started.")
+            SetHelp(_nextDocuments, "Append matching documents from the same published snapshot. Loaded rows and selections remain. Sort applies to loaded matches; Find documents starts with the current snapshot.")
+            SetHelp(_rebuildSelected, "Save archive changes and rebuild semantic indexes only for the explicit document IDs below. Valid extracted text is retained; this operation never invokes extraction or OCR.")
             SetHelp(_extractSelected, "Save archive changes and extract text again only for explicit document IDs. Each source's OCR option still applies.")
             SetHelp(_permissionsSelected, "Save archive changes and reconcile generated-file permissions only for explicit document IDs. Original permissions remain unchanged.")
-            SetHelp(_retrySelected, "Save archive changes and retry failed work only for explicit document IDs. Empty selection never means all.")
+            SetHelp(_retrySelected, "Save archive changes and retry failed or coverage-excluded work only for explicit document IDs. Extraction is repeated only when the stored extraction is missing/empty/incomplete/unknown; complete extracts are reused. Empty selection never means all.")
             SetHelp(_diagnostics, "Read-only operation details and errors, including path or permission failures. Select text and use Copy diagnostics, or copy the whole view when no text is selected.")
             SetHelp(_copyDiagnostics, "Copy selected diagnostic text to the clipboard; if no text is selected, copy all displayed diagnostics.")
             SetHelp(_showTechnicalDiagnostics, "Include deduplicated routing-metadata reductions and local hierarchy splits. These are technical observations, not failed document conversions. Saved details are bounded; source-specific messages require current access to the original.")
@@ -1026,10 +1061,12 @@ Namespace SharedLibrary
             _archiveSelectionIndex = _archives.SelectedIndex
             _rootSelectionIndex = -1
             _archiveDirty = False
+            _archiveIndexUnsupported = False
             ResetDocumentListing()
             _documents.Items.Clear()
             _selectedDocumentIds.Clear()
-            _documentPageStatus.Text = "Load a bounded page of published document metadata or paste known stable document IDs."
+            _documentDetails.Clear()
+            _documentPageStatus.Text = "Choose a status and Find documents. Needs attention lists incomplete, empty or unsuccessful processing. Source access unavailable is a separate view."
             _root = Nothing
             _loading = True
             _newRootPath.Clear()
@@ -1251,19 +1288,44 @@ Namespace SharedLibrary
         Private Async Function RemoveArchiveAsync() As System.Threading.Tasks.Task
             If _closeRequested OrElse _busy OrElse _catalogActivationBlocked OrElse _archive Is Nothing Then Return
             If Not ConfirmDiscardChanges(False) Then Return
-            If Not ConfirmConsoleAction("Unregister '" & _archive.Name & "'? Original files and generated artifacts are retained.", "Unregister", "Cancel") Then Return
-            Dim id = _archive.ArchiveId
+            Dim withdrawRequired As System.Boolean = Not SemanticArchiveLibrary.IsSubscriber(_archive) AndAlso
+                _archive.Library IsNot Nothing AndAlso _archive.Library.State = "available"
+            Dim message As System.String = "Unregister '" & _archive.Name & "'? Original files and generated artifacts are retained."
+            If withdrawRequired Then message = "Withdraw the published library definition of '" & _archive.Name & "' and then unregister this local archive? Library readers will no longer receive the definition. Original files and generated artifacts are retained."
+            If Not ConfirmConsoleAction(message, If(withdrawRequired, "Withdraw and unregister", "Unregister"), "Cancel") Then Return
+            Dim id As System.String = _archive.ArchiveId
+            Dim cancellation As New System.Threading.CancellationTokenSource()
+            _operationCancellation = cancellation
             SetBusy(True)
+            Dim removed As System.Boolean = False
+            Dim failure As System.Exception = Nothing
+            Dim cancelled As System.Boolean = False
             Try
-                Await System.Threading.Tasks.Task.Run(Sub() _store.RemoveArchive(id))
+                Await System.Threading.Tasks.Task.Run(
+                    Sub()
+                        cancellation.Token.ThrowIfCancellationRequested()
+                        If withdrawRequired Then
+                            If Not SemanticArchiveLibrary.IsConfigured(_context) Then Throw New System.InvalidOperationException("Restore the archive's configured library connection first. Its published definition must be withdrawn before local unregistration.")
+                            SemanticArchiveLibrary.Publish(_context, id, True, cancellation.Token)
+                        End If
+                        ' Store keeps its publication/revision/subscriber guards. No index is opened.
+                        cancellation.Token.ThrowIfCancellationRequested()
+                        _store.RemoveArchive(id)
+                        removed = True
+                    End Sub, cancellation.Token)
+            Catch ex As System.OperationCanceledException
+                cancelled = True
             Catch ex As System.Exception
-                ReportError("Archive could not be unregistered", ex)
-                Return
+                failure = ex
             Finally
+                _operationCancellation = Nothing
+                cancellation.Dispose()
                 SetBusy(False)
             End Try
-            _archiveDirty = False
-            Await ReloadCatalogAsync()
+            If removed Then _archiveDirty = False
+            If Not _closeRequested Then Await ReloadCatalogAsync()
+            If failure IsNot Nothing Then ReportError("Archive could not be unregistered. A failed withdrawal leaves the local registration in place; reload to verify a partially completed operation", failure)
+            If cancelled AndAlso Not IsDisposed Then _status.Text = "Unregistration stopped. A publication already withdrawn stays withdrawn; reload before continuing."
         End Function
 
         Private Async Function AddRootAsync() As System.Threading.Tasks.Task
@@ -1445,13 +1507,13 @@ Namespace SharedLibrary
                 Case MaintenanceCommand.RefreshContent
                     Return "Refreshing " & scopeText & ". Unchanged documents and valid extracted text are reused; only necessary work is performed."
                 Case MaintenanceCommand.SemanticReindex
-                    Return "Rebuilding semantic metadata for " & scopeText & ". Compatible extracted text is reused."
+                    Return "Rebuilding the semantic index for " & scopeText & ". Existing validated extracted text is reused; this operation never runs extraction or OCR."
                 Case MaintenanceCommand.Extract
                     Return "Re-extracting text for " & scopeText & ". PDF text layers are checked first; OCR runs only for pages that need it, using the configured batch size."
                 Case MaintenanceCommand.Permissions
                     Return "Checking generated-file permissions for " & scopeText & ". Original document permissions are not changed."
                 Case MaintenanceCommand.Retry
-                    Return "Retrying unfinished work for " & scopeText & ". Completed documents are not restarted."
+                    Return "Retrying unfinished or coverage-excluded work for " & scopeText & ". Missing/empty/incomplete/unknown extraction is refreshed; verified complete extracts are reused."
                 Case Else
                     Return "Processing " & scopeText & "."
             End Select
@@ -1534,6 +1596,7 @@ Namespace SharedLibrary
                 Dim totalProcessed As Integer = 0
                 Dim totalReused As Integer = 0
                 Dim totalFailed As Integer = 0
+                Dim totalCoverageExcluded As Integer = 0
                 Dim totalRepaired As Integer = 0
                 Dim totalQuarantined As Integer = 0
                 Do
@@ -1542,6 +1605,7 @@ Namespace SharedLibrary
                         .OperationId = operationId,
                         .SelectedDocumentIds = If(selectedIds Is Nothing, Nothing, New System.Collections.Generic.List(Of String)(selectedIds)),
                         .RebuildSemanticMetadata = command = MaintenanceCommand.SemanticReindex,
+                        .IndexOnlyRebuild = command = MaintenanceCommand.SemanticReindex,
                         .ForceReextract = command = MaintenanceCommand.Extract,
                         .RetryFailures = command = MaintenanceCommand.Retry,
                         .ReconcilePermissionsOnly = command = MaintenanceCommand.Permissions,
@@ -1553,6 +1617,7 @@ Namespace SharedLibrary
                     totalProcessed += result.ProcessedFiles
                     totalReused += result.ReusedFiles
                     totalFailed += result.FailedFiles
+                    totalCoverageExcluded += result.CoverageExcludedFiles
                     totalRepaired += result.PermissionArtifactsRepaired
                     totalQuarantined += result.PermissionArtifactsQuarantined
                     Dim visibleDiagnostics As System.Collections.Generic.List(Of System.String) = Await System.Threading.Tasks.Task.Run(
@@ -1563,7 +1628,8 @@ Namespace SharedLibrary
                     If result.SelectionRequired Then Throw New System.InvalidOperationException("The targeted command has no selected document IDs; no archive-wide work was started.")
                     If includeTechnicalDiagnostics Then
                         AppendDiagnostic("Processed: " & totalProcessed.ToString() & "; reused: " & totalReused.ToString() &
-                            "; failed: " & totalFailed.ToString() & "; pending: " & result.PendingFiles.ToString() & "; deferred: " & result.DeferredFiles.ToString() &
+                            "; failed: " & totalFailed.ToString() & "; coverage excluded: " & totalCoverageExcluded.ToString() &
+                            "; pending: " & result.PendingFiles.ToString() & "; deferred: " & result.DeferredFiles.ToString() &
                             "; permissions repaired/quarantined: " & totalRepaired.ToString() & "/" & totalQuarantined.ToString() &
                             "; discovery pending: " & result.DiscoveryPending.ToString() & "; published: " & result.Published.ToString() & ".")
                         If result.Published Then AppendDiagnostic("Validated generation activated: " & result.GenerationId)
@@ -1591,7 +1657,8 @@ Namespace SharedLibrary
                     If Not pending Then
                         If Not includeTechnicalDiagnostics Then
                             AppendDiagnostic("Completed. " & totalProcessed.ToString(System.Globalization.CultureInfo.InvariantCulture) & " document job(s) processed; " &
-                                totalReused.ToString(System.Globalization.CultureInfo.InvariantCulture) & " reused; " & totalFailed.ToString(System.Globalization.CultureInfo.InvariantCulture) & " failed.")
+                                totalReused.ToString(System.Globalization.CultureInfo.InvariantCulture) & " reused; " & totalFailed.ToString(System.Globalization.CultureInfo.InvariantCulture) & " failed; " &
+                                totalCoverageExcluded.ToString(System.Globalization.CultureInfo.InvariantCulture) & " coverage-excluded result(s) recorded during this operation.")
                             If result.Inventory IsNot Nothing Then AppendDiagnostic(result.Inventory.ToDiagnosticText())
                         End If
                         _resumeArchiveId = ""
@@ -1685,9 +1752,16 @@ Namespace SharedLibrary
                 Dim publishedDiagnostics As New System.Collections.Generic.List(Of System.String)()
                 Dim queueDiagnostics As System.Collections.Generic.List(Of String) = Nothing
                 Dim manifest As SemanticArchiveGenerationManifest = Nothing
+                Dim unsupportedIndex As System.Boolean = False
+                Dim unsupportedDetail As System.String = ""
                 Await System.Threading.Tasks.Task.Run(
                     Sub()
-                        manifest = _store.PinGenerationForAdministration(archiveId)
+                        Try
+                            manifest = _store.PinGenerationForAdministration(archiveId)
+                        Catch ex As System.IO.InvalidDataException When ex.Message.StartsWith("unsupported_semantic_index:", System.StringComparison.Ordinal)
+                            unsupportedIndex = True
+                            If includeTechnical Then unsupportedDetail = ex.ToString()
+                        End Try
                         queueDiagnostics = SemanticArchiveBuilder.ReadDiagnostics(_store, archiveId, includeTechnical)
                         If manifest IsNot Nothing Then publishedDiagnostics = SemanticArchiveBuilder.PresentDiagnostics(_store, archiveId, manifest.Diagnostics, includeTechnical)
                     End Sub)
@@ -1708,7 +1782,12 @@ Namespace SharedLibrary
                 For Each message In queueDiagnostics
                     AppendDiagnostic(message)
                 Next
-                If manifest Is Nothing Then
+                _archiveIndexUnsupported = unsupportedIndex
+                If unsupportedIndex Then
+                    AppendDiagnostic("This archive uses an unsupported old index format. Create a new archive index; repairing or migrating this old index is not supported. Unregister remains available and will first withdraw a published library definition. Original files and generated artifacts are retained.")
+                    If includeTechnical Then AppendDiagnostic(unsupportedDetail)
+                    _status.Text = "Old index format: create a new archive or use Unregister to withdraw and remove its registration."
+                ElseIf manifest Is Nothing Then
                     AppendDiagnostic("No published generation is available.")
                     _status.Text = "No published generation is available for " & _archive.Name & ". See diagnostics for queued or pending work."
                 Else
@@ -1753,13 +1832,20 @@ Namespace SharedLibrary
             _removeRoot.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _root IsNot Nothing
             _rootEditor.Enabled = Not value AndAlso _root IsNot Nothing
             LayoutSourceSections()
-            _refresh.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing
-            _retry.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing
-            _rebuild.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing
-            _extractAll.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing
+            _refresh.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing AndAlso Not _archiveIndexUnsupported
+            _retry.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing AndAlso Not _archiveIndexUnsupported
+            _rebuild.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing AndAlso Not _archiveIndexUnsupported
+            _extractAll.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing AndAlso Not _archiveIndexUnsupported
             _permissionsAll.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing
             _loadDocuments.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing
-            _nextDocuments.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing AndAlso _documentCursor IsNot Nothing AndAlso Not _documentListingComplete
+            _nextDocuments.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing AndAlso _documentCursor IsNot Nothing AndAlso Not _documentListingComplete AndAlso _documents.Items.Count < MaintenanceLoadedLimit
+            _documentFilter.Enabled = Not value
+            _documentStateFilter.Enabled = Not value
+            _documentTechnical.Enabled = Not value
+            _selectedDocumentIds.ReadOnly = value
+            _documents.Enabled = Not value
+            _selectLoadedDocuments.Enabled = Not value AndAlso _documents.Items.Count > 0
+            _clearDocumentSelection.Enabled = Not value
             UpdateSelectedActions()
             _inspect.Enabled = Not value AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing
             _globalEnabled.Enabled = Not value
@@ -1878,25 +1964,46 @@ Namespace SharedLibrary
 
         Private Function CreateDocumentsTab() As System.Windows.Forms.TabPage
             Dim tab As New System.Windows.Forms.TabPage("Documents and selected actions")
-            _documents.Columns.Add("Stable document ID", 265)
-            _documents.Columns.Add("Original source", 400)
-            _documents.Columns.Add("Processing status", 135)
-            tab.Controls.Add(_documents)
-            Dim top As New System.Windows.Forms.FlowLayoutPanel() With {.Dock = System.Windows.Forms.DockStyle.Top, .AutoSize = True, .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink, .Padding = New System.Windows.Forms.Padding(4)}
-            top.Controls.Add(New System.Windows.Forms.Label() With {.Text = "Path or document ID contains", .AutoSize = True, .Padding = New System.Windows.Forms.Padding(0, 7, 0, 0)})
+            Dim layout As New System.Windows.Forms.TableLayoutPanel() With {.Dock = System.Windows.Forms.DockStyle.Fill, .ColumnCount = 1, .RowCount = 6, .Padding = New System.Windows.Forms.Padding(4)}
+            layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 76))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            _documents.Columns.Add("Document", 260)
+            _documents.Columns.Add("Status", 180)
+            _documents.Columns.Add("Recommended action", 285)
+            _documents.Columns.Add("Original folder", 280)
+            _documents.Columns.Add("Document ID", 0)
+            _documents.ShowItemToolTips = True
+            _documents.ListViewItemSorter = New MaintenanceDocumentComparer(0, False)
+            _documentStateFilter.Items.AddRange(New System.Object() {"Needs attention", "Incomplete / unknown extraction", "No readable text", "Processing failed", "Needs extraction / indexing", "Source access unavailable", "Searchable", "All documents", "Removed"})
+            _documentStateFilter.SelectedIndex = 0
+            Dim top As New System.Windows.Forms.FlowLayoutPanel() With {.Dock = System.Windows.Forms.DockStyle.Fill, .AutoSize = True, .WrapContents = True}
+            top.Controls.Add(_documentStateFilter)
+            top.Controls.Add(New System.Windows.Forms.Label() With {.Text = "Name or path contains", .AutoSize = True, .Padding = New System.Windows.Forms.Padding(0, 7, 0, 0)})
             top.Controls.Add(_documentFilter)
             top.Controls.Add(_loadDocuments)
             top.Controls.Add(_nextDocuments)
-            tab.Controls.Add(top)
-            Dim selection = NewTable()
-            selection.Dock = System.Windows.Forms.DockStyle.Bottom
-            AddRow(selection, "Selected document IDs (one per line)", _selectedDocumentIds)
-            AddRow(selection, "Selection safety", New System.Windows.Forms.Label() With {.Text = "Select rows or paste stable document IDs. An empty selection never means all. Paths are shown only after current original-source authorization. Restricted rows contain opaque IDs only. Metadata is read in bounded pages without source-directory scans. Re-extract/OCR uses each root's configured OCR option.", .AutoSize = True, .MaximumSize = New System.Drawing.Size(530, 0)})
-            tab.Controls.Add(selection)
-            Dim actions As New System.Windows.Forms.FlowLayoutPanel() With {.Dock = System.Windows.Forms.DockStyle.Bottom, .AutoSize = True, .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink}
-            actions.Controls.AddRange(New System.Windows.Forms.Control() {_permissionsSelected, _rebuildSelected, _extractSelected, _retrySelected})
-            tab.Controls.Add(actions)
-            tab.Controls.Add(_documentPageStatus)
+            top.Controls.Add(_documentTechnical)
+            layout.Controls.Add(top, 0, 0)
+            layout.Controls.Add(_documents, 0, 1)
+            layout.Controls.Add(_documentDetails, 0, 2)
+            Dim actions As New System.Windows.Forms.FlowLayoutPanel() With {.Dock = System.Windows.Forms.DockStyle.Fill, .AutoSize = True, .WrapContents = True}
+            actions.Controls.AddRange(New System.Windows.Forms.Control() {_selectLoadedDocuments, _clearDocumentSelection, _documentSelectionStatus, _retrySelected, _extractSelected, _rebuildSelected, _permissionsSelected})
+            layout.Controls.Add(actions, 0, 3)
+            _selectedDocumentIds.Dock = System.Windows.Forms.DockStyle.Fill
+            _selectedDocumentIds.AccessibleName = "Explicit document IDs (one per line)"
+            SetHelp(_selectedDocumentIds, "Advanced: paste stable document IDs, one per line. Hidden IDs still belong to the selected actions; Clear selection removes them. An empty selection never means all.")
+            _documentAdvanced.Controls.Add(_selectedDocumentIds)
+            layout.Controls.Add(_documentAdvanced, 0, 4)
+            _documentPageStatus.Dock = System.Windows.Forms.DockStyle.Fill
+            _documentPageStatus.AutoSize = True
+            _documentPageStatus.Text = "Choose a status and Find documents. Column headers sort loaded matches. Changing filters clears selection."
+            layout.Controls.Add(_documentPageStatus, 0, 5)
+            tab.Controls.Add(layout)
             Return tab
         End Function
 
@@ -1907,69 +2014,103 @@ Namespace SharedLibrary
             _documentListingComplete = False
         End Sub
 
-        Private Async Function LoadDocumentPageAsync(restart As Boolean) As System.Threading.Tasks.Task
+        Private Sub DocumentFilterChanged(sender As System.Object, e As System.EventArgs)
+            If _busy Then Return
+            ResetDocumentListing()
+            _documents.Items.Clear()
+            _selectedDocumentIds.Clear()
+            _documentDetails.Clear()
+            _nextDocuments.Enabled = False
+            _documentPageStatus.Text = "Filter changed. Find documents searches the published metadata; only matching documents are displayed."
+        End Sub
+
+        Private Async Function LoadDocumentPageAsync(restart As System.Boolean) As System.Threading.Tasks.Task
             If _closeRequested OrElse _busy OrElse _catalogActivationBlocked OrElse _archive Is Nothing OrElse _store Is Nothing Then Return
-            Dim archiveId = _archive.ArchiveId
-            Dim filter = _documentFilter.Text.Trim()
+            Dim archiveId As System.String = _archive.ArchiveId
+            Dim filter As System.String = _documentFilter.Text.Trim()
+            Dim stateFilter As System.Int32 = _documentStateFilter.SelectedIndex
             Dim rows As New System.Collections.Generic.List(Of MaintenanceDocumentRow)()
-            Dim inspected As Integer = 0
+            Dim inspected As System.Int32 = 0
             Dim cancellation As New System.Threading.CancellationTokenSource()
             _operationCancellation = cancellation
             SetBusy(True)
             Try
-                If restart Then ResetDocumentListing()
-                Await System.Threading.Tasks.Task.Run(
-                    Sub()
-                        cancellation.Token.ThrowIfCancellationRequested()
-                        Dim currentArchive = _store.GetArchive(archiveId)
-                        If currentArchive Is Nothing Then Throw New System.InvalidOperationException("The archive was unregistered; reload the catalog.")
-                        Dim access = SemanticArchiveAccessContext.CreateForCurrentUser()
-                        If _documentCursor Is Nothing Then
-                            Dim manifest = _store.PinGenerationForAdministration(archiveId)
-                            If manifest Is Nothing Then
-                                _documentListingComplete = True
-                                Return
-                            End If
-                            _documentGenerationId = manifest.GenerationId
-                            _documentCursor = _store.EnumerateDocuments(manifest).GetEnumerator()
-                        End If
-                        Dim pageTimer = System.Diagnostics.Stopwatch.StartNew()
-                        While rows.Count < 200 AndAlso inspected < 1000 AndAlso Not _documentListingComplete AndAlso pageTimer.Elapsed.TotalSeconds < 5
+                If restart Then
+                    ResetDocumentListing()
+                    _documents.Items.Clear()
+                    _selectedDocumentIds.Clear()
+                    _documentDetails.Clear()
+                End If
+                Dim pageSize As System.Int32 = System.Math.Min(MaintenancePageSize, MaintenanceLoadedLimit - _documents.Items.Count)
+                ' Continue across empty metadata chunks until a matching page or the end is reached.
+                ' UI/cancellation stay live between bounded worker chunks; no original-folder scan occurs.
+                While rows.Count < pageSize AndAlso Not _documentListingComplete
+                    Await System.Threading.Tasks.Task.Run(
+                        Sub()
                             cancellation.Token.ThrowIfCancellationRequested()
-                            If Not _documentCursor.MoveNext() Then
-                                _documentListingComplete = True
-                                Exit While
+                            Dim currentArchive As SemanticArchiveDefinition = _store.GetArchive(archiveId)
+                            If currentArchive Is Nothing Then Throw New System.InvalidOperationException("The archive was unregistered; reload the catalog.")
+                            Dim access As SemanticArchiveAccessContext = SemanticArchiveAccessContext.CreateForCurrentUser()
+                            If _documentCursor Is Nothing Then
+                                Dim manifest As SemanticArchiveGenerationManifest = _store.PinGenerationForAdministration(archiveId)
+                                If manifest Is Nothing Then
+                                    _documentListingComplete = True
+                                    Return
+                                End If
+                                _documentGenerationId = manifest.GenerationId
+                                _documentCursor = _store.EnumerateDocuments(manifest).GetEnumerator()
                             End If
-                            inspected += 1
-                            Dim document = _documentCursor.Current
-                            Dim readable As Boolean = CanDiscloseMaintenanceSource(document, currentArchive, access)
-                            ' Denied/unknown originals expose no cached path, name or source status.
-                            ' An opaque ID remains usable for an explicit permission-repair command.
-                            Dim sourceDisplay = If(readable, document.SourcePath, "(source access unavailable)")
-                            If filter.Length = 0 OrElse document.DocumentId.IndexOf(filter, System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                               (readable AndAlso sourceDisplay.IndexOf(filter, System.StringComparison.OrdinalIgnoreCase) >= 0) Then
-                                rows.Add(New MaintenanceDocumentRow(document.DocumentId, sourceDisplay, If(readable, document.ProcessingStatus, "Restricted")))
-                            End If
-                        End While
-                    End Sub)
+                            Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                            Dim chunkInspected As System.Int32 = 0
+                            While rows.Count < pageSize AndAlso chunkInspected < 1000 AndAlso timer.Elapsed.TotalSeconds < 1
+                                cancellation.Token.ThrowIfCancellationRequested()
+                                If Not _documentCursor.MoveNext() Then
+                                    _documentListingComplete = True
+                                    Exit While
+                                End If
+                                inspected += 1
+                                chunkInspected += 1
+                                Dim document As SemanticArchiveDocumentRecord = _documentCursor.Current
+                                Dim state As System.String = MaintenanceState(document)
+                                ' Status-only views skip irrelevant records before costly source checks.
+                                ' Restricted records are NEVER emitted based on their hidden cached status.
+                                If stateFilter <> 5 AndAlso stateFilter <> 7 AndAlso Not MatchesMaintenanceState(state, stateFilter, SemanticArchiveInventory.IsSearchable(document)) Then Continue While
+                                Dim readable As System.Boolean = CanDiscloseMaintenanceSource(document, currentArchive, access)
+                                If Not readable AndAlso stateFilter <> 5 AndAlso stateFilter <> 7 Then Continue While
+                                If readable AndAlso stateFilter = 5 Then Continue While
+                                Dim row As MaintenanceDocumentRow = CreateMaintenanceRow(document, readable, state)
+                                If filter.Length > 0 AndAlso row.DocumentId.IndexOf(filter, System.StringComparison.OrdinalIgnoreCase) < 0 AndAlso
+                                   (Not readable OrElse row.SourceDisplay.IndexOf(filter, System.StringComparison.OrdinalIgnoreCase) < 0) Then Continue While
+                                rows.Add(row)
+                            End While
+                        End Sub, cancellation.Token)
+                    If IsDisposed Then Return
+                    _documentPageStatus.Text = "Finding matching documents: " & rows.Count.ToString() & " found; " & inspected.ToString() & " metadata records checked. Pause cancels this search."
+                End While
                 If IsDisposed Then Return
+                _updatingDocumentRows = True
                 _documents.BeginUpdate()
                 Try
-                    _documents.Items.Clear()
-                    For Each document In rows
-                        Dim item As New System.Windows.Forms.ListViewItem(document.DocumentId) With {.Tag = document.DocumentId}
-                        item.SubItems.Add(document.SourceDisplay)
+                    For Each document As MaintenanceDocumentRow In rows
+                        Dim item As New System.Windows.Forms.ListViewItem(document.DisplayName) With {.Tag = document, .ToolTipText = document.SourceDisplay}
                         item.SubItems.Add(document.Status)
+                        item.SubItems.Add(document.RecommendedAction)
+                        item.SubItems.Add(document.Folder)
+                        item.SubItems.Add(document.DocumentId)
                         _documents.Items.Add(item)
                     Next
+                    _documents.Sort()
                 Finally
                     _documents.EndUpdate()
+                    _updatingDocumentRows = False
                 End Try
-                _documentPageStatus.Text = rows.Count.ToString() & " displayed; " & inspected.ToString() & " metadata records inspected. " &
-                    If(_documentListingComplete, "End of published metadata.", "Next page continues this bounded listing.") & " Generation: " & _documentGenerationId
+                _documentPageStatus.Text = _documents.Items.Count.ToString() & " matching documents loaded. " &
+                    If(_documentListingComplete, "All matches in this published snapshot have been checked.",
+                       If(_documents.Items.Count >= MaintenanceLoadedLimit, "Display limit reached; refine the filters to narrow the results.", "Load more matches continues; existing selections are retained.")) &
+                    " Sorting applies to loaded matches."
             Catch ex As System.OperationCanceledException
                 ResetDocumentListing()
-                If Not IsDisposed Then _documentPageStatus.Text = "Document listing cancelled; load the first page to restart."
+                If Not IsDisposed Then _documentPageStatus.Text = "Search cancelled. Previously loaded matches and selections remain; Find documents starts a fresh search."
             Catch ex As System.Exception
                 ResetDocumentListing()
                 ReportError("Document metadata could not be listed", ex)
@@ -1979,6 +2120,61 @@ Namespace SharedLibrary
                 If IsDisposed Then ResetDocumentListing()
                 SetBusy(False)
             End Try
+        End Function
+
+        Private Shared Function MaintenanceState(document As SemanticArchiveDocumentRecord) As System.String
+            If document Is Nothing Then Return "unavailable"
+            Dim status As System.String = If(document.ProcessingStatus, System.String.Empty).Trim().ToLowerInvariant()
+            If status = "removed" OrElse status = "failed" OrElse status = "unavailable" OrElse status = "pending_host" OrElse status = "empty" Then Return status
+            If document.Representation Is Nothing Then Return "needs_extraction"
+            Dim coverage As System.String = If(document.Representation.Completeness, "unknown").ToLowerInvariant()
+            If coverage = "empty" OrElse coverage = "incomplete" OrElse coverage = "unknown" Then Return coverage
+            If SemanticArchiveInventory.IsSearchable(document) Then Return "searchable"
+            Return "needs_indexing"
+        End Function
+
+        Private Shared Function MatchesMaintenanceState(state As System.String, filter As System.Int32, searchable As System.Boolean) As System.Boolean
+            Select Case filter
+                Case 0 : Return state <> "searchable" AndAlso state <> "removed"
+                Case 1 : Return state = "incomplete" OrElse state = "unknown"
+                Case 2 : Return state = "empty"
+                Case 3 : Return state = "failed" OrElse state = "unavailable"
+                Case 4 : Return state = "needs_extraction" OrElse state = "needs_indexing" OrElse state = "pending_host"
+                Case 6 : Return searchable
+                Case 8 : Return state = "removed"
+                Case Else : Return True
+            End Select
+        End Function
+
+        Private Shared Function CreateMaintenanceRow(document As SemanticArchiveDocumentRecord, readable As System.Boolean, state As System.String) As MaintenanceDocumentRow
+            If Not readable Then Return New MaintenanceDocumentRow(document.DocumentId, "Source access unavailable", "", "Source access unavailable", "Check source access; reconcile permissions if needed.", "", "", "The original source could not be verified. Its cached name, path, processing status and diagnostics are hidden.", "")
+            Dim name As System.String = System.IO.Path.GetFileName(document.SourcePath)
+            Dim folder As System.String = System.IO.Path.GetDirectoryName(document.SourcePath)
+            Dim status As System.String
+            Dim action As System.String
+            Dim explanation As System.String
+            Select Case state
+                Case "searchable"
+                    status = "Searchable" : action = "No repair needed." : explanation = "Extracted text and semantic index are available."
+                Case "incomplete"
+                    status = "Incomplete extraction" : action = "Retry selected; check OCR settings if needed." : explanation = "Some source content could not be validated. Re-extraction/OCR uses this source folder's settings."
+                Case "unknown"
+                    status = "Extraction not verified" : action = "Retry selected to verify extraction." : explanation = "The completeness of the extracted content has not been established."
+                Case "empty"
+                    status = "No readable text" : action = "Check original; re-extract/OCR selected." : explanation = "No readable text was extracted. The source may be empty, image-only or unsupported by its configured reader."
+                Case "failed", "unavailable"
+                    status = "Processing failed" : action = "Retry selected; inspect details if it fails again." : explanation = "Extraction or indexing did not complete successfully."
+                Case "pending_host"
+                    status = "Needs Office reader" : action = "Process through a supported Office host." : explanation = "This source requires a host reader; the standalone worker cannot read it."
+                Case "needs_extraction"
+                    status = "Needs extraction" : action = "Re-extract/OCR selected." : explanation = "No usable text representation is available."
+                Case "removed"
+                    status = "Removed" : action = "Check source registration if unexpected." : explanation = "This retained record is no longer a current source."
+                Case Else
+                    status = "Needs semantic indexing" : action = "Rebuild semantic index (selected)." : explanation = "Extracted text is available, but this document is not currently searchable."
+            End Select
+            If state = "incomplete" OrElse state = "unknown" Then explanation &= If(SemanticArchiveInventory.IsSearchable(document), " Partial-text search is currently allowed for this document.", " This document is currently excluded from search.")
+            Return New MaintenanceDocumentRow(document.DocumentId, name, document.SourcePath, status, action, folder, state, explanation, If(document.Diagnostic, ""))
         End Function
 
         Private Shared Function CanDiscloseMaintenanceSource(document As SemanticArchiveDocumentRecord,
@@ -2001,22 +2197,96 @@ Namespace SharedLibrary
         End Function
 
         Private NotInheritable Class MaintenanceDocumentRow
-            Public ReadOnly DocumentId As String
-            Public ReadOnly SourceDisplay As String
-            Public ReadOnly Status As String
-            Public Sub New(documentId As String, sourceDisplay As String, status As String)
-                Me.DocumentId = documentId
-                Me.SourceDisplay = sourceDisplay
-                Me.Status = status
+            Public ReadOnly DocumentId As System.String
+            Public ReadOnly DisplayName As System.String
+            Public ReadOnly SourceDisplay As System.String
+            Public ReadOnly Status As System.String
+            Public ReadOnly RecommendedAction As System.String
+            Public ReadOnly Folder As System.String
+            Public ReadOnly State As System.String
+            Public ReadOnly Explanation As System.String
+            Public ReadOnly Diagnostic As System.String
+            Public Sub New(documentId As System.String, displayName As System.String, sourceDisplay As System.String, status As System.String, action As System.String, folder As System.String, state As System.String, explanation As System.String, diagnostic As System.String)
+                Me.DocumentId = documentId : Me.DisplayName = displayName : Me.SourceDisplay = sourceDisplay
+                Me.Status = status : Me.RecommendedAction = action : Me.Folder = folder : Me.State = state
+                Me.Explanation = explanation : Me.Diagnostic = diagnostic
             End Sub
         End Class
 
-        Private Sub DocumentSelectionChanged(sender As Object, e As System.EventArgs)
-            Dim ids As New System.Collections.Generic.List(Of String)()
+        Private NotInheritable Class MaintenanceDocumentComparer
+            Implements System.Collections.IComparer
+            Private ReadOnly _column As System.Int32
+            Private ReadOnly _descending As System.Boolean
+            Public Sub New(column As System.Int32, descending As System.Boolean)
+                _column = column : _descending = descending
+            End Sub
+            Public Function Compare(x As System.Object, y As System.Object) As System.Int32 Implements System.Collections.IComparer.Compare
+                Dim left As System.Windows.Forms.ListViewItem = DirectCast(x, System.Windows.Forms.ListViewItem)
+                Dim right As System.Windows.Forms.ListViewItem = DirectCast(y, System.Windows.Forms.ListViewItem)
+                Dim result As System.Int32 = System.StringComparer.CurrentCultureIgnoreCase.Compare(left.SubItems(_column).Text, right.SubItems(_column).Text)
+                If result = 0 Then result = System.StringComparer.Ordinal.Compare(DirectCast(left.Tag, MaintenanceDocumentRow).DocumentId, DirectCast(right.Tag, MaintenanceDocumentRow).DocumentId)
+                Return If(_descending, -result, result)
+            End Function
+        End Class
+
+        Private Sub DocumentColumnClicked(sender As System.Object, e As System.Windows.Forms.ColumnClickEventArgs)
+            If _busy Then Return
+            If _documentSortColumn = e.Column Then
+                _documentSortDescending = Not _documentSortDescending
+            Else
+                _documentSortColumn = e.Column
+                _documentSortDescending = False
+            End If
+            _updatingDocumentRows = True
+            Try
+                _documents.ListViewItemSorter = New MaintenanceDocumentComparer(_documentSortColumn, _documentSortDescending)
+                _documents.Sort()
+            Finally
+                _updatingDocumentRows = False
+            End Try
+        End Sub
+
+        Private Sub DocumentSelectionChanged(sender As System.Object, e As System.EventArgs)
+            If _updatingDocumentRows Then Return
+            Dim ids As New System.Collections.Generic.List(Of System.String)()
             For Each item As System.Windows.Forms.ListViewItem In _documents.SelectedItems
-                ids.Add(CStr(item.Tag))
+                ids.Add(DirectCast(item.Tag, MaintenanceDocumentRow).DocumentId)
             Next
             _selectedDocumentIds.Text = System.String.Join(System.Environment.NewLine, ids)
+            UpdateDocumentDetails()
+        End Sub
+
+        Private Sub SelectLoadedDocuments(sender As System.Object, e As System.EventArgs)
+            If _busy Then Return
+            If _documents.Items.Count > 1024 Then
+                _documentPageStatus.Text = "At most 1,024 documents can be selected for one command. Refine the filter or select a smaller set."
+                Return
+            End If
+            _updatingDocumentRows = True
+            _documents.BeginUpdate()
+            Try
+                For Each item As System.Windows.Forms.ListViewItem In _documents.Items
+                    item.Selected = True
+                Next
+            Finally
+                _documents.EndUpdate()
+                _updatingDocumentRows = False
+            End Try
+            DocumentSelectionChanged(sender, e)
+        End Sub
+
+        Private Sub UpdateDocumentDetails()
+            _documentSelectionStatus.Text = ParseLines(_selectedDocumentIds.Text, New Char() {Microsoft.VisualBasic.ChrW(13), Microsoft.VisualBasic.ChrW(10), ";"c, ","c}).Count.ToString() & " selected"
+            If _documents.SelectedItems.Count <> 1 Then
+                _documentDetails.Text = "Select one document for an explanation and recommended action. Actions below apply only to the explicitly selected documents."
+                Return
+            End If
+            Dim row As MaintenanceDocumentRow = DirectCast(_documents.SelectedItems(0).Tag, MaintenanceDocumentRow)
+            _documentDetails.Text = row.DisplayName & " — " & row.Status & System.Environment.NewLine & row.Explanation & System.Environment.NewLine & row.RecommendedAction
+            If _documentTechnical.Checked Then
+                _documentDetails.AppendText(System.Environment.NewLine & "Document ID: " & row.DocumentId)
+                If row.Diagnostic.Length > 0 Then _documentDetails.AppendText(System.Environment.NewLine & row.Diagnostic)
+            End If
         End Sub
 
         Private Function ReadSelectedDocumentIds() As System.Collections.Generic.List(Of String)
@@ -2031,10 +2301,10 @@ Namespace SharedLibrary
 
         Private Sub UpdateSelectedActions()
             Dim enabled As Boolean = Not _busy AndAlso Not _catalogActivationBlocked AndAlso _archive IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(_selectedDocumentIds.Text)
-            _rebuildSelected.Enabled = enabled
-            _extractSelected.Enabled = enabled
+            _rebuildSelected.Enabled = enabled AndAlso Not _archiveIndexUnsupported
+            _extractSelected.Enabled = enabled AndAlso Not _archiveIndexUnsupported
             _permissionsSelected.Enabled = enabled
-            _retrySelected.Enabled = enabled
+            _retrySelected.Enabled = enabled AndAlso Not _archiveIndexUnsupported
         End Sub
 
         Private Sub ResetDiagnostics(Optional initialText As System.String = Nothing)

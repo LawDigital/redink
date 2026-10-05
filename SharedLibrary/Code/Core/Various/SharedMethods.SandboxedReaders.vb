@@ -71,6 +71,13 @@ Namespace SharedLibrary
             Return DocxTextExtractor.ReadDocxSandboxed(docxPath, returnMarkdown, readError)
         End Function
 
+        Public Shared Function ReadDocxSandboxed(docxPath As System.String,
+                                                 returnMarkdown As System.Boolean,
+                                                 ByRef readError As System.String,
+                                                 ByRef extractionComplete As System.Nullable(Of System.Boolean)) As System.String
+            Return DocxTextExtractor.ReadDocxSandboxed(docxPath, returnMarkdown, readError, extractionComplete)
+        End Function
+
         Public Shared Function ReadPdfMarkdownSandboxed(pdfPath As String) As String
             Return PdfMarkdownExtractor.ReadPdfAsMarkdown(pdfPath)
         End Function

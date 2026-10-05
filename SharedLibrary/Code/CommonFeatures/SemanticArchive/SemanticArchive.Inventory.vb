@@ -23,6 +23,15 @@ Namespace SharedLibrary
         Public Property PendingSources As System.Int32
         Public Property RemovedSources As System.Int32
 
+        ' Derived from existing counters, including already-published current-format shards.
+        ' No schema migration or zero-filled historical status counter is required.
+        Public ReadOnly Property ExcludedComplete As System.Int32
+            Get
+                Return System.Math.Max(0, CompleteExtractions - (SearchableDocuments -
+                    (UnknownExtractions - ExcludedUnknown) - (IncompleteExtractions - ExcludedIncomplete)))
+            End Get
+        End Property
+
         Public Shared Function IsSearchable(document As SemanticArchiveDocumentRecord) As System.Boolean
             Return document IsNot Nothing AndAlso document.Active AndAlso document.Card IsNot Nothing AndAlso
                 document.Representation IsNot Nothing AndAlso document.Representation.Completeness <> "empty"
@@ -108,7 +117,7 @@ Namespace SharedLibrary
         End Function
 
         Public Function ToDiagnosticText() As System.String
-            Dim attention As System.Int32 = ExcludedUnknown + ExcludedIncomplete + EmptySources + FailedSources + PendingSources
+            Dim attention As System.Int32 = CurrentSources - SearchableDocuments
             Dim lines As New System.Collections.Generic.List(Of System.String) From {
                 "Archive contents: " & CurrentSources.ToString(System.Globalization.CultureInfo.InvariantCulture) & " document(s).",
                 "Searchable now: " & SearchableDocuments.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".",
@@ -116,12 +125,13 @@ Namespace SharedLibrary
                 "Need attention: " & attention.ToString(System.Globalization.CultureInfo.InvariantCulture) & "."
             }
             If attention > 0 Then
-                lines.Add("  Incomplete extraction: " & ExcludedIncomplete.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                lines.Add("  Complete text without searchable metadata: " & ExcludedComplete.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; incomplete extraction: " & ExcludedIncomplete.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                     "; unverified extraction: " & ExcludedUnknown.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                     "; no readable text: " & EmptySources.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                     "; failed/unavailable: " & FailedSources.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                     "; pending: " & PendingSources.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
             End If
+            If ExcludedComplete > 0 Then lines.Add("Complete extracted text is retained but some documents require extraction-contract validation or semantic metadata repair. Run Retry failed or repair; permissions alone do not rebuild content.")
             Return System.String.Join(System.Environment.NewLine, lines)
         End Function
 
@@ -133,6 +143,7 @@ Namespace SharedLibrary
                 "Extraction complete: " & CompleteExtractions.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                 "; unknown: " & UnknownExtractions.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                 "; incomplete: " & IncompleteExtractions.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.Environment.NewLine &
+                "Complete extraction but not searchable: " & ExcludedComplete.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.Environment.NewLine &
                 "Not searchable with unknown coverage: " & ExcludedUnknown.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                 "; not searchable with incomplete coverage: " & ExcludedIncomplete.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.Environment.NewLine &
                 "Empty: " & EmptySources.ToString(System.Globalization.CultureInfo.InvariantCulture) &

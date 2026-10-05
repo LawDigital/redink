@@ -22,6 +22,11 @@ Namespace SharedLibrary
         Public Property CountsComplete As System.Boolean
         Public Property ProcessedFiles As System.Int32
         Public Property ReusedFiles As System.Int32
+        Public Property ExtractsReused As System.Int32
+        Public Property CardsRebuilt As System.Int32
+        Public Property SectionIndexesRebuilt As System.Int32
+        Public Property RoutingGroupsBuilt As System.Int32
+        Public Property DocumentsRequiringExtraction As System.Int32
         Public Property FailedFiles As System.Int32
         Public Property CoverageExcludedFiles As System.Int32
         Public Property PendingFiles As System.Int32
@@ -48,7 +53,7 @@ Namespace SharedLibrary
                 .ArchiveId = SemanticArchiveIdentity.ValidateId(archiveId, NameOf(archiveId)),
                 .RunId = System.Guid.NewGuid().ToString("N"),
                 .Operation = If(options.ReconcilePermissionsOnly, "permissions", If(options.ForceReextract, "extract",
-                    If(options.RebuildSemanticMetadata, "reindex", If(options.RetryFailures, "retry", "refresh")))),
+                    If(options.IndexOnlyRebuild OrElse options.RebuildSemanticMetadata, "reindex", If(options.RetryFailures, "retry", "refresh")))),
                 .SelectedScope = options.SelectedDocumentIds IsNot Nothing,
                 .SelectedDocumentCount = If(options.SelectedDocumentIds Is Nothing, 0, options.SelectedDocumentIds.Count),
                 .IsBackground = options.IsBackground, .StartedUtc = System.DateTime.UtcNow, .UpdatedUtc = System.DateTime.UtcNow}
@@ -77,6 +82,11 @@ Namespace SharedLibrary
                         record.CountsComplete = True
                         record.ProcessedFiles = result.ProcessedFiles
                         record.ReusedFiles = result.ReusedFiles
+                        record.ExtractsReused = result.ExtractsReused
+                        record.CardsRebuilt = result.CardsRebuilt
+                        record.SectionIndexesRebuilt = result.SectionIndexesRebuilt
+                        record.RoutingGroupsBuilt = result.RoutingGroupsBuilt
+                        record.DocumentsRequiringExtraction = result.DocumentsRequiringExtraction
                         record.FailedFiles = result.FailedFiles
                         record.PendingFiles = result.PendingFiles
                         record.DeferredFiles = result.DeferredFiles
@@ -144,8 +154,10 @@ Namespace SharedLibrary
                         "; started UTC: " & record.StartedUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture) &
                         "; updated UTC: " & record.UpdatedUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture) & ".")
                     values.Add("Latest bounded batch counts (" & If(record.CountsComplete, "final", "observed before completion") & "): processed: " &
-                        Number(record.ProcessedFiles) & "; reused: " & Number(record.ReusedFiles) & "; failed: " & Number(record.FailedFiles) &
-                        "; excluded from search: " & Number(record.CoverageExcludedFiles) &
+                        Number(record.ProcessedFiles) & "; reused: " & Number(record.ReusedFiles) & "; extracts reused: " & Number(record.ExtractsReused) &
+                        "; cards rebuilt: " & Number(record.CardsRebuilt) & "; section indexes rebuilt: " & Number(record.SectionIndexesRebuilt) &
+                        "; routing groups built: " & Number(record.RoutingGroupsBuilt) & "; requires extraction: " & Number(record.DocumentsRequiringExtraction) &
+                        "; failed: " & Number(record.FailedFiles) & "; excluded from search: " & Number(record.CoverageExcludedFiles) &
                         "; ready: " & Number(record.PendingFiles) & "; deferred: " & Number(record.DeferredFiles) &
                         "; discovery entries: " & Number(record.DiscoveryEntriesInspected) & "; published: " & record.Published.ToString() & ".")
                     If record.DiscoveryPending OrElse record.PermissionsPending OrElse record.PermissionsDeferred Then
@@ -155,6 +167,8 @@ Namespace SharedLibrary
                     End If
                 ElseIf record.Status = "pending" OrElse record.Status = "deferred" OrElse record.DiscoveryPending OrElse record.PermissionsPending OrElse record.PermissionsDeferred Then
                     values.Add("Maintenance is not finished yet. Remaining work is checkpointed and can continue without restarting completed documents.")
+                ElseIf record.Status = "completed_with_requirements" Then
+                    values.Add("The semantic index rebuild completed for reusable text. Some documents still require a separate extraction/OCR action before they can be indexed.")
                 ElseIf record.Status = "failed" OrElse record.Status = "completed_with_failures" OrElse record.ErrorCode.Length > 0 Then
                     values.Add("The last maintenance run needs attention. Enable Show technical details for the recorded failure information.")
                 End If
@@ -191,6 +205,7 @@ Namespace SharedLibrary
             If result.SelectionRequired Then Return "selection_required"
             If result.WriterLeaseDeferred Then Return "deferred"
             If result.FailedFiles > 0 Then Return "completed_with_failures"
+            If result.DocumentsRequiringExtraction > 0 Then Return "completed_with_requirements"
             If result.DeferredFiles > 0 OrElse result.PermissionsDeferred Then Return "deferred"
             If result.PendingFiles > 0 OrElse result.DiscoveryPending OrElse result.PermissionsPending Then Return "pending"
             Return "completed"
@@ -231,7 +246,7 @@ Namespace SharedLibrary
 
         Private Shared Function KnownStage(value As System.String) As System.String
             Select Case value
-                Case "starting", "scanning", "processing", "permissions", "hierarchy", "publishing", "failed", "pending_host", "coverage_excluded", "shared_claim_deferred", "operation_failed", "operation_cancelled"
+                Case "starting", "scanning", "validating_extracts", "processing", "permissions", "hierarchy", "routing", "publishing", "failed", "pending_host", "needs_extraction", "coverage_excluded", "shared_claim_deferred", "operation_failed", "operation_cancelled"
                     Return value
                 Case Else
                     Return "other"
@@ -263,7 +278,7 @@ Namespace SharedLibrary
                 Case Else : Throw New System.IO.InvalidDataException("The operation diagnostic command is invalid.")
             End Select
             Select Case record.Status
-                Case "started", "cancelled", "failed", "incomplete", "selection_required", "deferred", "completed_with_failures", "pending", "completed"
+                Case "started", "cancelled", "failed", "incomplete", "selection_required", "deferred", "completed_with_failures", "completed_with_requirements", "pending", "completed"
                 Case Else : Throw New System.IO.InvalidDataException("The operation diagnostic status is invalid.")
             End Select
             Select Case record.ErrorCode
@@ -272,6 +287,7 @@ Namespace SharedLibrary
             End Select
             If record.ErrorType Is Nothing OrElse (record.ErrorType.Length > 0 AndAlso Not IsExceptionTypeToken(record.ErrorType)) Then Throw New System.IO.InvalidDataException("The operation diagnostic error type is invalid.")
             For Each count As System.Int32 In New System.Int32() {record.SelectedDocumentCount, record.ProcessedFiles, record.ReusedFiles,
+                record.ExtractsReused, record.CardsRebuilt, record.SectionIndexesRebuilt, record.RoutingGroupsBuilt, record.DocumentsRequiringExtraction,
                 record.FailedFiles, record.CoverageExcludedFiles, record.PendingFiles, record.DeferredFiles, record.DiscoveryEntriesInspected,
                 record.PermissionSourcesChecked, record.PermissionArtifactsChecked}
                 If count < 0 Then Throw New System.IO.InvalidDataException("The operation diagnostic count is invalid.")

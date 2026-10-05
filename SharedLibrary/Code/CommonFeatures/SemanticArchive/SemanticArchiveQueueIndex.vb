@@ -278,7 +278,7 @@ Namespace SharedLibrary
                 .canonical_source = item.CanonicalSourceKey, .source_path = item.SourcePath,
                 .hash = item.SourceHash, .length = item.SourceLength, .write_ticks = item.SourceWriteTicks,
                 .extraction = item.ExtractionSignature, .semantic = item.SemanticSignature,
-                .partition = item.PartitionKey, .bindings = bindings, .remove = item.Remove
+                .partition = item.PartitionKey, .bindings = bindings, .remove = item.Remove, .index_only = item.IndexOnlyRebuild
             }))
         End Function
 

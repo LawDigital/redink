@@ -9,6 +9,8 @@ Namespace SharedLibrary
 
     Public NotInheritable Class SemanticArchiveBuildOptions
         Public Property RebuildSemanticMetadata As System.Boolean = SharedMethods.DEFAULT_SEMANTICARCHIVE_REBUILD_SEMANTIC_METADATA
+        ' Hard index-only contract: semantic derivatives may be rebuilt, but text extraction/OCR is never invoked.
+        Public Property IndexOnlyRebuild As System.Boolean
         Public Property ForceReextract As System.Boolean = SharedMethods.DEFAULT_SEMANTICARCHIVE_FORCE_REEXTRACT
         Public Property ReconcilePermissionsOnly As System.Boolean = SharedMethods.DEFAULT_SEMANTICARCHIVE_RECONCILE_PERMISSIONS_ONLY
         Public Property SelectedDocumentIds As System.Collections.Generic.List(Of System.String) = Nothing
@@ -22,6 +24,12 @@ Namespace SharedLibrary
         Public Property IsBackground As System.Boolean = SharedMethods.DEFAULT_SEMANTICARCHIVE_IS_BACKGROUND
         Public Property FullIntegrityAudit As System.Boolean = SharedMethods.DEFAULT_SEMANTICARCHIVE_FULL_INTEGRITY_AUDIT
         Public Property HostReaderDispatcher As System.Func(Of System.Func(Of String), System.Threading.CancellationToken, System.Threading.Tasks.Task(Of String))
+
+        Friend Function Snapshot() As SemanticArchiveBuildOptions
+            Dim copy As SemanticArchiveBuildOptions = DirectCast(Me.MemberwiseClone(), SemanticArchiveBuildOptions)
+            If Me.SelectedDocumentIds IsNot Nothing Then copy.SelectedDocumentIds = New System.Collections.Generic.List(Of System.String)(Me.SelectedDocumentIds)
+            Return copy
+        End Function
     End Class
 
     Public NotInheritable Class SemanticArchiveBuildProgress
@@ -41,6 +49,12 @@ Namespace SharedLibrary
         Public Property GenerationId As String = ""
         Public Property ProcessedFiles As Integer
         Public Property ReusedFiles As Integer
+        Public Property ExtractsReused As Integer
+        Public Property CardsRebuilt As Integer
+        Public Property SectionIndexesRebuilt As Integer
+        Public Property RoutingGroupsBuilt As Integer
+        Public Property DocumentsRequiringExtraction As Integer
+        Public Property CoverageExcludedFiles As Integer
         Public Property FailedFiles As Integer
         Public Property PendingFiles As Integer
         Public Property DeferredFiles As Integer
@@ -82,6 +96,8 @@ Namespace SharedLibrary
         Public Property Remove As Boolean
         Public Property ForceSemanticRebuild As Boolean
         Public Property ForceExtractionRebuild As System.Boolean
+        ' Durable operation intent: background drain/resume may not silently enable OCR.
+        Public Property IndexOnlyRebuild As System.Boolean
         Public Property Attempts As Integer
         Public Property NextAttemptUtc As System.DateTime = System.DateTime.MinValue
         Public Property UpdatedUtc As System.DateTime = System.DateTime.UtcNow
@@ -101,6 +117,8 @@ Namespace SharedLibrary
         Public Property Phase As System.String = "discover"
         Public Property ForceSemanticRebuild As System.Boolean
         Public Property ForceExtractionRebuild As System.Boolean
+        ' Durable operation intent: background drain/resume may not silently enable OCR.
+        Public Property IndexOnlyRebuild As System.Boolean
         Public Property RetryFailures As System.Boolean
         Public Property ExplicitRefresh As System.Boolean
         Public Property DirectoryHead As System.Int64
@@ -180,14 +198,17 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        Public Function Enqueue(item As SemanticArchiveWorkItem) As Boolean
+        Public Function Enqueue(item As SemanticArchiveWorkItem, Optional replaceOperationIntent As System.Boolean = False) As Boolean
             If _index.Matches(item) Then Return False
             Dim previous As SemanticArchiveWorkItem = Load(item.DocumentId)
+            ' Only background continuation preserves an older no-extraction intent.
+            ' An explicitly authorized replacement command supplies its own operation policy.
+            If Not replaceOperationIntent AndAlso previous IsNot Nothing AndAlso previous.IndexOnlyRebuild AndAlso Not item.ForceExtractionRebuild Then item.IndexOnlyRebuild = True
             Dim sameSource As System.Boolean = previous IsNot Nothing AndAlso
                 System.String.Equals(previous.CanonicalSourceKey, item.CanonicalSourceKey, System.StringComparison.Ordinal)
             Dim compatibleHash As System.Boolean = previous IsNot Nothing AndAlso (System.String.IsNullOrEmpty(item.SourceHash) OrElse
                 System.String.Equals(previous.SourceHash, item.SourceHash, System.StringComparison.OrdinalIgnoreCase))
-            If previous IsNot Nothing AndAlso Not item.ForceSemanticRebuild AndAlso Not item.ForceExtractionRebuild AndAlso previous.Remove = item.Remove AndAlso
+            If previous IsNot Nothing AndAlso Not item.ForceSemanticRebuild AndAlso Not item.ForceExtractionRebuild AndAlso previous.Remove = item.Remove AndAlso previous.IndexOnlyRebuild = item.IndexOnlyRebuild AndAlso
                 sameSource AndAlso compatibleHash AndAlso System.String.Equals(previous.SourcePath, item.SourcePath, System.StringComparison.Ordinal) AndAlso
                 previous.SourceLength = item.SourceLength AndAlso previous.SourceWriteTicks = item.SourceWriteTicks AndAlso
                 System.String.Equals(previous.ExtractionSignature, item.ExtractionSignature, System.StringComparison.Ordinal) AndAlso
@@ -251,13 +272,19 @@ Namespace SharedLibrary
             Return _index.PendingCount(runnableOnly, isBackground, selectedDocumentIds)
         End Function
 
-        Public Sub Fail(item As SemanticArchiveWorkItem, diagnostic As String, Optional requiresHost As Boolean = False)
+        Public Sub Fail(item As SemanticArchiveWorkItem, diagnostic As String, Optional requiresHost As Boolean = False, Optional retryOnlyWhenExplicit As System.Boolean = False)
             item.Attempts += 1
             item.State = If(requiresHost, "PendingHost", "Retry")
             item.LastError = If(diagnostic, "Archive processing failed.")
             ' Shared policy at the job boundary, independent of source format or model provider.
-            Dim delaySeconds As Double = System.Math.Min(3600.0, 15.0 * System.Math.Pow(2.0, System.Math.Min(8, item.Attempts - 1)))
-            item.NextAttemptUtc = System.DateTime.UtcNow.AddSeconds(delaySeconds)
+            ' Deterministic failures can be held until an explicit Retry failed action rather
+            ' than executing an identical automatic retry loop.
+            If retryOnlyWhenExplicit Then
+                item.NextAttemptUtc = System.DateTime.MaxValue
+            Else
+                Dim delaySeconds As Double = System.Math.Min(3600.0, 15.0 * System.Math.Pow(2.0, System.Math.Min(8, item.Attempts - 1)))
+                item.NextAttemptUtc = System.DateTime.UtcNow.AddSeconds(delaySeconds)
+            End If
             Save(item)
         End Sub
 

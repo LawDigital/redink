@@ -30,7 +30,8 @@ Namespace SharedLibrary
             Optional cancellationToken As System.Threading.CancellationToken = Nothing
         ) As System.Threading.Tasks.Task(Of SemanticArchiveBuildResult)
             If Not SemanticArchiveHostIntegration.IsConfigured(_context) Then Throw New System.InvalidOperationException("semantic_archive_disabled: SemanticArchiveCatalogPathLocal is empty.")
-            Dim effectiveOptions As SemanticArchiveBuildOptions = If(options, New SemanticArchiveBuildOptions())
+            Dim effectiveOptions As SemanticArchiveBuildOptions = If(options, New SemanticArchiveBuildOptions()).Snapshot()
+            If effectiveOptions.IndexOnlyRebuild AndAlso (effectiveOptions.ForceReextract OrElse effectiveOptions.ReconcilePermissionsOnly) Then Throw New System.ArgumentException("Index-only rebuild cannot be combined with forced extraction or permission-only maintenance.", NameOf(options))
             If effectiveOptions.MaximumFilesPerBatch < 1 OrElse effectiveOptions.MaximumFilesPerBatch > 4096 Then Throw New System.ArgumentOutOfRangeException(NameOf(options), "Archive batches must contain 1 to 4,096 sources.")
             Return System.Threading.Tasks.Task.Run(
                 Function() BuildWithoutInteractiveUiAsync(archiveId, effectiveOptions, progress, cancellationToken), System.Threading.CancellationToken.None)
@@ -135,6 +136,24 @@ Namespace SharedLibrary
                     Dim generation As SemanticArchiveGenerationManifest = _store.NewGeneration(lease)
                     Dim hierarchy As New SemanticArchiveHierarchy(_store, archive, resolved.Context, previous, generation, result.Diagnostics)
                     Dim scan As SemanticArchiveScanCheckpoint = queue.LoadScan()
+                    If options.IndexOnlyRebuild AndAlso options.SelectedDocumentIds Is Nothing Then
+                        Dim inventoryBase As SemanticArchiveGenerationManifest = previous
+                        If Not System.String.IsNullOrEmpty(options.OperationId) AndAlso scan.RequestId = options.OperationId AndAlso scan.IndexOnlyRebuild Then
+                            inventoryBase = queue.LoadDiscoveryBase(archiveId, False)
+                        End If
+                        options.SelectedDocumentIds = New System.Collections.Generic.List(Of System.String)()
+                        If inventoryBase IsNot Nothing Then
+                            For Each shard As SemanticArchiveDocumentShardDescriptor In inventoryBase.DocumentShards
+                                options.SelectedDocumentIds.AddRange(shard.DocumentIds)
+                            Next
+                            options.SelectedDocumentIds.Sort(System.StringComparer.Ordinal)
+                        End If
+                        result.Diagnostics.Add("reindex_inventory_bound: Discovery, processing and resume share the operation's fixed published inventory; unrelated queued sources are not processed.")
+                        If options.SelectedDocumentIds.Count = 0 Then
+                            result.Diagnostics.Add("reindex_empty_inventory: No published source records exist. Refresh archive discovers sources; reindex did not extract anything.")
+                            Return result
+                        End If
+                    End If
                     Dim scanSignature As String = ScanConfigurationSignature(archive, semanticSignature)
                     If options.ForceScan OrElse scan.InProgress OrElse scan.ConfigurationSignature <> scanSignature OrElse
                         System.DateTime.UtcNow.Subtract(scan.LastAttemptUtc).TotalMinutes >= 15 Then
@@ -146,6 +165,7 @@ Namespace SharedLibrary
                         result.Diagnostics.Add("Full immutable-generation integrity audit completed.")
                     End If
                     Dim ready As New System.Collections.Generic.List(Of SemanticArchiveWorkItem)()
+                    If options.IndexOnlyRebuild Then Report(progress, result, "", "validating_extracts", "Validating existing extracted representations for index-only reuse.")
                     Dim batch As System.Collections.Generic.List(Of SemanticArchiveWorkItem) = queue.GetBatch(options.MaximumFilesPerBatch, False, options.IsBackground, options.SelectedDocumentIds)
                     For Each item As SemanticArchiveWorkItem In batch
                         cancellationToken.ThrowIfCancellationRequested()
@@ -178,6 +198,7 @@ Namespace SharedLibrary
                             result.ProcessedFiles += 1
                             If Not document.Active AndAlso Not item.Remove Then
                                 coverageExcludedFiles += 1
+                                result.CoverageExcludedFiles += 1
                                 ReportSourceDiagnostic(progress, result, archive, item, "coverage_excluded",
                                     "status: " & document.ProcessingStatus & "; " & BoundProcessingDiagnostic(document.Diagnostic))
                             End If
@@ -201,8 +222,9 @@ Namespace SharedLibrary
                             ' before accepting a failed job or publishing partial metadata.
                             interactionScope.ThrowIfInteractionRequested()
                             Dim hostRequired As Boolean = TypeOf ex Is SemanticArchiveHostRequiredException
+                            Dim explicitRetryOnly As System.Boolean = TypeOf ex Is SemanticArchiveExplicitRetryProcessingException
                             Dim failureDetail As System.String = FormatProcessingFailure(ex)
-                            queue.Fail(item, failureDetail, hostRequired)
+                            queue.Fail(item, failureDetail, hostRequired, explicitRetryOnly)
                             Dim failed As SemanticArchiveDocumentRecord = FailedRecord(item, If(hostRequired, "pending_host", "failed"), failureDetail)
                             item.CachedDocument = failed
                             queue.Save(item)
@@ -215,6 +237,27 @@ Namespace SharedLibrary
                     If hierarchy.HasChanges Then
                         Report(progress, result, "", "hierarchy", "Updating affected bounded card shards and their ancestors.")
                         Await hierarchy.WriteChangesAsync(cancellationToken).ConfigureAwait(False)
+                        cancellationToken.ThrowIfCancellationRequested()
+                        Report(progress, result, "", "routing", "Building affected semantic routing groups from validated document cards.")
+                        Dim previousRouting As SemanticArchiveRoutingGraph = Nothing
+                        If previous IsNot Nothing Then
+                            Try
+                                previousRouting = _store.LoadRoutingGraph(previous)
+                            Catch ex As System.IO.InvalidDataException
+                                ' Routing is a derived optimization, not source truth. Maintenance must
+                                ' recover from an invalid/obsolete graph by rebuilding it from the
+                                ' current validated document cards; search remains strict and never
+                                ' consumes the rejected graph.
+                                result.Diagnostics.Add("routing_rebuild_required: The existing routing graph failed current validation and was discarded; current routing will be rebuilt from validated document cards.")
+                            End Try
+                        End If
+                        Dim routingBuilder As New SemanticArchiveRoutingBuilder(archive.MaxChildrenPerNode, archive.MaxRoutingCharacters, previousRouting, result.Diagnostics, semanticSignature)
+                        Dim routingAccess As SemanticArchiveAccessContext = SemanticArchiveAccessContext.CreateForCurrentUser()
+                        Dim routingGraph As SemanticArchiveRoutingGraph = Await routingBuilder.BuildAsync(
+                            _store.EnumerateDocuments(generation), resolved.Context,
+                            Function(document As SemanticArchiveDocumentRecord) _store.CanReadDocument(routingAccess, generation, document), cancellationToken).ConfigureAwait(False)
+                        _store.WriteRoutingGraph(generation, routingGraph)
+                        result.RoutingGroupsBuilt += routingBuilder.RebuiltGroups
                         cancellationToken.ThrowIfCancellationRequested()
                         Report(progress, result, "", "publishing", "Validating and activating the immutable generation.")
                         interactionScope.ThrowIfInteractionRequested()
@@ -239,7 +282,7 @@ Namespace SharedLibrary
                 End If
             End Try
             If coverageExcludedFiles > 0 Then result.Diagnostics.Add("coverage_excluded: " & coverageExcludedFiles.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " processed source(s) are not searchable because their extraction is empty or the current archive policy excludes incomplete/unknown coverage. Their completed extraction checkpoints remain available.")
+                " processed source(s) are not searchable. Inspect document status for needs_extraction, empty, incomplete/unknown coverage or downstream failure. Retained extracts do not establish search readiness.")
             Return result
         End Function
 
@@ -251,6 +294,15 @@ Namespace SharedLibrary
                                                     options As SemanticArchiveBuildOptions, result As SemanticArchiveBuildResult,
                                                     cancellationToken As System.Threading.CancellationToken,
                                                     interactionScope As SharedMethods.HeadlessExecutionScope) As System.Threading.Tasks.Task(Of SemanticArchiveDocumentRecord)
+            ' A repair supersedes a queued reindex policy even before bounded discovery
+            ' has revisited this job. Background resume retains the durable restriction.
+            If Not options.IndexOnlyRebuild AndAlso Not options.IsBackground AndAlso options.RetryFailures Then
+                item.IndexOnlyRebuild = False
+                If options.RebuildSemanticMetadata Then item.ForceSemanticRebuild = True
+                Dim retryDocument As SemanticArchiveDocumentRecord = If(item.CachedDocument, If(previous Is Nothing, Nothing, _store.LoadDocument(previous, item.DocumentId)))
+                If RetryRequiresFreshExtraction(retryDocument) Then item.ForceExtractionRebuild = True
+                queue.Save(item)
+            End If
             Dim binding As SemanticArchiveSourceBinding = FindBinding(archive, item.PrimaryBindingId)
             If binding Is Nothing Then Throw New System.InvalidOperationException("The source binding was removed; refresh the archive scope.")
             If item.SemanticSignature <> semanticSignature Then
@@ -268,6 +320,7 @@ Namespace SharedLibrary
             End If
             Dim exportOptions As New Global.SharedLibrary.Agents.TextExportOptions() With {
                 .OcrPdf = binding.EnableOcr, .OcrBatchPages = binding.OcrBatchPages, .Overwrite = False,
+                .ForceFreshExtraction = item.ForceExtractionRebuild,
                 .HostReaderDispatcher = If(options.IsBackground, Nothing, options.HostReaderDispatcher)
             }
             Dim expectedExporterSignature As String = Global.SharedLibrary.Agents.TextExportService.GetProcessingSignature(extractionContext, sourcePath, exportOptions)
@@ -304,12 +357,46 @@ Namespace SharedLibrary
             document.BindingIds = New System.Collections.Generic.List(Of String)(item.BindingIds)
             document.Fingerprint = current
             document.ExtractionSignature = item.ExtractionSignature
-            Dim preparation As CooperativePreparation = Await PrepareCooperativeAsync(archive, binding, item, document, queue, options, result, cancellationToken).ConfigureAwait(False)
+            Dim batchCompatibleExtract As System.Boolean = False
+            If Not item.ForceExtractionRebuild Then
+                batchCompatibleExtract = ValidateExtractionBatchCompatibility(archive, binding, item, document.Representation, extractionContext, cancellationToken)
+                If batchCompatibleExtract Then result.Diagnostics.Add("extraction_batch_policy_compatible: " & item.DocumentId & "; existing source/bytes/coverage and extraction contract were verified; only OCR batching changed. The original representation was retained unchanged.")
+            End If
+            Dim preparation As CooperativePreparation = Await PrepareCooperativeAsync(archive, binding, item, document, queue, options, result, cancellationToken,
+                validatedLocalExtract:=batchCompatibleExtract).ConfigureAwait(False)
             document = preparation.Document
             BindDocumentToSource(document, item, sourcePath, current)
             Using cooperative As SemanticArchiveCooperativeStore = preparation.Store
-            Dim canReuseExtraction As Boolean = Not item.ForceExtractionRebuild AndAlso ValidateReusableRepresentation(binding, document.Representation, item.SourceHash, item.ExtractionSignature)
+            Dim canReuseExtraction As Boolean = Not item.ForceExtractionRebuild AndAlso (preparation.ValidatedLocalExtract OrElse ValidateReusableRepresentation(binding, document.Representation, item.SourceHash, item.ExtractionSignature))
+            If Not canReuseExtraction AndAlso (options.IndexOnlyRebuild OrElse item.IndexOnlyRebuild) Then
+                Dim priorRepresentation As SemanticArchiveRepresentation = document.Representation
+                document.Active = False
+                document.Index = Nothing
+                document.Card = Nothing
+                document.SemanticSignature = item.SemanticSignature
+                document.SemanticModelIdentity = modelName
+                document.ProcessingStatus = "needs_extraction"
+                document.Diagnostic = DescribeIndexOnlyExtractionRequirement(priorRepresentation, item.SourceHash, item.ExtractionSignature, expectedExporterSignature)
+                If priorRepresentation IsNot Nothing AndAlso Not System.String.Equals(priorRepresentation.SourceHash, item.SourceHash, System.StringComparison.OrdinalIgnoreCase) Then
+                    document.Representation = Nothing
+                End If
+                item.ForceSemanticRebuild = False
+                item.ForceExtractionRebuild = False
+                item.CachedDocument = document
+                item.State = "RequiresExtraction"
+                queue.Save(item)
+                result.DocumentsRequiringExtraction += 1
+                ReportSourceDiagnostic(Nothing, result, archive, item, "needs_extraction", document.Diagnostic)
+                Return document
+            End If
             If Not canReuseExtraction Then
+                If options.RetryFailures Then
+                    ' Complete historical text was first checked for current/batch-only
+                    ' compatibility. A genuinely unusable extract now requires fresh work.
+                    item.ForceExtractionRebuild = True
+                    exportOptions.ForceFreshExtraction = True
+                    queue.Save(item)
+                End If
                 document.Representation = Nothing
                 document.Index = Nothing
                 document.Card = Nothing
@@ -322,10 +409,14 @@ Namespace SharedLibrary
                 interactionScope.ThrowIfInteractionRequested()
                 If export.ErrorCode = "requires_sta" Then Throw New SemanticArchiveHostRequiredException(export.Message)
                 If export.Status = Global.SharedLibrary.Agents.TextExportStatus.Failed OrElse export.Status = Global.SharedLibrary.Agents.TextExportStatus.Unsupported Then
-                    Throw New System.IO.InvalidDataException("text_export_failed (" & export.ErrorCode & "): " & If(System.String.IsNullOrWhiteSpace(export.Message), "The existing exporter could not produce a readable representation.", export.Message))
+                    Dim exportMessage As System.String = "text_export_failed (" & export.ErrorCode & "): " & If(System.String.IsNullOrWhiteSpace(export.Message), "The existing exporter could not produce a readable representation.", export.Message)
+                    If export.ErrorCode = "pdf_parser_failure_requires_ocr" OrElse export.ErrorCode = "pdf_parser_failure_unrecoverable" Then
+                        Throw New SemanticArchiveExplicitRetryProcessingException(exportMessage)
+                    End If
+                    Throw New System.IO.InvalidDataException(exportMessage)
                 End If
                 If Not System.String.Equals(export.ProcessingSignature, expectedExporterSignature, System.StringComparison.Ordinal) Then
-                    Throw New System.IO.IOException("The effective extraction configuration changed before the export was pinned; no representation was accepted under a stale processing signature.")
+                    Throw New SemanticArchiveExplicitRetryProcessingException("extraction_contract_mismatch: expected_exporter=" & expectedExporterSignature & "; actual_exporter=" & export.ProcessingSignature & "; no representation was accepted under a stale processing signature.")
                 End If
                 If export.Status = Global.SharedLibrary.Agents.TextExportStatus.Empty Then
                     document.Active = False
@@ -364,6 +455,7 @@ Namespace SharedLibrary
                 PublishCooperativeCheckpoint(cooperative, document, SemanticArchiveCooperativeStore.ExtractedStage, item.SemanticSignature, result, cancellationToken)
             Else
                 result.ReusedFiles += 1
+                result.ExtractsReused += 1
             End If
             Dim representation As SemanticArchiveRepresentation = document.Representation
             If representation.Completeness <> "complete" AndAlso Not archive.AllowPartialSearch Then
@@ -416,6 +508,7 @@ Namespace SharedLibrary
                         .EntryCount = generated.SegmentCount
                     }
                     entries = generated.IndexDocument.Entries
+                    result.SectionIndexesRebuilt += 1
                     document.Card = Nothing
                     item.ForceSemanticRebuild = False
                     item.CachedDocument = document
@@ -430,6 +523,7 @@ Namespace SharedLibrary
             End If
             If item.ForceSemanticRebuild OrElse document.Card Is Nothing OrElse document.SemanticSignature <> item.SemanticSignature Then
                 document.Card = Await SemanticArchiveMetadata.DescribeDocumentAsync(modelContext, document, text, entries, result.Diagnostics, cancellationToken).ConfigureAwait(False)
+                result.CardsRebuilt += 1
             End If
             interactionScope.ThrowIfInteractionRequested()
             If Not System.String.Equals(SemanticArchivePathGuard.GetVerifiedSourceIdentity(binding.RootPath, sourcePath), item.CanonicalSourceKey, System.StringComparison.Ordinal) Then
@@ -451,6 +545,29 @@ Namespace SharedLibrary
             PublishCooperativeCheckpoint(cooperative, document, SemanticArchiveCooperativeStore.CompleteStage, item.SemanticSignature, result, cancellationToken)
             Return document
             End Using
+        End Function
+
+        Private Shared Function DescribeIndexOnlyExtractionRequirement(representation As SemanticArchiveRepresentation, sourceHash As System.String, extractionSignature As System.String, expectedExporterSignature As System.String) As System.String
+            If representation Is Nothing Then Return "requires_extraction: no existing extracted representation is available; reindex did not invoke extraction or OCR."
+            If Not System.String.Equals(representation.SourceHash, sourceHash, System.StringComparison.OrdinalIgnoreCase) Then Return "requires_extraction: the source version/hash changed since the stored extract; reindex did not invoke extraction or OCR."
+            If Not System.String.Equals(representation.OptionsSignature, extractionSignature, System.StringComparison.Ordinal) Then
+                Dim storedExporter As System.String = "unavailable"
+                If Not System.String.IsNullOrWhiteSpace(representation.SourceMapJson) AndAlso representation.SourceMapJson.Length <= SharedMethods.DEFAULT_SEMANTICARCHIVE_DIAGNOSTIC_MAXIMUM_BYTES Then
+                    Try
+                        Dim map As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(representation.SourceMapJson,
+                            New Newtonsoft.Json.Linq.JsonLoadSettings With {.DuplicatePropertyNameHandling = Newtonsoft.Json.Linq.DuplicatePropertyNameHandling.Error})
+                        Dim token As Newtonsoft.Json.Linq.JToken = map("processing_signature")
+                        If token IsNot Nothing AndAlso token.Type = Newtonsoft.Json.Linq.JTokenType.String Then storedExporter = token.ToObject(Of System.String)()
+                    Catch ex As Newtonsoft.Json.JsonException
+                        storedExporter = "invalid_source_map"
+                    End Try
+                End If
+                Return "requires_extraction: the stored extract is incompatible with the current extraction contract; reindex did not invoke extraction or OCR. stored_contract=" & representation.OptionsSignature &
+                    "; expected_contract=" & extractionSignature & "; stored_exporter=" & storedExporter & "; expected_exporter=" & expectedExporterSignature &
+                    "; mismatch_layer=" & If(storedExporter = expectedExporterSignature, "archive_profile_or_options", "exporter_configuration_or_options")
+            End If
+            If System.String.IsNullOrWhiteSpace(representation.TextPath) OrElse System.String.IsNullOrWhiteSpace(representation.TextFileHash) Then Return "requires_extraction: the stored extract has no verifiable text artifact; reindex did not invoke extraction or OCR."
+            Return "requires_extraction: the stored extract failed integrity or access validation; reindex did not invoke extraction or OCR."
         End Function
 
         Private Shared Function FormatProcessingFailure(failure As System.Exception) As System.String
@@ -499,10 +616,47 @@ Namespace SharedLibrary
             Return archive.Roots.Find(Function(binding As SemanticArchiveSourceBinding) System.String.Equals(binding.BindingId, bindingId, System.StringComparison.Ordinal))
         End Function
 
+        Private Shared Function ValidateExtractionBatchCompatibility(archive As SemanticArchiveDefinition, binding As SemanticArchiveSourceBinding,
+                                                                     item As SemanticArchiveWorkItem, representation As SemanticArchiveRepresentation,
+                                                                     extractionContext As SharedContext.ISharedContext,
+                                                                     cancellationToken As System.Threading.CancellationToken) As System.Boolean
+            If representation Is Nothing OrElse representation.OptionsSignature = item.ExtractionSignature OrElse representation.SourceHash <> item.SourceHash OrElse
+                System.String.IsNullOrWhiteSpace(representation.SourceMapJson) OrElse representation.SourceMapJson.Length > SharedMethods.DEFAULT_SEMANTICARCHIVE_DIAGNOSTIC_MAXIMUM_BYTES Then Return False
+            Dim historicalExporter As System.String = Nothing
+            Try
+                Dim map As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(representation.SourceMapJson,
+                    New Newtonsoft.Json.Linq.JsonLoadSettings With {.DuplicatePropertyNameHandling = Newtonsoft.Json.Linq.DuplicatePropertyNameHandling.Error})
+                Dim token As Newtonsoft.Json.Linq.JToken = map("processing_signature")
+                If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then Return False
+                historicalExporter = token.ToObject(Of System.String)()
+            Catch ex As Newtonsoft.Json.JsonException
+                Return False
+            End Try
+            If System.String.IsNullOrWhiteSpace(historicalExporter) Then Return False
+            ' Reconstruct and verify the historical contract; never guess what an
+            ' opaque signature means. This relaxes batching only, not OCR enablement,
+            ' extractor/model/prompt version, profile, source identity or extract bytes.
+            For batchPages As System.Int32 = 1 To 75
+                cancellationToken.ThrowIfCancellationRequested()
+                If ComposeExtractionSignature(archive, binding, historicalExporter, batchPages) <> representation.OptionsSignature Then Continue For
+                Dim expected As System.String = Global.SharedLibrary.Agents.TextExportService.GetProcessingSignature(extractionContext, item.SourcePath,
+                    New Global.SharedLibrary.Agents.TextExportOptions With {.OcrPdf = binding.EnableOcr, .OcrBatchPages = batchPages, .Overwrite = False})
+                If Not System.String.Equals(expected, historicalExporter, System.StringComparison.Ordinal) Then Return False
+                Return ValidateReusableRepresentation(binding, representation, item.SourceHash, representation.OptionsSignature)
+            Next
+            Return False
+        End Function
+
         Private Shared Function ValidateReusableRepresentation(binding As SemanticArchiveSourceBinding, representation As SemanticArchiveRepresentation, sourceHash As String, extractionSignature As String) As Boolean
             If representation Is Nothing OrElse representation.SourceHash <> sourceHash OrElse representation.OptionsSignature <> extractionSignature Then Return False
             Try
                 SemanticArchiveStore.RequirePrivateDerivedArtifact(binding, representation.TextPath)
+                Dim textInfo As New System.IO.FileInfo(representation.TextPath)
+                If representation.TextByteLength < 0 OrElse textInfo.Length <> representation.TextByteLength Then Return False
+                Dim encodingName As System.String = If(representation.EncodingName, System.String.Empty).Trim()
+                If Not System.String.Equals(encodingName, "utf-8", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                    Not System.String.Equals(encodingName, "utf8", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                    Not System.String.Equals(encodingName, "utf-8-bom", System.StringComparison.OrdinalIgnoreCase) Then Return False
                 Return ValidateFileHash(representation.TextPath, representation.TextFileHash)
             Catch ex As System.IO.IOException
                 Return False
@@ -604,6 +758,13 @@ Namespace SharedLibrary
                 .CompletedFiles = result.ProcessedFiles, .PendingFiles = result.PendingFiles, .DeferredFiles = result.DeferredFiles, .Message = message
             })
         End Sub
+
+        Private NotInheritable Class SemanticArchiveExplicitRetryProcessingException
+            Inherits System.Exception
+            Public Sub New(message As System.String)
+                MyBase.New(message)
+            End Sub
+        End Class
 
         Private NotInheritable Class SemanticArchiveHostRequiredException
             Inherits System.InvalidOperationException

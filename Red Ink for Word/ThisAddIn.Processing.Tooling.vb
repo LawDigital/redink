@@ -1252,6 +1252,10 @@ Partial Public Class ThisAddIn
                     modelPhaseStopwatch.Stop()
                     ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
                         "model_request", context.HostKind, modelPhaseStopwatch.ElapsedMilliseconds, "success"))
+                            Dim footerDraftRestored As System.Boolean = False
+                            currentResponse = SharedLibrary.Agents.ToolCallSequencing.RestoreFooterOnlyDraft(
+                                context.SequencingState, currentResponse, footerDraftRestored)
+                            If footerDraftRestored Then context.Log("TASK_STATUS-only repair restored the retained draft; normal finalization gates still apply.", "diag")
 
                 Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
                     context.LogWarn(
@@ -3521,6 +3525,11 @@ Partial Public Class ThisAddIn
                                         SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(
                                             context.SequencingState,
                                             turnValidation.InvalidReason))
+                                If SharedLibrary.Agents.ToolCallSequencing.TryBeginFooterOnlyRepair(
+                                    context.SequencingState, currentResponse, turnValidation.InvalidReason) Then
+                                    context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildFooterOnlyRepairPrompt()
+                                    context.Log("Missing TASK_STATUS: retaining the draft and requesting only its completion footer.", "diag")
+                                End If
                                 context.PendingRejectedAssistantTurn = If(currentResponse, "")
                                 context.PendingGuardTitle =
                                     If(

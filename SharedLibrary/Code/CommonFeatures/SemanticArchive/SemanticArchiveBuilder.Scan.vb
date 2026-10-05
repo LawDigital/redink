@@ -128,6 +128,20 @@ Namespace SharedLibrary
             Dim selected As System.Collections.Generic.List(Of System.String) = Nothing
             If options.SelectedDocumentIds IsNot Nothing Then
                 selected = New System.Collections.Generic.List(Of System.String)(New System.Collections.Generic.HashSet(Of System.String)(options.SelectedDocumentIds, System.StringComparer.Ordinal))
+            ElseIf options.IndexOnlyRebuild Then
+                ' Reindex operates on the published logical inventory. It validates each current source
+                ' during processing but deliberately does not discover new files or turn a semantic
+                ' rebuild into a refresh/extraction operation.
+                selected = New System.Collections.Generic.List(Of System.String)()
+                If previous IsNot Nothing Then
+                    For Each document As SemanticArchiveDocumentRecord In _store.EnumerateDocuments(previous)
+                        If document IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(document.DocumentId) Then selected.Add(document.DocumentId)
+                    Next
+                End If
+                result.Diagnostics.Add("reindex_inventory_bound: semantic rebuild is bound to the currently published logical source inventory; Refresh archive discovers additions/removals.")
+            End If
+            If selected IsNot Nothing Then
+                selected = New System.Collections.Generic.List(Of System.String)(New System.Collections.Generic.HashSet(Of System.String)(selected, System.StringComparer.Ordinal))
                 selected.Sort(System.StringComparer.Ordinal)
                 For Each documentId As System.String In selected
                     SemanticArchiveIdentity.ValidateId(documentId, NameOf(options.SelectedDocumentIds))
@@ -136,7 +150,7 @@ Namespace SharedLibrary
             If options.OperationId Is Nothing Then options.OperationId = ""
             Dim scopeSignature As System.String = SemanticArchiveIdentity.StableId("scope", Newtonsoft.Json.JsonConvert.SerializeObject(New With {
                 .selected_ids = selected, .permissions_only = options.ReconcilePermissionsOnly,
-                .force_extraction = options.ForceReextract, .force_semantic = options.RebuildSemanticMetadata, .retry = options.RetryFailures,
+                .force_extraction = options.ForceReextract, .force_semantic = options.RebuildSemanticMetadata, .index_only = options.IndexOnlyRebuild, .retry = options.RetryFailures,
                 .integrity_audit = options.FullIntegrityAudit, .explicit_refresh = options.ForceScan AndAlso Not options.IsBackground}))
             Dim checkpoint As SemanticArchiveScanCheckpoint = queue.LoadScan(options.ReconcilePermissionsOnly)
             Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
@@ -157,7 +171,7 @@ Namespace SharedLibrary
                 checkpoint = New SemanticArchiveScanCheckpoint With {
                     .InProgress = True, .CycleId = System.Guid.NewGuid().ToString("N"), .RequestId = options.OperationId,
                     .ScopeSignature = scopeSignature, .ConfigurationSignature = scanSignature,
-                    .ForceSemanticRebuild = options.RebuildSemanticMetadata, .ForceExtractionRebuild = options.ForceReextract,
+                    .ForceSemanticRebuild = options.RebuildSemanticMetadata OrElse options.IndexOnlyRebuild, .ForceExtractionRebuild = options.ForceReextract, .IndexOnlyRebuild = options.IndexOnlyRebuild,
                     .RetryFailures = options.RetryFailures, .ExplicitRefresh = options.ForceScan AndAlso Not options.IsBackground,
                     .Phase = If(selected Is Nothing, "discover", "selected")}
                 queue.SaveDiscoveryBase(previous, options.ReconcilePermissionsOnly)
@@ -182,7 +196,7 @@ Namespace SharedLibrary
                 While checkpoint.InProgress AndAlso result.DiscoveryEntriesInspected < options.MaxDiscoveryEntries AndAlso
                     timer.Elapsed.TotalSeconds < options.MaxDiscoverySeconds
                     cancellationToken.ThrowIfCancellationRequested()
-                    If Not options.ReconcilePermissionsOnly AndAlso queue.PendingCount(False, options.IsBackground) >= System.Math.Max(1024, options.MaximumFilesPerBatch * 4) Then
+                    If Not options.ReconcilePermissionsOnly AndAlso queue.PendingCount(False, options.IsBackground, selected) >= System.Math.Max(1024, options.MaximumFilesPerBatch * 4) Then
                         result.Diagnostics.Add("discovery_backpressure: Discovery paused while its bounded source-processing queue drains.")
                         Exit While
                     End If
@@ -394,8 +408,15 @@ Namespace SharedLibrary
                 .SourceLength = info.Length, .SourceWriteTicks = info.LastWriteTimeUtc.Ticks,
                 .ExtractionSignature = ExtractionSignature(archive, binding, full, extractionContext), .SemanticSignature = semanticSignature,
                 .ForceSemanticRebuild = checkpoint.ForceSemanticRebuild OrElse checkpoint.ForceExtractionRebuild,
-                .ForceExtractionRebuild = checkpoint.ForceExtractionRebuild}
+                .ForceExtractionRebuild = checkpoint.ForceExtractionRebuild, .IndexOnlyRebuild = checkpoint.IndexOnlyRebuild}
             If prior IsNot Nothing AndAlso prior.PartitionKey.StartsWith(binding.BindingId & ":", System.StringComparison.Ordinal) Then item.PartitionKey = prior.PartitionKey
+            If checkpoint.RetryFailures AndAlso RetryRequiresFreshExtraction(prior) Then
+                ' Explicit retry is stage-aware: extraction-level failures must bypass
+                ' an intact-but-incomplete representation, while semantic/index failures
+                ' with a verified complete extract continue to reuse that extract.
+                item.ForceExtractionRebuild = True
+                item.ForceSemanticRebuild = True
+            End If
             Dim unchanged As System.Boolean = prior IsNot Nothing AndAlso prior.Fingerprint IsNot Nothing AndAlso
                 prior.Fingerprint.Length = item.SourceLength AndAlso prior.Fingerprint.LastWriteUtcTicks = item.SourceWriteTicks AndAlso
                 Not System.String.IsNullOrWhiteSpace(prior.Fingerprint.Sha256)
@@ -420,7 +441,7 @@ Namespace SharedLibrary
                     If prior IsNot Nothing AndAlso (Not unchanged OrElse audited) Then
                         _store.SaveValidity(lease, prior, False, "Source/version or scheduled integrity validation is pending; the prior projection remains suppressed until validation completes.", Nothing)
                     End If
-                    queue.Enqueue(item)
+                    queue.Enqueue(item, replaceOperationIntent:=checkpoint.ExplicitRefresh OrElse checkpoint.RetryFailures OrElse checkpoint.ForceSemanticRebuild OrElse checkpoint.ForceExtractionRebuild)
                 End If
                 If checkpoint.RetryFailures AndAlso seen Is Nothing Then queue.ResetRetry(documentId)
                 queue.MarkSeen(checkpoint, documentId, bindings, False)
@@ -724,12 +745,12 @@ Namespace SharedLibrary
             Return ComposeExtractionSignature(archive, binding, signature)
         End Function
 
-        Private Shared Function ComposeExtractionSignature(archive As SemanticArchiveDefinition, binding As SemanticArchiveSourceBinding, signature As System.String) As System.String
+        Private Shared Function ComposeExtractionSignature(archive As SemanticArchiveDefinition, binding As SemanticArchiveSourceBinding, signature As System.String, Optional ocrBatchPages As System.Int32 = -1) As System.String
             ' Semantic compatibility is independent of private/shared placement and
             ' user-visible path aliases. Structured encoding prevents delimiter aliases.
             Return SemanticArchiveIdentity.StableId("extraction", Newtonsoft.Json.JsonConvert.SerializeObject(New With {
                 .schema = 2, .exporter = signature, .profile = archive.ExtractionProfileVersion,
-                .options = binding.ExtractionOptionsSignature, .ocr = binding.EnableOcr, .ocrBatchPages = binding.OcrBatchPages}))
+                .options = binding.ExtractionOptionsSignature, .ocr = binding.EnableOcr, .ocrBatchPages = If(ocrBatchPages < 0, binding.OcrBatchPages, ocrBatchPages)}))
         End Function
 
         Private Shared Function RelativeSourcePath(root As System.String, path As System.String) As System.String
@@ -746,6 +767,15 @@ Namespace SharedLibrary
 
         Private Shared Function IsExcluded(binding As SemanticArchiveSourceBinding, path As System.String) As System.Boolean
             Return SemanticArchiveStore.IsSourceExcluded(binding, path)
+        End Function
+
+        Private Shared Function RetryRequiresFreshExtraction(document As SemanticArchiveDocumentRecord) As System.Boolean
+            If document Is Nothing OrElse document.Representation Is Nothing Then Return True
+            Select Case If(document.ProcessingStatus, System.String.Empty)
+                Case "empty", "incomplete", "unknown"
+                    Return True
+            End Select
+            Return Not System.String.Equals(If(document.Representation.Completeness, System.String.Empty), "complete", System.StringComparison.Ordinal) AndAlso Not document.Active
         End Function
 
         Private Shared Function SameStringSet(left As System.Collections.Generic.IEnumerable(Of System.String), right As System.Collections.Generic.IEnumerable(Of System.String)) As System.Boolean

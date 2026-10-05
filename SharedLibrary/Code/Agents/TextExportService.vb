@@ -19,6 +19,9 @@ Namespace Agents
         Public Property OcrPdf As System.Boolean
         Public Property OcrBatchPages As System.Int32 = 1
         Public Property Overwrite As System.Boolean
+        ' Execution policy only: bypass session reuse for an explicit extraction retry.
+        ' This does not change document identity, the content signature or overwrite permission.
+        Public Property ForceFreshExtraction As System.Boolean
         ' Host capability, supplied for an explicit foreground job. The adapter dispatches
         ' only its synchronous host reader; enumeration, snapshots and model calls stay off UI.
         Public Property HostReaderDispatcher As System.Func(Of System.Func(Of System.String), System.Threading.CancellationToken, System.Threading.Tasks.Task(Of System.String))
@@ -231,6 +234,108 @@ Namespace Agents
                 target.Add("Additional reader observations omitted by the diagnostic limit.")
             End If
         End Sub
+
+        ''' <summary>Prioritized bounded exception observations for the existing private reader diagnostics.
+        ''' Does not collect request bodies, attachments, model replies or FusionLog.</summary>
+        Public Shared Sub AddExceptionDetails(target As System.Collections.Generic.List(Of System.String),
+                                              code As System.String, failure As System.Exception,
+                                              stage As System.String)
+            If target Is Nothing OrElse failure Is Nothing Then Return
+            Dim details As New System.Collections.Generic.List(Of System.String)()
+            Try
+                Dim chain As New System.Collections.Generic.List(Of System.Exception)()
+                Dim current As System.Exception = failure
+                While current IsNot Nothing AndAlso chain.Count < Global.SharedLibrary.SharedLibrary.SharedMethods.DEFAULT_TEXTEXPORT_EXCEPTION_DIAGNOSTIC_DEPTH
+                    chain.Add(current)
+                    current = current.InnerException
+                End While
+                AddWarning(details, code & ": stage=" & stage & "; exception=" & failure.GetType().FullName &
+                    "; hresult=" & failure.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture))
+                ' Missing dependency identity precedes messages and stacks so a bounded
+                ' downstream display can still identify the file inside a wrapper exception.
+                For index As System.Int32 = 0 To chain.Count - 1
+                    Dim missing As System.IO.FileNotFoundException = TryCast(chain(index), System.IO.FileNotFoundException)
+                    Dim loadFailure As System.IO.FileLoadException = TryCast(chain(index), System.IO.FileLoadException)
+                    Dim prefix As System.String = code & ": inner_depth=" & index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    AddExceptionObservation(details, prefix, "file",
+                        Function() If(missing IsNot Nothing, missing.FileName, If(loadFailure IsNot Nothing, loadFailure.FileName, Nothing)))
+                Next
+                For index As System.Int32 = 0 To chain.Count - 1
+                    Dim item As System.Exception = chain(index)
+                    Dim prefix As System.String = code & ": inner_depth=" & index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    AddWarning(details, prefix & "; type=" & item.GetType().FullName)
+                    AddExceptionObservation(details, prefix, "message", Function() item.Message)
+                    AddExceptionObservation(details, prefix, "target", Function() ExceptionTargetName(item))
+                Next
+                For index As System.Int32 = 0 To chain.Count - 1
+                    Dim item As System.Exception = chain(index)
+                    Dim prefix As System.String = code & ": inner_depth=" & index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    ' Formatting TargetSite/StackTrace can itself resolve missing runtime
+                    ' dependencies. Isolate each observation after essential file/message data.
+                    AddExceptionObservation(details, prefix, "frame", Function() ExceptionStackLines(item))
+                Next
+                If current IsNot Nothing Then AddWarning(details, code & ": additional inner exceptions omitted by the diagnostic depth limit.")
+            Catch diagnosticFailure As System.Exception
+                AddObservationFailure(details, code, "exception_chain", diagnosticFailure)
+            Finally
+                ' Partial diagnostic success must survive later metadata-resolution failure.
+                details.AddRange(target)
+                Dim bounded As System.Collections.Generic.List(Of System.String) = CopyWarnings(details)
+                target.Clear()
+                target.AddRange(bounded)
+            End Try
+        End Sub
+
+        Private Shared Sub AddExceptionObservation(details As System.Collections.Generic.List(Of System.String),
+                                                    prefix As System.String, field As System.String,
+                                                    readValue As System.Func(Of System.String))
+            Try
+                Dim value As System.String = readValue.Invoke()
+                If Not System.String.IsNullOrWhiteSpace(value) Then AddWarning(details, prefix & "; " & field & "=" & value)
+            Catch diagnosticFailure As System.Exception
+                AddObservationFailure(details, prefix, field, diagnosticFailure)
+            End Try
+        End Sub
+
+        Private Shared Sub AddObservationFailure(details As System.Collections.Generic.List(Of System.String),
+                                                 prefix As System.String, field As System.String,
+                                                 failure As System.Exception)
+            AddWarning(details, prefix & "; observation_unavailable=" & field & "; exception=" & failure.GetType().FullName)
+            ' Read only basic failure fields here; never reflect over the secondary
+            ' exception or format its stack, which could reproduce the same load failure.
+            Try
+                Dim missing As System.IO.FileNotFoundException = TryCast(failure, System.IO.FileNotFoundException)
+                Dim loadFailure As System.IO.FileLoadException = TryCast(failure, System.IO.FileLoadException)
+                Dim fileName As System.String = If(missing IsNot Nothing, missing.FileName, If(loadFailure IsNot Nothing, loadFailure.FileName, Nothing))
+                If Not System.String.IsNullOrWhiteSpace(fileName) Then AddWarning(details, prefix & "; observation=" & field & "; diagnostic_file=" & fileName)
+            Catch basicFailure As System.Exception
+                AddWarning(details, prefix & "; diagnostic_file_unavailable=" & basicFailure.GetType().FullName)
+            End Try
+            Try
+                AddWarning(details, prefix & "; observation=" & field & "; diagnostic_message=" & failure.Message)
+            Catch basicFailure As System.Exception
+                AddWarning(details, prefix & "; diagnostic_message_unavailable=" & basicFailure.GetType().FullName)
+            End Try
+        End Sub
+
+        Private Shared Function ExceptionTargetName(failure As System.Exception) As System.String
+            Dim site As System.Reflection.MethodBase = failure.TargetSite
+            If site Is Nothing Then Return Nothing
+            Dim owner As System.Type = site.DeclaringType
+            Return If(owner Is Nothing, System.String.Empty, owner.FullName & ".") & site.Name
+        End Function
+
+        Private Shared Function ExceptionStackLines(failure As System.Exception) As System.String
+            Dim lines As New System.Collections.Generic.List(Of System.String)()
+            Using reader As New System.IO.StringReader(If(failure.StackTrace, System.String.Empty))
+                For frame As System.Int32 = 1 To Global.SharedLibrary.SharedLibrary.SharedMethods.DEFAULT_TEXTEXPORT_EXCEPTION_STACK_FRAMES
+                    Dim line As System.String = reader.ReadLine()
+                    If line Is Nothing Then Exit For
+                    lines.Add(line.Trim())
+                Next
+            End Using
+            Return System.String.Join(" | ", lines)
+        End Function
 
         Public Shared Function CopyWarnings(values As System.Collections.Generic.IEnumerable(Of System.String)) As System.Collections.Generic.List(Of System.String)
             Dim result As New System.Collections.Generic.List(Of System.String)()

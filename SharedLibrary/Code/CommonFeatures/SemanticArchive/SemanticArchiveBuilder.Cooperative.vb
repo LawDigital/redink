@@ -8,14 +8,23 @@ Namespace SharedLibrary
         Private NotInheritable Class CooperativePreparation
             Public Property Store As SemanticArchiveCooperativeStore
             Public Property Document As SemanticArchiveDocumentRecord
+            Public Property ValidatedLocalExtract As System.Boolean
         End Class
 
         Private Async Function PrepareCooperativeAsync(archive As SemanticArchiveDefinition, binding As SemanticArchiveSourceBinding,
                                                         item As SemanticArchiveWorkItem, document As SemanticArchiveDocumentRecord,
                                                         queue As SemanticArchiveWorkQueue,
                                                         options As SemanticArchiveBuildOptions, result As SemanticArchiveBuildResult,
-                                                        cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of CooperativePreparation)
-            Dim preparation As New CooperativePreparation With {.Document = document}
+                                                        cancellationToken As System.Threading.CancellationToken,
+                                                        Optional validatedLocalExtract As System.Boolean = False) As System.Threading.Tasks.Task(Of CooperativePreparation)
+            Dim preparation As New CooperativePreparation With {.Document = document, .ValidatedLocalExtract = validatedLocalExtract}
+            Dim indexOnly As System.Boolean = options.IndexOnlyRebuild OrElse item.IndexOnlyRebuild
+            If indexOnly AndAlso Not item.ForceExtractionRebuild AndAlso (validatedLocalExtract OrElse ValidateReusableRepresentation(binding, document.Representation, item.SourceHash, item.ExtractionSignature)) Then
+                ' Never replace a valid local extract or wait for a shared writer merely
+                ' to regenerate private semantic derivatives.
+                preparation.ValidatedLocalExtract = True
+                Return preparation
+            End If
             Try
                 Dim location As SemanticArchiveArtifactLocation = SemanticArchiveArtifactPlanner.Plan(binding, item.SourcePath)
                 If Not System.String.Equals(location.SourceIdentity, item.CanonicalSourceKey, System.StringComparison.Ordinal) Then
@@ -47,6 +56,7 @@ Namespace SharedLibrary
                         End Try
                     Next
                 End If
+                If indexOnly Then Return preparation
                 If Not location.IsShared Then
                     preparation.Document.CooperativeState = "local_only"
                     preparation.Document.CooperativeDiagnostic = location.Diagnostic

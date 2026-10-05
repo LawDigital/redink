@@ -16,6 +16,7 @@ Namespace SharedLibrary
     Public NotInheritable Partial Class SemanticArchiveBuilder
         Friend Shared Function IsTechnicalDiagnostic(message As System.String) As System.Boolean
             Return message IsNot Nothing AndAlso (message.StartsWith("routing_metadata_reduced:", System.StringComparison.Ordinal) OrElse
+                message.StartsWith("routing_rebuild_required:", System.StringComparison.Ordinal) OrElse
                 message.StartsWith("local_split:", System.StringComparison.Ordinal) OrElse
                 message.StartsWith("cooperative_contributed:", System.StringComparison.Ordinal) OrElse
                 message.StartsWith("cooperative_reuse:", System.StringComparison.Ordinal) OrElse

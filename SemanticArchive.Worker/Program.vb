@@ -50,7 +50,6 @@ Namespace SemanticArchiveWorker
                 Dim onCancel As System.ConsoleCancelEventHandler =
                     Sub(sender As System.Object, args As System.ConsoleCancelEventArgs)
                         args.Cancel = True
-                        consoleProgress.Clear()
                         System.Console.Error.WriteLine("Cancellation requested. Finishing the current safe checkpoint; completed work will remain reusable.")
                         cancellation.Cancel()
                     End Sub
@@ -81,7 +80,7 @@ Namespace SemanticArchiveWorker
                     Dim catalog As SemanticArchiveCatalog = store.LoadCatalog()
                     Dim selected As System.Collections.Generic.List(Of System.String) = SelectArchives(catalog, options)
                     headless.ThrowIfInteractionRequested()
-                    Using log As New WorkerLog(options.LogPath, catalog, store.DirectoryPath, consoleProgress)
+                    Using log As New WorkerLog(options.LogPath, catalog, store.DirectoryPath)
                         log.Write("started", New With {.operationId = options.OperationId, .operation = options.Operation,
                             .archives = selected, .allDocuments = options.AllDocuments, .selectedDocumentCount = options.DocumentIds.Count,
                             .mode = If(options.LoopContinuously, "loop", "once")})
@@ -90,8 +89,9 @@ Namespace SemanticArchiveWorker
                             .SelectedDocumentIds = If(options.AllDocuments, Nothing, New System.Collections.Generic.List(Of System.String)(options.DocumentIds)),
                             .ReconcilePermissionsOnly = permissionsOnly,
                             .ForceReextract = options.Operation = "extract",
-                            .RebuildSemanticMetadata = options.Operation = "reindex",
-                            .RetryFailures = options.Operation = "retry",
+                            .RebuildSemanticMetadata = options.Operation = "reindex" OrElse options.Operation = "repair",
+                            .IndexOnlyRebuild = options.Operation = "reindex",
+                            .RetryFailures = options.Operation = "retry" OrElse options.Operation = "repair",
                             .MaximumFilesPerBatch = options.MaximumFiles,
                             .MaximumWriterLeaseWait = System.TimeSpan.FromMilliseconds(Global.SharedLibrary.SharedLibrary.SharedMethods.DEFAULT_SEMANTICARCHIVE_WORKER_WRITER_LEASE_WAIT_MILLISECONDS),
                             .MaxDiscoveryEntries = options.DiscoveryEntries,
@@ -127,6 +127,9 @@ Namespace SemanticArchiveWorker
                                 End Try
                                 log.Write("batch", New With {.operationId = options.OperationId, .archiveId = archiveId,
                                     .cycle = cycle, .processed = result.ProcessedFiles, .reused = result.ReusedFiles,
+                                    .extractsReused = result.ExtractsReused, .cardsRebuilt = result.CardsRebuilt,
+                                    .sectionIndexesRebuilt = result.SectionIndexesRebuilt, .routingGroupsBuilt = result.RoutingGroupsBuilt,
+                                    .documentsRequiringExtraction = result.DocumentsRequiringExtraction, .coverageExcluded = result.CoverageExcludedFiles,
                                     .failed = result.FailedFiles, .pending = result.PendingFiles, .deferred = result.DeferredFiles,
                                     .published = result.Published, .discoveryPending = result.DiscoveryPending,
                                     .discoveryEntries = result.DiscoveryEntriesInspected, .permissionsPending = result.PermissionsPending,
@@ -156,14 +159,57 @@ Namespace SemanticArchiveWorker
                             Await System.Threading.Tasks.Task.Delay(System.TimeSpan.FromSeconds(options.IntervalSeconds), cancellation.Token).ConfigureAwait(False)
                         Loop
                         headless.ThrowIfInteractionRequested()
+                        If Not permissionsOnly Then
+                            For Each archiveId As System.String In selected
+                                cancellation.Token.ThrowIfCancellationRequested()
+                                If Not VerifyPublishedScope(store, archiveId, options, log, cancellation.Token) Then incomplete = True
+                            Next
+                        End If
                         log.Write(If(incomplete, "incomplete", "complete"), New With {.operationId = options.OperationId, .cycles = cycle})
                         Return If(incomplete, 3, 0)
                     End Using
                 Finally
-                    consoleProgress.Clear()
                     RemoveHandler System.Console.CancelKeyPress, onCancel
                 End Try
             End Using
+        End Function
+
+        Private Function VerifyPublishedScope(store As SemanticArchiveStore, archiveId As System.String,
+                                              options As WorkerOptions, log As WorkerLog,
+                                              cancellationToken As System.Threading.CancellationToken) As System.Boolean
+            Try
+                Dim generation As SemanticArchiveGenerationManifest = store.PinGeneration(archiveId)
+                If generation Is Nothing Then Throw New System.IO.InvalidDataException("generation_unavailable")
+                ' A completed queue is not proof of a usable published semantic index.
+                store.LoadRoutingGraph(generation)
+                Dim selectedIds As New System.Collections.Generic.HashSet(Of System.String)(options.DocumentIds, System.StringComparer.Ordinal)
+                Dim records As New System.Collections.Generic.List(Of SemanticArchiveDocumentRecord)()
+                Dim needsExtraction As System.Int32 = 0
+                Dim unavailable As System.Int32 = 0
+                Dim access As SemanticArchiveAccessContext = SemanticArchiveAccessContext.CreateForCurrentUser()
+                For Each document As SemanticArchiveDocumentRecord In store.EnumerateDocuments(generation)
+                    cancellationToken.ThrowIfCancellationRequested()
+                    If Not options.AllDocuments AndAlso Not selectedIds.Contains(document.DocumentId) Then Continue For
+                    records.Add(document)
+                    selectedIds.Remove(document.DocumentId)
+                    If document.ProcessingStatus = "needs_extraction" Then needsExtraction += 1
+                    If SemanticArchiveInventory.IsSearchable(document) AndAlso Not store.CanReadDocument(access, generation, document) Then unavailable += 1
+                Next
+                Dim inventory As SemanticArchiveInventory = SemanticArchiveInventory.FromDocuments(records)
+                Dim missingSelected As System.Int32 = If(options.AllDocuments, 0, selectedIds.Count)
+                Dim unresolved As System.Int32 = inventory.CurrentSources - inventory.EmptySources - inventory.SearchableDocuments
+                Dim complete As System.Boolean = unresolved = 0 AndAlso unavailable = 0 AndAlso missingSelected = 0
+                log.Write("published_scope_verified", New With {.operationId = options.OperationId, .archiveId = archiveId,
+                    .generationId = generation.GenerationId, .inventory = inventory, .needsExtraction = needsExtraction,
+                    .unresolved = unresolved, .sourcesUnavailable = unavailable, .missingSelectedDocuments = missingSelected, .complete = complete})
+                Return complete
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.Exception
+                log.Write("published_scope_verification_failed", New With {.operationId = options.OperationId,
+                    .archiveId = archiveId, .exceptionType = ex.GetType().Name})
+                Return False
+            End Try
         End Function
 
         Private Function SelectArchives(catalog As SemanticArchiveCatalog, options As WorkerOptions) As System.Collections.Generic.List(Of System.String)
@@ -203,7 +249,7 @@ Namespace SemanticArchiveWorker
             Dim allowed As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal) From {
                 "pending_host", "failed", "shared_claim_deferred", "empty_selection", "selection_required",
                 "permissions_deferred", "permission_denied", "path_too_long", "restart_required", "noninteractive_auth_required",
-                "coverage_excluded", "cooperative_local_only", "cooperative_contribution_pending", "cooperative_contributed", "cooperative_reuse"}
+                "coverage_excluded", "requires_extraction", "extraction_contract_mismatch", "extraction_configuration_changed", "extraction_batch_policy_compatible", "routing_rebuild_required", "routing_assignment_fallback", "routing_partition_fallback", "routing_summary_fallback", "cooperative_local_only", "cooperative_contribution_pending", "cooperative_contributed", "cooperative_reuse"}
             If diagnostics Is Nothing Then Return result
             For Each diagnostic As System.String In diagnostics
                 Dim separator As System.Int32 = If(diagnostic, "").IndexOf(":"c)
@@ -222,13 +268,17 @@ Namespace SemanticArchiveWorker
         Private Sub ShowHelp()
             System.Console.WriteLine("Red Ink Semantic Archive Worker")
             System.Console.WriteLine("Quick use: redink-sa-worker.exe refresh ""Archive Name""")
+            System.Console.WriteLine("           redink-sa-worker.exe repair ""Archive A"" ""Archive B""")
             System.Console.WriteLine("           redink-sa-worker.exe reindex ""Archive Name""")
-            System.Console.WriteLine("The quick form uses Red Ink's normal redink.ini resolution, all documents and drains the operation to completion.")
+            System.Console.WriteLine("The quick form uses Red Ink's normal redink.ini resolution, all documents and drains one or more named archives to completion.")
+            System.Console.WriteLine("retry is stage-aware: missing/empty/incomplete/unknown extraction is freshly extracted/OCRed, while a verified complete extract is reused for downstream retries.")
+            System.Console.WriteLine("repair performs that stage-aware repair and also rebuilds semantic cards, section indexes and current routing in the same operation.")
+            System.Console.WriteLine("reindex is index-only: it reuses validated extracted text and never invokes extraction/OCR; invalid or missing extracts are reported as requiring extraction.")
             System.Console.WriteLine("")
             System.Console.WriteLine("Advanced: [--ini <path-or-HTTPS-URL>] [--once|--loop]")
             System.Console.WriteLine("  (--archive <name-or-stable-id> [--archive <name-or-id> ...]|--all-archives)")
             System.Console.WriteLine("  [--document <stable-id> [--document <id> ...]|--all-documents]")
-            System.Console.WriteLine("  [--operation refresh|retry|reindex|extract|permissions] [--operation-id <GUID>]")
+            System.Console.WriteLine("  [--operation refresh|retry|repair|reindex|extract|permissions] [--operation-id <GUID>]")
             System.Console.WriteLine("  [--batch-files 1..4096] [--discovery-entries 1..10000] [--discovery-seconds 1..120]")
             System.Console.WriteLine("  [--interval-seconds 1..86400] [--max-cycles 1..1000000] [--max-seconds 1..604800]")
             System.Console.WriteLine("  [--log <private-file-outside-source-roots>]")
@@ -237,7 +287,7 @@ Namespace SemanticArchiveWorker
             System.Console.WriteLine("Use --batch-files to throttle model/OCR pressure; e.g. --batch-files 8. Use --discovery-seconds to limit long directory scans per cycle.")
             System.Console.WriteLine("Without --ini the worker resolves the same active redink.ini source as Red Ink. Without document options it uses all documents; without --once it drains the operation like --loop.")
             System.Console.WriteLine("A configured SemanticArchiveCatalogLibraryPath is synchronized before archive selection.")
-            System.Console.WriteLine("Interactive terminals show an in-place progress line on stderr. stdout remains JSON-lines so automation can parse it; --log stores the same JSON events.")
+            System.Console.WriteLine("Progress is appended as separate lines on stderr, including when redirected; window resizing needs no cursor recovery. stdout remains JSON-lines; --log stores the same JSON events.")
             System.Console.WriteLine("Ctrl+C requests graceful cancellation. Durable discovery/extraction checkpoints and the last validated published generation are retained; rerun the same command to continue.")
             System.Console.WriteLine("If a source needs an Office host reader it can remain pending; the worker does not automate Word/Outlook UI.")
             System.Console.WriteLine("Exit codes: 0 complete, 1 configuration/auth/runtime error, 2 arguments, 3 incomplete/deferred, 130 cancelled.")
@@ -247,11 +297,10 @@ Namespace SemanticArchiveWorker
             Implements System.IProgress(Of SemanticArchiveBuildProgress)
 
             Private ReadOnly _sync As New System.Object()
-            Private _lastLength As System.Int32
             Private _lastText As System.String = ""
 
             Public Sub Report(value As SemanticArchiveBuildProgress) Implements System.IProgress(Of SemanticArchiveBuildProgress).Report
-                If value Is Nothing OrElse System.Console.IsErrorRedirected Then Return
+                If value Is Nothing Then Return
                 Dim sourceName As System.String = ""
                 If Not System.String.IsNullOrWhiteSpace(value.SourcePath) Then
                     Try
@@ -268,41 +317,47 @@ Namespace SemanticArchiveWorker
                     If value.DeferredFiles > 0 Then counters.Append("; ").Append(value.DeferredFiles.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(" deferred")
                 End If
                 Dim line As System.String = stage
-                If sourceName.Length > 0 Then line &= " — " & sourceName
+                If sourceName.Length > 0 Then line &= " — " & SingleLine(sourceName)
                 If counters.Length > 0 Then line &= " | " & counters.ToString()
-                WriteInPlace(line)
+                WriteProgressLine(line, If(value.SourcePath, ""))
             End Sub
 
-            Public Sub Clear()
-                If System.Console.IsErrorRedirected Then Return
+            Private Sub WriteProgressLine(text As System.String, sourcePath As System.String)
+                ' Complete lines need no cursor position, width, padding or resize recovery.
+                ' Suppress only identical consecutive events; equal filenames in different
+                ' directories must not hide a different source's progress.
+                Dim line As System.String = SingleLine(text)
+                Dim key As System.String = sourcePath & Microsoft.VisualBasic.ChrW(0) & line
                 SyncLock _sync
-                    If _lastLength <= 0 Then Return
-                    System.Console.Error.Write(Microsoft.VisualBasic.ChrW(13) & New System.String(" "c, _lastLength) & Microsoft.VisualBasic.ChrW(13))
-                    _lastLength = 0
-                    _lastText = ""
+                    If System.String.Equals(key, _lastText, System.StringComparison.Ordinal) Then Return
+                    System.Console.Error.WriteLine(line)
+                    _lastText = key
                 End SyncLock
             End Sub
 
-            Private Sub WriteInPlace(text As System.String)
-                Dim bounded As System.String = If(text, "")
-                If bounded.Length > 180 Then bounded = bounded.Substring(0, 177) & "..."
-                SyncLock _sync
-                    If System.String.Equals(bounded, _lastText, System.StringComparison.Ordinal) Then Return
-                    Dim padding As System.Int32 = System.Math.Max(0, _lastLength - bounded.Length)
-                    System.Console.Error.Write(Microsoft.VisualBasic.ChrW(13) & bounded & New System.String(" "c, padding))
-                    _lastLength = bounded.Length
-                    _lastText = bounded
-                End SyncLock
-            End Sub
+            Private Shared Function SingleLine(value As System.String) As System.String
+                Dim result As New System.Text.StringBuilder()
+                For Each character As System.Char In If(value, "")
+                    ' Filenames/stage text must never inject terminal controls or extra lines.
+                    If System.Char.IsControl(character) OrElse character = Microsoft.VisualBasic.ChrW(&H2028) OrElse character = Microsoft.VisualBasic.ChrW(&H2029) Then
+                        result.Append(" "c)
+                    Else
+                        result.Append(character)
+                    End If
+                Next
+                Return result.ToString()
+            End Function
 
             Private Shared Function FriendlyStage(stage As System.String) As System.String
                 Select Case If(stage, "").Trim().ToLowerInvariant()
                     Case "scanning" : Return "Scanning sources"
+                    Case "validating_extracts" : Return "Validating existing extracts"
                     Case "permissions" : Return "Checking permissions"
                     Case "processing" : Return "Processing source"
                     Case "extracting" : Return "Extracting text"
                     Case "indexing" : Return "Building semantic metadata"
                     Case "hierarchy" : Return "Updating archive index"
+                    Case "routing" : Return "Building routing groups"
                     Case "publishing" : Return "Publishing generation"
                     Case "coverage_excluded" : Return "Coverage check"
                     Case "shared_claim_deferred" : Return "Shared artifact deferred"
@@ -325,10 +380,8 @@ Namespace SemanticArchiveWorker
         Private NotInheritable Class WorkerLog
             Implements System.IDisposable
             Private ReadOnly _writer As System.IO.StreamWriter
-            Private ReadOnly _progress As WorkerConsoleProgress
 
-            Public Sub New(path As System.String, catalog As SemanticArchiveCatalog, controlDirectory As System.String, progress As WorkerConsoleProgress)
-                _progress = progress
+            Public Sub New(path As System.String, catalog As SemanticArchiveCatalog, controlDirectory As System.String)
                 If System.String.IsNullOrWhiteSpace(path) Then Return
                 Try
                     Dim full As System.String = SemanticArchivePathGuard.RequireWindowsCompatiblePath(path)
@@ -350,7 +403,6 @@ Namespace SemanticArchiveWorker
             End Sub
 
             Public Sub Write(code As System.String, details As System.Object)
-                If _progress IsNot Nothing Then _progress.Clear()
                 Dim line As System.String = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
                     .utc = System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture), .code = code, .details = details})
                 System.Console.WriteLine(line)

@@ -1,4 +1,4 @@
-﻿' Part of "Red Ink" (SharedLibrary)
+' Part of "Red Ink" (SharedLibrary)
 ' Bounded, generation-pinned archive search. Models select metadata; the host resolves IDs.
 Option Strict On
 Option Explicit On
@@ -8,9 +8,11 @@ Namespace SharedLibrary
         ' Counts describe published records, not permissions or proof of complete corpus coverage.
         Public Property PublishedInventory As New System.Collections.Generic.Dictionary(Of System.String, SemanticArchiveInventory)(System.StringComparer.Ordinal)
         Public Property Generations As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
-        Public Property RetrievalStrategy As System.String = "hierarchical"
+        Public Property RetrievalStrategy As System.String = "semantic_routing_dag"
         Public Property DocumentMetadataSelectionComplete As System.Boolean
         Public Property NodesVisited As System.Int32
+        Public Property RoutingLevelsVisited As System.Int32
+        Public Property RoutingGroupsConsidered As System.Int32
         Public Property ModelCalls As System.Int32
         Public Property TotalNodesVisited As System.Int64
         Public Property TotalModelCalls As System.Int64
@@ -23,6 +25,11 @@ Namespace SharedLibrary
         Public Property TotalLiteralByteBudgetUsed As System.Int64
         Public Property LiteralScanCoverageComplete As System.Boolean
         Public Property CardsConsidered As System.Int32
+        Public Property DocumentCardsConsidered As System.Int32
+        Public Property SemanticSelectionElapsedMilliseconds As System.Int64
+        Public Property ExactMetadataCandidatesQueued As System.Int32
+        Public Property UnavailableArchiveIds As New System.Collections.Generic.List(Of System.String)()
+        Public Property ExactMetadataElapsedMilliseconds As System.Int64
         Public Property ExactMetadataRecordsInspected As System.Int32
         Public Property FilesInspected As System.Int32
         Public Property SourcesUnavailable As System.Int32
@@ -32,6 +39,9 @@ Namespace SharedLibrary
         Public Property SectionsConsidered As System.Int32
         Public Property TotalSections As System.Int32
         Public Property IndexedFilesInspected As System.Int32
+        Public Property SectionIndexesQueried As System.Int32
+        Public Property CandidateDocumentsReturned As System.Int32
+        Public Property ContinuationAvailable As System.Boolean
         Public Property IndexedFilesWithoutSelection As System.Int32
         Public Property IndexedReadFailures As System.Int32
         Public Property ExactMetadataCoverageComplete As System.Boolean
@@ -68,8 +78,10 @@ Namespace SharedLibrary
         Public Property Status As System.String = "ok"
         Public Property Message As System.String = ""
         Public Property Query As System.String = ""
+        Public Property DeferredQuery As System.String
         Public Property Hits As New System.Collections.Generic.List(Of SemanticArchiveSearchHit)()
         Public Property ContinuationReference As System.String
+        Public Property NextSearchArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object)
         Public Property Coverage As New SemanticArchiveCoverage()
     End Class
 
@@ -81,11 +93,16 @@ Namespace SharedLibrary
         Friend Property TotalExactRecords As System.Int64
         Friend Property SearchCalls As System.Int64
         Friend Property SourceChecksAtCallStart As System.Int64
+        Friend ReadOnly UnavailableArchiveIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         Friend Property HadTraversalFailures As System.Boolean
         Friend Property HadExactFailures As System.Boolean
+        Friend Property RequestedArchiveIds As New System.Collections.Generic.List(Of System.String)()
         Friend Property ArchiveIds As New System.Collections.Generic.List(Of System.String)()
-        Friend Property Queue As New System.Collections.Generic.List(Of SemanticArchiveNodeWork)()
-        Friend Property SeenNodes As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        Friend Property RoutingGraphs As New System.Collections.Generic.Dictionary(Of System.String, SemanticArchiveRoutingGraph)(System.StringComparer.Ordinal)
+        Friend Property RoutingQueue As New System.Collections.Generic.List(Of SemanticArchiveRoutingWork)()
+        Friend Property SeenRoutingGroups As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        Friend Property RoutingLeafQueue As New System.Collections.Generic.List(Of SemanticArchiveRoutingLeafWork)()
+        Friend Property SeenRoutingLeaves As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
         Friend Property Candidates As New System.Collections.Generic.Dictionary(Of System.String, SemanticArchiveCandidate)(System.StringComparer.Ordinal)
         Friend Property Returned As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
         Friend Property ExactEnumerators As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.IEnumerator(Of SemanticArchiveDocumentRecord))(System.StringComparer.Ordinal)
@@ -96,6 +113,9 @@ Namespace SharedLibrary
         Friend Property FlatDocuments As New System.Collections.Generic.List(Of SemanticArchiveFlatDocument)()
         Friend Property Sequence As System.Int64
         Friend Property NeedsWidening As System.Boolean
+        Friend Property PageYieldRequested As System.Boolean
+        Friend Property EvaluatedDocumentIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        Friend Property DeferredDocumentOrder As New System.Collections.Generic.Dictionary(Of System.String, System.Int64)(System.StringComparer.Ordinal)
         Friend Property LiteralScan As SemanticArchiveLiteralScanState
     End Class
 
@@ -104,12 +124,21 @@ Namespace SharedLibrary
         Friend Property Document As SemanticArchiveDocumentRecord
     End Class
 
-    Friend NotInheritable Class SemanticArchiveNodeWork
+    Friend NotInheritable Class SemanticArchiveRoutingWork
         Friend Property ArchiveId As System.String
-        Friend Property NodeId As System.String
+        Friend Property GroupId As System.String
         Friend Property Priority As System.Double
         Friend Property Sequence As System.Int64
-        Friend Property ProcessedCardIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Friend Property Evaluated As System.Boolean
+        Friend Property Depth As System.Int32
+    End Class
+
+    Friend NotInheritable Class SemanticArchiveRoutingLeafWork
+        Friend Property ArchiveId As System.String
+        Friend Property GroupId As System.String
+        Friend Property Priority As System.Double
+        Friend Property Sequence As System.Int64
+        Friend Property ProcessedDocumentIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
     End Class
 
     Friend NotInheritable Class SemanticArchiveCandidate
@@ -157,7 +186,8 @@ Namespace SharedLibrary
                         Optional limit As System.Int32 = SharedMethods.DEFAULT_SEMANTICARCHIVE_SEARCH_LIMIT,
                         Optional continuationReference As System.String = Nothing,
                         Optional cancellationToken As System.Threading.CancellationToken = Nothing,
-                        Optional literalText As System.String = Nothing) As System.Threading.Tasks.Task(Of SemanticArchiveSearchResult)
+                        Optional literalText As System.String = Nothing,
+                        Optional searchMode As System.String = "auto") As System.Threading.Tasks.Task(Of SemanticArchiveSearchResult)
             If Not SemanticArchiveHostIntegration.IsConfigured(_context) Then Return New SemanticArchiveSearchResult With {.Status = "not_configured", .Message = "Semantic Archive is disabled: the local catalog path is empty."}
             If Not System.String.IsNullOrWhiteSpace(_scope.AccessContext.DenialCode) Then
                 Return New SemanticArchiveSearchResult() With {.Status = _scope.AccessContext.DenialCode,
@@ -174,12 +204,19 @@ Namespace SharedLibrary
             End Try
             If activeScope.SelectedArchiveIds.Count = 0 Then Return New SemanticArchiveSearchResult() With {.Status = "selection_required", .Message = "The host must select an archive before search."}
             If limit < 1 OrElse limit > 50 Then Return New SemanticArchiveSearchResult() With {.Status = "invalid_limit", .Message = "The result limit must be between 1 and 50."}
+            searchMode = If(searchMode, "auto").Trim().ToLowerInvariant()
+            If searchMode <> "auto" AndAlso searchMode <> "continue" AndAlso searchMode <> "new" Then
+                Return New SemanticArchiveSearchResult() With {.Status = "invalid_search_mode", .Message = "Search mode must be auto, continue or new."}
+            End If
+            If searchMode = "new" AndAlso Not System.String.IsNullOrWhiteSpace(continuationReference) Then
+                Return New SemanticArchiveSearchResult() With {.Status = "invalid_search_mode", .Message = "A new search cannot carry a continuation reference."}
+            End If
             Await activeScope.State.OperationGate.WaitAsync(cancellationToken).ConfigureAwait(False)
             Try
                 Using priority As System.IDisposable = BackgroundMaintenanceCoordinator.EnterInteractiveWork()
                     activeScope.State.EnsureUsable()
                     activeScope.State.BindDirectory(_store.DirectoryPath)
-                    Return Await System.Threading.Tasks.Task.Run(Function() SearchCoreAsync(activeScope, query, limit, continuationReference, cancellationToken, literalText), cancellationToken).ConfigureAwait(False)
+                    Return Await System.Threading.Tasks.Task.Run(Function() SearchCoreAsync(activeScope, query, limit, continuationReference, cancellationToken, literalText, searchMode), cancellationToken).ConfigureAwait(False)
                 End Using
             Finally
                 activeScope.State.OperationGate.Release()
@@ -189,7 +226,7 @@ Namespace SharedLibrary
         Private Async Function SearchCoreAsync(scope As SemanticArchiveRunScope, query As System.String, limit As System.Int32,
                         continuationReference As System.String,
                         cancellationToken As System.Threading.CancellationToken,
-                        literalText As System.String) As System.Threading.Tasks.Task(Of SemanticArchiveSearchResult)
+                        literalText As System.String, searchMode As System.String) As System.Threading.Tasks.Task(Of SemanticArchiveSearchResult)
             SemanticArchiveLibrary.ValidateScope(_context, _store, scope.SelectedArchiveIds)
             Dim result As New SemanticArchiveSearchResult() With {.Query = If(query, "")}
             Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
@@ -197,6 +234,37 @@ Namespace SharedLibrary
             Dim budgets As SemanticArchiveRetrievalBudgets = Nothing
             Dim state As SemanticArchiveSearchState = Nothing
             Dim continuation As System.String = continuationReference
+            ' The caller chooses intent; never guess semantic equivalence between two queries.
+            ' Direct API callers retain exact-query auto-resume unless they opt into continue/new.
+            If searchMode <> "new" AndAlso System.String.IsNullOrWhiteSpace(continuation) Then
+                Dim matches As New System.Collections.Generic.List(Of System.String)()
+                Dim compatible As New System.Collections.Generic.List(Of System.String)()
+                Dim requested As New System.Collections.Generic.HashSet(Of System.String)(scope.SelectedArchiveIds, System.StringComparer.Ordinal)
+                For Each pending As System.Collections.Generic.KeyValuePair(Of System.String, SemanticArchiveSearchState) In scope.State.Searches
+                    Dim sameLiteral As System.Boolean = If(pending.Value.LiteralScan Is Nothing, literalText Is Nothing,
+                        literalText IsNot Nothing AndAlso System.String.Equals(literalText, pending.Value.LiteralScan.LiteralText, System.StringComparison.Ordinal))
+                    If sameLiteral AndAlso requested.SetEquals(pending.Value.RequestedArchiveIds) Then
+                        compatible.Add(pending.Key)
+                        If Not System.String.IsNullOrWhiteSpace(query) AndAlso System.String.Equals(query.Trim(), pending.Value.Query, System.StringComparison.Ordinal) Then matches.Add(pending.Key)
+                    End If
+                Next
+                If matches.Count = 1 Then
+                    continuation = matches(0)
+                    result.Coverage.Diagnostics.Add("continuation_resumed: The unchanged query/scope resumed its pending search rather than restarting routing and validation.")
+                ElseIf searchMode = "continue" AndAlso compatible.Count = 1 Then
+                    continuation = compatible(0)
+                    Dim retainedQuery As System.String = scope.State.Searches(continuation).Query
+                    If Not System.String.IsNullOrWhiteSpace(query) AndAlso Not System.String.Equals(query.Trim(), retainedQuery, System.StringComparison.Ordinal) Then
+                        result.DeferredQuery = query
+                        result.Coverage.Diagnostics.Add("query_reformulation_deferred: Continue mode retained the original query and snapshot. DeferredQuery was not searched. Use search_mode=new without a continuation only for a deliberately different question.")
+                    End If
+                    query = retainedQuery
+                ElseIf searchMode = "continue" AndAlso compatible.Count > 1 Then
+                    result.Status = "continuation_selection_required"
+                    result.Message = "Several pending searches match this scope and literal. Supply the exact continuation_reference, or deliberately choose search_mode=new; no search was advanced or restarted."
+                    Return result
+                End If
+            End If
             If Not System.String.IsNullOrWhiteSpace(continuation) Then
                 If Not scope.State.Searches.TryGetValue(continuation, state) Then
                     result.Status = "invalid_continuation"
@@ -253,7 +321,7 @@ Namespace SharedLibrary
                     Return result
                 End If
                 budgets = ResolveBudgets(scope)
-                state = New SemanticArchiveSearchState() With {.Query = query, .Budgets = budgets}
+                state = New SemanticArchiveSearchState() With {.Query = query, .Budgets = budgets, .RequestedArchiveIds = New System.Collections.Generic.List(Of System.String)(scope.SelectedArchiveIds)}
                 If literalText IsNot Nothing Then state.LiteralScan = New SemanticArchiveLiteralScanState() With {.LiteralText = literalText}
                 continuation = "sac_" & System.Guid.NewGuid().ToString("N")
                 For Each archiveId As System.String In scope.SelectedArchiveIds
@@ -269,16 +337,33 @@ Namespace SharedLibrary
                             If generation IsNot Nothing Then scope.State.Generations.Add(archiveId, generation)
                         End If
                         If generation Is Nothing Then
+                            state.UnavailableArchiveIds.Add(archiveId)
                             result.Coverage.SourcesUnavailable += 1
                             Continue For
                         End If
-                        state.ArchiveIds.Add(archiveId)
-                        Enqueue(state, archiveId, generation.RootNodeId, 100.0R)
+                        Dim routingGraph As SemanticArchiveRoutingGraph = _store.LoadRoutingGraph(generation)
+                        ' Small catalogs still use direct document cards first; their
+                        ' partial continuations use the same current DAG as larger ones.
+                        state.RoutingGraphs(archiveId) = routingGraph
+                        For Each rootGroupId As System.String In routingGraph.RootGroupIds
+                            EnqueueRouting(state, archiveId, rootGroupId, 100.0R, False)
+                        Next
                         state.ExactEnumerators.Add(archiveId, _store.EnumerateDocuments(generation).GetEnumerator())
                         If state.LiteralScan IsNot Nothing Then state.LiteralScan.Enumerators.Add(archiveId, _store.EnumerateDocuments(generation).GetEnumerator())
+                        state.ArchiveIds.Add(archiveId)
                     Catch ex As System.Exception
+                        state.RoutingGraphs.Remove(archiveId)
+                        state.RoutingQueue.RemoveAll(Function(work As SemanticArchiveRoutingWork) work.ArchiveId = archiveId)
+                        Dim iterator As System.Collections.Generic.IEnumerator(Of SemanticArchiveDocumentRecord) = Nothing
+                        If state.ExactEnumerators.TryGetValue(archiveId, iterator) Then iterator.Dispose()
+                        state.ExactEnumerators.Remove(archiveId)
+                        If state.LiteralScan IsNot Nothing Then
+                            If state.LiteralScan.Enumerators.TryGetValue(archiveId, iterator) Then iterator.Dispose()
+                            state.LiteralScan.Enumerators.Remove(archiveId)
+                        End If
                         System.Diagnostics.Debug.WriteLine("SA generation pin failed: " & ex.GetType().FullName)
                         result.Coverage.SourcesUnavailable += 1
+                        state.UnavailableArchiveIds.Add(archiveId)
                         result.Coverage.Diagnostics.Add("generation_unavailable: An authorized archive has no usable published generation.")
                     End Try
                 Next
@@ -287,11 +372,16 @@ Namespace SharedLibrary
             If budgets Is Nothing Then budgets = ResolveBudgets(scope)
             state.Budgets = budgets
             state.SourceChecksAtCallStart = sourceChecksBefore
+            state.PageYieldRequested = False
+            result.Coverage.UnavailableArchiveIds.AddRange(state.UnavailableArchiveIds)
+            result.Coverage.UnavailableArchiveIds.Sort(System.StringComparer.Ordinal)
+            If state.UnavailableArchiveIds.Count > 0 Then result.Coverage.Diagnostics.Add("archive_publication_required: UnavailableArchiveIds cannot be recovered by query reformulation or another search. Do not search only those archives unless publication changed or the user explicitly requests a retry. Continue the usable snapshot with NextSearchArguments unchanged.")
             result.Query = query
             For Each archiveId As System.String In state.ArchiveIds
                 result.Coverage.Generations(archiveId) = scope.State.Generations(archiveId).GenerationId
                 Dim inventory As SemanticArchiveInventory = scope.State.Generations(archiveId).Inventory
                 result.Coverage.PublishedInventory(archiveId) = SemanticArchiveMetadata.Clone(inventory)
+                If inventory.ExcludedComplete > 0 Then result.Coverage.Diagnostics.Add("complete_text_not_searchable: " & inventory.ExcludedComplete.ToString(System.Globalization.CultureInfo.InvariantCulture) & " complete extracts have no active searchable document card. Repair the published index; query reformulation cannot recover excluded records.")
                 If inventory.ExcludedUnknown > 0 OrElse inventory.ExcludedIncomplete > 0 Then
                     result.Coverage.Diagnostics.Add("extraction_coverage_exclusions: Published records are not searchable because their coverage is unknown/incomplete or their validity is suppressed. See PublishedInventory; query reformulation cannot make excluded records searchable.")
                 End If
@@ -310,65 +400,81 @@ Namespace SharedLibrary
             ' The host retains the sharded enumerators for subsequent bounded calls.
             Try
                 If state.LiteralScan IsNot Nothing Then RunLiteralTextChannel(scope, state, result.Coverage, timer, deadline.Token)
-                RunExactMetadataChannel(scope, state, result.Coverage, timer, deadline.Token)
+                Dim exactTimer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                Try
+                    RunExactMetadataChannel(scope, state, result.Coverage, timer, deadline.Token)
+                Finally
+                    result.Coverage.ExactMetadataElapsedMilliseconds += exactTimer.ElapsedMilliseconds
+                End Try
             Catch ex As System.OperationCanceledException When Not cancellationToken.IsCancellationRequested
                 result.Coverage.Diagnostics.Add("elapsed_budget: Literal inspection or exact metadata lookup stopped at the configured operation deadline.")
             End Try
-            Dim exactMetadataFastPath As System.Boolean = state.SearchCalls = 0 AndAlso CanUseExactMetadataFastPath(state)
+            ' Exact metadata is a parallel acceleration channel only. It may add candidates,
+            ' but it never replaces semantic routing for the page.
             Dim returnMetadataPage As System.Boolean = False
-            If exactMetadataFastPath Then
-                ' Keep the hierarchy available on continuation; do not report it as traversed.
-                result.Coverage.RetrievalStrategy = "exact_metadata_first_page"
-                returnMetadataPage = True
-            ElseIf Not state.FlatAttempted AndAlso state.FlatEligible AndAlso state.ExactComplete AndAlso Not state.HadExactFailures AndAlso state.LiteralScan Is Nothing Then
+            If Not state.FlatAttempted AndAlso state.LiteralScan Is Nothing Then
+                PrepareSmallCatalog(scope, state)
+            End If
+            If Not state.FlatAttempted AndAlso state.FlatEligible AndAlso state.LiteralScan Is Nothing Then
                 state.FlatAttempted = True
                 Try
                     returnMetadataPage = Await SearchSmallCatalogAsync(scope, state, result.Coverage, deadline.Token).ConfigureAwait(False)
                 Catch ex As System.OperationCanceledException When Not cancellationToken.IsCancellationRequested
-                    result.Coverage.Diagnostics.Add("elapsed_budget: Document-card selection stopped at the configured deadline. The hierarchy remains available on continuation.")
+                    result.Coverage.Diagnostics.Add("elapsed_budget: Document-card selection stopped at the configured deadline. The semantic routing frontier remains available on continuation.")
                 Catch ex As System.OperationCanceledException
                     Throw
                 Catch ex As System.Exception
-                    result.Coverage.Diagnostics.Add("flat_metadata_unavailable: Direct document-card selection could not be completed; normal hierarchy navigation remains available.")
+                    result.Coverage.Diagnostics.Add("flat_metadata_unavailable: Direct document-card selection could not be completed; current semantic routing remains available.")
                     System.Diagnostics.Trace.WriteLine("[SemanticArchive] Flat metadata selection: " & ex.GetType().FullName)
                 End Try
             End If
-            If Not state.ExactComplete Then state.FlatEligible = False
             state.FlatDocuments.Clear()
-            While Not returnMetadataPage AndAlso state.Queue.Count > 0 AndAlso result.Coverage.NodesVisited < budgets.MaxNodesVisited AndAlso
+            While Not returnMetadataPage AndAlso (state.RoutingQueue.Count > 0 OrElse state.RoutingLeafQueue.Count > 0) AndAlso Not state.PageYieldRequested AndAlso
+                  (result.Coverage.NodesVisited < budgets.MaxNodesVisited OrElse state.RoutingLeafQueue.Count > 0) AndAlso
                   result.Coverage.ModelCalls < budgets.MaxModelCalls AndAlso timer.ElapsedMilliseconds < CLng(budgets.MaxElapsedSeconds) * 1000L AndAlso
                   (state.Candidates.Count < budgets.MaxCandidateFiles OrElse result.Coverage.NodesVisited = 0)
                 cancellationToken.ThrowIfCancellationRequested()
-                If CountUnreturnedCandidates(state) >= limit * 3 AndAlso result.Coverage.NodesVisited > 0 AndAlso Not state.NeedsWidening Then Exit While
-                state.Queue.Sort(Function(left As SemanticArchiveNodeWork, right As SemanticArchiveNodeWork)
-                                     Dim priority As System.Int32 = right.Priority.CompareTo(left.Priority)
-                                     Return If(priority <> 0, priority, left.Sequence.CompareTo(right.Sequence))
-                                 End Function)
-                Dim work As SemanticArchiveNodeWork = state.Queue(0)
-                state.Queue.RemoveAt(0)
-                Dim key As System.String = Identity(work.ArchiveId, work.NodeId)
-                If Not state.SeenNodes.Add(key) Then Continue While
-                result.Coverage.NodesVisited += 1
-                Dim previousProgress As New System.Collections.Generic.HashSet(Of System.String)(work.ProcessedCardIds, System.StringComparer.OrdinalIgnoreCase)
-                Try
-                    Await SearchNodeAsync(scope, state, work, result.Coverage, deadline.Token).ConfigureAwait(False)
-                Catch ex As System.OperationCanceledException When Not cancellationToken.IsCancellationRequested
-                    work.ProcessedCardIds = previousProgress
-                    state.SeenNodes.Remove(key)
-                    If Not state.Queue.Contains(work) Then state.Queue.Add(work)
-                    result.Coverage.Diagnostics.Add("elapsed_budget: Model selection stopped at the configured deadline; unfinished node cards remain eligible on continuation.")
-                    Exit While
-                Catch ex As System.OperationCanceledException
-                    work.ProcessedCardIds = previousProgress
-                    state.SeenNodes.Remove(key)
-                    If Not state.Queue.Contains(work) Then state.Queue.Add(work)
-                    Throw
-                Catch ex As System.Exception
-                    state.HadTraversalFailures = True
-                    System.Diagnostics.Debug.WriteLine("SA node selection failed: " & ex.GetType().FullName)
-                    result.Coverage.Diagnostics.Add("node_or_selection_failed: A visited node could not be validated or selected. Its omission is explicit; no unvalidated summary was used.")
-                    result.Coverage.SourcesUnavailable += 1
-                End Try
+                ' Exact metadata may fill a page before a single document was selected
+                ' semantically. Routing-group calls alone cannot satisfy that channel.
+                If CountUnreturnedCandidates(state) >= limit AndAlso result.Coverage.DocumentCardsConsidered > 0 Then Exit While
+                Dim routeLeafFirst As System.Boolean = state.RoutingLeafQueue.Count > 0 AndAlso
+                    (state.RoutingQueue.Count = 0 OrElse result.Coverage.NodesVisited >= budgets.MaxNodesVisited OrElse HighestRoutingLeafPriority(state) >= HighestRoutingPriority(state))
+                If routeLeafFirst OrElse (state.RoutingQueue.Count = 0 AndAlso state.RoutingLeafQueue.Count > 0) Then
+                    result.Coverage.RetrievalStrategy = "semantic_routing_dag"
+                    Try
+                        Await SearchRoutingDocumentBatchAsync(scope, state, result.Coverage, deadline.Token).ConfigureAwait(False)
+                    Catch ex As System.OperationCanceledException When Not cancellationToken.IsCancellationRequested
+                        result.Coverage.Diagnostics.Add("elapsed_budget: Semantic document routing stopped at the configured deadline; retained document groups remain available on continuation.")
+                        Exit While
+                    Catch ex As System.OperationCanceledException
+                        Throw
+                    Catch ex As System.Exception
+                        state.HadTraversalFailures = True
+                        result.Coverage.SourcesUnavailable += 1
+                        result.Coverage.Diagnostics.Add("routing_document_failed: A semantic document-routing batch could not be validated; remaining independent branches stay available.")
+                        ' Retain the exact failed batch, not an arbitrary first leaf.
+                        Exit While
+                    End Try
+                    Continue While
+                End If
+                If state.RoutingQueue.Count > 0 Then
+                    result.Coverage.RetrievalStrategy = "semantic_routing_dag"
+                    Try
+                        Await SearchRoutingGroupBatchAsync(scope, state, result.Coverage, deadline.Token).ConfigureAwait(False)
+                    Catch ex As System.OperationCanceledException When Not cancellationToken.IsCancellationRequested
+                        result.Coverage.Diagnostics.Add("elapsed_budget: Semantic routing stopped at the configured deadline; retained branches remain available on continuation.")
+                        Exit While
+                    Catch ex As System.OperationCanceledException
+                        Throw
+                    Catch ex As System.Exception
+                        state.HadTraversalFailures = True
+                        result.Coverage.SourcesUnavailable += 1
+                        result.Coverage.Diagnostics.Add("routing_group_failed: A semantic routing group could not be validated; other branches remain available.")
+                        ' Retain the exact failed frontier for a bounded retry.
+                        Exit While
+                    End Try
+                    Continue While
+                End If
             End While
             Dim ranked As New System.Collections.Generic.List(Of SemanticArchiveCandidate)(state.Candidates.Values)
             ranked.Sort(Function(left As SemanticArchiveCandidate, right As SemanticArchiveCandidate)
@@ -418,11 +524,12 @@ Namespace SharedLibrary
                 If Not System.String.Equals(document.Representation.Completeness, "complete", System.StringComparison.OrdinalIgnoreCase) Then result.Coverage.IncompleteExtractions += 1
             Next
             result.Coverage.ExactMetadataCoverageComplete = state.ExactComplete AndAlso Not state.HadExactFailures AndAlso budgets.MaxExactLookupDocuments > 0
-            result.Coverage.TraversalComplete = result.Coverage.RetrievalStrategy = "hierarchical" AndAlso state.Queue.Count = 0 AndAlso Not state.HadTraversalFailures
-            Dim hasMore As System.Boolean = state.Queue.Count > 0 OrElse Not state.ExactComplete OrElse CountUnreturnedCandidates(state) > 0 OrElse
+            result.Coverage.TraversalComplete = (result.Coverage.RetrievalStrategy = "semantic_routing_dag" OrElse result.Coverage.RetrievalStrategy = "flat_document_cards") AndAlso state.RoutingQueue.Count = 0 AndAlso state.RoutingLeafQueue.Count = 0 AndAlso Not state.HadTraversalFailures
+            Dim hasMore As System.Boolean = state.RoutingQueue.Count > 0 OrElse state.RoutingLeafQueue.Count > 0 OrElse Not state.ExactComplete OrElse CountUnreturnedCandidates(state) > 0 OrElse
                 (state.LiteralScan IsNot Nothing AndAlso Not state.LiteralScan.Completed)
             result.Coverage.BudgetEndedSearch = hasMore AndAlso Not returnMetadataPage
             If hasMore Then
+                If result.Hits.Count > 0 Then result.Message = "Search remains partial. Continue with the returned ContinuationReference and unchanged query/scope; do not restart routing or add literal_text merely to get more files."
                 ' Rotate a successfully consumed page token. Legitimate continuation calls
                 ' therefore do not look like identical failed retries to generic tooling.
                 Dim nextContinuation As System.String = "sac_" & System.Guid.NewGuid().ToString("N")
@@ -430,6 +537,10 @@ Namespace SharedLibrary
                 scope.State.Searches.Remove(continuation)
                 continuation = nextContinuation
                 result.ContinuationReference = continuation
+                result.NextSearchArguments = New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.Ordinal) From {
+                    {"query", state.Query}, {"archive_ids", New System.Collections.Generic.List(Of System.String)(state.RequestedArchiveIds)}, {"search_mode", "continue"},
+                    {"continuation_reference", continuation}, {"limit", limit}}
+                If state.LiteralScan IsNot Nothing Then result.NextSearchArguments.Add("literal_text", state.LiteralScan.LiteralText)
             Else
                 DisposeExactEnumerators(state)
                 scope.State.Searches.Remove(continuation)
@@ -455,6 +566,8 @@ Namespace SharedLibrary
                 result.Coverage.TotalLiteralByteBudgetUsed = state.LiteralScan.TotalByteBudgetUsed
                 result.Coverage.LiteralScanCoverageComplete = state.LiteralScan.Completed AndAlso Not state.LiteralScan.HadOmissions
             End If
+            result.Coverage.CandidateDocumentsReturned = result.Hits.Count
+            result.Coverage.ContinuationAvailable = Not System.String.IsNullOrWhiteSpace(result.ContinuationReference)
             result.Coverage.SourceAuthorizationChecks = scope.AccessContext.SourceChecks - sourceChecksBefore
             result.Coverage.ElapsedMilliseconds = timer.ElapsedMilliseconds
             If Not System.String.IsNullOrWhiteSpace(scope.AccessContext.DenialCode) Then
@@ -467,6 +580,8 @@ Namespace SharedLibrary
                 result.Message = If(System.String.IsNullOrWhiteSpace(scope.AccessContext.DenialMessage), "The requesting principal's source authorization is no longer verified.", scope.AccessContext.DenialMessage)
                 DisposeExactEnumerators(state)
                 scope.State.Searches.Remove(continuation)
+                result.Coverage.CandidateDocumentsReturned = 0
+                result.Coverage.ContinuationAvailable = False
             End If
             SemanticArchiveLibrary.ValidateScope(_context, _store, scope.SelectedArchiveIds)
             Return result
@@ -484,7 +599,7 @@ Namespace SharedLibrary
             ' A one-file policy alternates the independent channels across calls.
             ' Larger policies reserve capacity for semantic candidates in every call.
             Dim exactCapacity As System.Int32 = If(state.Budgets.MaxCandidateFiles = 1,
-                If((state.SearchCalls Mod 2L) <> 0L OrElse state.Queue.Count = 0, 1, 0), System.Math.Max(1, state.Budgets.MaxCandidateFiles \ 2))
+                If((state.SearchCalls Mod 2L) <> 0L OrElse (state.RoutingQueue.Count = 0 AndAlso state.RoutingLeafQueue.Count = 0), 1, 0), System.Math.Max(1, state.Budgets.MaxCandidateFiles \ 2))
             If state.LiteralScan IsNot Nothing AndAlso Not state.LiteralScan.Completed Then
                 ' The explicitly requested text inspection gets its reserved slots;
                 ' semantic candidates keep at least one slot where the policy permits.
@@ -492,7 +607,7 @@ Namespace SharedLibrary
                     System.Math.Min(state.Budgets.MaxCandidateFiles - 1, state.Candidates.Count + System.Math.Max(1, state.Budgets.MaxCandidateFiles \ 3)))
             End If
             While state.ExactArchivePosition < state.ArchiveIds.Count AndAlso coverage.ExactMetadataRecordsInspected < state.Budgets.MaxExactLookupDocuments AndAlso
-                  timer.ElapsedMilliseconds < CLng(state.Budgets.MaxElapsedSeconds) * 1000L \ 3 AndAlso state.Candidates.Count < exactCapacity
+                  timer.ElapsedMilliseconds < System.Math.Min(1000L, CLng(state.Budgets.MaxElapsedSeconds) * 1000L \ 3) AndAlso state.Candidates.Count < exactCapacity
                 cancellationToken.ThrowIfCancellationRequested()
                 Dim archiveId As System.String = state.ArchiveIds(state.ExactArchivePosition)
                 Dim iterator As System.Collections.Generic.IEnumerator(Of SemanticArchiveDocumentRecord) = state.ExactEnumerators(archiveId)
@@ -513,27 +628,41 @@ Namespace SharedLibrary
                 coverage.ExactMetadataRecordsInspected += 1
                 Dim document As SemanticArchiveDocumentRecord = iterator.Current
                 Dim generation As SemanticArchiveGenerationManifest = scope.State.Generations(archiveId)
-                If state.FlatEligible Then
-                    If coverage.ExactMetadataRecordsInspected + state.TotalExactRecords > SharedMethods.DEFAULT_SEMANTICARCHIVE_FLAT_METADATA_DOCUMENTS Then
-                        state.FlatEligible = False
-                        state.FlatDocuments.Clear()
-                    ElseIf SemanticArchiveInventory.IsSearchable(document) Then
-                        state.FlatDocuments.Add(New SemanticArchiveFlatDocument With {.ArchiveId = archiveId, .Document = document})
-                    End If
-                End If
                 If Not SemanticArchiveInventory.IsSearchable(document) Then Continue While
-                ' Local metadata matching reveals nothing. Source checks occur before a
-                ' matching title/identifier can reach a model, candidate, or tool result.
+                ' Local matching and private opaque candidate ranking disclose nothing.
+                ' Fresh source checks still precede model input and emitted hit metadata.
                 Dim score As System.Double = ExactMetadataScore(state.Query, document)
                 If score <= 0 Then Continue While
-                If Not _store.CanReadDocument(scope.AccessContext, generation, document) Then
-                    coverage.SourcesUnavailable += 1
-                    Continue While
+                ' Queue only opaque IDs/scores in private run state. No source content is
+                ' disclosed here: routing inputs and final hits still require fresh authorization.
+                ' Avoid opening every matching original just to rank cached metadata.
+                Dim candidatesBefore As System.Int32 = state.Candidates.Count
+                If AddCandidate(state, archiveId, document.DocumentId, System.Math.Min(0.95R, 0.5R + score * 0.1R), "Exact name or retained identifier/term match.", "exact_metadata") AndAlso state.Candidates.Count > candidatesBefore Then
+                    coverage.ExactMetadataCandidatesQueued += 1
                 End If
-                coverage.FilesInspected += 1
-                AddCandidate(state, archiveId, document.DocumentId, System.Math.Min(0.95R, 0.5R + score * 0.1R), "Exact name or retained identifier/term match.", "exact_metadata")
             End While
             state.ExactComplete = state.ExactArchivePosition >= state.ArchiveIds.Count
+        End Sub
+
+        Private Sub PrepareSmallCatalog(scope As SemanticArchiveRunScope, state As SemanticArchiveSearchState)
+            state.FlatDocuments.Clear()
+            Dim count As System.Int64 = 0L
+            For Each archiveId As System.String In state.ArchiveIds
+                count += scope.State.Generations(archiveId).TotalDocumentCount
+            Next
+            state.FlatEligible = count <= SharedMethods.DEFAULT_SEMANTICARCHIVE_FLAT_METADATA_DOCUMENTS
+            If Not state.FlatEligible Then Return
+            Try
+                For Each archiveId As System.String In state.ArchiveIds
+                    For Each document As SemanticArchiveDocumentRecord In _store.EnumerateDocuments(scope.State.Generations(archiveId))
+                        If SemanticArchiveInventory.IsSearchable(document) Then state.FlatDocuments.Add(New SemanticArchiveFlatDocument With {.ArchiveId = archiveId, .Document = document})
+                    Next
+                Next
+            Catch failure As System.Exception
+                state.FlatDocuments.Clear()
+                state.FlatEligible = False
+                System.Diagnostics.Trace.WriteLine("[SemanticArchive] Small-catalog inventory unavailable: " & failure.GetType().FullName)
+            End Try
         End Sub
 
         ''' <summary>Small catalogs rank their complete authorized document cards directly. No keyword-only prefilter.</summary>
@@ -559,9 +688,10 @@ Namespace SharedLibrary
             coverage.RetrievalStrategy = "flat_document_cards"
             Dim options As SharedMethods.SemanticSearchRetrievalOptions = SelectionOptions(System.Math.Min(entries.Count, System.Math.Min(state.Budgets.MaxSectionCandidates, System.Math.Min(50, state.Budgets.MaxCandidateFiles))), state.Budgets, coverage)
             ' The existing selector handles complete-record character/token batching and the configured model-call cap.
-            Dim selection As SharedMethods.SemanticSearchSelectionResult = Await SharedMethods.SelectSemanticSearchEntriesAsync(
-                _context, state.Query, entries, options, cancellationToken).ConfigureAwait(False)
+            Dim selection As SharedMethods.SemanticSearchSelectionResult = Await SelectSearchEntriesAsync(
+                state.Query, entries, options, coverage, cancellationToken).ConfigureAwait(False)
             coverage.CardsConsidered += selection.CandidatesConsidered
+            coverage.DocumentCardsConsidered += selection.CandidatesConsidered
             Dim allRetained As System.Boolean = True
             For Each choice As SharedMethods.SemanticSearchSelectedEntryResult In selection.SelectedEntries
                 Dim item As SemanticArchiveFlatDocument = Nothing
@@ -574,131 +704,264 @@ Namespace SharedLibrary
                 End If
                 If Not AddCandidate(state, item.ArchiveId, item.Document.DocumentId, choice.Relevance, choice.Reason, "flat_semantic") Then allRetained = False
             Next
+            For Each rejectedId As System.String In selection.RejectedEntryIds
+                Dim rejected As SemanticArchiveFlatDocument = documents(rejectedId)
+                state.EvaluatedDocumentIds.Add(Identity(rejected.ArchiveId, rejected.Document.DocumentId))
+            Next
             coverage.DocumentMetadataSelectionComplete = selection.CoverageComplete AndAlso Not selection.PotentiallyMissingInformation AndAlso allRetained
             If coverage.DocumentMetadataSelectionComplete Then
                 ' Ranking every document substitutes for container navigation, not for exact evidence reading.
-                state.Queue.Clear()
+                state.RoutingQueue.Clear()
+                state.RoutingLeafQueue.Clear()
             Else
-                coverage.Diagnostics.Add("flat_metadata_partial: Additional semantic coverage is available through the retained hierarchy continuation.")
+                coverage.Diagnostics.Add("flat_metadata_partial: Additional semantic coverage is available through the retained semantic routing continuation.")
             End If
             Return True
         End Function
 
-        Private Async Function SearchNodeAsync(scope As SemanticArchiveRunScope, state As SemanticArchiveSearchState,
-                        work As SemanticArchiveNodeWork, coverage As SemanticArchiveCoverage,
+        Private Async Function SearchRoutingGroupBatchAsync(scope As SemanticArchiveRunScope,
+                        state As SemanticArchiveSearchState, coverage As SemanticArchiveCoverage,
                         cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
-            Dim generation As SemanticArchiveGenerationManifest = scope.State.Generations(work.ArchiveId)
-            Dim node As SemanticArchiveNode = _store.LoadNode(generation, work.NodeId)
-            Dim entries As New System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry)()
-            Dim targets As New System.Collections.Generic.Dictionary(Of System.String, SemanticArchiveCard)(System.StringComparer.OrdinalIgnoreCase)
-            Dim neutralIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
-            Dim cardPosition As System.Int32 = 0
-            For Each card As SemanticArchiveCard In node.Cards
-                cancellationToken.ThrowIfCancellationRequested()
-                If card Is Nothing Then Throw New System.IO.InvalidDataException("A node contains an invalid card.")
-                cardPosition += 1
-                Dim id As System.String = "S" & cardPosition.ToString("0000", System.Globalization.CultureInfo.InvariantCulture)
-                If work.ProcessedCardIds.Contains(id) Then Continue For
-                Dim isContainer As System.Boolean = System.String.Equals(card.Level, "CONTAINER", System.StringComparison.OrdinalIgnoreCase)
-                Dim remainingParentChecks As System.Int64 = System.Math.Max(0L, 2048L - (scope.AccessContext.SourceChecks - state.SourceChecksAtCallStart))
-                Dim mayExpose As System.Boolean = _store.CanExposeCard(scope.AccessContext, generation, card, CInt(System.Math.Min(256L, remainingParentChecks \ 2L)))
-                If Not mayExpose AndAlso Not isContainer Then
-                    coverage.SourcesUnavailable += 1
-                    work.ProcessedCardIds.Add(id)
-                    Continue For
-                End If
-                Dim entry As SharedMethods.SemanticSearchIndexEntry
-                If Not mayExpose Then
-                    ' A host-resolved structural edge can remain traversable while its
-                    ' revoked descendant summaries are never passed to a model.
-                    entry = New SharedMethods.SemanticSearchIndexEntry() With {.Id = id, .Title = "Navigation branch", .Summary = "Permission-neutral branch; inspect authorized children for relevant evidence."}
-                    neutralIds.Add(id)
-                    coverage.NeutralNavigationBranches += 1
-                    If Not coverage.Diagnostics.Contains("permission_neutral_navigation: Some branch summaries were suppressed because current descendant authorization was denied, unknown, or exceeded its bounded check budget. Widening remains available; semantic coverage is reduced.") Then
-                        coverage.Diagnostics.Add("permission_neutral_navigation: Some branch summaries were suppressed because current descendant authorization was denied, unknown, or exceeded its bounded check budget. Widening remains available; semantic coverage is reduced.")
-                    End If
-                Else
-                    entry = EntryFromCard(card, id)
-                End If
-                entries.Add(entry)
-                targets.Add(id, card)
+            state.RoutingQueue.Sort(Function(left As SemanticArchiveRoutingWork, right As SemanticArchiveRoutingWork)
+                                        Dim priority As System.Int32 = right.Priority.CompareTo(left.Priority)
+                                        Return If(priority <> 0, priority, left.Sequence.CompareTo(right.Sequence))
+                                    End Function)
+            Dim first As SemanticArchiveRoutingWork = state.RoutingQueue(0)
+            ' Roots merely select the independent projections; asking a model to rank
+            ' them adds latency but no document discrimination.
+            If first.Evaluated OrElse state.RoutingGraphs(first.ArchiveId).RootGroupIds.Contains(first.GroupId) Then
+                ExpandRoutingGroup(state, first, coverage)
+                state.RoutingQueue.Remove(first)
+                coverage.NodesVisited += 1
+                Return
+            End If
+            Dim batch As New System.Collections.Generic.List(Of SemanticArchiveRoutingWork)()
+            Dim remaining As System.Int32 = state.Budgets.MaxNodesVisited - coverage.NodesVisited
+            If remaining <= 0 Then Return
+            For Each work As SemanticArchiveRoutingWork In state.RoutingQueue
+                If work.Evaluated OrElse work.ArchiveId <> first.ArchiveId OrElse work.Depth <> first.Depth Then Continue For
+                batch.Add(work)
+                If batch.Count >= System.Math.Min(state.Budgets.MaxSectionCandidates, remaining) Then Exit For
             Next
-            If entries.Count = 0 Then Return
-            Dim groups As System.Collections.Generic.List(Of System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry)) = CreateGroups(entries, state.Budgets)
-            Dim selected As New System.Collections.Generic.Dictionary(Of System.String, SharedMethods.SemanticSearchSelectedEntryResult)(System.StringComparer.OrdinalIgnoreCase)
-            Dim widenLeaf As System.Boolean = False
-            For Each group As System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry) In groups
-                If coverage.ModelCalls >= state.Budgets.MaxModelCalls Then
-                    state.SeenNodes.Remove(Identity(work.ArchiveId, work.NodeId))
-                    state.Queue.Add(work)
-                    coverage.Diagnostics.Add("model_call_budget: Additional node-card groups remain eligible on continuation.")
+            Dim generation As SemanticArchiveGenerationManifest = scope.State.Generations(first.ArchiveId)
+            Dim entries As New System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry)()
+            Dim targets As New System.Collections.Generic.Dictionary(Of System.String, SemanticArchiveRoutingWork)(System.StringComparer.OrdinalIgnoreCase)
+            Dim neutral As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each work As SemanticArchiveRoutingWork In batch
+                cancellationToken.ThrowIfCancellationRequested()
+                Dim id As System.String = "R" & entries.Count.ToString("0000", System.Globalization.CultureInfo.InvariantCulture)
+                Dim group As SemanticArchiveRoutingGroup = state.RoutingGraphs(work.ArchiveId).Groups(work.GroupId)
+                Dim entry As SharedMethods.SemanticSearchIndexEntry = BuildAuthorizedRoutingEntry(scope, state, generation, group, id, coverage)
+                If entry.Title = "Navigation branch" Then neutral.Add(id)
+                entries.Add(entry)
+                targets.Add(id, work)
+            Next
+            For Each groupEntries As System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry) In CreateGroups(entries, state.Budgets)
+                If coverage.ModelCalls >= state.Budgets.MaxModelCalls Then Exit For
+                Dim options As SharedMethods.SemanticSearchRetrievalOptions = SelectionOptions(state.Budgets.InitialBranches, state.Budgets, coverage)
+                ' Commit every completed request before the next cancellable call.
+                options.MaximumSelectionModelCalls = 1
+                Dim selection As SharedMethods.SemanticSearchSelectionResult = Await SelectSearchEntriesAsync(
+                    state.Query, groupEntries, options, coverage, cancellationToken).ConfigureAwait(False)
+                coverage.CardsConsidered += selection.CandidatesConsidered
+                Dim selected As New System.Collections.Generic.Dictionary(Of System.String, SharedMethods.SemanticSearchSelectedEntryResult)(System.StringComparer.OrdinalIgnoreCase)
+                For Each choice As SharedMethods.SemanticSearchSelectedEntryResult In selection.SelectedEntries
+                    selected.Add(choice.Id, choice)
+                Next
+                For position As System.Int32 = 0 To System.Math.Min(selection.CandidatesConsidered, groupEntries.Count) - 1
+                    Dim id As System.String = groupEntries(position).Id
+                    Dim work As SemanticArchiveRoutingWork = targets(id)
+                    Dim choice As SharedMethods.SemanticSearchSelectedEntryResult = Nothing
+                    If selected.TryGetValue(id, choice) Then
+                        ' Descend the selected beam before equally/less promising peers.
+                        work.Priority += 1.0R + choice.Relevance
+                        ExpandRoutingGroup(state, work, coverage)
+                        state.RoutingQueue.Remove(work)
+                    Else
+                        work.Evaluated = True
+                        work.Priority = If(neutral.Contains(id), -0.25R, -1.0R)
+                        state.Sequence += 1
+                        work.Sequence = state.Sequence
+                    End If
+                    coverage.NodesVisited += 1
+                    coverage.RoutingGroupsConsidered += 1
+                    coverage.RoutingLevelsVisited = System.Math.Max(coverage.RoutingLevelsVisited, work.Depth + 1)
+                Next
+                If selection.CandidatesConsidered = 0 Then
+                    state.PageYieldRequested = True
+                    coverage.Diagnostics.Add("routing_request_no_progress: No complete group card fitted/evaluated; the frontier is retained for continuation or a larger request budget.")
                     Exit For
                 End If
-                Dim selection As SharedMethods.SemanticSearchSelectionResult = Await SharedMethods.SelectSemanticSearchEntriesAsync(
-                    _context, state.Query, group, SelectionOptions(If(node.IsLeaf, 8, state.Budgets.InitialBranches), state.Budgets, coverage), cancellationToken).ConfigureAwait(False)
-                coverage.CardsConsidered += selection.CandidatesConsidered
-                Dim chosenIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
-                For Each choice As SharedMethods.SemanticSearchSelectedEntryResult In selection.SelectedEntries
-                    chosenIds.Add(choice.Id)
-                Next
-                For considered As System.Int32 = 0 To System.Math.Min(selection.CandidatesConsidered, group.Count) - 1
-                    If node.IsLeaf AndAlso selection.PotentiallyMissingInformation AndAlso chosenIds.Count > 0 AndAlso Not chosenIds.Contains(group(considered).Id) Then
-                        ' A result limit cannot permanently discard the remaining
-                        ' relevant file cards from a leaf. Revisit without prior hits.
-                        widenLeaf = True
-                    Else
-                        work.ProcessedCardIds.Add(group(considered).Id)
-                    End If
-                Next
-                state.NeedsWidening = state.NeedsWidening OrElse selection.PotentiallyMissingInformation
-                If Not selection.CoverageComplete Then
-                    coverage.Diagnostics.Add("selection_coverage_incomplete: Not every candidate in a metadata group was evaluated; remaining cards stay eligible on continuation.")
-                    state.SeenNodes.Remove(Identity(work.ArchiveId, work.NodeId))
-                    state.Queue.Add(work)
-                End If
-                For Each choice As SharedMethods.SemanticSearchSelectedEntryResult In selection.SelectedEntries
-                    If targets.ContainsKey(choice.Id) Then selected(choice.Id) = choice
-                Next
-                If Not selection.CoverageComplete Then Exit For
+                state.NeedsWidening = state.NeedsWidening OrElse selection.PotentiallyMissingInformation OrElse Not selection.CoverageComplete
             Next
-            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, SemanticArchiveCard) In targets
-                Dim card As SemanticArchiveCard = pair.Value
-                Dim choice As SharedMethods.SemanticSearchSelectedEntryResult = Nothing
-                selected.TryGetValue(pair.Key, choice)
-                If System.String.Equals(card.Level, "CONTAINER", System.StringComparison.OrdinalIgnoreCase) Then
-                    ' Selected branches are expanded first. Every other valid branch
-                    ' remains eligible for deterministic bounded widening.
-                    Enqueue(state, work.ArchiveId, card.TargetId, If(choice Is Nothing, If(neutralIds.Contains(pair.Key), 0.25R, 0.0R), 10.0R + choice.Relevance))
-                ElseIf System.String.Equals(card.Level, "DOCUMENT", System.StringComparison.OrdinalIgnoreCase) AndAlso choice IsNot Nothing Then
-                    Dim document As SemanticArchiveDocumentRecord = _store.LoadDocument(generation, card.TargetId)
-                    coverage.FilesInspected += 1
-                    If document IsNot Nothing AndAlso _store.CanReadDocument(scope.AccessContext, generation, document) Then
-                        If Not AddCandidate(state, work.ArchiveId, card.TargetId, choice.Relevance, choice.Reason, "semantic") Then
-                            ' Candidate capacity never discards a selected file card.
-                            ' Retain its host-owned leaf work for the next call.
-                            work.ProcessedCardIds.Remove(pair.Key)
-                            widenLeaf = True
-                            state.NeedsWidening = True
-                        End If
-                    Else
-                        coverage.SourcesUnavailable += 1
-                    End If
-                End If
-            Next
-            If widenLeaf Then
-                Dim alreadyQueued As System.Boolean = False
-                For Each pending As SemanticArchiveNodeWork In state.Queue
-                    If System.Object.ReferenceEquals(pending, work) Then alreadyQueued = True
-                Next
-                If Not alreadyQueued Then
-                    state.SeenNodes.Remove(Identity(work.ArchiveId, work.NodeId))
-                    work.Priority = -1.0R
-                    state.Sequence += 1
-                    work.Sequence = state.Sequence
-                    state.Queue.Add(work)
-                End If
-            End If
         End Function
+
+        Private Function BuildAuthorizedRoutingEntry(scope As SemanticArchiveRunScope,
+                                                     state As SemanticArchiveSearchState,
+                                                     generation As SemanticArchiveGenerationManifest,
+                                                     group As SemanticArchiveRoutingGroup,
+                                                     id As System.String,
+                                                     coverage As SemanticArchiveCoverage) As SharedMethods.SemanticSearchIndexEntry
+            Dim node As New SemanticArchiveNode With {.NodeId = group.GroupId, .GenerationId = generation.GenerationId, .IsLeaf = group.ChildGroupIds.Count = 0, .Level = group.Level}
+            Dim allContributorsAuthorized As System.Boolean = group.RepresentativeDocumentIds.Count > 0
+            For Each documentId As System.String In group.RepresentativeDocumentIds
+                If scope.AccessContext.SourceChecks - state.SourceChecksAtCallStart >= 2046L Then
+                    allContributorsAuthorized = False
+                    Exit For
+                End If
+                Dim document As SemanticArchiveDocumentRecord = _store.LoadDocument(generation, documentId)
+                If document IsNot Nothing AndAlso document.Card IsNot Nothing AndAlso _store.CanReadDocument(scope.AccessContext, generation, document) Then
+                    node.Cards.Add(document.Card)
+                Else
+                    allContributorsAuthorized = False
+                End If
+            Next
+            If node.Cards.Count = 0 Then
+                coverage.NeutralNavigationBranches += 1
+                Return New SharedMethods.SemanticSearchIndexEntry With {.Id = id, .Title = "Navigation branch", .Summary = "Permission-neutral semantic route; inspect authorized descendants for relevant evidence."}
+            End If
+            Dim card As SemanticArchiveCard
+            If allContributorsAuthorized Then
+                ' V2 persists exactly the source-card contributors of this bounded
+                ' summary. Every contributor was just checked, never an ACL cache.
+                card = group.Card
+            Else
+                card = SemanticArchiveMetadata.ComposeContainerCard(node)
+            End If
+            Const notice As System.String = "routing_summary_coverage: Group summaries are bounded routing aids, not exhaustive descendant evidence. Unselected and permission-neutral branches remain available through continuation."
+            If Not coverage.Diagnostics.Contains(notice) Then coverage.Diagnostics.Add(notice)
+            Return EntryFromCard(card, id)
+        End Function
+
+        Private Sub ExpandRoutingGroup(state As SemanticArchiveSearchState, work As SemanticArchiveRoutingWork, coverage As SemanticArchiveCoverage)
+            Dim key As System.String = Identity(work.ArchiveId, work.GroupId)
+            If state.SeenRoutingGroups.Contains(key) Then Return
+            Dim group As SemanticArchiveRoutingGroup = state.RoutingGraphs(work.ArchiveId).Groups(work.GroupId)
+            If group.ChildGroupIds.Count > 0 Then
+                For Each childId As System.String In group.ChildGroupIds
+                    EnqueueRouting(state, work.ArchiveId, childId, work.Priority, False, work.Depth + 1)
+                Next
+            Else
+                EnqueueRoutingLeaf(state, work.ArchiveId, work.GroupId, work.Priority)
+            End If
+            ' Commit only after all outgoing references have been retained.
+            state.SeenRoutingGroups.Add(key)
+            coverage.RoutingLevelsVisited = System.Math.Max(coverage.RoutingLevelsVisited, work.Depth + 1)
+        End Sub
+
+        Private Async Function SearchRoutingDocumentBatchAsync(scope As SemanticArchiveRunScope,
+                        state As SemanticArchiveSearchState, coverage As SemanticArchiveCoverage,
+                        cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            state.RoutingLeafQueue.Sort(Function(left As SemanticArchiveRoutingLeafWork, right As SemanticArchiveRoutingLeafWork)
+                                            Dim priority As System.Int32 = right.Priority.CompareTo(left.Priority)
+                                            Return If(priority <> 0, priority, left.Sequence.CompareTo(right.Sequence))
+                                        End Function)
+            Dim entries As New System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry)()
+            Dim targets As New System.Collections.Generic.Dictionary(Of System.String, System.Tuple(Of SemanticArchiveRoutingLeafWork, SemanticArchiveDocumentRecord))(System.StringComparer.OrdinalIgnoreCase)
+            Dim batchDocuments As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            For Each leaf As SemanticArchiveRoutingLeafWork In New System.Collections.Generic.List(Of SemanticArchiveRoutingLeafWork)(state.RoutingLeafQueue)
+                Dim generation As SemanticArchiveGenerationManifest = scope.State.Generations(leaf.ArchiveId)
+                Dim group As SemanticArchiveRoutingGroup = state.RoutingGraphs(leaf.ArchiveId).Groups(leaf.GroupId)
+                Dim orderedIds As New System.Collections.Generic.List(Of System.String)(group.DocumentIds)
+                orderedIds.Sort(Function(left As System.String, right As System.String)
+                                    Dim leftOrder As System.Int64 = 0L
+                                    Dim rightOrder As System.Int64 = 0L
+                                    state.DeferredDocumentOrder.TryGetValue(Identity(leaf.ArchiveId, left), leftOrder)
+                                    state.DeferredDocumentOrder.TryGetValue(Identity(leaf.ArchiveId, right), rightOrder)
+                                    Dim comparison As System.Int32 = leftOrder.CompareTo(rightOrder)
+                                    Return If(comparison <> 0, comparison, System.StringComparer.Ordinal.Compare(left, right))
+                                End Function)
+                For Each documentId As System.String In orderedIds
+                    cancellationToken.ThrowIfCancellationRequested()
+                    Dim key As System.String = Identity(leaf.ArchiveId, documentId)
+                    If leaf.ProcessedDocumentIds.Contains(documentId) Then Continue For
+                    If state.EvaluatedDocumentIds.Contains(key) OrElse state.Returned.Contains(key) OrElse HasSelectedDocumentCandidate(state, key) Then
+                        leaf.ProcessedDocumentIds.Add(documentId)
+                        Continue For
+                    End If
+                    If Not batchDocuments.Add(key) Then Continue For
+                    Dim document As SemanticArchiveDocumentRecord = _store.LoadDocument(generation, documentId)
+                    coverage.FilesInspected += 1
+                    If document Is Nothing OrElse document.Card Is Nothing OrElse Not _store.CanReadDocument(scope.AccessContext, generation, document) Then
+                        leaf.ProcessedDocumentIds.Add(documentId)
+                        coverage.SourcesUnavailable += 1
+                        Continue For
+                    End If
+                    Dim id As System.String = "D" & entries.Count.ToString("0000", System.Globalization.CultureInfo.InvariantCulture)
+                    ' Complete document metadata, including rare terms/intents. The
+                    ' shared selector batches whole records against both budgets.
+                    entries.Add(EntryFromCard(document.Card, id))
+                    targets.Add(id, System.Tuple.Create(leaf, document))
+                    If entries.Count >= state.Budgets.MaxSectionCandidates Then Exit For
+                Next
+                If entries.Count >= state.Budgets.MaxSectionCandidates Then Exit For
+            Next
+            If entries.Count = 0 Then
+                RemoveCompletedRoutingLeaves(state)
+                Return
+            End If
+            Dim options As SharedMethods.SemanticSearchRetrievalOptions = SelectionOptions(System.Math.Min(12, entries.Count), state.Budgets, coverage)
+            options.MaximumSelectionModelCalls = 1
+            Dim selection As SharedMethods.SemanticSearchSelectionResult = Await SelectSearchEntriesAsync(
+                state.Query, entries, options, coverage, cancellationToken).ConfigureAwait(False)
+            coverage.CardsConsidered += selection.CandidatesConsidered
+            coverage.DocumentCardsConsidered += selection.CandidatesConsidered
+            Dim chosen As New System.Collections.Generic.Dictionary(Of System.String, SharedMethods.SemanticSearchSelectedEntryResult)(System.StringComparer.OrdinalIgnoreCase)
+            For Each choice As SharedMethods.SemanticSearchSelectedEntryResult In selection.SelectedEntries
+                chosen.Add(choice.Id, choice)
+            Next
+            Dim completed As System.Int32 = 0
+            For index As System.Int32 = 0 To System.Math.Min(selection.CandidatesConsidered, entries.Count) - 1
+                Dim id As System.String = entries(index).Id
+                Dim target As System.Tuple(Of SemanticArchiveRoutingLeafWork, SemanticArchiveDocumentRecord) = targets(id)
+                Dim key As System.String = Identity(target.Item1.ArchiveId, target.Item2.DocumentId)
+                Dim choice As SharedMethods.SemanticSearchSelectedEntryResult = Nothing
+                Dim finished As System.Boolean = False
+                If chosen.TryGetValue(id, choice) Then
+                    finished = AddCandidate(state, target.Item1.ArchiveId, target.Item2.DocumentId, choice.Relevance, choice.Reason, "semantic_routing")
+                ElseIf selection.RejectedEntryIds.Contains(id) Then
+                    finished = True
+                End If
+                If finished Then
+                    target.Item1.ProcessedDocumentIds.Add(target.Item2.DocumentId)
+                    state.EvaluatedDocumentIds.Add(key)
+                    state.DeferredDocumentOrder.Remove(key)
+                    completed += 1
+                Else
+                    ' Evaluated is not synonymous with delivered. Limits/partial
+                    ' selections defer, rather than permanently deleting, candidates.
+                    state.Sequence += 1
+                    state.DeferredDocumentOrder(key) = state.Sequence
+                    state.NeedsWidening = True
+                End If
+            Next
+            state.NeedsWidening = state.NeedsWidening OrElse selection.PotentiallyMissingInformation OrElse Not selection.CoverageComplete
+            If completed = 0 Then
+                state.PageYieldRequested = True
+                coverage.Diagnostics.Add("routing_document_deferred: No candidate could be completed on this request. Uninspected cards precede deferred cards on continuation; no result-limit omission was discarded.")
+                For Each target As System.Tuple(Of SemanticArchiveRoutingLeafWork, SemanticArchiveDocumentRecord) In targets.Values
+                    target.Item1.Priority = -1.0R
+                    state.Sequence += 1
+                    target.Item1.Sequence = state.Sequence
+                Next
+            End If
+            RemoveCompletedRoutingLeaves(state)
+        End Function
+
+        Private Sub RemoveCompletedRoutingLeaves(state As SemanticArchiveSearchState)
+            For index As System.Int32 = state.RoutingLeafQueue.Count - 1 To 0 Step -1
+                Dim leaf As SemanticArchiveRoutingLeafWork = state.RoutingLeafQueue(index)
+                Dim group As SemanticArchiveRoutingGroup = state.RoutingGraphs(leaf.ArchiveId).Groups(leaf.GroupId)
+                For Each documentId As System.String In group.DocumentIds
+                    Dim key As System.String = Identity(leaf.ArchiveId, documentId)
+                    If state.EvaluatedDocumentIds.Contains(key) OrElse state.Returned.Contains(key) OrElse HasSelectedDocumentCandidate(state, key) Then leaf.ProcessedDocumentIds.Add(documentId)
+                Next
+                If leaf.ProcessedDocumentIds.Count >= group.DocumentIds.Count Then
+                    state.SeenRoutingLeaves.Add(Identity(leaf.ArchiveId, leaf.GroupId))
+                    state.RoutingLeafQueue.RemoveAt(index)
+                End If
+            Next
+        End Sub
 
         Private Shared Function EntryFromCard(card As SemanticArchiveCard, id As System.String) As SharedMethods.SemanticSearchIndexEntry
             Dim entry As SharedMethods.SemanticSearchIndexEntry = Nothing
@@ -718,12 +981,24 @@ Namespace SharedLibrary
             Return entry
         End Function
 
+        Private Async Function SelectSearchEntriesAsync(query As System.String,
+                    entries As System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry),
+                    options As SharedMethods.SemanticSearchRetrievalOptions, coverage As SemanticArchiveCoverage,
+                    cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of SharedMethods.SemanticSearchSelectionResult)
+            Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+            Try
+                Return Await SharedMethods.SelectSemanticSearchEntriesAsync(_context, query, entries, options, cancellationToken).ConfigureAwait(False)
+            Finally
+                coverage.SemanticSelectionElapsedMilliseconds += timer.ElapsedMilliseconds
+            End Try
+        End Function
+
         Private Shared Function CreateGroups(entries As System.Collections.Generic.IEnumerable(Of SharedMethods.SemanticSearchIndexEntry), budgets As SemanticArchiveRetrievalBudgets) As System.Collections.Generic.List(Of System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry))
             Dim groups As New System.Collections.Generic.List(Of System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry))()
             Dim current As New System.Collections.Generic.List(Of SharedMethods.SemanticSearchIndexEntry)()
             Dim characters As System.Int32 = 0
             For Each entry As SharedMethods.SemanticSearchIndexEntry In entries
-                Dim size As System.Int32 = SharedMethods.BuildCompactSemanticSearchIndex(New SharedMethods.SemanticSearchIndexEntry() {entry}).Length
+                Dim size As System.Int32 = SharedMethods.BuildSemanticSearchSelectionRecord(entry).Length
                 If size > budgets.MaxPromptCharacters Then Throw New System.IO.InvalidDataException("oversized_card: A preserved card cannot fit the complete routing budget.")
                 If current.Count > 0 AndAlso (current.Count >= budgets.MaxSectionCandidates OrElse characters + size > budgets.MaxPromptCharacters) Then
                     groups.Add(current)
@@ -749,17 +1024,46 @@ Namespace SharedLibrary
                 .IncludeAdjacentToPreviouslyUsedIds = False, .EnableFullScanFallback = False, .SpecialTaskName = "SemanticSearch"}
         End Function
 
-        Private Shared Sub Enqueue(state As SemanticArchiveSearchState, archiveId As System.String, nodeId As System.String, priority As System.Double)
-            If System.String.IsNullOrWhiteSpace(nodeId) OrElse state.SeenNodes.Contains(Identity(archiveId, nodeId)) Then Return
-            For Each existing As SemanticArchiveNodeWork In state.Queue
-                If System.String.Equals(existing.ArchiveId, archiveId, System.StringComparison.Ordinal) AndAlso System.String.Equals(existing.NodeId, nodeId, System.StringComparison.Ordinal) Then
+        Private Shared Function HighestRoutingPriority(state As SemanticArchiveSearchState) As System.Double
+            Dim value As System.Double = System.Double.MinValue
+            For Each work As SemanticArchiveRoutingWork In state.RoutingQueue
+                value = System.Math.Max(value, work.Priority)
+            Next
+            Return value
+        End Function
+
+        Private Shared Function HighestRoutingLeafPriority(state As SemanticArchiveSearchState) As System.Double
+            Dim value As System.Double = System.Double.MinValue
+            For Each work As SemanticArchiveRoutingLeafWork In state.RoutingLeafQueue
+                value = System.Math.Max(value, work.Priority)
+            Next
+            Return value
+        End Function
+
+        Private Shared Sub EnqueueRouting(state As SemanticArchiveSearchState, archiveId As System.String, groupId As System.String, priority As System.Double, evaluated As System.Boolean, Optional depth As System.Int32 = 0)
+            If System.String.IsNullOrWhiteSpace(groupId) OrElse state.SeenRoutingGroups.Contains(Identity(archiveId, groupId)) Then Return
+            For Each existing As SemanticArchiveRoutingWork In state.RoutingQueue
+                If existing.ArchiveId = archiveId AndAlso existing.GroupId = groupId Then
+                    existing.Priority = System.Math.Max(existing.Priority, priority)
+                    existing.Evaluated = existing.Evaluated OrElse evaluated
+                    Return
+                End If
+            Next
+            If state.RoutingQueue.Count >= 8192 Then Throw New System.InvalidOperationException("routing_state_budget: The bounded semantic routing queue is full.")
+            state.Sequence += 1
+            state.RoutingQueue.Add(New SemanticArchiveRoutingWork With {.ArchiveId = archiveId, .GroupId = groupId, .Priority = priority, .Sequence = state.Sequence, .Evaluated = evaluated, .Depth = depth})
+        End Sub
+
+        Private Shared Sub EnqueueRoutingLeaf(state As SemanticArchiveSearchState, archiveId As System.String, groupId As System.String, priority As System.Double)
+            If state.SeenRoutingLeaves.Contains(Identity(archiveId, groupId)) Then Return
+            For Each existing As SemanticArchiveRoutingLeafWork In state.RoutingLeafQueue
+                If existing.ArchiveId = archiveId AndAlso existing.GroupId = groupId Then
                     existing.Priority = System.Math.Max(existing.Priority, priority)
                     Return
                 End If
             Next
-            If state.Queue.Count >= 8192 Then Throw New System.InvalidOperationException("navigation_state_budget: The bounded retained navigation queue is full.")
             state.Sequence += 1
-            state.Queue.Add(New SemanticArchiveNodeWork() With {.ArchiveId = archiveId, .NodeId = nodeId, .Priority = priority, .Sequence = state.Sequence})
+            state.RoutingLeafQueue.Add(New SemanticArchiveRoutingLeafWork With {.ArchiveId = archiveId, .GroupId = groupId, .Priority = priority, .Sequence = state.Sequence})
         End Sub
 
         Private Shared Function AddCandidate(state As SemanticArchiveSearchState, archiveId As System.String, documentId As System.String,
@@ -812,15 +1116,12 @@ Namespace SharedLibrary
             Return score
         End Function
 
-        Private Shared Function CanUseExactMetadataFastPath(state As SemanticArchiveSearchState) As System.Boolean
-            If state Is Nothing OrElse Not state.ExactComplete OrElse state.HadExactFailures OrElse state.LiteralScan IsNot Nothing Then Return False
-            If state.Candidates.Count <> 1 Then Return False
-            For Each candidate As SemanticArchiveCandidate In state.Candidates.Values
-                Return candidate IsNot Nothing AndAlso
-                    candidate.Score >= 0.75R AndAlso
-                    candidate.Channel.IndexOf("exact_metadata", System.StringComparison.OrdinalIgnoreCase) >= 0
-            Next
-            Return False
+        Private Shared Function HasSelectedDocumentCandidate(state As SemanticArchiveSearchState, key As System.String) As System.Boolean
+            Dim candidate As SemanticArchiveCandidate = Nothing
+            If Not state.Candidates.TryGetValue(key, candidate) Then Return False
+            ' Lexical metadata candidates must still be eligible for document-level
+            ' semantic selection. Exact/literal channels remain independent.
+            Return candidate.Channel.Contains("semantic") OrElse candidate.Channel.Contains("literal_text")
         End Function
 
         Private Shared Function CountUnreturnedCandidates(state As SemanticArchiveSearchState) As System.Int32

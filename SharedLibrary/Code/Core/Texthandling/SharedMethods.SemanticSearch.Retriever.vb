@@ -96,6 +96,9 @@ Namespace SharedLibrary
             Public Property ModelCalls As System.Int32
             Public Property CoverageComplete As System.Boolean
             Public Property DiagnosticMessage As System.String = System.String.Empty
+            ' Host-produced progress only; never accept these fields from model output.
+            <Newtonsoft.Json.JsonIgnoreAttribute()>
+            Public Property RejectedEntryIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         End Class
 
         Public Class SemanticSearchSegmentScanResult
@@ -1596,6 +1599,12 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>Selection-only routing over host-authorized metadata; never loads document bytes.</summary>
+        ' One canonical wire record for both host batching and the selector's character budget.
+        ' Preserve every metadata field; JSON quoting/escaping is part of the actual request size.
+        Friend Shared Function BuildSemanticSearchSelectionRecord(entry As SemanticSearchIndexEntry) As System.String
+            Return SerializeSemanticSearchJson(BuildCompactSemanticSearchIndex(New SemanticSearchIndexEntry() {entry}))
+        End Function
+
         Public Shared Async Function SelectSemanticSearchEntriesAsync(
             context As ISharedContext,
             currentQuestion As System.String,
@@ -1650,7 +1659,7 @@ Namespace SharedLibrary
                 Dim recordsCharacters As System.Int32 = 0
                 While position + batch.Count < candidates.Count AndAlso batch.Count < effective.MaximumCandidateEntries
                     Dim entry As SemanticSearchIndexEntry = candidates(position + batch.Count)
-                    Dim record As System.String = SerializeSemanticSearchJson(BuildCompactSemanticSearchIndex(New SemanticSearchIndexEntry() {entry}))
+                    Dim record As System.String = BuildSemanticSearchSelectionRecord(entry)
                     If recordsCharacters + record.Length > effective.MaximumCompactIndexCharacters Then
                         If batch.Count = 0 Then
                             Throw New SemanticSearchRequestBudgetException("semantic_request_oversized: A complete metadata record exceeds MaximumCompactIndexCharacters; split the record at a host-owned boundary.")
@@ -1704,6 +1713,17 @@ Namespace SharedLibrary
                     End If
                     result.SuggestedRelatedIds.Add(id.Trim())
                 Next
+                ' A completed batch can establish irrelevance even when later batches
+                ' have not fitted this operation. Keep limit/related omissions deferred.
+                If Not selection.PotentiallyMissingInformation Then
+                    Dim selectedBatchIds As New System.Collections.Generic.HashSet(Of System.String)(selection.SuggestedRelatedIds, System.StringComparer.OrdinalIgnoreCase)
+                    For Each selected As SemanticSearchSelectedEntryResult In selection.SelectedEntries
+                        If selected.Relevance >= effective.MinimumSelectionRelevance Then selectedBatchIds.Add(selected.Id)
+                    Next
+                    For Each entry As SemanticSearchIndexEntry In batch
+                        If Not selectedBatchIds.Contains(entry.Id) Then result.RejectedEntryIds.Add(entry.Id)
+                    Next
+                End If
                 result.PotentiallyMissingInformation = result.PotentiallyMissingInformation OrElse selection.PotentiallyMissingInformation
                 position += batch.Count
                 result.CandidatesConsidered += batch.Count

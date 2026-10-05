@@ -512,6 +512,8 @@ Namespace SharedLibrary
         ' Shared exporter observations only; these bounds do not alter extraction policy.
         Public Const DEFAULT_TEXTEXPORT_MAXIMUM_COVERAGE_WARNINGS As System.Int32 = 64
         Public Const DEFAULT_TEXTEXPORT_COVERAGE_WARNING_CHARACTERS As System.Int32 = 512
+        Public Const DEFAULT_TEXTEXPORT_EXCEPTION_DIAGNOSTIC_DEPTH As System.Int32 = 4
+        Public Const DEFAULT_TEXTEXPORT_EXCEPTION_STACK_FRAMES As System.Int32 = 3
 
         ' Command-line defaults; explicit options continue to override these values.
         Public Const DEFAULT_SEMANTICARCHIVE_WORKER_OPERATION As System.String = "refresh"

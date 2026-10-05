@@ -69,6 +69,9 @@ Namespace SharedLibrary
 
         Private Shared Sub ValidateManifestHeader(manifest As SemanticArchiveGenerationManifest)
             If manifest Is Nothing OrElse manifest.SchemaVersion <> GenerationSchemaVersion OrElse manifest.Nodes Is Nothing OrElse manifest.DocumentShards Is Nothing OrElse manifest.TermShards Is Nothing OrElse manifest.Inventory Is Nothing OrElse manifest.FenceToken <= 0 Then Throw New System.IO.InvalidDataException("Invalid archive generation descriptor.")
+            If manifest.ValidationStatus = "validated" AndAlso manifest.RoutingGraphArtifact Is Nothing Then
+                Throw New System.IO.InvalidDataException("unsupported_semantic_index: This published archive has no current routing graph. Create a new archive index; legacy index migration is not supported.")
+            End If
             SemanticArchiveIdentity.ValidateId(manifest.ArchiveId, NameOf(manifest.ArchiveId))
             SemanticArchiveIdentity.ValidateId(manifest.GenerationId, NameOf(manifest.GenerationId))
             manifest.Inventory.Validate()
@@ -257,6 +260,10 @@ Namespace SharedLibrary
             For Each reference As SemanticArchiveArtifactReference In manifest.TermShards
                 ValidateArtifact(reference, manifest.ArchiveId)
             Next
+            ' Current routing is mandatory. LoadRoutingGraph validates the graph once;
+            ' there is no storage-tree fallback or second graph traversal.
+            ValidateArtifact(manifest.RoutingGraphArtifact, manifest.ArchiveId)
+            LoadRoutingGraph(manifest)
             inventory.Validate()
             manifest.Inventory = inventory
             manifest.DocumentCount = inventory.SearchableDocuments
@@ -292,6 +299,10 @@ Namespace SharedLibrary
             For Each reference As SemanticArchiveArtifactReference In manifest.TermShards
                 ValidateArtifact(reference, manifest.ArchiveId)
             Next
+            ' Current routing is mandatory. LoadRoutingGraph validates the graph once;
+            ' there is no storage-tree fallback or second graph traversal.
+            ValidateArtifact(manifest.RoutingGraphArtifact, manifest.ArchiveId)
+            LoadRoutingGraph(manifest)
             Dim visited As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
             ValidateAcyclic(manifest, manifest.RootNodeId, New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal), visited)
             If visited.Count <> manifest.Nodes.Count Then Throw New System.IO.InvalidDataException("The audited generation contains unreachable nodes.")

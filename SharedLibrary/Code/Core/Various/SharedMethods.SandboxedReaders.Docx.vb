@@ -137,7 +137,18 @@ Namespace SharedLibrary
                 Optional returnMarkdown As System.Boolean = False,
                 Optional ByRef readError As System.String = Nothing
             ) As System.String
+                Dim extractionComplete As System.Nullable(Of System.Boolean) = Nothing
+                Return ReadDocxSandboxed(docxPath, returnMarkdown, readError, extractionComplete)
+            End Function
+
+            Public Shared Function ReadDocxSandboxed(
+                docxPath As System.String,
+                returnMarkdown As System.Boolean,
+                ByRef readError As System.String,
+                ByRef extractionComplete As System.Nullable(Of System.Boolean)
+            ) As System.String
                 readError = System.String.Empty
+                extractionComplete = Nothing
                 If System.String.IsNullOrWhiteSpace(docxPath) OrElse Not System.IO.File.Exists(docxPath) Then
                     Return ReportLegacyTextReaderError("Error: File not found.", readError)
                 End If
@@ -158,6 +169,7 @@ Namespace SharedLibrary
                         Return ReportLegacyTextReaderError("Error: Not a valid .docx file (missing word/document.xml).", readError)
                     End If
 
+                    Dim coverageComplete As System.Boolean = True
                     Dim context As New ExtractionContext()
                     context.WordDirectory = wordDirectory
                     context.StyleModel = LoadStyleModel(wordDirectory)
@@ -191,16 +203,16 @@ Namespace SharedLibrary
 
                     If DocxIncludeHeaderFooterFootnotes AndAlso System.IO.Directory.Exists(wordDirectory) Then
                         supplementaryStories.AddRange(
-                            AnalyseStoryFiles(wordDirectory, "header*.xml", "Header", context)
+                            AnalyseStoryFiles(wordDirectory, "header*.xml", "Header", context, coverageComplete)
                         )
                         supplementaryStories.AddRange(
-                            AnalyseStoryFiles(wordDirectory, "footer*.xml", "Footer", context)
+                            AnalyseStoryFiles(wordDirectory, "footer*.xml", "Footer", context, coverageComplete)
                         )
                         noteStories.AddRange(
-                            AnalyseNoteFile(wordDirectory, "footnotes.xml", "footnote", "Footnote", context)
+                            AnalyseNoteFile(wordDirectory, "footnotes.xml", "footnote", "Footnote", context, coverageComplete)
                         )
                         noteStories.AddRange(
-                            AnalyseNoteFile(wordDirectory, "endnotes.xml", "endnote", "Endnote", context)
+                            AnalyseNoteFile(wordDirectory, "endnotes.xml", "endnote", "Endnote", context, coverageComplete)
                         )
                     End If
 
@@ -268,6 +280,7 @@ Namespace SharedLibrary
                         Return ReportLegacyTextReaderError("Error: No text content found in .docx.", readError)
                     End If
 
+                    extractionComplete = coverageComplete
                     Return result
 
                 Catch ex As System.Exception
@@ -1540,7 +1553,8 @@ Namespace SharedLibrary
                 wordDirectory As System.String,
                 filePattern As System.String,
                 sectionLabel As System.String,
-                context As ExtractionContext
+                context As ExtractionContext,
+                ByRef coverageComplete As System.Boolean
             ) As System.Collections.Generic.List(Of StorySection)
 
                 Dim stories As New System.Collections.Generic.List(Of StorySection)()
@@ -1554,6 +1568,7 @@ Namespace SharedLibrary
                         Dim namespaceManager As System.Xml.XmlNamespaceManager = CreateNamespaceManager(document)
                         Dim root As System.Xml.XmlNode = document.DocumentElement
                         If root Is Nothing Then
+                            coverageComplete = False
                             Continue For
                         End If
 
@@ -1577,7 +1592,9 @@ Namespace SharedLibrary
                         stories.Add(story)
                     Next
                 Catch ex As System.Exception
-                    ' Supplementary parts are optional.
+                    ' Preserve readable main-document text but do not claim complete
+                    ' coverage when a declared supplementary story cannot be parsed.
+                    coverageComplete = False
                 End Try
 
                 Return stories
@@ -1588,7 +1605,8 @@ Namespace SharedLibrary
                 fileName As System.String,
                 noteElementLocalName As System.String,
                 sectionLabel As System.String,
-                context As ExtractionContext
+                context As ExtractionContext,
+                ByRef coverageComplete As System.Boolean
             ) As System.Collections.Generic.List(Of NoteSection)
 
                 Dim notes As New System.Collections.Generic.List(Of NoteSection)()
@@ -1604,6 +1622,7 @@ Namespace SharedLibrary
                     Dim noteNodes As System.Xml.XmlNodeList = document.SelectNodes("//w:" & noteElementLocalName, namespaceManager)
 
                     If noteNodes Is Nothing Then
+                        coverageComplete = False
                         Return notes
                     End If
 
@@ -1627,7 +1646,9 @@ Namespace SharedLibrary
                         notes.Add(note)
                     Next
                 Catch ex As System.Exception
-                    ' Notes are optional.
+                    ' Preserve readable main-document text but keep extraction coverage
+                    ' incomplete when a present notes part cannot be parsed.
+                    coverageComplete = False
                 End Try
 
                 Return notes

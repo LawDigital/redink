@@ -1,4 +1,4 @@
-RED INK SEMANTIC ARCHIVE WORKER
+﻿RED INK SEMANTIC ARCHIVE WORKER
 ===============================
 
 Purpose
@@ -25,10 +25,21 @@ Common operations
                extract/index what is needed, and publish the current generation.
                Use this for first-time indexing and normal updates.
 
-  retry        Retry failed/deferred source work that is ready to run.
+  retry        Retry failed/deferred and coverage-excluded source work. A missing,
+               empty, incomplete or unknown extraction is freshly extracted/OCRed;
+               a verified complete extraction is reused when only downstream
+               semantic/index work failed.
 
-  reindex      Rebuild semantic metadata/indexes while reusing valid extracted text
-               whenever possible.
+  repair       Repair failed/missing/empty/incomplete/unknown extraction where
+               necessary, reuse verified complete extracts, then rebuild semantic
+               cards, applicable section indexes and current routing for the scope
+               in the same drained operation.
+
+  reindex      Rebuild semantic cards, section indexes and routing indexes from
+               validated existing extracted text only. It never invokes extraction
+               or OCR. Missing/invalid/incompatible extracts are reported as
+               requiring extraction and can be handled with the separate extract
+               operation.
 
   extract      Force re-extraction (and OCR where configured) before rebuilding
                semantic metadata. This can be expensive; do not use it for a normal
@@ -36,15 +47,36 @@ Common operations
 
   permissions  Reconcile derivative permissions only; no content indexing.
 
+Current indexes and OCR recovery
+--------------------------------
+Only the current semantic routing format is supported. Missing/obsolete
+routing indexes are rejected; there is no legacy migration or storage-tree
+search fallback. Create a new archive index for such obsolete state. Retry, repair and reindex
+cannot migrate that old format. In Admin, Unregister withdraws a published
+library definition first and then removes its local registration (subscriber
+archives opt out). The existing publisher/library authorization still applies;
+a failed withdrawal must not silently remove the local publisher registration.
+Original documents and generated artifacts are retained.
+
+Reindex changes semantic metadata, not recognition quality. For problematic
+PDFs, use Re-extract/OCR selected in Admin or extract for the explicitly
+selected worker scope. Existing PDF extracts with an older extraction
+contract require fresh extraction; reindex reports that need without OCR.
+Force-extract bypasses previous in-process extraction cache/in-flight work.
+OCR must still be enabled in the source binding and supported by the model.
+
 Examples
 --------
 First build / normal update:
   redink-sa-worker.exe refresh "DP Know-how"
 
-Retry ready failures:
+Retry failures and coverage-excluded extraction without restarting valid extracts:
   redink-sa-worker.exe retry "DP Know-how"
 
-Rebuild semantic metadata:
+Repair two archives that already use the current index format:
+  redink-sa-worker.exe repair "VISCHER Compliance" "VISCHER DP Know-how"
+
+Rebuild the semantic index without OCR/extraction:
   redink-sa-worker.exe reindex "DP Know-how"
 
 Force extraction/OCR again:
@@ -64,6 +96,50 @@ Use an explicit Red Ink configuration source (optional override):
 
 Process every archive in the local catalog:
   redink-sa-worker.exe --all-archives --all-documents --operation refresh --loop
+
+Targeted recovery and completion
+-------------------------------
+Retry one explicitly selected stable document ID:
+  redink-sa-worker.exe --operation retry --archive "<archive-id>" --document "<document-id>"
+
+Force extraction/OCR for that same document only:
+  redink-sa-worker.exe --operation extract --archive "<archive-id>" --document "<document-id>"
+
+Reconcile archive permissions separately (no OCR or semantic model work):
+  redink-sa-worker.exe --operation permissions --archive "<archive-id>" --all-documents
+
+Replace the placeholders with actual stable IDs. Repeated --document selects
+multiple documents in one explicitly selected archive. Empty selected IDs never
+mean all; --all-documents is the explicit whole-archive operation.
+
+A batch with failed=0 and published=true can still exclude incomplete text.
+The final published_scope_verified event audits the requested scope: check
+complete=true, unresolved=0, missingSelectedDocuments=0 and the searchable /
+complete extraction inventory. The final complete event confirms completion of
+that command's scope, not every registered archive. Exit 3 indicates incomplete,
+pending, deferred or failed work. Permission discovery/repair is separate from
+content searchability and can require its own permissions command.
+
+Use Admin's Needs attention document filter for incomplete, empty or failed
+processing; Source access unavailable is a separate view. Select rows by their
+filenames for targeted maintenance. Show IDs / technical details exposes stable
+IDs and authorized raw diagnostics. Header sorting applies to loaded matches;
+Load more matches retains the selection. Find documents refreshes the snapshot.
+
+Build/output dependency checks
+------------------------------
+Build with VS2022 / Windows MSBuild and restored existing solution packages.
+Deploy the complete output directory, including SharedLibrary dependencies and
+the generated redink-sa-worker.exe.config. Do not deploy the EXE alone or replace
+its generated config with source App.config. Logging.Abstractions redirects use
+the configured SharedLibrary assembly identity; .NET Framework 4.8 ValueTuple
+uses the inbox policy and must not acquire an automatic package redirect to
+4.0.5.0. No .NET 8 runtime is required for this Framework 4.8 worker.
+
+If extraction reports FileNotFoundException at pdf_chunk_creation, OCR has not
+yet reached its model request. Inspect the missing assembly and generated output
+config before retrying more documents. Searchability requires verified extraction
+coverage; enabling partial text does not repair a failed OCR/dependency load.
 
 Defaults
 --------
@@ -91,13 +167,20 @@ validation when used.
 
 Progress and logs
 -----------------
-In an interactive console, the current activity is shown on stderr as one
-in-place status line that rewrites itself, for example:
+Each activity is appended on stderr as a complete line, for example:
 
   Processing source — policy.pdf | 18 completed; 112 queued
+  Extracting text — policy.pdf
+  Building semantic metadata — policy.pdf
+
+No cursor rewriting or window-width assumptions are used; resizing may reflow
+existing terminal text but does not erase or overwrite progress. Identical
+consecutive events for the same source are suppressed. Redirected stderr also
+receives these lines and can contain source filenames; protect that output.
 
 stdout remains JSON-lines so scripts can parse lifecycle/batch events. If --log
 is supplied, the same JSON events are also written to that private log file.
+Progress never enters stdout or the private JSON log.
 
 A message such as "Source discovery has a durable continuation" means the scan
 stopped at its bounded discovery checkpoint and will continue in the next cycle.
@@ -108,8 +191,10 @@ Safe cancellation
 -----------------
 Press Ctrl+C to request graceful cancellation. The worker propagates a
 CancellationToken and stops at a safe checkpoint. Durable discovery/extraction
-checkpoints remain reusable, and generation activation is atomic. Run the same
-command again to continue.
+checkpoints remain reusable, and generation activation is atomic. To resume the
+SAME bounded operation, add --operation-id using the started event operationId
+and keep exactly the same operation/archive/document scope. Omitting the ID
+starts a fresh operation; never reuse it for a different scope.
 
 Avoid forcibly terminating the process (for example Task Manager / End Process)
 when a normal Ctrl+C can be used. A forced process kill cannot give in-flight
@@ -134,7 +219,7 @@ Advanced syntax
   redink-sa-worker.exe [--ini <path-or-HTTPS-URL>] [--once|--loop]
     (--archive <name-or-stable-id> [--archive <name-or-id> ...]|--all-archives)
     [--document <stable-id> [--document <id> ...]|--all-documents]
-    [--operation refresh|retry|reindex|extract|permissions]
+    [--operation refresh|retry|repair|reindex|extract|permissions]
     [--operation-id <GUID>]
     [--batch-files 1..4096]
     [--discovery-entries 1..10000]
