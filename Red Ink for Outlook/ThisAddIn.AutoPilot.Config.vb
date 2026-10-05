@@ -171,6 +171,12 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property ThreadRetentionDays As Integer = 0
 
+        ''' <summary>
+        ''' Recipient for periodic privacy-scrubbed AutoPilot engineering diagnostics reports.
+        ''' Empty disables idle log analysis and reporting completely.
+        ''' </summary>
+        Public Property LogDiagnosticsReportEmail As String = ""
+
 
     End Class
 
@@ -409,6 +415,10 @@ Partial Public Class ThisAddIn
             .Name = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
             .Value = saved.ThreadRetentionDays.ToString()
         }
+        Dim pLogDiagnosticsReportEmail As New InputParameter() With {
+            .Name = "Engineering diagnostics report recipient (email; empty = disabled)",
+            .Value = If(saved.LogDiagnosticsReportEmail, "")
+        }
 
         Dim paramsList As New List(Of InputParameter) From {
             pCooldown,
@@ -422,7 +432,8 @@ Partial Public Class ThisAddIn
             pEnableUserFiles,
             pEnablePrivacyProtection,
             pIncludeSourcesFooter,
-            pThreadRetentionDays
+            pThreadRetentionDays,
+            pLogDiagnosticsReportEmail
         }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -494,6 +505,20 @@ Partial Public Class ThisAddIn
             config.ThreadRetentionDays = threadRetentionDays
         End If
 
+        Dim diagnosticsRecipientInput As System.String = If(pLogDiagnosticsReportEmail.Value?.ToString(), System.String.Empty).Trim()
+        If diagnosticsRecipientInput.Length > 0 Then
+            Dim normalizedDiagnosticsRecipient As System.String = NormalizeAutoPilotLogDiagnosticsRecipient(diagnosticsRecipientInput)
+            If normalizedDiagnosticsRecipient.Length = 0 Then
+                ShowCustomMessageBox(
+                    "The engineering diagnostics report recipient must be a valid e-mail address, or left empty to disable the function.",
+                    AN)
+                Return Nothing
+            End If
+            config.LogDiagnosticsReportEmail = normalizedDiagnosticsRecipient
+        Else
+            config.LogDiagnosticsReportEmail = System.String.Empty
+        End If
+
         ' Voicemail settings
         If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
             config.EnableVoicemailProcessing = CBool(If(pVoicemail.Value, False))
@@ -518,12 +543,11 @@ Partial Public Class ThisAddIn
         If modelSupportsTools Then
             Dim availableTools = GetAvailableToolsForAutoPilotSelection()
             If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
-                ' Load previously persisted tool names for pre-selection
-                Dim previousToolNames As New List(Of String)()
-                If Not String.IsNullOrWhiteSpace(My.Settings.AP_SelectedExternalToolNames) Then
-                    previousToolNames = My.Settings.AP_SelectedExternalToolNames.Split({vbLf}, StringSplitOptions.RemoveEmptyEntries).
-                        Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
-                End If
+                ' Restore the persisted selection against the catalog that existed when it was saved.
+                ' Tools that are genuinely new since that catalog snapshot are selected automatically,
+                ' while tools the user deliberately left unchecked remain unchecked.
+                Dim previousToolNames As System.Collections.Generic.List(Of System.String) =
+                    ResolveAutoPilotExternalToolSelectionNames(availableTools)
 
                 Dim toolChoice = ShowCustomYesNoBox(
                     $"There are {availableTools.Count} {Globals.ThisAddIn.ToolFriendlyName.ToLower} available (web retrieval, etc.)." & vbCrLf &
@@ -606,6 +630,7 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"User file storage: {If(config.EnableUserFiles, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
         summaryBuilder.AppendLine($"Sender tool policy: {If(String.IsNullOrWhiteSpace(config.SenderToolPolicyPath), "disabled", config.SenderToolPolicyPath)}")
+        summaryBuilder.AppendLine($"Engineering diagnostics: {If(String.IsNullOrWhiteSpace(config.LogDiagnosticsReportEmail), "disabled", "enabled → " & config.LogDiagnosticsReportEmail)}")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -670,7 +695,98 @@ Partial Public Class ThisAddIn
         Return rules
     End Function
 
-    ''' <summary>Persists the AutoPilot config to My.Settings.</summary>
+    ''' <summary>
+    ''' One-time bridge from the legacy selected-names-only format to catalog snapshots.
+    ''' After the first save with AP_AvailableExternalToolNames populated, all future
+    ''' additions are detected generically by catalog difference.
+    ''' </summary>
+    Private Shared ReadOnly AutoPilotLegacyCatalogMigrationDefaultToolNames As System.String() = {
+        SharedLibrary.Agents.LogCountTool.ToolName
+    }
+
+    Private Shared Function ParseAutoPilotToolNameSetting(value As System.String) As System.Collections.Generic.List(Of System.String)
+        If System.String.IsNullOrWhiteSpace(value) Then
+            Return New System.Collections.Generic.List(Of System.String)()
+        End If
+
+        Return value.Split({vbLf}, System.StringSplitOptions.RemoveEmptyEntries).
+            Select(Function(item As System.String) item.Trim()).
+            Where(Function(item As System.String) item.Length > 0).
+            Distinct(System.StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    Private Shared Function GetAutoPilotToolCanonicalName(tool As ModelConfig) As System.String
+        If tool Is Nothing Then Return System.String.Empty
+        If Not System.String.IsNullOrWhiteSpace(tool.ToolName) Then Return tool.ToolName.Trim()
+        If Not System.String.IsNullOrWhiteSpace(tool.ModelDescription) Then Return tool.ModelDescription.Trim()
+        If Not System.String.IsNullOrWhiteSpace(tool.Model) Then Return tool.Model.Trim()
+        Return System.String.Empty
+    End Function
+
+    Private Shared Function GetAutoPilotCatalogToolNames(availableTools As System.Collections.Generic.IEnumerable(Of ModelConfig)) As System.Collections.Generic.List(Of System.String)
+        If availableTools Is Nothing Then
+            Return New System.Collections.Generic.List(Of System.String)()
+        End If
+
+        Return availableTools.
+            Select(Function(tool As ModelConfig) GetAutoPilotToolCanonicalName(tool)).
+            Where(Function(name As System.String) Not System.String.IsNullOrWhiteSpace(name)).
+            Distinct(System.StringComparer.OrdinalIgnoreCase).
+            OrderBy(Function(name As System.String) name, System.StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    ''' <summary>
+    ''' Resolves the persisted AutoPilot selection without changing previous user choices.
+    ''' Existing tools keep their selected/deselected state. Tools absent from the catalog
+    ''' snapshot are new and therefore become selected automatically.
+    ''' </summary>
+    Private Function ResolveAutoPilotExternalToolSelectionNames(availableTools As System.Collections.Generic.List(Of ModelConfig)) As System.Collections.Generic.List(Of System.String)
+        Dim currentCatalogNames As System.Collections.Generic.List(Of System.String) = GetAutoPilotCatalogToolNames(availableTools)
+        Dim currentCatalogSet As New System.Collections.Generic.HashSet(Of System.String)(currentCatalogNames, System.StringComparer.OrdinalIgnoreCase)
+        Dim savedSelectedNames As System.Collections.Generic.List(Of System.String) = ParseAutoPilotToolNameSetting(My.Settings.AP_SelectedExternalToolNames)
+        Dim savedCatalogNames As System.Collections.Generic.List(Of System.String) = ParseAutoPilotToolNameSetting(My.Settings.AP_AvailableExternalToolNames)
+        Dim resolved As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+        For Each name As System.String In savedSelectedNames
+            If currentCatalogSet.Contains(name) Then resolved.Add(name)
+        Next
+
+        If savedCatalogNames.Count > 0 Then
+            Dim savedCatalogSet As New System.Collections.Generic.HashSet(Of System.String)(savedCatalogNames, System.StringComparer.OrdinalIgnoreCase)
+            For Each name As System.String In currentCatalogNames
+                If Not savedCatalogSet.Contains(name) Then resolved.Add(name)
+            Next
+        ElseIf savedSelectedNames.Count > 0 OrElse HasSavedAutoPilotConfig() Then
+            ' Legacy installations did not persist the catalog, so a historical deselection
+            ' cannot be distinguished from a tool introduced by this upgrade. Only the tools
+            ' introduced together with catalog snapshots are bridged once here. Thereafter
+            ' every new tool is detected generically by the saved-catalog difference above.
+            For Each migrationName As System.String In AutoPilotLegacyCatalogMigrationDefaultToolNames
+                If currentCatalogSet.Contains(migrationName) Then resolved.Add(migrationName)
+            Next
+        End If
+
+        Return currentCatalogNames.Where(Function(name As System.String) resolved.Contains(name)).ToList()
+    End Function
+
+    Private Shared Function MatchAutoPilotToolsByNames(availableTools As System.Collections.Generic.List(Of ModelConfig),
+                                                       selectedNames As System.Collections.Generic.IEnumerable(Of System.String)) As System.Collections.Generic.List(Of ModelConfig)
+        Dim result As New System.Collections.Generic.List(Of ModelConfig)()
+        If availableTools Is Nothing OrElse selectedNames Is Nothing Then Return result
+
+        Dim selectedSet As New System.Collections.Generic.HashSet(Of System.String)(selectedNames, System.StringComparer.OrdinalIgnoreCase)
+        For Each tool As ModelConfig In availableTools
+            Dim canonicalName As System.String = GetAutoPilotToolCanonicalName(tool)
+            If canonicalName.Length > 0 AndAlso selectedSet.Contains(canonicalName) Then
+                result.Add(tool)
+            End If
+        Next
+
+        Return result
+    End Function
+
     ''' <summary>Persists the AutoPilot config to My.Settings.</summary>
     Private Sub SaveAutoPilotConfigToSettings(config As AutoPilotConfig)
         My.Settings.AP_FilterRules = String.Join(vbLf, config.FilterRules.Select(
@@ -697,17 +813,26 @@ Partial Public Class ThisAddIn
         My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
         My.Settings.AP_SenderToolPolicyPath = If(config.SenderToolPolicyPath, "")
         My.Settings.AP_ThreadRetentionDays = config.ThreadRetentionDays
+        My.Settings.AP_LogDiagnosticsReportEmail = If(config.LogDiagnosticsReportEmail, "")
 
-        ' Persist external tool selection by ToolName/ModelDescription
+        ' Persist the explicit user selection exactly as before. In addition, persist the
+        ' catalog against which that selection was made so newly introduced tools can be
+        ' auto-selected later without re-enabling previously deselected tools.
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
-            Dim toolNames = config.SelectedExternalTools.Select(
-                Function(t) If(Not String.IsNullOrEmpty(t.ToolName), t.ToolName,
-                            If(Not String.IsNullOrEmpty(t.ModelDescription), t.ModelDescription, t.Model))).
-                Where(Function(n) Not String.IsNullOrEmpty(n))
-            My.Settings.AP_SelectedExternalToolNames = String.Join(vbLf, toolNames)
+            Dim toolNames As System.Collections.Generic.List(Of System.String) =
+                GetAutoPilotCatalogToolNames(config.SelectedExternalTools)
+            My.Settings.AP_SelectedExternalToolNames = System.String.Join(vbLf, toolNames)
         Else
-            My.Settings.AP_SelectedExternalToolNames = ""
+            My.Settings.AP_SelectedExternalToolNames = System.String.Empty
         End If
+
+        Try
+            Dim availableTools As System.Collections.Generic.List(Of ModelConfig) = GetAvailableToolsForAutoPilotSelection()
+            My.Settings.AP_AvailableExternalToolNames =
+                System.String.Join(vbLf, GetAutoPilotCatalogToolNames(availableTools))
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to persist external tool catalog snapshot: {ex.Message}")
+        End Try
 
         SaveAutoPilotSettingsWithRegistryBackup()
         SaveAutoPilotSourcesFooterMode(config.SourcesFooterMode)
@@ -738,6 +863,7 @@ Partial Public Class ThisAddIn
         config.AutoDeleteAfterHours = If(My.Settings.AP_AutoDeleteAfterHours >= 0, My.Settings.AP_AutoDeleteAfterHours, 0)
         config.SenderToolPolicyPath = If(My.Settings.AP_SenderToolPolicyPath, "")
         config.ThreadRetentionDays = If(My.Settings.AP_ThreadRetentionDays >= 0, My.Settings.AP_ThreadRetentionDays, 0)
+        config.LogDiagnosticsReportEmail = If(My.Settings.AP_LogDiagnosticsReportEmail, "")
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then
@@ -750,26 +876,20 @@ Partial Public Class ThisAddIn
                 Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
         End If
 
-        ' Restore external tools by matching persisted names against currently available tools
-        If Not String.IsNullOrWhiteSpace(My.Settings.AP_SelectedExternalToolNames) Then
-            Dim savedToolNames = My.Settings.AP_SelectedExternalToolNames.Split({vbLf}, StringSplitOptions.RemoveEmptyEntries).
-                Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
-            If savedToolNames.Count > 0 Then
-                Try
-                    Dim availableTools = GetAvailableTools()
-                    If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
-                        Dim matched = availableTools.Where(
-                            Function(t) savedToolNames.Any(Function(n)
-                                                               Return String.Equals(n, t.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
-                                                                      String.Equals(n, t.ModelDescription, StringComparison.OrdinalIgnoreCase) OrElse
-                                                                      String.Equals(n, t.Model, StringComparison.OrdinalIgnoreCase)
-                                                           End Function)).ToList()
-                        If matched.Count > 0 Then config.SelectedExternalTools = matched
-                    End If
-                Catch
-                End Try
+        ' Restore the external-tool selection against the current AutoPilot-selectable
+        ' catalog. New tools are selected automatically; prior explicit deselections remain.
+        Try
+            Dim availableTools As System.Collections.Generic.List(Of ModelConfig) = GetAvailableToolsForAutoPilotSelection()
+            If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
+                Dim selectedNames As System.Collections.Generic.List(Of System.String) =
+                    ResolveAutoPilotExternalToolSelectionNames(availableTools)
+                Dim matched As System.Collections.Generic.List(Of ModelConfig) =
+                    MatchAutoPilotToolsByNames(availableTools, selectedNames)
+                If matched.Count > 0 Then config.SelectedExternalTools = matched
             End If
-        End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to restore external tool selection: {ex.Message}")
+        End Try
 
         Return config
     End Function

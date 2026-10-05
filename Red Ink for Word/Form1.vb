@@ -643,6 +643,10 @@ Public Class frmAIChat
             baseInstructions &= $" Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request."
         End If
 
+        If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+            baseInstructions &= " Type '(sa)' to retrieve evidence from the selected Semantic Archives, or '(sa: archive:""Name"" query)' for a named archive. This also works without agent tools."
+        End If
+
         lblInstructions.Text = baseInstructions
         lblInstructions.AutoSize = True
         lblInstructions.Height = 50
@@ -979,6 +983,16 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             ' STEP 2: Build Conversation Context
             ' ──────────────────────────────────────────────────────────────
+            ' Only the current input box text can request an archive or select scope.
+            ' Source documents and stored conversation text are appended afterwards.
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(userPrompt) Then
+                archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, userPrompt, Globals.ThisAddIn.CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+            End If
+            Dim retrievalUserPrompt As System.String = If(archivePrepared Is Nothing, userPrompt, archivePrepared.CleanPrompt)
+
             Dim conversationSoFar As String = BuildConversationString(_chatHistory)
 
             ' Append OldChat if present (preserved from model switch or previous session)
@@ -1264,7 +1278,7 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             If HasLoadedIndex() Then
                 Dim indexExcerpt As String = Await BuildIndexExcerptAsync(
-                    userPrompt,
+                    retrievalUserPrompt,
                     conversationSoFar,
                     Sub(status)
                         Try
@@ -1289,7 +1303,7 @@ Public Class frmAIChat
             End If
 
             ' Finalize the prompt with the current user message and conversation history.
-            fullPrompt.AppendLine("User: " & userPrompt)
+            fullPrompt.AppendLine("User: " & retrievalUserPrompt)
             fullPrompt.AppendLine($"The conversation so far (not including any previously added text document):{vbLf}{conversationSoFar}")
             Debug.WriteLine(fullPrompt.ToString())
 
@@ -1340,7 +1354,8 @@ Public Class frmAIChat
                         pinnedWordDocumentName:=requestTargetDocumentName,
                         pinnedWordDocumentFullName:=requestTargetDocumentFullName,
                         pinnedWordSelectionStart:=requestTargetSelectionStart,
-                        pinnedWordSelectionEnd:=requestTargetSelectionEnd)
+                        pinnedWordSelectionEnd:=requestTargetSelectionEnd,
+                        semanticArchivePrepared:=archivePrepared)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -2889,6 +2904,7 @@ Public Class frmAIChat
         Public Property Underline As System.Nullable(Of Boolean)
         Public Property FontSizePt As System.Nullable(Of Single)
         Public Property FontColor As System.String
+        Public Property Highlight As System.String
         Public Property Alignment As System.String
         Public Property SpaceBeforePt As System.Nullable(Of Single)
         Public Property SpaceAfterPt As System.Nullable(Of Single)
@@ -2906,6 +2922,7 @@ Public Class frmAIChat
                    Underline.HasValue OrElse
                    FontSizePt.HasValue OrElse
                    Not System.String.IsNullOrWhiteSpace(FontColor) OrElse
+                   Not System.String.IsNullOrWhiteSpace(Highlight) OrElse
                    Not System.String.IsNullOrWhiteSpace(Alignment) OrElse
                    SpaceBeforePt.HasValue OrElse
                    SpaceAfterPt.HasValue OrElse
@@ -2925,6 +2942,7 @@ Public Class frmAIChat
                 If(Underline.HasValue, Underline.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
                 If(FontSizePt.HasValue, FontSizePt.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
                 If(FontColor, ""),
+                If(Highlight, ""),
                 If(Alignment, ""),
                 If(SpaceBeforePt.HasValue, SpaceBeforePt.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
                 If(SpaceAfterPt.HasValue, SpaceAfterPt.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
@@ -2978,7 +2996,13 @@ Public Class frmAIChat
         Public Property Argument2 As System.String
         Public Property Target As System.String
         Public Property FormatSpec As ParsedCommandFormat
+        Public Property MatchFormatSpec As ParsedCommandFormat
         Public Property MatchSpec As ParsedCommandMatchSpec
+
+        ' Host-side compatibility normalization only. A value >= 2 means that this
+        ' command represents that many identical occurrence=1 replace/delete commands
+        ' emitted by the model and merged before Word execution.
+        Friend Property RepeatedOccurrenceOneMergeCount As System.Int32
     End Class
 
     ''' <summary>
@@ -3346,13 +3370,14 @@ Public Class frmAIChat
 
             Select Case operation
                 Case "find"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "occurrence", "max_matches")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "occurrence", "max_matches", "match_format")
                     parsed.Command = "find"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "goto"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence", "match_format")
                     parsed.Command = "goto"
 
                     Dim gotoTarget As System.String = GetOptionalJsonString(commandObject, "target", commandIndex)
@@ -3367,6 +3392,10 @@ Public Class frmAIChat
                             Throw New System.InvalidOperationException(
                                 $"Word goto command #{commandIndex} cannot combine 'target' with 'occurrence'.")
                         End If
+                        If commandObject.GetValue("match_format", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException(
+                                $"Word goto command #{commandIndex} cannot combine a recent-change 'target' with 'match_format'.")
+                        End If
                         parsed.Target = NormalizeRecentChangeTarget(gotoTarget, commandIndex, "goto")
                     Else
                         If System.String.IsNullOrWhiteSpace(gotoSearch) Then
@@ -3374,21 +3403,24 @@ Public Class frmAIChat
                                 $"Word goto command #{commandIndex} requires either a non-empty 'search' string or a recent-change 'target'.")
                         End If
                         parsed.Argument1 = CleanJsonArgument(gotoSearch)
+                        parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                         parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=False)
                     End If
 
                 Case "replace"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "replace"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
                     parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "delete"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "occurrence", "max_matches")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "occurrence", "max_matches", "match_format")
                     parsed.Command = "replace"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
                     parsed.Argument2 = ""
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "insert"
@@ -3397,24 +3429,27 @@ Public Class frmAIChat
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
 
                 Case "insert_before"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "insertbefore"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
                     parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "insert_after"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "insertafter"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
                     parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "add_comment"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "addcomment"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
                     parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "reply_comment"
@@ -3424,7 +3459,7 @@ Public Class frmAIChat
                     parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
 
                 Case "format"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence", "max_matches", "format")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence", "max_matches", "format", "match_format")
                     parsed.Command = "format"
                     parsed.FormatSpec = ParseJsonFormatSpec(commandObject, commandIndex)
 
@@ -3441,6 +3476,10 @@ Public Class frmAIChat
                             Throw New System.InvalidOperationException(
                                 $"Word format command #{commandIndex} cannot combine a recent-change 'target' with occurrence/max_matches.")
                         End If
+                        If commandObject.GetValue("match_format", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException(
+                                $"Word format command #{commandIndex} cannot combine a recent-change 'target' with 'match_format'.")
+                        End If
                         parsed.Target = NormalizeRecentChangeTarget(formatTarget, commandIndex, "format")
                     Else
                         If System.String.IsNullOrWhiteSpace(formatSearch) Then
@@ -3448,6 +3487,7 @@ Public Class frmAIChat
                                 $"Word format command #{commandIndex} requires either a non-empty 'search' string or a recent-change 'target'.")
                         End If
                         parsed.Argument1 = CleanJsonArgument(formatSearch)
+                        parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                         parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
                     End If
 
@@ -3614,8 +3654,47 @@ Public Class frmAIChat
                 $"Word format command #{commandIndex} requires a 'format' JSON object.")
         End If
 
-        Dim formatObject As Newtonsoft.Json.Linq.JObject =
-            DirectCast(formatToken, Newtonsoft.Json.Linq.JObject)
+        Return ParseJsonFormatObject(
+            DirectCast(formatToken, Newtonsoft.Json.Linq.JObject),
+            commandIndex,
+            "format",
+            allowAnyHighlight:=False)
+    End Function
+
+    Private Function ParseJsonMatchFormatSpec(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        commandIndex As Integer) As ParsedCommandFormat
+
+        Dim matchFormatToken As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue("match_format", System.StringComparison.OrdinalIgnoreCase)
+
+        If matchFormatToken Is Nothing OrElse matchFormatToken.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+            Return Nothing
+        End If
+
+        If matchFormatToken.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property 'match_format' must be a JSON object.")
+        End If
+
+        Return ParseJsonFormatObject(
+            DirectCast(matchFormatToken, Newtonsoft.Json.Linq.JObject),
+            commandIndex,
+            "match_format",
+            allowAnyHighlight:=True)
+    End Function
+
+    Private Function ParseJsonFormatObject(
+        formatObject As Newtonsoft.Json.Linq.JObject,
+        commandIndex As Integer,
+        propertyName As System.String,
+        allowAnyHighlight As Boolean) As ParsedCommandFormat
+
+        If formatObject Is Nothing Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON object.")
+        End If
+
         Dim spec As New ParsedCommandFormat()
 
         For Each propertyItem As Newtonsoft.Json.Linq.JProperty In formatObject.Properties()
@@ -3623,13 +3702,13 @@ Public Class frmAIChat
                 Case "style"
                     If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String OrElse
                        System.String.IsNullOrWhiteSpace(propertyItem.Value.ToObject(Of System.String)()) Then
-                        Throw New System.InvalidOperationException($"Word format command #{commandIndex} property 'style' must be a non-empty string.")
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.style' must be a non-empty string.")
                     End If
                     spec.StyleName = propertyItem.Value.ToObject(Of System.String)().Trim()
 
                 Case "builtin_style"
                     If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
-                        Throw New System.InvalidOperationException($"Word format command #{commandIndex} property 'builtin_style' must be a string.")
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.builtin_style' must be a string.")
                     End If
                     Dim builtinStyle As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim().ToLowerInvariant()
                     Select Case builtinStyle
@@ -3637,29 +3716,29 @@ Public Class frmAIChat
                             spec.BuiltinStyle = builtinStyle
                         Case Else
                             Throw New System.InvalidOperationException(
-                                $"Word format command #{commandIndex} property 'builtin_style' must be normal or heading1 through heading6.")
+                                $"Word command #{commandIndex} property '{propertyName}.builtin_style' must be normal or heading1 through heading6.")
                     End Select
 
                 Case "font_name"
                     If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String OrElse
                        System.String.IsNullOrWhiteSpace(propertyItem.Value.ToObject(Of System.String)()) Then
-                        Throw New System.InvalidOperationException($"Word format command #{commandIndex} property 'font_name' must be a non-empty string.")
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.font_name' must be a non-empty string.")
                     End If
                     spec.FontName = propertyItem.Value.ToObject(Of System.String)().Trim()
 
                 Case "bold"
-                    spec.Bold = GetRequiredJsonBoolean(propertyItem.Value, "bold", commandIndex)
+                    spec.Bold = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".bold", commandIndex)
 
                 Case "italic"
-                    spec.Italic = GetRequiredJsonBoolean(propertyItem.Value, "italic", commandIndex)
+                    spec.Italic = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".italic", commandIndex)
 
                 Case "underline"
-                    spec.Underline = GetRequiredJsonBoolean(propertyItem.Value, "underline", commandIndex)
+                    spec.Underline = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".underline", commandIndex)
 
                 Case "font_size_pt"
                     spec.FontSizePt = GetRequiredJsonSingle(
                         propertyItem.Value,
-                        "font_size_pt",
+                        propertyName & ".font_size_pt",
                         commandIndex,
                         0.0F,
                         1638.0F,
@@ -3667,30 +3746,37 @@ Public Class frmAIChat
 
                 Case "font_color"
                     If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
-                        Throw New System.InvalidOperationException($"Word format command #{commandIndex} property 'font_color' must be a string.")
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.font_color' must be a string.")
                     End If
                     Dim color As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim()
                     If Not System.Text.RegularExpressions.Regex.IsMatch(color, "^#[0-9A-Fa-f]{6}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
                         Throw New System.InvalidOperationException(
-                            $"Word format command #{commandIndex} property 'font_color' must use #RRGGBB.")
+                            $"Word command #{commandIndex} property '{propertyName}.font_color' must use #RRGGBB.")
                     End If
                     spec.FontColor = color
 
+                Case "highlight"
+                    spec.Highlight = ParseJsonHighlightValue(
+                        propertyItem.Value,
+                        propertyName & ".highlight",
+                        commandIndex,
+                        allowAnyHighlight)
+
                 Case "alignment"
                     If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
-                        Throw New System.InvalidOperationException($"Word format command #{commandIndex} property 'alignment' must be a string.")
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.alignment' must be a string.")
                     End If
                     Dim alignment As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim().ToLowerInvariant()
                     If alignment <> "left" AndAlso alignment <> "center" AndAlso alignment <> "right" AndAlso alignment <> "justify" Then
                         Throw New System.InvalidOperationException(
-                            $"Word format command #{commandIndex} property 'alignment' must be left, center, right, or justify.")
+                            $"Word command #{commandIndex} property '{propertyName}.alignment' must be left, center, right, or justify.")
                     End If
                     spec.Alignment = alignment
 
                 Case "space_before_pt"
                     spec.SpaceBeforePt = GetRequiredJsonSingle(
                         propertyItem.Value,
-                        "space_before_pt",
+                        propertyName & ".space_before_pt",
                         commandIndex,
                         0.0F,
                         1584.0F,
@@ -3699,50 +3785,91 @@ Public Class frmAIChat
                 Case "space_after_pt"
                     spec.SpaceAfterPt = GetRequiredJsonSingle(
                         propertyItem.Value,
-                        "space_after_pt",
+                        propertyName & ".space_after_pt",
                         commandIndex,
                         0.0F,
                         1584.0F,
                         allowZero:=True)
 
                 Case "keep_with_next"
-                    spec.KeepWithNext = GetRequiredJsonBoolean(propertyItem.Value, "keep_with_next", commandIndex)
+                    spec.KeepWithNext = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".keep_with_next", commandIndex)
 
                 Case "keep_together"
-                    spec.KeepTogether = GetRequiredJsonBoolean(propertyItem.Value, "keep_together", commandIndex)
+                    spec.KeepTogether = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".keep_together", commandIndex)
 
                 Case "page_break_before"
-                    spec.PageBreakBefore = GetRequiredJsonBoolean(propertyItem.Value, "page_break_before", commandIndex)
+                    spec.PageBreakBefore = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".page_break_before", commandIndex)
 
                 Case "list_type"
                     If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
-                        Throw New System.InvalidOperationException($"Word format command #{commandIndex} property 'list_type' must be a string.")
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.list_type' must be a string.")
                     End If
                     Dim listType As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim().ToLowerInvariant()
                     If listType <> "bullet" AndAlso listType <> "number" AndAlso listType <> "none" Then
                         Throw New System.InvalidOperationException(
-                            $"Word format command #{commandIndex} property 'list_type' must be bullet, number, or none.")
+                            $"Word command #{commandIndex} property '{propertyName}.list_type' must be bullet, number, or none.")
                     End If
                     spec.ListType = listType
 
                 Case Else
                     Throw New System.InvalidOperationException(
-                        $"Unsupported Word format property '{propertyItem.Name}' in command #{commandIndex}.")
+                        $"Unsupported Word formatting property '{propertyItem.Name}' in '{propertyName}' of command #{commandIndex}.")
             End Select
         Next
 
         If Not System.String.IsNullOrWhiteSpace(spec.StyleName) AndAlso
            Not System.String.IsNullOrWhiteSpace(spec.BuiltinStyle) Then
             Throw New System.InvalidOperationException(
-                $"Word format command #{commandIndex} cannot combine 'style' with 'builtin_style'.")
+                $"Word command #{commandIndex} property '{propertyName}' cannot combine 'style' with 'builtin_style'.")
         End If
 
         If Not spec.HasAnySetting() Then
             Throw New System.InvalidOperationException(
-                $"Word format command #{commandIndex} does not contain any supported formatting property.")
+                $"Word command #{commandIndex} property '{propertyName}' does not contain any supported formatting property.")
         End If
 
         Return spec
+    End Function
+
+    Private Function ParseJsonHighlightValue(
+        token As Newtonsoft.Json.Linq.JToken,
+        propertyName As System.String,
+        commandIndex As Integer,
+        allowAnyHighlight As Boolean) As System.String
+
+        If token Is Nothing Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' is missing.")
+        End If
+
+        If token.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+            Dim enabled As Boolean = token.ToObject(Of Boolean)()
+            If allowAnyHighlight Then Return If(enabled, "any", "none")
+            Return If(enabled, "yellow", "none")
+        End If
+
+        If token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a boolean or a supported highlight-color string.")
+        End If
+
+        Dim normalized As System.String = If(token.ToObject(Of System.String)(), "").Trim().ToLowerInvariant().Replace("_", "").Replace("-", "").Replace(" ", "")
+        Select Case normalized
+            Case "none", "nohighlight", "yellow", "brightgreen", "turquoise", "pink", "blue", "red", "darkblue", "teal", "green", "violet", "darkred", "darkyellow", "gray50", "grey50", "gray25", "grey25", "black", "white"
+                If normalized = "nohighlight" Then normalized = "none"
+                If normalized = "grey50" Then normalized = "gray50"
+                If normalized = "grey25" Then normalized = "gray25"
+                Return normalized
+            Case "any"
+                If allowAnyHighlight Then Return "any"
+        End Select
+
+        Dim allowedText As System.String = If(
+            allowAnyHighlight,
+            "any, none, yellow, brightgreen, turquoise, pink, blue, red, darkblue, teal, green, violet, darkred, darkyellow, gray50, gray25, black, or white",
+            "none, yellow, brightgreen, turquoise, pink, blue, red, darkblue, teal, green, violet, darkred, darkyellow, gray50, gray25, black, or white")
+        Throw New System.InvalidOperationException(
+            $"Word command #{commandIndex} property '{propertyName}' must be {allowedText}.")
     End Function
 
     Private Function GetRequiredJsonSingle(
@@ -3756,7 +3883,7 @@ Public Class frmAIChat
         If token Is Nothing OrElse
            (token.Type <> Newtonsoft.Json.Linq.JTokenType.Integer AndAlso token.Type <> Newtonsoft.Json.Linq.JTokenType.Float) Then
             Throw New System.InvalidOperationException(
-                $"Word format command #{commandIndex} property '{propertyName}' must be a JSON number.")
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON number.")
         End If
 
         Dim value As Single = token.ToObject(Of Single)()
@@ -3769,7 +3896,7 @@ Public Class frmAIChat
 
             Dim lowerBoundText As System.String = If(allowZero, $"at least {minimumValue}", $"greater than {minimumValue}")
             Throw New System.InvalidOperationException(
-                $"Word format command #{commandIndex} property '{propertyName}' must be {lowerBoundText} and at most {maximumValue}.")
+                $"Word command #{commandIndex} property '{propertyName}' must be {lowerBoundText} and at most {maximumValue}.")
         End If
 
         Return value
@@ -3782,27 +3909,103 @@ Public Class frmAIChat
 
         If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean Then
             Throw New System.InvalidOperationException(
-                $"Word format command #{commandIndex} property '{propertyName}' must be a JSON boolean.")
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON boolean.")
         End If
 
         Return token.ToObject(Of Boolean)()
     End Function
 
+    ''' <summary>
+    ''' Compatibility normalization for a common model-planning error: if the model emits
+    ''' the same replace/delete command multiple times with occurrence=1, each later command
+    ''' would otherwise be discarded as an exact duplicate. Merge only that narrow shape into
+    ''' one command starting at occurrence 1 with max_matches equal to the number of repeated
+    ''' commands. All substantive arguments and match-format criteria must be identical.
+    ''' Explicit max_matches commands and occurrence values other than 1 are never rewritten.
+    ''' </summary>
+    Private Function TryMergeRepeatedOccurrenceOneReplaceCommand(
+        results As System.Collections.Generic.List(Of ParsedCommand),
+        parsed As ParsedCommand) As Boolean
+
+        If results Is Nothing OrElse parsed Is Nothing Then Return False
+        If Not System.String.Equals(parsed.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Return False
+        If parsed.MatchSpec Is Nothing OrElse
+           Not parsed.MatchSpec.Occurrence.HasValue OrElse
+           parsed.MatchSpec.Occurrence.Value <> 1 OrElse
+           parsed.MatchSpec.MaxMatches.HasValue Then
+            Return False
+        End If
+
+        Dim parsedFormatKey As System.String = If(parsed.FormatSpec Is Nothing, "", parsed.FormatSpec.GetDuplicateKey())
+        Dim parsedMatchFormatKey As System.String = If(parsed.MatchFormatSpec Is Nothing, "", parsed.MatchFormatSpec.GetDuplicateKey())
+
+        For Each existing As ParsedCommand In results
+            If existing Is Nothing OrElse
+               Not System.String.Equals(existing.Command, parsed.Command, System.StringComparison.OrdinalIgnoreCase) OrElse
+               existing.Argument1 <> parsed.Argument1 OrElse
+               existing.Argument2 <> parsed.Argument2 OrElse
+               existing.Target <> parsed.Target Then
+                Continue For
+            End If
+
+            Dim existingFormatKey As System.String = If(existing.FormatSpec Is Nothing, "", existing.FormatSpec.GetDuplicateKey())
+            Dim existingMatchFormatKey As System.String = If(existing.MatchFormatSpec Is Nothing, "", existing.MatchFormatSpec.GetDuplicateKey())
+            If existingFormatKey <> parsedFormatKey OrElse existingMatchFormatKey <> parsedMatchFormatKey Then Continue For
+
+            If existing.MatchSpec Is Nothing OrElse
+               Not existing.MatchSpec.Occurrence.HasValue OrElse
+               existing.MatchSpec.Occurrence.Value <> 1 Then
+                Continue For
+            End If
+
+            Dim existingRepresentsMerge As Boolean =
+                existing.RepeatedOccurrenceOneMergeCount >= 2 AndAlso
+                existing.MatchSpec.MaxMatches.HasValue AndAlso
+                existing.MatchSpec.MaxMatches.Value = existing.RepeatedOccurrenceOneMergeCount
+
+            Dim existingIsSingleOccurrenceOne As Boolean =
+                Not existing.MatchSpec.MaxMatches.HasValue AndAlso
+                existing.RepeatedOccurrenceOneMergeCount = 0
+
+            If Not existingIsSingleOccurrenceOne AndAlso Not existingRepresentsMerge Then Continue For
+
+            Dim mergedCount As System.Int32 =
+                If(existingRepresentsMerge, existing.RepeatedOccurrenceOneMergeCount, 1) + 1
+
+            existing.MatchSpec.MaxMatches = mergedCount
+            existing.RepeatedOccurrenceOneMergeCount = mergedCount
+
+            System.Diagnostics.Debug.WriteLine(
+                $"Normalized {mergedCount} identical occurrence=1 replace command(s) for '{parsed.Argument1}' into one max_matches={mergedCount} command.")
+            Return True
+        Next
+
+        Return False
+    End Function
+
     Private Sub AddParsedCommandIfNotDuplicate(results As List(Of ParsedCommand), parsed As ParsedCommand)
         If results Is Nothing OrElse parsed Is Nothing Then Return
 
+        ' Normalize the narrow repeated-occurrence=1 replace shape before generic exact
+        ' duplicate suppression. This preserves the model's intended cardinality instead
+        ' of silently dropping the second and later requested replacements.
+        If TryMergeRepeatedOccurrenceOneReplaceCommand(results, parsed) Then Return
+
         Dim parsedFormatKey As System.String = If(parsed.FormatSpec Is Nothing, "", parsed.FormatSpec.GetDuplicateKey())
+        Dim parsedMatchFormatKey As System.String = If(parsed.MatchFormatSpec Is Nothing, "", parsed.MatchFormatSpec.GetDuplicateKey())
         Dim parsedMatchKey As System.String = If(parsed.MatchSpec Is Nothing, "", parsed.MatchSpec.GetDuplicateKey())
 
         If results.Any(
             Function(existing)
                 Dim existingFormatKey As System.String = If(existing.FormatSpec Is Nothing, "", existing.FormatSpec.GetDuplicateKey())
+                Dim existingMatchFormatKey As System.String = If(existing.MatchFormatSpec Is Nothing, "", existing.MatchFormatSpec.GetDuplicateKey())
                 Dim existingMatchKey As System.String = If(existing.MatchSpec Is Nothing, "", existing.MatchSpec.GetDuplicateKey())
                 Return existing.Command.Equals(parsed.Command, System.StringComparison.OrdinalIgnoreCase) AndAlso
                        existing.Argument1 = parsed.Argument1 AndAlso
                        existing.Argument2 = parsed.Argument2 AndAlso
                        existing.Target = parsed.Target AndAlso
                        existingFormatKey = parsedFormatKey AndAlso
+                       existingMatchFormatKey = parsedMatchFormatKey AndAlso
                        existingMatchKey = parsedMatchKey
             End Function) Then
             Return
@@ -4514,6 +4717,7 @@ Public Class frmAIChat
         targetText As System.String,
         Optional onlySelection As Boolean = False,
         Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing,
         Optional target As System.String = "",
         Optional targetSelectionStart As Integer = -1,
         Optional targetSelectionEnd As Integer = -1) As Boolean
@@ -4600,12 +4804,22 @@ Public Class frmAIChat
                 If Not Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then Exit Do
                 If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd Then Exit Do
 
-                occurrenceOrdinal += 1
                 Dim foundStart As Integer = sel.Start
                 Dim foundEnd As Integer = sel.End
+                Dim candidateRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateRange = sel.Range.Duplicate
+                    matchesFormat = RangeMatchesFormatSpec(candidateRange, matchFormatSpec)
+                Finally
+                    If candidateRange IsNot Nothing Then ReleaseWordRange(candidateRange)
+                End Try
 
-                If IsMatchOrdinalSelected(occurrenceOrdinal, matchSpec, 1) Then
-                    Return SelectAndShowActiveDocumentRange(foundStart, foundEnd)
+                If matchesFormat Then
+                    occurrenceOrdinal += 1
+                    If IsMatchOrdinalSelected(occurrenceOrdinal, matchSpec, 1) Then
+                        Return SelectAndShowActiveDocumentRange(foundStart, foundEnd)
+                    End If
                 End If
 
                 Dim progressedStart As Integer = System.Math.Max(foundEnd, nextSearchStart + 1)
@@ -4618,6 +4832,259 @@ Public Class frmAIChat
 
         Catch ex As System.Exception
             System.Diagnostics.Debug.WriteLine($"ExecuteGotoCommand failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    Private Function TryGetBuiltinStyle(
+        builtinStyleName As System.String,
+        ByRef builtinStyle As Microsoft.Office.Interop.Word.WdBuiltinStyle) As Boolean
+
+        Select Case If(builtinStyleName, "").Trim().ToLowerInvariant()
+            Case "normal"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleNormal
+            Case "heading1"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading1
+            Case "heading2"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading2
+            Case "heading3"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading3
+            Case "heading4"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading4
+            Case "heading5"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading5
+            Case "heading6"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading6
+            Case Else
+                Return False
+        End Select
+
+        Return True
+    End Function
+
+    Private Function TryGetHighlightColorIndex(
+        highlightName As System.String,
+        ByRef colorIndex As Microsoft.Office.Interop.Word.WdColorIndex) As Boolean
+
+        Select Case If(highlightName, "").Trim().ToLowerInvariant()
+            Case "none"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdNoHighlight
+            Case "yellow"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdYellow
+            Case "brightgreen"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdBrightGreen
+            Case "turquoise"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdTurquoise
+            Case "pink"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdPink
+            Case "blue"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdBlue
+            Case "red"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdRed
+            Case "darkblue"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdDarkBlue
+            Case "teal"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdTeal
+            Case "green"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdGreen
+            Case "violet"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdViolet
+            Case "darkred"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdDarkRed
+            Case "darkyellow"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdDarkYellow
+            Case "gray50"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdGray50
+            Case "gray25"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdGray25
+            Case "black"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdBlack
+            Case "white"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdWhite
+            Case Else
+                Return False
+        End Select
+
+        Return True
+    End Function
+
+    Private Function ConvertHexColorToWordColor(hexColor As System.String) As Microsoft.Office.Interop.Word.WdColor
+        Dim hexValue As System.String = If(hexColor, "").Trim().TrimStart("#"c)
+        Dim rgb As Integer = System.Convert.ToInt32(hexValue, 16)
+        Dim red As Integer = (rgb >> 16) And &HFF
+        Dim green As Integer = (rgb >> 8) And &HFF
+        Dim blue As Integer = rgb And &HFF
+        Return CType((blue << 16) Or (green << 8) Or red, Microsoft.Office.Interop.Word.WdColor)
+    End Function
+
+    Private Function RangeMatchesFormatSpec(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        matchFormatSpec As ParsedCommandFormat) As Boolean
+
+        If matchFormatSpec Is Nothing OrElse Not matchFormatSpec.HasAnySetting() Then Return True
+        If targetRange Is Nothing Then Return False
+
+        Try
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.StyleName) OrElse
+               Not System.String.IsNullOrWhiteSpace(matchFormatSpec.BuiltinStyle) Then
+
+                Dim rangeStyleObject As System.Object = Nothing
+                Dim rangeStyle As Microsoft.Office.Interop.Word.Style = Nothing
+                Try
+                    rangeStyleObject = targetRange.Style
+                    rangeStyle = TryCast(rangeStyleObject, Microsoft.Office.Interop.Word.Style)
+                    If rangeStyle Is Nothing Then Return False
+
+                    If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.StyleName) Then
+                        Dim actualStyleName As System.String = If(rangeStyle.NameLocal, "")
+                        If Not actualStyleName.Equals(matchFormatSpec.StyleName, System.StringComparison.OrdinalIgnoreCase) Then Return False
+                    End If
+
+                    If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.BuiltinStyle) Then
+                        Dim builtinStyle As Microsoft.Office.Interop.Word.WdBuiltinStyle
+                        If Not TryGetBuiltinStyle(matchFormatSpec.BuiltinStyle, builtinStyle) Then Return False
+
+                        Dim expectedStyle As Microsoft.Office.Interop.Word.Style = Nothing
+                        Try
+                            expectedStyle = CType(targetRange.Document.Styles(builtinStyle), Microsoft.Office.Interop.Word.Style)
+                            If expectedStyle Is Nothing OrElse
+                               Not If(rangeStyle.NameLocal, "").Equals(If(expectedStyle.NameLocal, ""), System.StringComparison.OrdinalIgnoreCase) Then Return False
+                        Finally
+                            If expectedStyle IsNot Nothing Then
+                                Try
+                                    System.Runtime.InteropServices.Marshal.ReleaseComObject(expectedStyle)
+                                Catch
+                                End Try
+                            End If
+                        End Try
+                    End If
+                Finally
+                    If rangeStyle IsNot Nothing Then
+                        Try
+                            System.Runtime.InteropServices.Marshal.ReleaseComObject(rangeStyle)
+                        Catch
+                        End Try
+                    End If
+                End Try
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.FontName) Then
+                Dim actualFontName As System.String = If(targetRange.Font.Name, "")
+                If actualFontName = CStr(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   Not actualFontName.Equals(matchFormatSpec.FontName, System.StringComparison.OrdinalIgnoreCase) Then Return False
+            End If
+
+            If matchFormatSpec.Bold.HasValue Then
+                Dim actualBold As Integer = targetRange.Font.Bold
+                If actualBold = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualBold <> 0) <> matchFormatSpec.Bold.Value Then Return False
+            End If
+
+            If matchFormatSpec.Italic.HasValue Then
+                Dim actualItalic As Integer = targetRange.Font.Italic
+                If actualItalic = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualItalic <> 0) <> matchFormatSpec.Italic.Value Then Return False
+            End If
+
+            If matchFormatSpec.Underline.HasValue Then
+                Dim actualUnderline As Microsoft.Office.Interop.Word.WdUnderline = targetRange.Font.Underline
+                If actualUnderline = CType(Microsoft.Office.Interop.Word.WdConstants.wdUndefined, Microsoft.Office.Interop.Word.WdUnderline) Then Return False
+                Dim isUnderlined As Boolean = actualUnderline <> Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineNone
+                If isUnderlined <> matchFormatSpec.Underline.Value Then Return False
+            End If
+
+            If matchFormatSpec.FontSizePt.HasValue Then
+                Dim actualFontSize As Single = targetRange.Font.Size
+                If actualFontSize = CSng(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   System.Math.Abs(CDbl(actualFontSize - matchFormatSpec.FontSizePt.Value)) > 0.01R Then Return False
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.FontColor) Then
+                Dim actualFontColor As Microsoft.Office.Interop.Word.WdColor = targetRange.Font.Color
+                If CInt(actualFontColor) = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   actualFontColor <> ConvertHexColorToWordColor(matchFormatSpec.FontColor) Then Return False
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.Highlight) Then
+                Dim actualHighlight As Integer = CInt(targetRange.HighlightColorIndex)
+                If matchFormatSpec.Highlight.Equals("any", System.StringComparison.OrdinalIgnoreCase) Then
+                    If actualHighlight = CInt(Microsoft.Office.Interop.Word.WdColorIndex.wdNoHighlight) OrElse
+                       actualHighlight = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) Then Return False
+                Else
+                    Dim expectedHighlight As Microsoft.Office.Interop.Word.WdColorIndex
+                    If Not TryGetHighlightColorIndex(matchFormatSpec.Highlight, expectedHighlight) Then Return False
+                    If actualHighlight <> CInt(expectedHighlight) Then Return False
+                End If
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.Alignment) Then
+                Dim expectedAlignment As Microsoft.Office.Interop.Word.WdParagraphAlignment
+                Select Case matchFormatSpec.Alignment.ToLowerInvariant()
+                    Case "left"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphLeft
+                    Case "center"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphCenter
+                    Case "right"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphRight
+                    Case "justify"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphJustify
+                    Case Else
+                        Return False
+                End Select
+                If targetRange.ParagraphFormat.Alignment <> expectedAlignment Then Return False
+            End If
+
+            If matchFormatSpec.SpaceBeforePt.HasValue Then
+                Dim actualSpaceBefore As Single = targetRange.ParagraphFormat.SpaceBefore
+                If actualSpaceBefore = CSng(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   System.Math.Abs(CDbl(actualSpaceBefore - matchFormatSpec.SpaceBeforePt.Value)) > 0.01R Then Return False
+            End If
+
+            If matchFormatSpec.SpaceAfterPt.HasValue Then
+                Dim actualSpaceAfter As Single = targetRange.ParagraphFormat.SpaceAfter
+                If actualSpaceAfter = CSng(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   System.Math.Abs(CDbl(actualSpaceAfter - matchFormatSpec.SpaceAfterPt.Value)) > 0.01R Then Return False
+            End If
+
+            If matchFormatSpec.KeepWithNext.HasValue Then
+                Dim actualKeepWithNext As Integer = targetRange.ParagraphFormat.KeepWithNext
+                If actualKeepWithNext = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualKeepWithNext <> 0) <> matchFormatSpec.KeepWithNext.Value Then Return False
+            End If
+
+            If matchFormatSpec.KeepTogether.HasValue Then
+                Dim actualKeepTogether As Integer = targetRange.ParagraphFormat.KeepTogether
+                If actualKeepTogether = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualKeepTogether <> 0) <> matchFormatSpec.KeepTogether.Value Then Return False
+            End If
+
+            If matchFormatSpec.PageBreakBefore.HasValue Then
+                Dim actualPageBreakBefore As Integer = targetRange.ParagraphFormat.PageBreakBefore
+                If actualPageBreakBefore = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualPageBreakBefore <> 0) <> matchFormatSpec.PageBreakBefore.Value Then Return False
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.ListType) Then
+                Dim actualListType As Microsoft.Office.Interop.Word.WdListType = targetRange.ListFormat.ListType
+                Select Case matchFormatSpec.ListType.ToLowerInvariant()
+                    Case "none"
+                        If actualListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then Return False
+                    Case "bullet"
+                        If actualListType <> Microsoft.Office.Interop.Word.WdListType.wdListBullet AndAlso
+                           actualListType <> Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet Then Return False
+                    Case "number"
+                        If actualListType = Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering OrElse
+                           actualListType = Microsoft.Office.Interop.Word.WdListType.wdListBullet OrElse
+                           actualListType = Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet OrElse
+                           actualListType = Microsoft.Office.Interop.Word.WdListType.wdListMixedNumbering Then Return False
+                    Case Else
+                        Return False
+                End Select
+            End If
+
+            Return True
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine($"RangeMatchesFormatSpec failed: {ex.Message}")
             Return False
         End Try
     End Function
@@ -4636,24 +5103,7 @@ Public Class frmAIChat
         Try
             If Not System.String.IsNullOrWhiteSpace(formatSpec.BuiltinStyle) Then
                 Dim builtinStyle As Microsoft.Office.Interop.Word.WdBuiltinStyle
-                Select Case formatSpec.BuiltinStyle.ToLowerInvariant()
-                    Case "normal"
-                        builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleNormal
-                    Case "heading1"
-                        builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading1
-                    Case "heading2"
-                        builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading2
-                    Case "heading3"
-                        builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading3
-                    Case "heading4"
-                        builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading4
-                    Case "heading5"
-                        builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading5
-                    Case "heading6"
-                        builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading6
-                    Case Else
-                        Return False
-                End Select
+                If Not TryGetBuiltinStyle(formatSpec.BuiltinStyle, builtinStyle) Then Return False
 
                 Try
                     Dim styleValue As System.Object = builtinStyle
@@ -4689,12 +5139,13 @@ Public Class frmAIChat
             If formatSpec.FontSizePt.HasValue Then targetRange.Font.Size = formatSpec.FontSizePt.Value
 
             If Not System.String.IsNullOrWhiteSpace(formatSpec.FontColor) Then
-                Dim hexValue As System.String = formatSpec.FontColor.TrimStart("#"c)
-                Dim rgb As Integer = System.Convert.ToInt32(hexValue, 16)
-                Dim red As Integer = (rgb >> 16) And &HFF
-                Dim green As Integer = (rgb >> 8) And &HFF
-                Dim blue As Integer = rgb And &HFF
-                targetRange.Font.Color = CType((blue << 16) Or (green << 8) Or red, Microsoft.Office.Interop.Word.WdColor)
+                targetRange.Font.Color = ConvertHexColorToWordColor(formatSpec.FontColor)
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(formatSpec.Highlight) Then
+                Dim highlightColor As Microsoft.Office.Interop.Word.WdColorIndex
+                If Not TryGetHighlightColorIndex(formatSpec.Highlight, highlightColor) Then Return False
+                targetRange.HighlightColorIndex = highlightColor
             End If
 
             Select Case If(formatSpec.Alignment, "").ToLowerInvariant()
@@ -4743,6 +5194,7 @@ Public Class frmAIChat
         formatSpec As ParsedCommandFormat,
         Optional onlySelection As Boolean = False,
         Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing,
         Optional target As System.String = "",
         Optional targetSelectionStart As Integer = -1,
         Optional targetSelectionEnd As Integer = -1) As Boolean
@@ -4828,6 +5280,13 @@ Public Class frmAIChat
                         If tocContinue <= nextSearchStart Then tocContinue = nextSearchStart + 1
                         If tocContinue >= scopeEnd Then Exit Do
                         nextSearchStart = tocContinue
+                        Continue Do
+                    End If
+
+                    If Not RangeMatchesFormatSpec(candidateRange, matchFormatSpec) Then
+                        Dim filteredProgressStart As Integer = System.Math.Max(candidateEnd, nextSearchStart + 1)
+                        If filteredProgressStart >= scopeEnd Then Exit Do
+                        nextSearchStart = filteredProgressStart
                         Continue Do
                     End If
 
@@ -5055,14 +5514,14 @@ Public Class frmAIChat
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection, pc.MatchSpec)
+                    commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
 
                 Case "addcomment"
                     commandDescription = $"Adding comment '{pc.Argument2}' to the text '{pc.Argument1}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteAddComment(pc.Argument1, pc.Argument2, OnlySelection, pc.MatchSpec)
+                    commandSuccess = ExecuteAddComment(pc.Argument1, pc.Argument2, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
 
                 Case "replycomment"
                     commandDescription = $"Replying to comment '{pc.Argument1}' with '{pc.Argument2}'"
@@ -5081,7 +5540,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteReplaceCommand(pc.Argument1, pc.Argument2, OnlySelection, MarkerChar, pc.MatchSpec)
+                    commandSuccess = ExecuteReplaceCommand(pc.Argument1, pc.Argument2, OnlySelection, MarkerChar, pc.MatchSpec, pc.MatchFormatSpec)
 
                 Case "insertafter"
                     commandDescription = $"Inserting '{pc.Argument2}' after '{pc.Argument1}'"
@@ -5089,7 +5548,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, False, pc.MatchSpec)
+                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, False, pc.MatchSpec, pc.MatchFormatSpec)
 
                 Case "insertbefore"
                     commandDescription = $"Inserting '{pc.Argument2}' before '{pc.Argument1}'"
@@ -5097,7 +5556,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, True, pc.MatchSpec)
+                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, True, pc.MatchSpec, pc.MatchFormatSpec)
 
                 Case "insert"
                     commandDescription = $"Inserting '{pc.Argument1}'"
@@ -5120,6 +5579,7 @@ Public Class frmAIChat
                         pc.Argument1,
                         OnlySelection,
                         pc.MatchSpec,
+                        pc.MatchFormatSpec,
                         pc.Target,
                         targetSelectionStart,
                         targetSelectionEnd)
@@ -5139,6 +5599,7 @@ Public Class frmAIChat
                         pc.FormatSpec,
                         OnlySelection,
                         pc.MatchSpec,
+                        pc.MatchFormatSpec,
                         pc.Target,
                         targetSelectionStart,
                         targetSelectionEnd)
@@ -5569,7 +6030,8 @@ Public Class frmAIChat
         ByVal searchTerm As System.String,
         ByVal commentText As System.String,
         Optional ByVal onlySelection As Boolean = False,
-        Optional ByVal matchSpec As ParsedCommandMatchSpec = Nothing) As Boolean
+        Optional ByVal matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional ByVal matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -5645,9 +6107,18 @@ Public Class frmAIChat
                 Dim anchorEnd As Integer = sel.End
                 If anchorStart < scopeStart OrElse anchorEnd > scopeEnd Then Exit Do
 
-                eligibleOrdinal += 1
+                Dim candidateAnchor As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateAnchor = sel.Range.Duplicate
+                    matchesFormat = RangeMatchesFormatSpec(candidateAnchor, matchFormatSpec)
+                Finally
+                    If candidateAnchor IsNot Nothing Then ReleaseWordRange(candidateAnchor)
+                End Try
 
-                If IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, 1) Then
+                If matchesFormat Then eligibleOrdinal += 1
+
+                If matchesFormat AndAlso IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, 1) Then
                     Dim anchor As Microsoft.Office.Interop.Word.Range = Nothing
                     Try
                         anchor = sel.Range.Duplicate
@@ -5718,7 +6189,8 @@ Public Class frmAIChat
     Private Function ExecuteFindCommand(
         searchTerm As System.String,
         Optional OnlySelection As Boolean = False,
-        Optional matchSpec As ParsedCommandMatchSpec = Nothing) As Boolean
+        Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
 
         Dim doc As Word.Document = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled As Boolean = doc.TrackRevisions
@@ -5763,15 +6235,26 @@ Public Class frmAIChat
                     Exit Do
                 End If
 
-                eligibleOrdinal += 1
+                Dim candidateRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateRange = doc.Application.Selection.Range.Duplicate
+                    matchesFormat = RangeMatchesFormatSpec(candidateRange, matchFormatSpec)
+                Finally
+                    If candidateRange IsNot Nothing Then ReleaseWordRange(candidateRange)
+                End Try
 
-                If IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, System.Int32.MaxValue) Then
-                    doc.Application.Selection.Range.HighlightColorIndex = Word.WdColorIndex.wdYellow
-                    highlightedCount += 1
-                    found = True
+                If matchesFormat Then
+                    eligibleOrdinal += 1
 
-                    If HasReachedSelectedMatchLimit(highlightedCount, matchSpec, System.Int32.MaxValue) Then
-                        Exit Do
+                    If IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, System.Int32.MaxValue) Then
+                        doc.Application.Selection.Range.HighlightColorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdYellow
+                        highlightedCount += 1
+                        found = True
+
+                        If HasReachedSelectedMatchLimit(highlightedCount, matchSpec, System.Int32.MaxValue) Then
+                            Exit Do
+                        End If
                     End If
                 End If
 
@@ -5876,7 +6359,7 @@ Public Class frmAIChat
     ''' - The cell-boundary advancement in Pass 1 prevents the scanner from getting stuck
     '''   at end-of-cell markers.
     ''' </remarks>
-    Private Function ExecuteReplaceCommand(oldText As System.String, newText As System.String, OnlySelection As Boolean, Marker As System.String, Optional matchSpec As ParsedCommandMatchSpec = Nothing) As Boolean
+    Private Function ExecuteReplaceCommand(oldText As System.String, newText As System.String, OnlySelection As Boolean, Marker As System.String, Optional matchSpec As ParsedCommandMatchSpec = Nothing, Optional matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
         Dim doc As Word.Document = Nothing
         Dim view As Word.View = Nothing
         Dim trackChangesEnabled As Boolean = False
@@ -6072,11 +6555,26 @@ Public Class frmAIChat
                     Continue Do
                 End If
 
-                ' Record this match
+                ' Record only text matches that also satisfy the optional formatting filter.
+                ' lastFoundEnd still advances for filtered-out matches so the forward scanner
+                ' cannot re-return the same textual hit.
                 lastFoundEnd = selEnd
-                matchPositions.Add((selStart, selEnd))
-                Debug.WriteLine($"ExecuteReplaceCommand: stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
-                LogReplaceDiag($"PASS1 stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                Dim candidateRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateRange = doc.Range(selStart, selEnd)
+                    matchesFormat = RangeMatchesFormatSpec(candidateRange, matchFormatSpec)
+                Finally
+                    If candidateRange IsNot Nothing Then ReleaseWordRange(candidateRange)
+                End Try
+
+                If matchesFormat Then
+                    matchPositions.Add((selStart, selEnd))
+                    Debug.WriteLine($"ExecuteReplaceCommand: stored eligible match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                    LogReplaceDiag($"PASS1 stored eligible match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                Else
+                    LogReplaceDiag($"PASS1 skipped text match [{selStart},{selEnd}] because match_format did not match")
+                End If
 
                 ' Advance past current match
                 doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
@@ -6418,7 +6916,8 @@ Public Class frmAIChat
         newText As System.String,
         Optional OnlySelection As Boolean = False,
         Optional InsertBefore As Boolean = False,
-        Optional matchSpec As ParsedCommandMatchSpec = Nothing) As Boolean
+        Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
 
         Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled As Boolean = doc.TrackRevisions
@@ -6511,12 +7010,26 @@ Public Class frmAIChat
                                 Continue Do
                             End If
 
+                            Dim foundStart As Integer = foundRange.Start
+                            Dim foundEnd As Integer = foundRange.End
+
+                            If Not RangeMatchesFormatSpec(foundRange, matchFormatSpec) Then
+                                Dim filteredContinuePosition As Integer = System.Math.Max(foundEnd, lastProcessedPosition + 1)
+                                If OnlySelection Then
+                                    If filteredContinuePosition >= selectionEnd Then Exit Do
+                                    Dim filteredSafeEnd As Integer = System.Math.Min(selectionEnd, doc.Content.End)
+                                    doc.Application.Selection.SetRange(filteredContinuePosition, filteredSafeEnd)
+                                Else
+                                    If filteredContinuePosition >= doc.Content.End Then Exit Do
+                                    doc.Application.Selection.SetRange(filteredContinuePosition, doc.Content.End)
+                                End If
+                                Continue Do
+                            End If
+
                             variantMatchedAny = True
                             matchedAnyEligibleAnchor = True
                             eligibleOrdinal += 1
 
-                            Dim foundStart As Integer = foundRange.Start
-                            Dim foundEnd As Integer = foundRange.End
                             Dim shouldInsert As Boolean = IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, System.Int32.MaxValue)
                             Dim continuePosition As Integer
 

@@ -64,6 +64,9 @@ Partial Public Class ThisAddIn
         Public Property NextItemNumber As Integer = 0
         Public Property ExportedItemCount As Integer = 0
         Public Property FailedItemCount As Integer = 0
+        Public Property DownloadFailureCount As System.Int32 = 0
+        Public ReadOnly ServerFolders As New System.Collections.Generic.Dictionary(Of System.String, ServerFolderExport)(System.StringComparer.OrdinalIgnoreCase)
+        Public Property ServerExtraCount As System.Int32 = 0
         Public Property PlaceholderCount As Integer = 0
         Public Property Cancelled As Boolean = False
 
@@ -113,10 +116,24 @@ Partial Public Class ThisAddIn
                 Return
             End Try
 
-            totalItemCount = CountExportableItems(source.RootFolder, options.RecurseFolders)
+            ' Download before counting/snapshotting: a header-only item is not a complete export.
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.ShowProgressBarInSeparateThread(AN & " PST / Outlook Export", "Downloading Outlook folders...")
+            Try
+                Await PrepareExportDownloadsAsync(source.RootFolder, options.RecurseFolders, state)
+            Finally
+                ProgressBarModule.CancelOperation = True
+            End Try
+            If state.Cancelled Then
+                WriteExportLogs(options, state)
+                ShowCustomMessageBox("Export cancelled while downloading Outlook items.", AN)
+                Return
+            End If
+            totalItemCount = CountExportableItems(source.RootFolder, options.RecurseFolders) + state.ServerExtraCount
 
             If totalItemCount <= 0 Then
-                ShowCustomMessageBox("No exportable Outlook items were found in the selected source.", AN)
+                WriteExportLogs(options, state)
+                ShowCustomMessageBox("No exportable Outlook items were found. See errors.log for download/coverage failures.", AN)
                 Return
             End If
 
@@ -157,6 +174,7 @@ Partial Public Class ThisAddIn
 
             summary.AppendLine($"Exported items: {state.ExportedItemCount}")
             summary.AppendLine($"Failed items: {state.FailedItemCount}")
+            summary.AppendLine($"Download/coverage diagnostics (see errors.log): {state.DownloadFailureCount}")
             summary.AppendLine($"Attachment placeholders: {state.PlaceholderCount}")
             summary.AppendLine($"Output directory: {options.OutputRootDirectory}")
             summary.AppendLine($"Index: {Path.Combine(options.OutputRootDirectory, "index.csv")}")
@@ -172,6 +190,106 @@ Partial Public Class ThisAddIn
         End Try
 
     End Sub
+
+    ''' <summary>Requests full header downloads and synchronizes the selected server folder before enumeration.</summary>
+    Private Async Function PrepareExportDownloadsAsync(folder As Microsoft.Office.Interop.Outlook.MAPIFolder,
+                                                        recurse As System.Boolean,
+                                                        state As PstExportState) As System.Threading.Tasks.Task
+        If ProgressBarModule.CancelOperation Then
+            state.Cancelled = True
+            Return
+        End If
+        ' Local PSTs have no server counterpart and must retain their offline behavior.
+        Dim isPst As System.Boolean = System.String.Equals(System.IO.Path.GetExtension(folder.Store.FilePath), ".pst", System.StringComparison.OrdinalIgnoreCase)
+        If Not isPst Then
+            Dim sync As Microsoft.Office.Interop.Outlook.SyncObject = Nothing
+            Dim changedMembership As System.Boolean = False
+            Dim originalMembership As System.Boolean = False
+            Dim finished As New System.Threading.Tasks.TaskCompletionSource(Of System.Boolean)()
+            Dim syncFailure As System.String = Nothing
+            Dim ended As Microsoft.Office.Interop.Outlook.SyncObjectEvents_SyncEndEventHandler = Sub() finished.TrySetResult(True)
+            Dim failed As Microsoft.Office.Interop.Outlook.SyncObjectEvents_OnErrorEventHandler =
+                Sub(code As System.Int32, description As System.String)
+                    syncFailure = description
+                End Sub
+            Try
+                ProgressBarModule.GlobalProgressLabel = "Downloading: " & TryGetFolderPath(folder)
+                If Me.Application.Session.Offline Then Throw New System.IO.IOException("Outlook is offline; server-only mail cannot be downloaded.")
+                Dim items As Microsoft.Office.Interop.Outlook.Items = folder.Items
+                Try
+                    For index As System.Int32 = 1 To items.Count
+                        If ProgressBarModule.CancelOperation Then
+                            state.Cancelled = True
+                            Return
+                        End If
+                        Dim candidate As System.Object = Nothing
+                        Try
+                            candidate = items.Item(index)
+                            Dim mail = TryCast(candidate, Microsoft.Office.Interop.Outlook.MailItem)
+                            If mail IsNot Nothing AndAlso mail.DownloadState <> Microsoft.Office.Interop.Outlook.OlDownloadState.olFullItem Then
+                                mail.MarkForDownload = Microsoft.Office.Interop.Outlook.OlRemoteStatus.olMarkedForDownload
+                                mail.Save()
+                            End If
+                        Catch ex As System.Exception
+                            state.DownloadFailureCount += 1
+                            AppendError(state, "ITEM-DOWNLOAD-MARK|Folder=" & TryGetFolderPath(folder) & "|Index=" & index.ToString() & "|Message=" & ex.Message)
+                        Finally
+                            ReleaseComObjectIfNeeded(candidate)
+                        End Try
+                    Next
+                Finally
+                    ReleaseComObjectIfNeeded(items)
+                End Try
+                originalMembership = folder.InAppFolderSyncObject
+                folder.InAppFolderSyncObject = True
+                changedMembership = True
+                sync = Me.Application.Session.SyncObjects.AppFolders
+                AddHandler sync.SyncEnd, ended
+                AddHandler sync.OnError, failed
+                sync.Start()
+                Dim clock = System.Diagnostics.Stopwatch.StartNew()
+                While Not finished.Task.IsCompleted
+                    If ProgressBarModule.CancelOperation Then
+                        state.Cancelled = True
+                        sync.Stop()
+                        Return
+                    End If
+                    If clock.Elapsed.TotalSeconds >= 120 Then
+                        sync.Stop()
+                        Throw New System.TimeoutException("Folder download did not finish within 120 seconds.")
+                    End If
+                    Await System.Threading.Tasks.Task.Delay(200)
+                End While
+                If Not System.String.IsNullOrWhiteSpace(syncFailure) Then Throw New System.IO.IOException(syncFailure)
+            Catch ex As System.Exception
+                ' Continue export of readable items but make incomplete folder coverage explicit.
+                state.DownloadFailureCount += 1
+                AppendError(state, "FOLDER-DOWNLOAD|Folder=" & TryGetFolderPath(folder) & "|Message=" & ex.Message)
+            Finally
+                If sync IsNot Nothing Then
+                    RemoveHandler sync.SyncEnd, ended
+                    RemoveHandler sync.OnError, failed
+                End If
+                If changedMembership Then
+                    Try
+                        folder.InAppFolderSyncObject = originalMembership
+                    Catch ex As System.Exception
+                        state.DownloadFailureCount += 1
+                        AppendError(state, "FOLDER-SYNC-RESTORE|Folder=" & TryGetFolderPath(folder) & "|Message=" & ex.Message)
+                    End Try
+                End If
+                ' Release our own sync RCW once; never release the Office Session/Application.
+                If sync IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(sync)
+            End Try
+        End If
+        If Not isPst AndAlso Not state.Cancelled Then Await PrepareServerExportAsync(folder, state)
+        If recurse AndAlso Not state.Cancelled Then
+            For Each child As Microsoft.Office.Interop.Outlook.MAPIFolder In GetSortedSubFolders(folder)
+                Await PrepareExportDownloadsAsync(child, True, state)
+                If state.Cancelled Then Exit For
+            Next
+        End If
+    End Function
 
     Private Function PromptForPstExportOptions(source As PstExportSource) As PstExportOptions
 
@@ -490,6 +608,15 @@ Partial Public Class ThisAddIn
         Dim snapshots As List(Of PstItemSnapshot) = GetSortedItemSnapshots(folder)
         Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Globals.ThisAddIn.Application.GetNamespace("MAPI")
 
+        Dim server As ServerFolderExport = Nothing
+        state.ServerFolders.TryGetValue(folder.EntryID, server)
+        Dim serverIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If server IsNot Nothing Then
+            For Each message In server.Messages
+                serverIds.Add(message.OutlookEntryId)
+            Next
+        End If
+        Dim exportedNativeIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         For Each snapshot In snapshots
             System.Windows.Forms.Application.DoEvents()
 
@@ -506,22 +633,48 @@ Partial Public Class ThisAddIn
                 $"Exporting item {Math.Min(ProgressBarModule.GlobalProgressValue + 1, totalItemCount)} of {totalItemCount}: {snapshot.SubjectPreview}"
 
                 itemObj = ns.GetItemFromID(snapshot.EntryID, snapshot.StoreID)
-                If itemObj Is Nothing Then
-                    state.FailedItemCount += 1
-                    AppendError(state, $"ITEM-LOAD|EntryID={snapshot.EntryID}|Reason=GetItemFromID returned Nothing")
-                    Continue For
-                End If
+                If itemObj Is Nothing Then Throw New System.IO.IOException("GetItemFromID returned Nothing.")
 
+                Dim downloadMail = TryCast(itemObj, Microsoft.Office.Interop.Outlook.MailItem)
+                If downloadMail IsNot Nothing AndAlso downloadMail.DownloadState <> Microsoft.Office.Interop.Outlook.OlDownloadState.olFullItem Then
+                    If serverIds.Contains(snapshot.EntryID) Then Continue For
+                    Throw New System.IO.IOException("Mail is still header-only after forced folder synchronization. No incomplete TXT was exported; check connectivity and the Outlook offline-cache range.")
+                End If
                 Await ExportSingleOutlookItemAsync(itemObj, folder, targetDirectory, options, state)
+                exportedNativeIds.Add(snapshot.EntryID)
 
             Catch ex As System.Exception
-                state.FailedItemCount += 1
-                AppendError(state, $"ITEM-ERROR|EntryID={snapshot.EntryID}|Folder={TryGetFolderPath(folder)}|Message={ex.Message}")
+                If serverIds.Contains(snapshot.EntryID) Then
+                    AppendError(state, $"NATIVE-SERVER-FALLBACK|EntryID={snapshot.EntryID}|Message={ex.Message}")
+                Else
+                    state.FailedItemCount += 1
+                    AppendError(state, $"ITEM-ERROR|EntryID={snapshot.EntryID}|Folder={TryGetFolderPath(folder)}|Message={ex.Message}")
+                End If
             Finally
                 ReleaseComObjectIfNeeded(itemObj)
             End Try
         Next
 
+        If server IsNot Nothing Then
+            For Each message In server.Messages
+                If exportedNativeIds.Contains(message.OutlookEntryId) Then Continue For
+                If ProgressBarModule.CancelOperation Then
+                    state.Cancelled = True
+                    Return
+                End If
+                Try
+                    ProgressBarModule.GlobalProgressValue = state.ExportedItemCount + state.FailedItemCount
+                    ProgressBarModule.GlobalProgressLabel = "Downloading server mail: " & message.Message.Subject
+                    Await ExportServerMailAsync(message, server.Mailbox, folder, targetDirectory, options, state)
+                Catch ex As System.OperationCanceledException
+                    state.Cancelled = True
+                    Return
+                Catch ex As System.Exception
+                    state.FailedItemCount += 1
+                    AppendError(state, "SERVER-MAIL|EntryID=" & message.OutlookEntryId & "|Message=" & ex.Message)
+                End Try
+            Next
+        End If
         If Not options.RecurseFolders Then
             Return
         End If
@@ -1811,10 +1964,12 @@ Partial Public Class ThisAddIn
         Dim plainText As String = ""
 
         If TypeOf item Is MailItem Then
-            Try
-                plainText = NormalizeText(GetMailBody(DirectCast(item, MailItem)))
-            Catch
-            End Try
+            Dim mail = DirectCast(item, Microsoft.Office.Interop.Outlook.MailItem)
+            If mail.DownloadState <> Microsoft.Office.Interop.Outlook.OlDownloadState.olFullItem Then
+                Throw New System.IO.IOException("Outlook mail content has not been fully downloaded.")
+            End If
+            ' A genuinely empty body is valid; a COM read failure must reach the item error log.
+            plainText = NormalizeText(ComRetry(Function() mail.Body))
         Else
             plainText = NormalizeText(TryGetStringProperty(item, "Body"))
         End If

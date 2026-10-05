@@ -4,7 +4,7 @@
 ' =============================================================================
 ' File: ThisAddIn.KnowledgeStoreWiring.vb
 ' Purpose:
-'   Wires Knowledge Store services into the Word add-in lifecycle.
+'   Hosts Knowledge Store automatic maintenance for Word. Semantic Archive automatic maintenance is Outlook-only.
 '
 ' Responsibilities:
 '   - Initialize and shut down the shared Knowledge Store idle service.
@@ -31,32 +31,32 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
-    ''' <summary>Timer driving background Knowledge Store indexing.</summary>
+    ''' <summary>UI activity snapshots and Word-hosted Knowledge Store maintenance.</summary>
     Private _ksTimer As System.Windows.Forms.Timer
+    Private _maintenanceCoordinator As BackgroundMaintenanceCoordinator
+    Private _hostIdleSnapshot As Integer = 1
 
-    ' KnowledgeStoreIdleService.Initialize may perform a full recursive store scan when
-    ' background indexing is enabled. Keep that work off Word's STA/UI thread.
+    ' Catalog initialization and all recursive scans execute on workers. Only the
+    ' UI timer captures Word/WinForms activity; no worker reads Office window state.
     Private _ksInitializationState As Integer = 0 ' 0=not started, 1=running, 2=initialized
     Private _ksShutdownRequested As Integer = 0
 
-    ''' <summary>Interval between idle ticks in milliseconds (60 seconds).</summary>
-    Private Const KS_IDLE_INTERVAL_MS As Integer = 60000
+    ''' <summary>Activity snapshots every five seconds; each provider owns its processing cadence.</summary>
+    Private Const KS_IDLE_INTERVAL_MS As Integer = 5000
 
 
     ''' <summary>
-    ''' Idle timer tick — drives background indexing.
+    ''' Idle timer tick — drives Word-hosted Knowledge Store background indexing.
     ''' </summary>
-    Private Async Sub KsTimer_Tick(sender As Object, e As EventArgs)
+    Private Async Sub KsTimer_Tick(sender As Object, e As System.EventArgs)
         Try
-            If Not KnowledgeStoreIdleService.CanRunNow(_context) Then
-                Debug.WriteLine("KS Wiring: Skipping tick — outside configured Knowledge Store processing window.")
-                Return
-            End If
-
-            Debug.WriteLine("KS Wiring: Timer tick fired (60s).")
-            Await KnowledgeStoreIdleService.OnIdleTickAsync().ConfigureAwait(False)
-        Catch
-            ' Never let timer callbacks crash the host
+            ' This is the only place that reads Office/WinForms activity. Workers see a Boolean snapshot.
+            Dim hostIsIdle = IsWordIdle()
+            System.Threading.Interlocked.Exchange(_hostIdleSnapshot, If(hostIsIdle, 1, 0))
+            Dim coordinator = _maintenanceCoordinator
+            If coordinator IsNot Nothing Then Await coordinator.OnTickAsync(hostIsIdle).ConfigureAwait(False)
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Office maintenance tick: " & ex.Message)
         End Try
     End Sub
 
@@ -88,47 +88,44 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeKnowledgeStoreService()
         Try
-            KnowledgeStoreHostGate.RegisterHostIdleProvider("Word", Function() IsWordIdle())
-
-            If Not KnowledgeStoreCatalog.IsConfigured(_context) Then Return
+            System.Threading.Interlocked.Exchange(_hostIdleSnapshot, If(IsWordIdle(), 1, 0))
+            KnowledgeStoreHostGate.RegisterHostIdleProvider("Word", Function() System.Threading.Volatile.Read(_hostIdleSnapshot) = 1)
+            ' Word intentionally does not register Semantic Archive automatic providers; Outlook owns them.
+            If Not OfficeMaintenanceService.IsConfigured(_context, includeSemanticArchiveProviders:=False) Then Return
             If System.Threading.Interlocked.CompareExchange(_ksInitializationState, 1, 0) <> 0 Then Return
-
             System.Threading.Interlocked.Exchange(_ksShutdownRequested, 0)
             Dim capturedContext = _context
-
-            ' IMPORTANT: Initialize() can synchronously call KnowledgeStoreWatcher.RunPeriodicScan(),
-            ' which recursively enumerates all configured store directories. On network shares or
-            ' large stores that can take seconds. It has no Word-COM/WinForms dependency, so perform
-            ' the service/watcher initialization on a worker and marshal only the WinForms timer
-            ' creation back to Word's UI thread.
             System.Threading.Tasks.Task.Run(
                 Sub()
                     Try
-                        KnowledgeStoreIdleService.Initialize(capturedContext)
+                        Dim created = OfficeMaintenanceService.Create(capturedContext, includeSemanticArchiveProviders:=False)
+                        System.Threading.Interlocked.Exchange(_maintenanceCoordinator, created)
                         System.Threading.Interlocked.Exchange(_ksInitializationState, 2)
-
                         If System.Threading.Volatile.Read(_ksShutdownRequested) <> 0 Then
-                            KnowledgeStoreIdleService.Shutdown()
+                            Dim retired = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+                            If retired IsNot Nothing Then retired.Dispose()
                             Return
                         End If
-
                         Dim uiControl = mainThreadControl
-                        If uiControl Is Nothing OrElse uiControl.IsDisposed Then Return
-
-                        uiControl.BeginInvoke(
-                            New System.Windows.Forms.MethodInvoker(
-                                Sub()
-                                    If System.Threading.Volatile.Read(_ksShutdownRequested) <> 0 Then Return
-                                    EnsureKnowledgeStoreTimerStarted()
-                                End Sub))
+                        If uiControl Is Nothing OrElse uiControl.IsDisposed Then
+                            Dim retired = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+                            If retired IsNot Nothing Then retired.Dispose()
+                            Return
+                        End If
+                        uiControl.BeginInvoke(New System.Windows.Forms.MethodInvoker(
+                            Sub()
+                                If System.Threading.Volatile.Read(_ksShutdownRequested) = 0 Then EnsureKnowledgeStoreTimerStarted()
+                            End Sub))
                     Catch ex As System.Exception
+                        Dim failed = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+                        If failed IsNot Nothing Then failed.Dispose()
                         System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
-                        Debug.WriteLine($"KS Wiring: Background init error: {ex.Message}")
+                        System.Diagnostics.Debug.WriteLine("Office maintenance initialization: " & ex.Message)
                     End Try
                 End Sub)
         Catch ex As System.Exception
             System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
-            Debug.WriteLine($"KS Wiring: Init scheduling error: {ex.Message}")
+            System.Diagnostics.Debug.WriteLine("Office maintenance startup: " & ex.Message)
         End Try
     End Sub
 
@@ -143,7 +140,6 @@ Partial Public Class ThisAddIn
 
     Public Sub ShutdownKnowledgeStoreService()
         System.Threading.Interlocked.Exchange(_ksShutdownRequested, 1)
-
         Try
             If _ksTimer IsNot Nothing Then
                 _ksTimer.Stop()
@@ -151,22 +147,11 @@ Partial Public Class ThisAddIn
                 _ksTimer.Dispose()
                 _ksTimer = Nothing
             End If
-
-            If System.Threading.Volatile.Read(_ksInitializationState) = 1 Then
-                ' Do not make Word shutdown wait for a potentially long recursive startup scan.
-                ' Shutdown() takes the same service lock and will run as soon as initialization
-                ' releases it. The shutdown flag also prevents the UI timer from being created.
-                System.Threading.Tasks.Task.Run(
-                    Sub()
-                        Try
-                            KnowledgeStoreIdleService.Shutdown()
-                        Catch ex As System.Exception
-                        End Try
-                    End Sub)
-            Else
-                KnowledgeStoreIdleService.Shutdown()
-            End If
-        Catch
+            Dim retired = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+            If retired IsNot Nothing Then retired.Dispose()
+            System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Office maintenance shutdown: " & ex.Message)
         Finally
             KnowledgeStoreHostGate.ClearHostIdleProvider()
         End Try

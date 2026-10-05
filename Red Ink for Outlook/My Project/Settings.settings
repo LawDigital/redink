@@ -89,6 +89,9 @@
     <Setting Name="AP_SelectedExternalToolNames" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
+    <Setting Name="AP_AvailableExternalToolNames" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
     <Setting Name="InboxBoardSummaryCache" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
@@ -259,6 +262,9 @@
     </Setting>
     <Setting Name="AP_ThreadRetentionDays" Type="System.Int32" Scope="User">
       <Value Profile="(Default)">0</Value>
+    </Setting>
+    <Setting Name="AP_LogDiagnosticsReportEmail" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
     </Setting>
     <Setting Name="LocalHttpAuthMasterKey" Type="System.String" Scope="User">
       <Value Profile="(Default)" />

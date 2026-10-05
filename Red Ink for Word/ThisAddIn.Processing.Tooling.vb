@@ -261,7 +261,12 @@ Partial Public Class ThisAddIn
         Optional pinnedWordDocumentFullName As String = "",
         Optional pinnedWordSelectionStart As Integer = -1,
         Optional pinnedWordSelectionEnd As Integer = -1,
-        Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
+        Optional resumeWorkflowFromCheckpoint As System.Boolean = False,
+        Optional workflowContinuationKey As System.String = "",
+        Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit,
+        Optional semanticArchiveRequest As System.String = Nothing,
+        Optional semanticArchivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing,
+        Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing) As System.Threading.Tasks.Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -363,6 +368,33 @@ Partial Public Class ThisAddIn
             End If
         End If
 
+        ' Archive control syntax is accepted only from an explicit host handoff.
+        ' Combined prompts, retrieved text and delegated model task text are never parsed.
+        Dim preparedArchive As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
+        If subAgentMode Then
+            context.SemanticArchiveScope = If(parentToolingContext Is Nothing, Nothing, parentToolingContext.SemanticArchiveScope)
+        Else
+            preparedArchive = semanticArchivePrepared
+            If preparedArchive Is Nothing AndAlso semanticArchiveScope Is Nothing Then
+                preparedArchive = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Current
+            End If
+            context.SemanticArchiveScope = If(preparedArchive Is Nothing, semanticArchiveScope, preparedArchive.Scope)
+            If context.SemanticArchiveScope Is Nothing Then
+                context.SemanticArchiveScope = CreateSelectedSemanticArchiveRunScope()
+            End If
+            If preparedArchive Is Nothing AndAlso semanticArchiveRequest IsNot Nothing Then
+                preparedArchive = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, semanticArchiveRequest, context.SemanticArchiveScope,
+                    allowInteractiveSelection:=False, cancellationToken:=cancellationToken)
+                context.SemanticArchiveScope = preparedArchive.Scope
+                If preparedArchive.HasTrigger Then
+                    sysCommand &= System.Environment.NewLine & preparedArchive.ContextText
+                    If System.String.Equals(otherPrompt, semanticArchiveRequest, System.StringComparison.Ordinal) Then otherPrompt = preparedArchive.CleanPrompt
+                    If System.String.Equals(userText, semanticArchiveRequest, System.StringComparison.Ordinal) Then userText = preparedArchive.CleanPrompt
+                End If
+            End If
+        End If
+
         If subAgentMode AndAlso
            (parentToolingContext Is Nothing OrElse
             parentToolingContext.SequencingState Is Nothing OrElse
@@ -422,6 +454,9 @@ Partial Public Class ThisAddIn
                 userText,
                 otherPrompt,
                 fullPromptOverride)
+        If Not subAgentMode AndAlso preparedArchive IsNot Nothing AndAlso preparedArchive.HasTrigger Then
+            context.LatestUserRequestRaw = preparedArchive.AuthoritativeRequest
+        End If
 
         ' Created-deliverable enforcement is metadata-driven only.
         ' Do not classify the user's text to decide whether an artifact is required.
@@ -521,7 +556,7 @@ Partial Public Class ThisAddIn
         context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
         context.WorkflowId = ResolveToolingWorkflowId(workflowId, subAgentMode, parentToolingContext)
 
-        If Not subAgentMode Then
+        If Not subAgentMode AndAlso Not resumeWorkflowFromCheckpoint Then
             Dim clearedCount As Integer =
                 SharedLibrary.Agents.SessionMemory.ClearTransientEntriesForHost(
                     context.HostKind,
@@ -534,10 +569,21 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        context.RuntimeState =
-    If(subAgentMode,
-       SharedLibrary.Agents.WorkflowContinuity.AttachWorkflow(context.WorkflowId, context.HostKind),
-       SharedLibrary.Agents.WorkflowContinuity.StartWorkflow(context.WorkflowId, context.HostKind))
+        If subAgentMode Then
+            context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.AttachWorkflow(context.WorkflowId, context.HostKind)
+        ElseIf resumeWorkflowFromCheckpoint Then
+            context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.ResumeWorkflow(context.WorkflowId, context.HostKind)
+            Dim continuationSnapshot As SharedLibrary.Agents.ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+            If Not SharedLibrary.Agents.WorkflowContinuity.TryGetContinuationSnapshot(context.WorkflowId, continuationSnapshot) OrElse continuationSnapshot Is Nothing Then
+                Throw New System.InvalidOperationException("The requested workflow continuation checkpoint is unavailable.")
+            End If
+            context.SequencingState.ApplyContinuationSnapshot(continuationSnapshot)
+            context.SequencingState.ActiveToolingSession = True
+            context.SequencingState.HasOpenToolWorkflow = True
+            context.Log("Cross-run workflow continuation restored from checkpoint.", "step")
+        Else
+            context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.StartWorkflow(context.WorkflowId, context.HostKind)
+        End If
 
         workflowScope = SharedLibrary.Agents.WorkflowContinuity.BeginWorkflowScope(context.WorkflowId, context.HostKind)
 
@@ -799,6 +845,8 @@ Partial Public Class ThisAddIn
             Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.ResolveProfile(transportRetryProfile)
         Dim transportRetryScope As System.IDisposable =
             Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.Push(effectiveTransportRetryProfile)
+        Dim transportDiagnosticScope As System.IDisposable =
+            Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.PushDiagnosticSink(Sub(message) context.Log(message, "diag"))
         context.Log("LLM transport retry profile: " & effectiveTransportRetryProfile.ToString(), "diag")
 
         Try
@@ -882,6 +930,15 @@ Partial Public Class ThisAddIn
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             ' Base system command
             Dim baseSysPrompt As String = sysCommand
+
+            ' Read only the host-selected catalog descriptors, before normal source planning.
+            ' This also runs for children, using only their inherited scope. No source scan.
+            Dim archiveCatalogPrompt As System.String = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveCatalogDiscovery.BuildPromptAsync(
+                _context, context.SemanticArchiveScope, cancellationToken)
+            If Not System.String.IsNullOrWhiteSpace(archiveCatalogPrompt) Then
+                baseSysPrompt &= System.Environment.NewLine & System.Environment.NewLine & archiveCatalogPrompt
+                context.Log("Semantic Archive catalog guidance prepared for the host-selected run scope.", "diag")
+            End If
 
             ' B1 progress (major steps only): the model announces significant new phases via the
             ' report_progress tool (a real tool call authored in the dialogue language). Deterministic
@@ -1197,6 +1254,10 @@ Partial Public Class ThisAddIn
                     modelPhaseStopwatch.Stop()
                     ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildRecord(
                         "model_request", context.HostKind, modelPhaseStopwatch.ElapsedMilliseconds, "success"))
+                            Dim footerDraftRestored As System.Boolean = False
+                            currentResponse = SharedLibrary.Agents.ToolCallSequencing.RestoreFooterOnlyDraft(
+                                context.SequencingState, currentResponse, footerDraftRestored)
+                            If footerDraftRestored Then context.Log("TASK_STATUS-only repair restored the retained draft; normal finalization gates still apply.", "diag")
 
                 Catch ex As Global.SharedLibrary.SharedLibrary.LlmTransientTransportException
                     context.LogWarn(
@@ -1231,6 +1292,12 @@ Partial Public Class ThisAddIn
                 Catch ex As System.TimeoutException
                     context.LogError("LLM call timed out.", ex:=ex)
                     ToolingFileLogger.EndSession(False, "LLM timeout")
+                    If subAgentMode Then
+                        Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                            subAgentName,
+                            0,
+                            ex.Message)
+                    End If
                     Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
                         context.SequencingState,
                         "llm_transport_timeout",
@@ -1241,6 +1308,7 @@ Partial Public Class ThisAddIn
                         appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
 
                 Catch ex As System.OperationCanceledException
+                    If subAgentMode Then Throw
                     context.IsCancelled = True
                     context.LogWarn("Operation was cancelled by the user.")
                     ToolingFileLogger.EndSession(False, "Cancelled by user")
@@ -1903,22 +1971,29 @@ Partial Public Class ThisAddIn
                                tc.Arguments,
                                succeededExplicitOperationId) Then
 
+                            Dim replayResponse As System.String = ""
+                            Dim verifiedReplay As System.Boolean = context.SequencingState.OperationRegistry.TryReplaySucceededResult(
+                                tc.ToolName, tc.Arguments, replayResponse)
+                            If Not verifiedReplay Then
+                                replayResponse = JsonConvert.SerializeObject(New With {
+                                    Key .status = "operation_replay_conflict",
+                                    Key .operation_id = succeededExplicitOperationId,
+                                    Key .message = "A step in this call already succeeded. The tool, arguments or complete batch do not match a recorded result, or the historical record lacks replay evidence. No execution or output creation occurred. For a distinct continuation use a new step_id; for a mixed batch resubmit only pending tasks. Do not change ids to repeat an already completed step."
+                                })
+                            End If
                             Dim syntheticAlreadyCompleted As New ToolResponse() With {
                                 .CallId = tc.CallId,
                                 .ToolName = tc.ToolName,
-                                .Success = True,
-                                .ResultKind = "success",
-                                .Response =
-                                    "{""status"":""already_completed"",""operation_id"":" &
-                                    JsonConvert.SerializeObject(succeededExplicitOperationId) &
-                                    ",""message"":""This logical operation already succeeded earlier in the same tooling run; no physical tool execution was repeated.""}",
+                                .Success = verifiedReplay,
+                                .ResultKind = If(verifiedReplay, "success", "error"),
+                                .Response = replayResponse,
                                 .OriginalCallJson = tc.RawJson,
                                 .NormalizedCallSignature = normalizedToolCallSignature
                             }
 
                             AddToolResponseToHistory(context, syntheticAlreadyCompleted)
                             context.Log(
-                                "Skipped already-completed explicit logical operation without creating a new failure. " &
+                                "Skipped completed step; verified_replay=" & verifiedReplay.ToString() & "; " &
                                 "host=" & context.HostKind &
                                 "; tool=" & tc.ToolName &
                                 "; operation_id=" & succeededExplicitOperationId,
@@ -2451,7 +2526,8 @@ Partial Public Class ThisAddIn
                                                                           "retry",
                                                                           If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling)),
                                                     terminal:=toolResponse.RepairLoopTerminal,
-                                                    recoveryScopeKey:=recoveryScopeKey)
+                                                    recoveryScopeKey:=recoveryScopeKey,
+                                                    retryCorrelationArguments:=tc.Arguments)
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -2497,7 +2573,8 @@ Partial Public Class ThisAddIn
                                             tc.ToolName,
                                             "no_change_applied",
                                             "Tool executed but applied no changes (no matching anchor).",
-                                            recoveryScopeKey:=recoveryScopeKey)
+                                            recoveryScopeKey:=recoveryScopeKey,
+                                            retryCorrelationArguments:=tc.Arguments)
                                     End If
 
                                     context.LogWarn(
@@ -3274,6 +3351,10 @@ Partial Public Class ThisAddIn
                                 Exit While
                             End If
 
+                            If TryScheduleEvidenceFinalizationReview(context, currentResponse) Then
+                                Continue While
+                            End If
+
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.FinalizeObservedAlternativeRecoveries("alternative_recovery_finalized")
                             End If
@@ -3453,6 +3534,11 @@ Partial Public Class ThisAddIn
                                         SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(
                                             context.SequencingState,
                                             turnValidation.InvalidReason))
+                                If SharedLibrary.Agents.ToolCallSequencing.TryBeginFooterOnlyRepair(
+                                    context.SequencingState, currentResponse, turnValidation.InvalidReason) Then
+                                    context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildFooterOnlyRepairPrompt()
+                                    context.Log("Missing TASK_STATUS: retaining the draft and requesting only its completion footer.", "diag")
+                                End If
                                 context.PendingRejectedAssistantTurn = If(currentResponse, "")
                                 context.PendingGuardTitle =
                                     If(
@@ -3471,6 +3557,7 @@ Partial Public Class ThisAddIn
                                 Continue While
                             End If
 
+                            context.PendingRejectedAssistantTurn = If(currentResponse, System.String.Empty)
                             context.FinalizationBlocked = True
                             context.FinalizationBlockedReason = If(turnValidation.InvalidReason, "invalid_turn")
                             currentResponse = Await BuildBlockedToolingResultAsync(
@@ -3939,6 +4026,15 @@ Partial Public Class ThisAddIn
                     End If
                 End If
 
+                ' Defensive egress scrub: BuildBlockedToolingResultAsync may be invoked after the
+                ' earlier status-strip stage. Parent/user-facing responses must never expose the
+                ' internal TASK_STATUS protocol even in such late host-generated fallback paths.
+                If Not subAgentMode Then
+                    currentResponse =
+                        SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                            StripTaskStatus(currentResponse))
+                End If
+
                 currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
             Else
                 context.Log("Returning raw caller-defined final response without user-facing post-processing.", "diag")
@@ -3954,7 +4050,11 @@ Partial Public Class ThisAddIn
                     SharedLibrary.Agents.WorkflowContinuity.NoteFinalStatus(
                         context.WorkflowId,
                         context.HostKind,
-                        isBlockedFinal)
+                        isBlockedFinal,
+                        context.SequencingState,
+                        context.LatestUserRequestRaw,
+                        currentResponse,
+                        workflowContinuationKey)
 
                 context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
                 context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}", "diag")
@@ -4019,6 +4119,7 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, $"Exception: {ex.Message}", ex:=ex)
             Return ""
         Finally
+            If transportDiagnosticScope IsNot Nothing Then transportDiagnosticScope.Dispose()
             If transportRetryScope IsNot Nothing Then
                 transportRetryScope.Dispose()
                 transportRetryScope = Nothing
@@ -5642,12 +5743,38 @@ Partial Public Class ThisAddIn
             failedCount = context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count()
         End If
 
+        Dim provisionalUserFacingText As System.String = System.String.Empty
+        If context IsNot Nothing AndAlso
+           SharedLibrary.Agents.ToolCallSequencing.CanSurfaceProvisionalBlockedResponse(context.FinalizationBlockedReason) AndAlso
+           SharedLibrary.Agents.ToolCallSequencing.TryExtractProvisionalUserFacingText(
+               context.PendingRejectedAssistantTurn,
+               provisionalUserFacingText) Then
+
+            Dim provisionalMessage As System.String =
+                SharedLibrary.Agents.ToolCallSequencing.BuildProvisionalBlockedFinalMessage(
+                    provisionalUserFacingText,
+                    context.SequencingState,
+                    ResolveBlockedFallbackUserLanguage(context))
+
+            If Not System.String.IsNullOrWhiteSpace(provisionalMessage) Then
+                ToolingFileLogger.LogWarn(
+                    "Returning safe provisional user-facing result after finalization was blocked.",
+                    details:=$"host={If(context.HostKind, System.String.Empty)}; finalizationReason={If(context.FinalizationBlockedReason, System.String.Empty)}; producedUserDeliverable={If(SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState), "true", "false")}")
+
+                Return provisionalMessage.Trim() & " " &
+                    SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
+                        "blocked",
+                        If(errorCode, "host_generated_blocked"))
+            End If
+        End If
+
         Dim deterministicHostMessage As System.String = System.String.Empty
         If SharedLibrary.Agents.ToolCallSequencing.TryBuildDeterministicHostFailureMessage(
             errorCode,
             message,
             ResolveBlockedFallbackUserLanguage(context),
-            deterministicHostMessage) Then
+            deterministicHostMessage,
+            producedUserDeliverable:=SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)) Then
 
             Return deterministicHostMessage.Trim() & " " &
                 SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
@@ -6287,6 +6414,7 @@ Partial Public Class ThisAddIn
                                            Optional staleCompactionThresholdChars As Integer = -1,
                                            Optional staleCompactionPreviewChars As Integer = -1,
                                            Optional currentIteration As Integer = -1,
+                                           Optional allowCurrentTurnStructuredCompaction As System.Boolean = False,
                                            Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
@@ -6312,24 +6440,38 @@ Partial Public Class ThisAddIn
         Dim firstCall As Boolean = True
         Dim firstResp As Boolean = True
 
-        Dim responseCount As Integer = If(responses Is Nothing, 0, responses.Count)
+        ' The recent-full window is defined over historical responses only. A large batch of
+        ' newly produced current-turn results must not evict the immediately preceding source
+        ' evidence from protection before those new results have even been replayed once.
+        Dim protectedHistoricalIndexes As New System.Collections.Generic.HashSet(Of Integer)()
+        If responses IsNot Nothing AndAlso keepRecentFullCount > 0 Then
+            Dim historicalIndexes As New System.Collections.Generic.List(Of Integer)()
+            For historyIndex As Integer = 0 To responses.Count - 1
+                If ResolveEffectiveReplayRetention(responses(historyIndex), currentIteration) =
+                   SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical Then
+                    historicalIndexes.Add(historyIndex)
+                End If
+            Next
+
+            Dim firstProtected As Integer = System.Math.Max(0, historicalIndexes.Count - keepRecentFullCount)
+            For protectedIndex As Integer = firstProtected To historicalIndexes.Count - 1
+                protectedHistoricalIndexes.Add(historicalIndexes(protectedIndex))
+            Next
+        End If
+
         Dim respIndex As Integer = -1
         For Each resp In responses
             respIndex += 1
-            ' Historical responses whose own body exceeds the large-result threshold are
-            ' compaction-eligible regardless of recency-window position. Current-turn results
-            ' stay lossless until the outer payload-budget pass explicitly permits current-turn
-            ' reference compaction after exhausting historical compaction.
+            ' The protected recent-history window stays lossless on the first pass, even
+            ' for large results. Older historical results may be compacted; current-turn results
+            ' stay lossless until the outer payload-budget pass explicitly permits structured
+            ' evidence-core or, as a final fallback, reference compaction.
             Dim replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind =
                 ResolveEffectiveReplayRetention(resp, currentIteration)
-            Dim respIsLarge As Boolean =
-                resp IsNot Nothing AndAlso
-                Not String.IsNullOrEmpty(resp.Response) AndAlso
-                resp.Response.Length > SubAgentLargeToolResponseThresholdChars
             Dim isStaleForCompaction As Boolean =
                 replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical AndAlso
                 compactStaleLargeResponses AndAlso
-                (respIsLarge OrElse (respIndex < responseCount - keepRecentFullCount))
+                Not protectedHistoricalIndexes.Contains(respIndex)
             If useCallParts Then
                 ' Extract the original arguments from the parsed tool call JSON
                 Dim argsJson As String = "{}"
@@ -6379,12 +6521,17 @@ Partial Public Class ThisAddIn
                 effStaleThresholdChars = staleCompactionThresholdChars
                 effStalePreviewChars = staleCompactionPreviewChars
             End If
+            Dim compactCurrentTurnByReference As System.Boolean =
+                allowCurrentTurnReferenceCompaction AndAlso
+                replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical
+
             Dim responseContent As String = BuildToolResponseContentForModel(
                 resp,
-                compactForSubAgent OrElse isStaleForCompaction,
+                compactForSubAgent OrElse isStaleForCompaction OrElse compactCurrentTurnByReference,
                 effStaleThresholdChars,
                 effStalePreviewChars,
                 replayRetention,
+                allowCurrentTurnStructuredCompaction,
                 allowCurrentTurnReferenceCompaction)
 
             ' Model-agnostic handling:

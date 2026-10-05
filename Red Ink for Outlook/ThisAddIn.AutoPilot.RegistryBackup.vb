@@ -43,7 +43,7 @@ Partial Public Class ThisAddIn
         Try
             Dim json As New JObject From {
                 {"T", "AutoPilot"},
-                {"V", 5},
+                {"V", 7},
                 {"AP_FilterRules", If(My.Settings.AP_FilterRules, "")},
                 {"AP_WhitelistedSenders", If(My.Settings.AP_WhitelistedSenders, "")},
                 {"AP_SubjectTriggerWord", If(My.Settings.AP_SubjectTriggerWord, "")},
@@ -66,12 +66,14 @@ Partial Public Class ThisAddIn
                 {"AP_EnableUserFiles", My.Settings.AP_EnableUserFiles},
                 {"AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection},
                 {"AP_SelectedExternalToolNames", If(My.Settings.AP_SelectedExternalToolNames, "")},
+                {"AP_AvailableExternalToolNames", If(My.Settings.AP_AvailableExternalToolNames, "")},
                 {"AP_DashboardWindowX", My.Settings.AP_DashboardWindowX},
                 {"AP_DashboardWindowY", My.Settings.AP_DashboardWindowY},
                 {"AP_DashboardWindowW", My.Settings.AP_DashboardWindowW},
                 {"AP_DashboardWindowH", My.Settings.AP_DashboardWindowH},
                 {"AP_SenderToolPolicyPath", If(My.Settings.AP_SenderToolPolicyPath, "")},
                 {"AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays},
+                {"AP_LogDiagnosticsReportEmail", If(My.Settings.AP_LogDiagnosticsReportEmail, "")},
                 {"D", Date.UtcNow.ToString("o")}
             }
 
@@ -162,12 +164,14 @@ Partial Public Class ThisAddIn
             My.Settings.AP_EnableUserFiles = GetJsonBoolean(json, "AP_EnableUserFiles", My.Settings.AP_EnableUserFiles)
             My.Settings.AP_EnablePrivacyProtection = GetJsonBoolean(json, "AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection)
             My.Settings.AP_SelectedExternalToolNames = GetJsonString(json, "AP_SelectedExternalToolNames")
+            My.Settings.AP_AvailableExternalToolNames = GetJsonString(json, "AP_AvailableExternalToolNames")
             My.Settings.AP_DashboardWindowX = GetJsonInteger(json, "AP_DashboardWindowX", My.Settings.AP_DashboardWindowX)
             My.Settings.AP_DashboardWindowY = GetJsonInteger(json, "AP_DashboardWindowY", My.Settings.AP_DashboardWindowY)
             My.Settings.AP_DashboardWindowW = GetJsonInteger(json, "AP_DashboardWindowW", My.Settings.AP_DashboardWindowW)
             My.Settings.AP_DashboardWindowH = GetJsonInteger(json, "AP_DashboardWindowH", My.Settings.AP_DashboardWindowH)
             My.Settings.AP_SenderToolPolicyPath = GetJsonString(json, "AP_SenderToolPolicyPath")
             My.Settings.AP_ThreadRetentionDays = GetJsonInteger(json, "AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays)
+            My.Settings.AP_LogDiagnosticsReportEmail = GetJsonString(json, "AP_LogDiagnosticsReportEmail")
 
             My.Settings.Save()
 

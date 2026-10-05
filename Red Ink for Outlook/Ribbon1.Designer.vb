@@ -501,10 +501,13 @@ Partial Class Ribbon2
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
         Me.RI_M365 = Me.Factory.CreateRibbonButton
+        Me.RI_CheckPhishing = Me.Factory.CreateRibbonButton
+        Me.RI_MarkdownEditor = Me.Factory.CreateRibbonButton
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.SearchTools = Me.Factory.CreateRibbonMenu
+        Me.RI_SemanticArchives = Me.Factory.CreateRibbonButton
         Me.RI_KnowledgeStores = Me.Factory.CreateRibbonButton
         Me.RI_SchedulerDashboard = Me.Factory.CreateRibbonButton
         Me.RI_PSTExport = Me.Factory.CreateRibbonButton
@@ -555,8 +558,10 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
         Me.Menu1.Items.Add(Me.RI_M365)
+        Me.Menu1.Items.Add(Me.RI_CheckPhishing)
         Me.Menu1.Items.Add(Me.RI_MailMover)
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
+        Me.Menu1.Items.Add(Me.RI_MarkdownEditor)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
         Me.Menu1.Items.Add(Me.SearchTools)
         Me.Menu1.Items.Add(Me.RI_AutoPilot)
@@ -724,6 +729,17 @@ Partial Class Ribbon2
         Me.RI_M365.ScreenTip = "Searches your Microsoft 365 content with and without the help of AI"
         Me.RI_M365.ShowImage = True
         '
+        'Passive security check and shared modeless editor
+        Me.RI_CheckPhishing.Label = "Check Phishing"
+        Me.RI_CheckPhishing.Name = "RI_CheckPhishing"
+        Me.RI_CheckPhishing.ScreenTip = "Assess the current mail, literal links and attachment metadata without opening them"
+        Me.RI_CheckPhishing.OfficeImageId = "ProtectDocument"
+        Me.RI_CheckPhishing.ShowImage = True
+        Me.RI_MarkdownEditor.Label = "Markdown Editor"
+        Me.RI_MarkdownEditor.Name = "RI_MarkdownEditor"
+        Me.RI_MarkdownEditor.Image = SharedMethods.CreateMarkdownDocumentBitmap()
+        Me.RI_MarkdownEditor.ShowImage = True
+        '
         'RI_MailMover
         '
         Me.RI_MailMover.Label = "Mail Mover"
@@ -750,6 +766,7 @@ Partial Class Ribbon2
         '
         'SearchTools
         '
+        Me.SearchTools.Items.Add(Me.RI_SemanticArchives)
         Me.SearchTools.Items.Add(Me.RI_KnowledgeStores)
         Me.SearchTools.Items.Add(Me.RI_SchedulerDashboard)
         Me.SearchTools.Items.Add(Me.RI_PSTExport)
@@ -760,6 +777,12 @@ Partial Class Ribbon2
         Me.SearchTools.ShowImage = True
         '
         'RI_KnowledgeStores
+        '
+        Me.RI_SemanticArchives.Label = "Semantic Archives"
+        Me.RI_SemanticArchives.Name = "RI_SemanticArchives"
+        Me.RI_SemanticArchives.OfficeImageId = "DatabaseCopyDatabaseFile"
+        Me.RI_SemanticArchives.ScreenTip = "Create, manage and index semantic archives"
+        Me.RI_SemanticArchives.ShowImage = True
         '
         Me.RI_KnowledgeStores.Label = "Knowledge Stores Admin"
         Me.RI_KnowledgeStores.Name = "RI_KnowledgeStores"
@@ -934,6 +957,8 @@ Partial Class Ribbon2
     Friend WithEvents RI_Freestyle As RibbonButton
     Friend WithEvents RI_Clipboard As RibbonButton
     Friend WithEvents RI_M365 As RibbonButton
+    Friend WithEvents RI_CheckPhishing As Microsoft.Office.Tools.Ribbon.RibbonButton
+    Friend WithEvents RI_MarkdownEditor As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_MailMover As RibbonButton
     Friend WithEvents RI_InboxBoard As RibbonButton
     Friend WithEvents RI_Translate As RibbonButton
@@ -953,6 +978,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_ApplyMyStyle As RibbonButton
     Friend WithEvents RI_DefineMyStyle As RibbonButton
     Friend WithEvents SearchTools As RibbonMenu
+    Friend WithEvents RI_SemanticArchives As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_KnowledgeStores As RibbonButton
     Friend WithEvents RI_SchedulerDashboard As RibbonButton
     Friend WithEvents RI_PSTExport As RibbonButton

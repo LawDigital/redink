@@ -117,6 +117,15 @@ Namespace Agents
         ''' <summary>Preview size kept when older medium-sized results are reference-compacted under budget pressure. Override via INI BudgetCompactionPreviewChars.</summary>
         Public Const BudgetCompactionPreviewChars As Integer = 600
 
+        ''' <summary>Maximum inline size of a deterministic evidence-core replay for a large structured result.</summary>
+        Public Const EvidenceReplayCoreMaxChars As Integer = 12000
+
+        ''' <summary>Maximum exact string length retained inside an evidence core. Longer text remains available through context_expand.</summary>
+        Public Const EvidenceReplayMaxExactStringChars As Integer = 320
+
+        ''' <summary>Preferred maximum number of exact properties retained per object inside large result arrays before progressively tighter evidence-core projection.</summary>
+        Public Const EvidenceReplayPreferredArrayItemProperties As Integer = 12
+
         ''' <summary>Maximum length of a blocked-final string that the host is willing to translate.</summary>
         Public Const MaxLocalizableBlockedFinalChars As Integer = 1500
 

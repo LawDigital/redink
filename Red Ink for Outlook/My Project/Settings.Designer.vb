@@ -402,6 +402,18 @@ Namespace My
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_AvailableExternalToolNames() As String
+            Get
+                Return CType(Me("AP_AvailableExternalToolNames"),String)
+            End Get
+            Set
+                Me("AP_AvailableExternalToolNames") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
         Public Property InboxBoardSummaryCache() As String
             Get
                 Return CType(Me("InboxBoardSummaryCache"),String)
@@ -1079,6 +1091,18 @@ Namespace My
             End Get
             Set
                 Me("AP_ThreadRetentionDays") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_LogDiagnosticsReportEmail() As String
+            Get
+                Return CType(Me("AP_LogDiagnosticsReportEmail"),String)
+            End Get
+            Set
+                Me("AP_LogDiagnosticsReportEmail") = value
             End Set
         End Property
         

@@ -134,7 +134,7 @@ Namespace SharedLibrary
             Try
                 Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
                 Dim debugFilePath As String = Path.Combine(desktopPath, fileName)
-                File.WriteAllText(debugFilePath, If(content, ""))
+                File.WriteAllText(debugFilePath, RedactSensitiveDebugText(If(content, "")))
             Catch
             End Try
         End Sub

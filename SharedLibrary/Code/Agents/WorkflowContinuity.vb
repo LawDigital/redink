@@ -82,6 +82,7 @@ Namespace Agents
         Public Property CheckpointKind As String = ""
         Public Property WrittenAt As DateTime
         Public Property RuntimeState As WorkflowRuntimeState
+        Public Property ContinuationState As ToolCallSequencing.ToolingRunContinuationSnapshot
     End Class
 
     Public NotInheritable Class WorkflowContinuity
@@ -89,8 +90,11 @@ Namespace Agents
         Private Sub New()
         End Sub
 
+        Public Const DefaultContinuationRetentionDays As System.Int32 = 7
+
         Private Shared ReadOnly _sync As New Object()
         Private Shared ReadOnly _states As New Dictionary(Of String, WorkflowRuntimeState)(StringComparer.OrdinalIgnoreCase)
+        Private Shared ReadOnly _continuations As New Dictionary(Of String, ToolCallSequencing.ToolingRunContinuationSnapshot)(StringComparer.OrdinalIgnoreCase)
         Private Shared ReadOnly _currentWorkflowId As New AsyncLocal(Of String)()
         Private Shared ReadOnly _currentHostPipeline As New AsyncLocal(Of String)()
 
@@ -301,6 +305,215 @@ Namespace Agents
             End SyncLock
         End Function
 
+        Public Shared Function ResumeWorkflow(workflowId As String,
+                                              hostPipeline As String,
+                                              Optional continuationRetentionDays As System.Int32 = 0) As WorkflowRuntimeState
+            If String.IsNullOrWhiteSpace(workflowId) Then
+                Throw New System.ArgumentException("A workflow id is required for continuation.", NameOf(workflowId))
+            End If
+
+            SyncLock _sync
+                Dim state As WorkflowRuntimeState = GetOrLoadUnlocked(workflowId, System.String.Empty)
+                Dim requestedHost As System.String = If(hostPipeline, System.String.Empty).Trim()
+                If requestedHost <> System.String.Empty AndAlso
+                   state IsNot Nothing AndAlso
+                   Not System.String.IsNullOrWhiteSpace(state.HostPipeline) AndAlso
+                   Not System.String.Equals(state.HostPipeline, requestedHost, System.StringComparison.OrdinalIgnoreCase) Then
+                    Throw New System.InvalidOperationException("The requested workflow continuation belongs to a different host pipeline.")
+                End If
+                Dim snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+                If Not _continuations.TryGetValue(workflowId, snapshot) OrElse snapshot Is Nothing Then
+                    Throw New System.InvalidOperationException("The requested workflow has no resumable continuation checkpoint.")
+                End If
+
+                If IsContinuationExpired(snapshot) Then
+                    _continuations.Remove(workflowId)
+                    DeleteContinuationArtifactsUnlocked(workflowId)
+                    Throw New System.InvalidOperationException("The requested workflow continuation checkpoint has expired.")
+                End If
+
+                snapshot.ResumeCount += 1
+                RefreshContinuationExpiryUnlocked(
+                    snapshot,
+                    If(continuationRetentionDays > 0, continuationRetentionDays, snapshot.RetentionDays))
+                state.CurrentPhase = "workflow_resumed"
+                state.UpdatedAt = DateTime.UtcNow
+                If requestedHost <> System.String.Empty Then state.HostPipeline = requestedHost
+                state.Authoritative = True
+                WriteCheckpointUnlocked(state, "workflow_resumed")
+                Return CloneState(state)
+            End SyncLock
+        End Function
+
+        Public Shared Function TryGetContinuationSnapshot(
+            workflowId As String,
+            ByRef snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As Boolean
+
+            snapshot = Nothing
+            If String.IsNullOrWhiteSpace(workflowId) Then Return False
+
+            SyncLock _sync
+                GetOrLoadUnlocked(workflowId, "")
+                Dim stored As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+                If Not _continuations.TryGetValue(workflowId, stored) OrElse stored Is Nothing Then Return False
+                If IsContinuationExpired(stored) Then
+                    _continuations.Remove(workflowId)
+                    DeleteContinuationArtifactsUnlocked(workflowId)
+                    Return False
+                End If
+                snapshot = CloneContinuationSnapshot(stored)
+                Return snapshot IsNot Nothing
+            End SyncLock
+        End Function
+
+        Public Shared Function HasContinuationSnapshot(workflowId As String) As Boolean
+            Dim snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+            Return TryGetContinuationSnapshot(workflowId, snapshot)
+        End Function
+
+        ''' <summary>
+        ''' Explicitly abandons one resumable continuation without deleting the workflow's
+        ''' diagnostic runtime history. The continuation snapshot and cached artifacts are
+        ''' removed and the checkpoint is rewritten without resumable state.
+        ''' </summary>
+        Public Shared Function InvalidateContinuation(
+            workflowId As System.String,
+            Optional expectedContinuationKey As System.String = "",
+            Optional expectedHostPipeline As System.String = "") As System.Boolean
+
+            Dim id As System.String = If(workflowId, System.String.Empty).Trim()
+            If id = System.String.Empty Then Return False
+
+            SyncLock _sync
+                Dim checkpointPath As System.String = GetCheckpointPath(id)
+                If Not _continuations.ContainsKey(id) AndAlso Not System.IO.File.Exists(checkpointPath) Then Return False
+
+                Dim state As WorkflowRuntimeState = GetOrLoadUnlocked(id, System.String.Empty)
+                Dim snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+                If Not _continuations.TryGetValue(id, snapshot) OrElse snapshot Is Nothing Then Return False
+
+                Dim expectedKey As System.String = If(expectedContinuationKey, System.String.Empty).Trim()
+                If expectedKey <> System.String.Empty AndAlso
+                   Not System.String.Equals(If(snapshot.ContinuationKey, System.String.Empty).Trim(), expectedKey, System.StringComparison.Ordinal) Then
+                    Return False
+                End If
+
+                Dim expectedHost As System.String = If(expectedHostPipeline, System.String.Empty).Trim()
+                If expectedHost <> System.String.Empty AndAlso
+                   (state Is Nothing OrElse
+                    Not System.String.Equals(If(state.HostPipeline, System.String.Empty), expectedHost, System.StringComparison.OrdinalIgnoreCase)) Then
+                    Return False
+                End If
+
+                _continuations.Remove(id)
+                DeleteContinuationArtifactsUnlocked(id)
+
+                If state Is Nothing Then Return True
+                state.UpdatedAt = System.DateTime.UtcNow
+                Return WriteCheckpointUnlocked(state, "continuation_invalidated")
+            End SyncLock
+        End Function
+
+        Public Shared Function FindBlockedContinuationWorkflowId(
+            continuationKey As String,
+            Optional hostPipeline As String = "") As String
+
+            Dim key As String = If(continuationKey, "").Trim()
+            If key = "" Then Return ""
+
+            SyncLock _sync
+                Try
+                    Dim dir As String = GetPrivateWorkflowDirectory()
+                    If Not Directory.Exists(dir) Then Return ""
+                    PruneStaleContinuationArtifactsUnlocked(dir)
+
+                    Dim bestWorkflowId As String = ""
+                    Dim bestWrittenAt As DateTime = DateTime.MinValue
+
+                    For Each checkpointPath As String In Directory.GetFiles(dir, "*.json", SearchOption.TopDirectoryOnly)
+                        Dim envelope As WorkflowCheckpointEnvelope = LoadCheckpointEnvelopeFromPathUnlocked(checkpointPath)
+                        If envelope Is Nothing OrElse envelope.RuntimeState Is Nothing OrElse envelope.ContinuationState Is Nothing Then Continue For
+                        If Not String.Equals(envelope.RuntimeState.CurrentPhase, "final_blocked", StringComparison.OrdinalIgnoreCase) Then Continue For
+                        If IsContinuationExpired(envelope.ContinuationState) Then Continue For
+                        If Not String.Equals(If(envelope.ContinuationState.ContinuationKey, "").Trim(), key, StringComparison.Ordinal) Then Continue For
+                        If Not String.IsNullOrWhiteSpace(hostPipeline) AndAlso
+                           Not String.Equals(If(envelope.RuntimeState.HostPipeline, ""), hostPipeline, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                        If envelope.WrittenAt >= bestWrittenAt Then
+                            bestWrittenAt = envelope.WrittenAt
+                            bestWorkflowId = If(envelope.WorkflowId, "").Trim()
+                        End If
+                    Next
+
+                    Return bestWorkflowId
+                Catch
+                    Return ""
+                End Try
+            End SyncLock
+        End Function
+
+        Public Shared Function GetLatestBlockedContinuationUserLanguage(
+            continuationKey As String,
+            Optional hostPipeline As String = "") As String
+
+            Dim key As String = If(continuationKey, "").Trim()
+            If key = "" Then Return ""
+
+            SyncLock _sync
+                Try
+                    Dim dir As String = GetPrivateWorkflowDirectory()
+                    If Not Directory.Exists(dir) Then Return ""
+
+                    Dim bestLanguage As String = ""
+                    Dim bestWrittenAt As DateTime = DateTime.MinValue
+
+                    For Each checkpointPath As String In Directory.GetFiles(dir, "*.json", SearchOption.TopDirectoryOnly)
+                        Dim envelope As WorkflowCheckpointEnvelope = LoadCheckpointEnvelopeFromPathUnlocked(checkpointPath)
+                        If envelope Is Nothing OrElse envelope.RuntimeState Is Nothing OrElse envelope.ContinuationState Is Nothing Then Continue For
+                        If Not String.Equals(envelope.RuntimeState.CurrentPhase, "final_blocked", StringComparison.OrdinalIgnoreCase) Then Continue For
+                        If Not String.Equals(If(envelope.ContinuationState.ContinuationKey, "").Trim(), key, StringComparison.Ordinal) Then Continue For
+                        If Not String.IsNullOrWhiteSpace(hostPipeline) AndAlso
+                           Not String.Equals(If(envelope.RuntimeState.HostPipeline, ""), hostPipeline, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                        If envelope.WrittenAt >= bestWrittenAt Then
+                            bestWrittenAt = envelope.WrittenAt
+                            bestLanguage = ExtractContinuationUserLanguage(envelope.ContinuationState)
+                        End If
+                    Next
+
+                    Return bestLanguage
+                Catch
+                    Return ""
+                End Try
+            End SyncLock
+        End Function
+
+        Public Shared Function BuildContinuationRetryHint(userLanguage As String) As String
+            Select Case NormalizeUserLanguageKey(userLanguage)
+                Case "de"
+                    Return "Wenn Sie diesen technisch blockierten Vorgang fortsetzen möchten, ohne bereits erfolgreich erledigte Arbeit absichtlich neu zu erzeugen, antworten Sie auf diese E-Mail mit `retry` als erster Zeile. Darunter können Sie weitere Anweisungen ergänzen. Bereits verifizierte Ergebnisse werden nach Möglichkeit wiederverwendet."
+                Case "fr"
+                    Return "Si vous souhaitez poursuivre cette exécution techniquement bloquée sans recréer délibérément le travail déjà effectué avec succès, répondez à cet e-mail avec `retry` sur la première ligne. Vous pouvez ajouter d’autres instructions en dessous. Les résultats déjà vérifiés seront réutilisés dans la mesure du possible."
+                Case "it"
+                    Return "Se desideri continuare questa esecuzione tecnicamente bloccata senza ricreare deliberatamente il lavoro già completato con successo, rispondi a questa e-mail inserendo `retry` nella prima riga. Puoi aggiungere ulteriori istruzioni nelle righe successive. I risultati già verificati verranno riutilizzati ove possibile."
+                Case Else
+                    Return "If you want me to continue this technically blocked run without deliberately recreating work that already succeeded, reply to this email with `retry` as the first line. You may add further instructions below it. Existing verified results will be reused where possible."
+            End Select
+        End Function
+
+        Public Shared Function BuildContinuationUnavailableNotice(userLanguage As String) As String
+            Select Case NormalizeUserLanguageKey(userLanguage)
+                Case "de"
+                    Return "Für diese Unterhaltung konnte kein fortsetzbarer blockierter Vorgang mehr gefunden werden. Ich habe keinen neuen Lauf gestartet, weil dadurch Dateien oder andere bereits erfolgreich ausgeführte Aktionen doppelt erzeugt werden könnten. Wenn Sie die Aufgabe neu starten möchten, senden oder formulieren Sie sie bitte erneut als neue Anfrage."
+                Case "fr"
+                    Return "Je n’ai plus trouvé d’exécution bloquée pouvant être reprise pour cette conversation. Je n’ai pas lancé une nouvelle exécution, car cela pourrait recréer des fichiers ou répéter d’autres actions déjà effectuées avec succès. Si vous souhaitez recommencer la tâche, veuillez la renvoyer ou la reformuler comme une nouvelle demande."
+                Case "it"
+                    Return "Non è stato possibile trovare per questa conversazione un’esecuzione bloccata ancora riprendibile. Non ho avviato una nuova esecuzione, perché ciò potrebbe ricreare file o ripetere altre azioni già completate con successo. Se desideri ricominciare l’attività, inviala o formulala nuovamente come nuova richiesta."
+                Case Else
+                    Return "I could not find a resumable blocked workflow checkpoint for this conversation. I have not started a fresh run, because doing so could repeat file creation or other actions that may already have succeeded. Please resend or restate the task if you want to start it again as a new request."
+            End Select
+        End Function
+
         Public Shared Function GetState(workflowId As String) As WorkflowRuntimeState
             If String.IsNullOrWhiteSpace(workflowId) Then Return Nothing
 
@@ -453,15 +666,57 @@ Namespace Agents
             End SyncLock
         End Function
 
-        Public Shared Function NoteFinalStatus(workflowId As String,
-                                               hostPipeline As String,
-                                               isBlocked As Boolean) As Boolean
+        Public Shared Function NoteFinalStatus(
+            workflowId As String,
+            hostPipeline As String,
+            isBlocked As Boolean,
+            Optional sequencingState As ToolCallSequencing.ToolingRunState = Nothing,
+            Optional originalUserRequestRaw As String = "",
+            Optional lastUserFacingResponse As String = "",
+            Optional continuationKey As String = "",
+            Optional continuationRetentionDays As System.Int32 = DefaultContinuationRetentionDays) As Boolean
+
             If String.IsNullOrWhiteSpace(workflowId) Then Return False
 
             SyncLock _sync
                 Dim state = GetOrLoadUnlocked(workflowId, hostPipeline)
                 state.CurrentPhase = If(isBlocked, "final_blocked", "final_complete")
                 state.UpdatedAt = DateTime.UtcNow
+                PruneStaleContinuationArtifactsUnlocked(GetPrivateWorkflowDirectory())
+
+                If isBlocked AndAlso sequencingState IsNot Nothing Then
+                    Dim prior As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+                    _continuations.TryGetValue(workflowId, prior)
+
+                    Dim originalRequest As String = BoundedContinuationText(originalUserRequestRaw, 16000)
+                    If prior IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(prior.OriginalUserRequestRaw) Then
+                        originalRequest = prior.OriginalUserRequestRaw
+                    End If
+
+                    Dim effectiveKey As String = If(continuationKey, "").Trim()
+                    If effectiveKey = "" AndAlso prior IsNot Nothing Then effectiveKey = If(prior.ContinuationKey, "").Trim()
+
+                    Dim snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot =
+                        sequencingState.CreateContinuationSnapshot(
+                            originalRequest,
+                            BoundedContinuationText(lastUserFacingResponse, 16000),
+                            effectiveKey)
+
+                    If prior IsNot Nothing Then
+                        snapshot.CreatedUtc = prior.CreatedUtc
+                        snapshot.ResumeCount = prior.ResumeCount
+                    End If
+
+                    RefreshContinuationExpiryUnlocked(snapshot, continuationRetentionDays)
+                    CacheContinuationArtifactsUnlocked(workflowId, snapshot)
+                    _continuations(workflowId) = snapshot
+                ElseIf Not isBlocked Then
+                    ' Do not delete the durable artifact cache here. Host delivery happens
+                    ' after finalization and may still reference these restored paths. Stale
+                    ' continuation caches are pruned separately by age.
+                    _continuations.Remove(workflowId)
+                End If
+
                 Return WriteCheckpointUnlocked(state, state.CurrentPhase)
             End SyncLock
         End Function
@@ -532,6 +787,24 @@ Namespace Agents
 
             If state.LastKnownSourceRefs IsNot Nothing AndAlso state.LastKnownSourceRefs.Count > 0 Then
                 sb.AppendLine("- lastKnownSourceRefs: " & String.Join(", ", state.LastKnownSourceRefs))
+            End If
+
+            Dim continuation As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+            If TryGetContinuationSnapshot(workflowId, continuation) AndAlso continuation IsNot Nothing AndAlso continuation.ResumeCount > 0 Then
+                sb.AppendLine("[CROSS_RUN_CONTINUATION]")
+                sb.AppendLine("This is an explicit continuation of a previously blocked workflow.")
+                sb.AppendLine("Reuse successful operations and registered artifacts from the restored host state. Do not repeat a successful mutating operation merely because this is a new mail/run. Revalidate existing outputs first and retry only unresolved or missing work.")
+                If Not String.IsNullOrWhiteSpace(continuation.OriginalUserRequestRaw) Then
+                    sb.AppendLine("Original request from the blocked workflow:")
+                    sb.AppendLine(BoundedContinuationText(continuation.OriginalUserRequestRaw, 12000))
+                End If
+                Dim continuationDetails As String = BuildContinuationPromptDetails(continuation)
+                If continuationDetails <> "" Then sb.AppendLine(continuationDetails)
+                If Not String.IsNullOrWhiteSpace(continuation.LastUserFacingResponse) Then
+                    sb.AppendLine("Prior provisional user-facing response:")
+                    sb.AppendLine(BoundedContinuationText(continuation.LastUserFacingResponse, 6000))
+                End If
+                sb.AppendLine("[/CROSS_RUN_CONTINUATION]")
             End If
 
             If memoryEntries.Count > 0 Then
@@ -743,7 +1016,15 @@ Namespace Agents
                 Return state
             End If
 
-            state = LoadCheckpointUnlocked(workflowId)
+            Dim envelope As WorkflowCheckpointEnvelope = LoadCheckpointEnvelopeUnlocked(workflowId)
+            state = If(envelope Is Nothing, Nothing, envelope.RuntimeState)
+            If envelope IsNot Nothing AndAlso envelope.ContinuationState IsNot Nothing Then
+                If Not IsContinuationExpired(envelope.ContinuationState) Then
+                    _continuations(workflowId) = envelope.ContinuationState
+                Else
+                    DeleteContinuationArtifactsUnlocked(workflowId)
+                End If
+            End If
 
             If state Is Nothing Then
                 Dim nowUtc = DateTime.UtcNow
@@ -762,19 +1043,15 @@ Namespace Agents
             Return state
         End Function
 
-        Private Shared Function LoadCheckpointUnlocked(workflowId As String) As WorkflowRuntimeState
+        Private Shared Function LoadCheckpointEnvelopeUnlocked(workflowId As String) As WorkflowCheckpointEnvelope
+            Return LoadCheckpointEnvelopeFromPathUnlocked(GetCheckpointPath(workflowId))
+        End Function
+
+        Private Shared Function LoadCheckpointEnvelopeFromPathUnlocked(path As String) As WorkflowCheckpointEnvelope
             Try
-                Dim path As String = GetCheckpointPath(workflowId)
-                If Not File.Exists(path) Then Return Nothing
-
-                Dim raw = File.ReadAllText(path, Encoding.UTF8)
-                Dim envelope = JsonConvert.DeserializeObject(Of WorkflowCheckpointEnvelope)(raw)
-
-                If envelope Is Nothing OrElse envelope.RuntimeState Is Nothing Then
-                    Return Nothing
-                End If
-
-                Return envelope.RuntimeState
+                If String.IsNullOrWhiteSpace(path) OrElse Not File.Exists(path) Then Return Nothing
+                Dim raw As String = File.ReadAllText(path, Encoding.UTF8)
+                Return JsonConvert.DeserializeObject(Of WorkflowCheckpointEnvelope)(raw)
             Catch
                 Return Nothing
             End Try
@@ -785,12 +1062,16 @@ Namespace Agents
                 Dim dir = GetPrivateWorkflowDirectory()
                 If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
 
+                Dim continuation As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+                _continuations.TryGetValue(state.WorkflowId, continuation)
+
                 Dim envelope As New WorkflowCheckpointEnvelope() With {
                     .WorkflowId = state.WorkflowId,
                     .HostPipeline = state.HostPipeline,
                     .CheckpointKind = checkpointKind,
                     .WrittenAt = DateTime.UtcNow,
-                    .RuntimeState = CloneState(state)
+                    .RuntimeState = CloneState(state),
+                    .ContinuationState = CloneContinuationSnapshot(continuation)
                 }
 
                 File.WriteAllText(
@@ -841,16 +1122,243 @@ Namespace Agents
             }
         End Function
 
+        Private Shared Function BuildContinuationPromptDetails(
+            snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As String
+
+            If snapshot Is Nothing OrElse String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then Return ""
+            Try
+                Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(snapshot.SequencingStateJson)
+                Dim sb As New StringBuilder()
+
+                Dim successfulTools As Newtonsoft.Json.Linq.JArray = TryCast(root("SuccessfulToolsThisRun"), Newtonsoft.Json.Linq.JArray)
+                If successfulTools IsNot Nothing AndAlso successfulTools.Count > 0 Then
+                    Dim names As List(Of String) = successfulTools.
+                        Values(Of String)().
+                        Where(Function(x) Not String.IsNullOrWhiteSpace(x)).
+                        Distinct(StringComparer.OrdinalIgnoreCase).
+                        Take(12).
+                        ToList()
+                    If names.Count > 0 Then sb.AppendLine("Previously successful tools: " & String.Join(", ", names))
+                End If
+
+                Dim artifacts As Newtonsoft.Json.Linq.JArray = TryCast(root("RegisteredDeliverableArtifacts"), Newtonsoft.Json.Linq.JArray)
+                If artifacts IsNot Nothing AndAlso artifacts.Count > 0 Then
+                    sb.AppendLine("Restored registered artifacts:")
+                    For Each token As Newtonsoft.Json.Linq.JToken In artifacts.Take(12)
+                        Dim artifact As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+                        If artifact Is Nothing Then Continue For
+                        Dim sessionPath As String = If(artifact.Value(Of String)("SessionPath"), "")
+                        Dim logicalId As String = If(artifact.Value(Of String)("LogicalDeliverableId"), "")
+                        Dim slotId As String = If(artifact.Value(Of String)("OutputSlotId"), "")
+                        Dim stateName As String = If(artifact.Value(Of String)("LifecycleState"), "")
+                        sb.AppendLine("- file=" & If(String.IsNullOrWhiteSpace(sessionPath), "(unavailable)", System.IO.Path.GetFileName(sessionPath)) &
+                                      "; logicalDeliverableId=" & logicalId &
+                                      "; outputSlotId=" & slotId &
+                                      "; lifecycle=" & stateName &
+                                      "; exists=" & If(Not String.IsNullOrWhiteSpace(sessionPath) AndAlso System.IO.File.Exists(sessionPath), "true", "false"))
+                    Next
+                End If
+
+                Dim lastResult As String = If(root.Value(Of String)("LastStructuredToolResult"), "")
+                If Not String.IsNullOrWhiteSpace(lastResult) Then
+                    sb.AppendLine("Last structured tool result excerpt:")
+                    sb.AppendLine(BoundedContinuationText(lastResult, 4000))
+                End If
+
+                Return sb.ToString().TrimEnd()
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function CloneContinuationSnapshot(
+            snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As ToolCallSequencing.ToolingRunContinuationSnapshot
+
+            If snapshot Is Nothing Then Return Nothing
+            Try
+                Dim json As String = JsonConvert.SerializeObject(snapshot, Formatting.None)
+                Return JsonConvert.DeserializeObject(Of ToolCallSequencing.ToolingRunContinuationSnapshot)(json)
+            Catch
+                Return Nothing
+            End Try
+        End Function
+
+        Private Shared Function BoundedContinuationText(value As String, maxChars As Integer) As String
+            Dim text As String = If(value, "")
+            If maxChars <= 0 OrElse text.Length <= maxChars Then Return text
+            Return text.Substring(0, maxChars) & Environment.NewLine & "[... continuation text truncated ...]"
+        End Function
+
+        Private Shared Sub CacheContinuationArtifactsUnlocked(
+            workflowId As String,
+            snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot)
+
+            If snapshot Is Nothing OrElse String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then Return
+
+            Try
+                Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(snapshot.SequencingStateJson)
+                Dim artifacts As Newtonsoft.Json.Linq.JArray = TryCast(root("RegisteredDeliverableArtifacts"), Newtonsoft.Json.Linq.JArray)
+                If artifacts Is Nothing OrElse artifacts.Count = 0 Then Return
+
+                Dim cacheRoot As String = GetContinuationArtifactDirectory(workflowId)
+                Directory.CreateDirectory(cacheRoot)
+                Dim totalBytes As Long = 0
+                Const MaxCachedBytes As Long = 100L * 1024L * 1024L
+
+                Dim index As Integer = 0
+                For Each token As Newtonsoft.Json.Linq.JToken In artifacts
+                    Dim artifact As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+                    If artifact Is Nothing Then Continue For
+                    Dim sourcePath As String = If(artifact.Value(Of String)("SessionPath"), "").Trim()
+                    If sourcePath = "" OrElse Not File.Exists(sourcePath) Then Continue For
+
+                    Dim info As New FileInfo(sourcePath)
+                    If info.Length < 0 OrElse totalBytes + info.Length > MaxCachedBytes Then Continue For
+                    totalBytes += info.Length
+
+                    index += 1
+                    Dim artifactId As String = Regex.Replace(If(artifact.Value(Of String)("ArtifactId"), "").Trim(), "[^A-Za-z0-9_\-]", "_")
+                    If artifactId = "" Then artifactId = "artifact_" & index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    Dim artifactDir As String = Path.Combine(cacheRoot, artifactId)
+                    Directory.CreateDirectory(artifactDir)
+                    Dim targetPath As String = Path.Combine(artifactDir, Path.GetFileName(sourcePath))
+                    If Not String.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase) Then
+                        File.Copy(sourcePath, targetPath, overwrite:=True)
+                    End If
+                    artifact("SessionPath") = targetPath
+                Next
+
+                snapshot.SequencingStateJson = root.ToString(Formatting.None)
+            Catch
+                ' Continuation caching is best effort. The snapshot still preserves operation
+                ' state and will fail closed if a required physical artifact is unavailable.
+            End Try
+        End Sub
+
+        Private Shared Function GetContinuationArtifactDirectory(workflowId As String) As String
+            Dim safeWorkflowId As String = Regex.Replace(If(workflowId, "").Trim(), "[^A-Za-z0-9_\-]", "_")
+            If safeWorkflowId = "" Then safeWorkflowId = "workflow"
+            Return Path.Combine(GetPrivateWorkflowDirectory(), safeWorkflowId & "_artifacts")
+        End Function
+
+        Private Shared Function NormalizeContinuationRetentionDays(value As System.Int32) As System.Int32
+            If value > 0 Then Return value
+            Return DefaultContinuationRetentionDays
+        End Function
+
+        Private Shared Sub RefreshContinuationExpiryUnlocked(
+            snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot,
+            retentionDays As System.Int32)
+
+            If snapshot Is Nothing Then Return
+            Dim effectiveDays As System.Int32 = NormalizeContinuationRetentionDays(retentionDays)
+            Dim nowUtc As System.DateTime = System.DateTime.UtcNow
+            snapshot.RetentionDays = effectiveDays
+            snapshot.UpdatedUtc = nowUtc
+            snapshot.ExpiresUtc = nowUtc.AddDays(effectiveDays)
+        End Sub
+
+        Private Shared Function GetContinuationExpiresUtc(
+            snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As System.DateTime
+
+            If snapshot Is Nothing Then Return System.DateTime.MinValue
+            If snapshot.ExpiresUtc <> System.DateTime.MinValue Then
+                Return snapshot.ExpiresUtc.ToUniversalTime()
+            End If
+
+            Dim anchorUtc As System.DateTime = snapshot.UpdatedUtc
+            If anchorUtc = System.DateTime.MinValue Then anchorUtc = snapshot.CreatedUtc
+            If anchorUtc = System.DateTime.MinValue Then Return System.DateTime.MinValue
+            If anchorUtc.Kind <> System.DateTimeKind.Utc Then anchorUtc = anchorUtc.ToUniversalTime()
+
+            Return anchorUtc.AddDays(NormalizeContinuationRetentionDays(snapshot.RetentionDays))
+        End Function
+
+        Private Shared Function IsContinuationExpired(
+            snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As System.Boolean
+
+            Dim expiresUtc As System.DateTime = GetContinuationExpiresUtc(snapshot)
+            If expiresUtc = System.DateTime.MinValue Then Return True
+            Return expiresUtc <= System.DateTime.UtcNow
+        End Function
+
+        Private Shared Function ExtractContinuationUserLanguage(
+            snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As System.String
+
+            If snapshot Is Nothing OrElse System.String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then Return System.String.Empty
+            Try
+                Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(snapshot.SequencingStateJson)
+                Return If(root.Value(Of System.String)("UserLanguage"), System.String.Empty).Trim()
+            Catch
+                Return System.String.Empty
+            End Try
+        End Function
+
+        Private Shared Function NormalizeUserLanguageKey(value As System.String) As System.String
+            Dim language As System.String = If(value, System.String.Empty).Trim().ToLowerInvariant()
+            Dim separator As System.Int32 = language.IndexOfAny(New System.Char() {"-"c, "_"c})
+            If separator > 0 Then language = language.Substring(0, separator)
+            Return language
+        End Function
+
+        Private Shared Sub PruneStaleContinuationArtifactsUnlocked(workflowDirectory As String)
+            Try
+                If String.IsNullOrWhiteSpace(workflowDirectory) OrElse Not Directory.Exists(workflowDirectory) Then Return
+
+                Dim knownArtifactDirectories As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                For Each checkpointPath As String In Directory.GetFiles(workflowDirectory, "*.json", SearchOption.TopDirectoryOnly)
+                    Try
+                        Dim envelope As WorkflowCheckpointEnvelope = LoadCheckpointEnvelopeFromPathUnlocked(checkpointPath)
+                        If envelope Is Nothing OrElse envelope.ContinuationState Is Nothing Then Continue For
+                        Dim workflowId As System.String = If(envelope.WorkflowId, System.String.Empty).Trim()
+                        If workflowId = System.String.Empty Then Continue For
+
+                        Dim artifactDirectory As System.String = GetContinuationArtifactDirectory(workflowId)
+                        knownArtifactDirectories.Add(artifactDirectory)
+                        If IsContinuationExpired(envelope.ContinuationState) AndAlso Directory.Exists(artifactDirectory) Then
+                            Directory.Delete(artifactDirectory, recursive:=True)
+                        End If
+                    Catch
+                    End Try
+                Next
+
+                ' Orphaned cache directories have no checkpoint from which to derive an exact
+                ' expiry. Keep the historical seven-day safety net only for those orphans.
+                Dim orphanCutoffUtc As DateTime = DateTime.UtcNow.AddDays(-DefaultContinuationRetentionDays)
+                For Each artifactDirectory As String In Directory.GetDirectories(workflowDirectory, "*_artifacts", SearchOption.TopDirectoryOnly)
+                    Try
+                        If knownArtifactDirectories.Contains(artifactDirectory) Then Continue For
+                        Dim info As New DirectoryInfo(artifactDirectory)
+                        If info.LastWriteTimeUtc < orphanCutoffUtc Then Directory.Delete(artifactDirectory, recursive:=True)
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+        End Sub
+
+        Private Shared Sub DeleteContinuationArtifactsUnlocked(workflowId As String)
+            Try
+                Dim artifactDirectory As String = GetContinuationArtifactDirectory(workflowId)
+                If Directory.Exists(artifactDirectory) Then Directory.Delete(artifactDirectory, recursive:=True)
+            Catch
+            End Try
+        End Sub
+
         Private Shared Function GetPrivateWorkflowDirectory() As String
             Dim root As String = TryGetSharedPath("INI_AgentResourcesPathLocal")
 
-            If String.IsNullOrWhiteSpace(root) Then
-                root = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            If Not System.String.IsNullOrWhiteSpace(root) Then
+                root = SharedLibrary.SharedMethods.ExpandEnvironmentVariables(root)
+            End If
+
+            If System.String.IsNullOrWhiteSpace(root) Then
+                root = System.IO.Path.Combine(
+                    System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
                     "RedInk")
             End If
 
-            Return Path.Combine(root, ".session", "workflow_runtime")
+            Return System.IO.Path.Combine(root, ".session", "workflow_runtime")
         End Function
 
         Public Shared Function GetCheckpointPath(workflowId As String) As String

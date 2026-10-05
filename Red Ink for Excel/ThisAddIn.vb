@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 29.9.2026
+' 5.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -40,6 +40,8 @@
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
 ' Includes Microsoft.Playwright (Playwright for .NET) in unchanged form; Copyright (c) 2020 Darío Kondratiuk and other contributors, with modifications copyright (c) Microsoft Corporation where stated in the source files; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/microsoft/playwright-dotnet
+' Includes adapted Lucide icon paths; Copyright (c) 2026 Lucide Icons and Contributors, with portions Copyright (c) 2013-present Cole Bemis (Feather); licensed under the ISC and MIT licenses (https://lucide.dev/license).
+' Includes adapted Nord, Catppuccin, Tokyo Night, Dracula, Gruvbox and Solarized color palettes; Copyright (c) Sven Greb, Catppuccin, Enkia and Tokyo Night contributors, Dracula Theme, Pavel Pertsev (morhetz) and Ethan Schoonover respectively; licensed under the MIT license. No theme application or font binaries are included.
 ' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 '
 ' Licenses of Red Ink and of third-party components and further legal terms/notices are available in the installation folder and via https://redink.ai.
@@ -69,7 +71,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.290926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.051026" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"

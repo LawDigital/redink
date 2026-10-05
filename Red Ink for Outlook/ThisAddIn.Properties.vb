@@ -1215,6 +1215,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_CheckforPhishing As String
+        Get
+            Return _context.SP_CheckforPhishing
+        End Get
+        Set(value As String)
+            _context.SP_CheckforPhishing = value
+        End Set
+    End Property
+
 
 
     Public Shared Property SP_ContextSearch As String
@@ -2905,6 +2914,60 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+
+    Public Shared Property INI_SemanticArchiveCatalogPathLocal As System.String
+        Get
+            Return _context.INI_SemanticArchiveCatalogPathLocal
+        End Get
+        Set(value As System.String)
+            _context.INI_SemanticArchiveCatalogPathLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SemanticArchiveCatalogLibraryPath As System.String
+        Get
+            Return _context.INI_SemanticArchiveCatalogLibraryPath
+        End Get
+        Set(value As System.String)
+            _context.INI_SemanticArchiveCatalogLibraryPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SemanticArchiveBackgroundIndexing As System.Boolean
+        Get
+            Return _context.INI_SemanticArchiveBackgroundIndexing
+        End Get
+        Set(value As System.Boolean)
+            _context.INI_SemanticArchiveBackgroundIndexing = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SemanticArchiveBackgroundIndexingWindow As System.String
+        Get
+            Return _context.INI_SemanticArchiveBackgroundIndexingWindow
+        End Get
+        Set(value As System.String)
+            _context.INI_SemanticArchiveBackgroundIndexingWindow = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SemanticArchivePermissionMaintenanceEnabled As System.Boolean
+        Get
+            Return _context.INI_SemanticArchivePermissionMaintenanceEnabled
+        End Get
+        Set(value As System.Boolean)
+            _context.INI_SemanticArchivePermissionMaintenanceEnabled = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SemanticArchivePermissionMaintenanceWindow As System.String
+        Get
+            Return _context.INI_SemanticArchivePermissionMaintenanceWindow
+        End Get
+        Set(value As System.String)
+            _context.INI_SemanticArchivePermissionMaintenanceWindow = value
+        End Set
+    End Property
 
     Public Shared Property INI_KnowledgeStorePath As String
         Get

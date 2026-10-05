@@ -197,8 +197,8 @@ Partial Public Class ThisAddIn
     ''' Best-effort retention cleanup for AutoPilot tooling-log archives. Retention counts logical
     ''' runs, not files: a run consists of its __Tooling log plus any companion __SubAgent_Returns log.
     ''' </summary>
-    Private Shared Sub PruneAutoPilotToolingLogArchives(archiveDirectory As String,
-                                                        keepExistingRunCount As Integer)
+    Private Sub PruneAutoPilotToolingLogArchives(archiveDirectory As String,
+                                                 keepExistingRunCount As Integer)
         Try
             Dim keepCount As Integer = System.Math.Max(0, keepExistingRunCount)
             Dim existingFiles As System.Collections.Generic.List(Of System.IO.FileInfo) =
@@ -225,7 +225,23 @@ Partial Public Class ThisAddIn
                     ToList()
 
             For runIndex As Integer = keepCount To orderedRuns.Count - 1
-                For Each fileInfo As System.IO.FileInfo In orderedRuns(runIndex).Value
+                Dim runKey As System.String = orderedRuns(runIndex).Key
+                Dim runFiles As System.Collections.Generic.List(Of System.IO.FileInfo) = orderedRuns(runIndex).Value
+
+                If IsAutoPilotLogDiagnosticsEnabled() AndAlso
+                   Not HasAutoPilotLogDiagnosticResult(runKey) Then
+                    ' Preserve every not-yet-analysed run before it leaves the 50-run archive.
+                    ' The idle diagnostics worker deletes the pending raw copy only after a
+                    ' successful standard-model analysis has been persisted.
+                    If TryQueueAutoPilotRunForLogDiagnostics(runKey, runFiles) Then Continue For
+
+                    ' Fail closed for diagnostics retention: if preservation failed, keep the
+                    ' archive files rather than silently losing an unanalysed run. This may
+                    ' temporarily exceed the normal retention count until a later cleanup pass.
+                    Continue For
+                End If
+
+                For Each fileInfo As System.IO.FileInfo In runFiles
                     Try
                         fileInfo.Delete()
                     Catch
@@ -739,6 +755,8 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] Failed to persist config on start: {ex.Message}")
         End Try
+
+        PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
 
         StopLocalSchedulerRuntime()
         SetAutoPilotQueueJournalPersistenceEnabled(True)
@@ -1885,6 +1903,10 @@ Partial Public Class ThisAddIn
 
         entryId = entryId.Trim()
 
+        ' Foreground mail processing always pre-empts idle engineering diagnostics so the
+        ' normal AutoPilot workload never waits behind a background log-analysis model call.
+        CancelAutoPilotLogDiagnosticsForForegroundWork()
+
         ' Atomic deduplication across NewMailEx, catch-up and other queue sources.
         If Not _apQueuedOrProcessingEntryIds.TryAdd(entryId, True) Then
             Return False
@@ -2302,6 +2324,13 @@ Partial Public Class ThisAddIn
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
             Await SendQueuePositionNotificationsAsync(ct.Value)
             Await SendActiveJobProgressNotificationAsync(ct.Value)
+
+            ' Engineering diagnostics run only during genuine AutoPilot idle periods and
+            ' are launched without blocking the heartbeat/notification timer itself.
+            If _apMailQueue.IsEmpty AndAlso
+               System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then
+                TryStartAutoPilotLogDiagnosticsIdle(ct.Value)
+            End If
         Catch ex As OperationCanceledException
             ' Expected during shutdown
         Catch ex As System.Exception
@@ -2972,6 +3001,13 @@ Partial Public Class ThisAddIn
         Dim primaryReplySubmitted As System.Boolean = False
         Dim outcomeHandoffEstablished As System.Boolean = False
         Dim processingException As System.Exception = Nothing
+        Dim workflowContinuationKey As System.String = System.String.Empty
+        Dim continuationWorkflowId As System.String = System.String.Empty
+        Dim continuationRetryRequested As System.Boolean = False
+        Dim resumeBlockedWorkflow As System.Boolean = False
+        Dim continuationInstructionLanguage As System.String = System.String.Empty
+        Dim workflowContinuationRetentionDays As System.Int32 =
+            SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
 
         Try
             Try
@@ -3059,6 +3095,28 @@ Partial Public Class ThisAddIn
             If Not MatchesFilterRules(mailInfo) Then : ApDashboardLog("SKIP (no filter match): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
             If MatchesNegativeFilters(mailInfo) Then : ApDashboardLog("SKIP (negative filter): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
 
+            ' Cross-mail continuation is opt-in and bound to the configured sender address plus
+            ' Outlook ConversationID. A plain follow-up never silently resumes old state.
+            workflowContinuationKey = BuildAutoPilotWorkflowContinuationKey(mailInfo)
+            workflowContinuationRetentionDays = ResolveAutoPilotWorkflowContinuationRetentionDays()
+            continuationRetryRequested = IsExplicitWorkflowContinuationRetry(mailInfo.Body)
+            If continuationRetryRequested AndAlso workflowContinuationKey <> "" Then
+                continuationInstructionLanguage =
+                    SharedLibrary.Agents.WorkflowContinuity.GetLatestBlockedContinuationUserLanguage(
+                        workflowContinuationKey,
+                        "Outlook")
+                continuationWorkflowId =
+                    SharedLibrary.Agents.WorkflowContinuity.FindBlockedContinuationWorkflowId(
+                        workflowContinuationKey,
+                        "Outlook")
+                resumeBlockedWorkflow = Not System.String.IsNullOrWhiteSpace(continuationWorkflowId)
+                If resumeBlockedWorkflow Then
+                    ApDashboardLog("CONTINUATION: resuming blocked workflow " & continuationWorkflowId, "step")
+                Else
+                    ApDashboardLog("CONTINUATION: retry requested but no matching blocked checkpoint exists; refusing a blind fresh rerun.", "warn")
+                End If
+            End If
+
             ' Subject trigger word CAN be bypassed for existing conversations — reply subjects
             ' often have "Re: Re: ..." prefixes or the trigger word gets stripped in threading.
             If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
@@ -3087,6 +3145,8 @@ Partial Public Class ThisAddIn
                     ApDashboardLog("COOLDOWN BYPASS (holding notice already sent): " & mailInfo.SenderEmail, "step")
                 ElseIf isCatchUpMail Then
                     ApDashboardLog("COOLDOWN BYPASS (catch-up/reprocess mail): " & mailInfo.SenderEmail, "step")
+                ElseIf resumeBlockedWorkflow Then
+                    ApDashboardLog("COOLDOWN BYPASS (explicit blocked-workflow continuation): " & mailInfo.SenderEmail, "step")
                 Else
                     ApDashboardLog($"SKIP (cooldown): {mailInfo.SenderEmail} — SentOn {mailSentUtc:HH:mm:ss} UTC", "step")
                     Return
@@ -3096,6 +3156,20 @@ Partial Public Class ThisAddIn
             If _apConfig.MaxRepliesPerSession > 0 AndAlso _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (global session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached — " & _apSessionReplyCount.ToString() & " replies sent across all senders): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "warn") : Return : End If
 
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
+
+            If continuationRetryRequested AndAlso Not resumeBlockedWorkflow Then
+                Dim unavailableNotice As System.String =
+                    SharedLibrary.Agents.WorkflowContinuity.BuildContinuationUnavailableNotice(continuationInstructionLanguage)
+                Await SwitchToUi(Sub() SendReplyToSender(mi, unavailableNotice, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                outcomeHandoffEstablished = True
+                Dim continuationSourceFinalized As System.Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                System.Threading.Interlocked.Increment(_apSessionReplyCount)
+                RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                RecordLastProcessedTime()
+                TrackAutoPilotConversation(mi)
+                ApDashboardLog("CONTINUATION: sent unavailable-checkpoint notice; no fresh tooling run was started.", "warn")
+                Return
+            End If
 
             ' ── Reply-To mismatch: potential spoofing or reflection attack ──
             ' If the mail has a Reply-To that differs from the sender, log a warning
@@ -3282,6 +3356,8 @@ Partial Public Class ThisAddIn
                 ' This mail owns its delivery state. Never let a no-tool mail fall back
                 ' to the completed registry of the previous AutoPilot mail/dialog.
                 _lastCompletedToolingRunState = Nothing
+                _lastCompletedToolingWorkflowId = System.String.Empty
+                _lastCompletedToolingWasBlocked = False
                 _lastCompletedToolResponses = New List(Of ToolResponse)()
 
                 ' Initialize tool call log for this e-mail
@@ -3290,7 +3366,17 @@ Partial Public Class ThisAddIn
                 ' ── Build LLM prompt ──
                 ' Use only processable attachments in the prompt so the LLM doesn't see
                 ' [OVER SIZE LIMIT] tags that trigger unwanted tool recommendations.
-                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments)
+                Dim archiveAuthoritativeRequest As System.String = If(System.String.IsNullOrWhiteSpace(mailInfo.FormattingAwareBody), mailInfo.Body, mailInfo.FormattingAwareBody)
+                Dim archiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope =
+                    Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                        Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.AutoPilotMail, mailInfo.EntryID, mailInfo.SenderEmail, ct)
+                Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest =
+                    Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, archiveAuthoritativeRequest, archiveScope,
+                        allowInteractiveSelection:=False, cancellationToken:=ct)
+                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments,
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+                If archivePrepared.HasTrigger Then userPrompt &= System.Environment.NewLine & archivePrepared.ContextText
                 If oversizedNote IsNot Nothing Then
                     userPrompt &= oversizedNote
                 End If
@@ -3421,12 +3507,16 @@ Partial Public Class ThisAddIn
                             hideSplash:=True, hideLogWindow:=True,
                             cancellationToken:=ct,
                             binaryOutputDirectory:=_apCurrentTempDir,
-                            workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                            workflowId:=If(resumeBlockedWorkflow, continuationWorkflowId, SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId()),
                             memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
                             memoryGroundingModeIsExplicit:=True,
                             toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
                                 If(String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
                                 mailInfo.Subject),
+                            resumeWorkflowFromCheckpoint:=resumeBlockedWorkflow,
+                            workflowContinuationKey:=workflowContinuationKey,
+                            workflowContinuationRetentionDays:=workflowContinuationRetentionDays,
+                            semanticArchivePrepared:=archivePrepared,
                             transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                     Else
                         ' Use no-tools system prompt when tooling is disabled
@@ -3463,6 +3553,18 @@ Partial Public Class ThisAddIn
                     INI_ToolingMaximumIterations = previousMaxToolIterations
                     ClearAttachmentCaches()
                 End Try
+
+                If Not jobAborted AndAlso
+                   _lastCompletedToolingWasBlocked AndAlso
+                   Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingWorkflowId) AndAlso
+                   SharedLibrary.Agents.WorkflowContinuity.HasContinuationSnapshot(_lastCompletedToolingWorkflowId) Then
+                    Dim retryInstructionLanguage As System.String = continuationInstructionLanguage
+                    If _lastCompletedToolingRunState IsNot Nothing AndAlso
+                       Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingRunState.UserLanguage) Then
+                        retryInstructionLanguage = _lastCompletedToolingRunState.UserLanguage
+                    End If
+                    response = AppendAutoPilotContinuationRetryHint(response, retryInstructionLanguage)
+                End If
 
                 ' ── Detect swallowed cancellation ──
                 ' ExecuteToolingLoop catches OperationCanceledException internally and returns
@@ -3571,6 +3673,7 @@ Partial Public Class ThisAddIn
 
                 ' Collect registry-backed and bounded legacy-compatible result attachments.
                 Dim resultAttachments As List(Of String) = CollectResultAttachments(tempDir, attachmentPaths)
+                AddSemanticArchiveEvidenceAttachments(resultAttachments, archiveScope, tempDir)
                 preparedDeliverablesPresent = (resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0)
 
                 If resultAttachments.Count > 0 Then
@@ -5214,6 +5317,32 @@ Partial Public Class ThisAddIn
     ''' never promotes a staging file to an ArtifactDelivery Final, and is disabled whenever
     ''' an expected-artifact contract has been explicitly declared, including the intentional empty contract [].
     ''' </summary>
+    Private Sub AddSemanticArchiveEvidenceAttachments(resultAttachments As System.Collections.Generic.List(Of System.String),
+                                                      scope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope,
+                                                      tempDir As System.String)
+        If resultAttachments Is Nothing OrElse scope Is Nothing OrElse System.String.IsNullOrWhiteSpace(tempDir) Then Return
+        Dim existing As New System.Collections.Generic.HashSet(Of System.String)(resultAttachments, System.StringComparer.OrdinalIgnoreCase)
+        For Each sourcePath As System.String In scope.GetUsedSourcePaths()
+            If System.String.IsNullOrWhiteSpace(sourcePath) OrElse Not System.IO.File.Exists(sourcePath) Then Continue For
+            Try
+                If _apConfig IsNot Nothing AndAlso New System.IO.FileInfo(sourcePath).Length > _apConfig.MaxAttachmentBytes Then
+                    ApDashboardLog("Semantic Archive evidence file exceeds the configured AutoPilot attachment limit and was not attached: " & System.IO.Path.GetFileName(sourcePath), "warn")
+                    Continue For
+                End If
+                Dim staged As System.String = MaterializeAutoPilotDeliveryPath(sourcePath, tempDir)
+                If Not System.String.IsNullOrWhiteSpace(staged) AndAlso System.IO.File.Exists(staged) Then
+                    Dim normalized As System.String = System.IO.Path.GetFullPath(staged)
+                    If existing.Add(normalized) Then
+                        resultAttachments.Add(normalized)
+                        ApDashboardLog("Semantic Archive evidence attached: " & System.IO.Path.GetFileName(sourcePath), "info")
+                    End If
+                End If
+            Catch ex As System.Exception
+                ApDashboardLog("Could not attach Semantic Archive evidence file '" & System.IO.Path.GetFileName(sourcePath) & "': " & ex.Message, "warn")
+            End Try
+        Next
+    End Sub
+
     Private Function CollectResultAttachments(
         tempDir As String,
         originalAttachments As List(Of AutoPilotAttachmentInfo),
@@ -6006,7 +6135,8 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>Builds the user prompt from the mail content and attachments.</summary>
-    Private Shared Function BuildUserPromptFromMail(info As AutoPilotMailInfo, attachments As List(Of AutoPilotAttachmentInfo)) As String
+    Private Shared Function BuildUserPromptFromMail(info As AutoPilotMailInfo, attachments As List(Of AutoPilotAttachmentInfo),
+                                                   Optional authoritativeBodyOverride As System.String = Nothing) As System.String
         Dim sb As New StringBuilder()
         sb.AppendLine("[INCOMING EMAIL]")
         sb.AppendLine($"From: {info.SenderName} <{info.SenderEmail}>")
@@ -6019,6 +6149,8 @@ Partial Public Class ThisAddIn
         If Not hasFormattingMap Then
             body = If(info.Body, "")
         End If
+
+        If authoritativeBodyOverride IsNot Nothing Then body = authoritativeBodyOverride
 
         If body.Length > 25000 Then
             body = body.Substring(0, 25000) & vbCrLf & "[... truncated ...]"
@@ -7204,6 +7336,56 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="mi">The incoming MailItem to check.</param>
     ''' <returns>True if this mail is part of an AutoPilot-managed conversation.</returns>
+    Private Function IsExplicitWorkflowContinuationRetry(body As System.String) As System.Boolean
+        Dim normalized As System.String = If(body, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        For Each rawLine As System.String In normalized.Split(ControlChars.Lf)
+            Dim line As System.String = If(rawLine, System.String.Empty).Trim()
+            If line = System.String.Empty Then Continue For
+            If System.String.Equals(line, "retry", System.StringComparison.OrdinalIgnoreCase) OrElse
+               System.String.Equals(line, "#retry", System.StringComparison.OrdinalIgnoreCase) OrElse
+               line.StartsWith("retry ", System.StringComparison.OrdinalIgnoreCase) OrElse
+               line.StartsWith("#retry ", System.StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+            Return False
+        Next
+        Return False
+    End Function
+
+    Private Function BuildAutoPilotWorkflowContinuationKey(info As AutoPilotMailInfo) As System.String
+        If info Is Nothing Then Return System.String.Empty
+        Dim sender As System.String = If(info.SenderEmail, System.String.Empty).Trim().ToLowerInvariant()
+        Dim conversationId As System.String = If(info.ConversationID, System.String.Empty).Trim()
+        If sender = System.String.Empty OrElse conversationId = System.String.Empty Then Return System.String.Empty
+
+        Dim seed As System.String = sender & "|" & conversationId
+        Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+            Dim hash As System.Byte() = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(seed))
+            Dim builder As New System.Text.StringBuilder(40)
+            For i As System.Int32 = 0 To System.Math.Min(19, hash.Length - 1)
+                builder.Append(hash(i).ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+            Next
+            Return "mail_" & builder.ToString()
+        End Using
+    End Function
+
+    Private Function ResolveAutoPilotWorkflowContinuationRetentionDays() As System.Int32
+        If _apConfig IsNot Nothing AndAlso _apConfig.ThreadRetentionDays > 0 Then
+            Return _apConfig.ThreadRetentionDays
+        End If
+        Return SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
+    End Function
+
+    Private Function AppendAutoPilotContinuationRetryHint(responseText As System.String,
+                                                           userLanguage As System.String) As System.String
+        Dim text As System.String = If(responseText, System.String.Empty).TrimEnd()
+        Dim hint As System.String =
+            SharedLibrary.Agents.WorkflowContinuity.BuildContinuationRetryHint(userLanguage)
+        If text = System.String.Empty Then Return hint
+        If text.IndexOf(hint, System.StringComparison.Ordinal) >= 0 Then Return text
+        Return text & Environment.NewLine & Environment.NewLine & hint
+    End Function
+
     Private Function IsPartOfAutoPilotConversation(mi As MailItem) As Boolean
         Try
             ' 1. Check the incoming mail itself for the header (any value: "true" or "holding")
@@ -7807,16 +7989,23 @@ Partial Public Class ThisAddIn
         Dim manualText As String = ""
         Dim usingIndexedManual As Boolean = False
 
-        Dim isRemote As Boolean =
-            manualPath.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
-            manualPath.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+        ' Resolve local AND remote indexed manuals through the exact same cache/refresh
+        ' path used by HelpMeInky. The default HelpMeInky source is commonly remote; the
+        ' previous Not-isRemote guard therefore caused AutoPilot inability handling to
+        ' download and send the whole indexed file as plain text instead of searching it.
+        Dim semanticIndexPath As String =
+            Await Global.SharedLibrary.SharedLibrary.HelpMeInky.ResolveSemanticSearchIndexPathAsync(
+                manualPath,
+                Sub(statusText As String)
+                    If Not String.IsNullOrWhiteSpace(statusText) Then
+                        ApDashboardLog(statusText, "step")
+                    End If
+                End Sub).ConfigureAwait(False)
 
-        If Not isRemote AndAlso
-           SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(manualPath) Then
-
+        If Not String.IsNullOrWhiteSpace(semanticIndexPath) Then
             Dim retrieval As SharedMethods.SemanticSearchRetrievalResult =
                 Await SharedMethods.RetrieveSemanticSearchAsync(
-                    manualPath,
+                    semanticIndexPath,
                     _context,
                     questionForManual,
                     "",
@@ -8319,6 +8508,8 @@ Partial Public Class ThisAddIn
             ' This voicemail owns its delivery state. Never reuse a completed
             ' registry from the previous AutoPilot item when no tooling run occurs.
             _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolingWorkflowId = System.String.Empty
+            _lastCompletedToolingWasBlocked = False
             _lastCompletedToolResponses = New List(Of ToolResponse)()
 
             ' ── Initialize tool call log ──
@@ -8347,6 +8538,7 @@ Partial Public Class ThisAddIn
             ' Save references before Finally clears them
             Dim savedAttachments = _apCurrentAttachments
             voicemailAttachmentsForRecovery = savedAttachments
+            Dim voicemailArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing
 
             Try
                 senderDesignScope = SharedLibrary.Agents.DesignRepository.PushAccessScope(
@@ -8362,7 +8554,16 @@ Partial Public Class ThisAddIn
                 SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({_apCurrentTempDir})
 
                 ' Build prompt with the transcription as the "email body"
-                Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing)
+                voicemailArchiveScope =
+                    Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                        Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.Voicemail, mailInfo.EntryID, recipientEmail, ct)
+                Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest =
+                    Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, voicemailMailInfo.Body, voicemailArchiveScope,
+                        allowInteractiveSelection:=False, cancellationToken:=ct)
+                Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing,
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+                If archivePrepared.HasTrigger Then userPrompt &= System.Environment.NewLine & archivePrepared.ContextText
                 Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
 
                 ' ── Inject per-sender policy system-prompt instruction (keyed on the caller's mapped email) ──
@@ -8416,6 +8617,7 @@ Partial Public Class ThisAddIn
                         memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
                         memoryGroundingModeIsExplicit:=True,
                         toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(recipientName, voicemailMailInfo.Subject),
+                        semanticArchivePrepared:=archivePrepared,
                         transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -8506,6 +8708,7 @@ Partial Public Class ThisAddIn
 
             ' Collect any result attachments (use saved reference, not cleared field)
             Dim resultAttachments = CollectResultAttachments(tempDir, savedAttachments)
+            AddSemanticArchiveEvidenceAttachments(resultAttachments, voicemailArchiveScope, tempDir)
             voicemailPreparedDeliverablesPresent =
                 resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0
 

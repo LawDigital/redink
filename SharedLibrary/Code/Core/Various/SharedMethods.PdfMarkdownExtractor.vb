@@ -268,8 +268,19 @@ Namespace SharedLibrary
                 pdfPath As System.String,
                 Optional options As PdfMarkdownOptions = Nothing
             ) As System.String
+                Dim readError As System.String = Nothing
+                Return ReadPdfAsMarkdown(pdfPath, options, readError)
+            End Function
+
+            Public Shared Function ReadPdfAsMarkdown(
+                pdfPath As System.String,
+                options As PdfMarkdownOptions,
+                ByRef readError As System.String
+            ) As System.String
+                readError = System.String.Empty
                 If System.String.IsNullOrWhiteSpace(pdfPath) OrElse Not System.IO.File.Exists(pdfPath) Then
-                    Return "Error: File not found."
+                    readError = "Error: File not found."
+                    Return readError
                 End If
 
                 If options Is Nothing Then
@@ -285,7 +296,8 @@ Namespace SharedLibrary
                     )
 
                     If totalCharacters < minimumCharacters Then
-                        Return "Error: PDF contains too little extractable text and likely requires OCR."
+                        readError = "Error: PDF contains too little extractable text and likely requires OCR."
+                        Return readError
                     End If
 
                     model.BodyFontSize = DetermineBodyFontSize(model)
@@ -309,12 +321,14 @@ Namespace SharedLibrary
                     markdown = NormalizeMarkdown(markdown, options)
 
                     If System.String.IsNullOrWhiteSpace(markdown) Then
-                        Return "Error: No text content found in PDF."
+                        readError = "Error: No text content found in PDF."
+                        Return readError
                     End If
 
                     Return markdown.TrimEnd()
                 Catch ex As System.Exception
-                    Return "Error reading PDF as Markdown: " & ex.Message
+                    readError = "Error reading PDF as Markdown: " & ex.Message
+                    Return readError
                 End Try
             End Function
 

@@ -829,6 +829,12 @@ Partial Public Class ThisAddIn
 
             If GPTSetupError OrElse INIValuesMissing() Or Not INIloaded Then Return
 
+            If RI_Command = "CheckPhishing" Then CheckPhishing() : Return
+            If RI_Command = "MarkdownEditor" Then
+                Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.ShowEditor("Outlook")
+                Return
+            End If
+
             ' Use fully qualified names to avoid ambiguity
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
 
@@ -1746,6 +1752,7 @@ Partial Public Class ThisAddIn
 
             OtherPrompt = ""
             Dim LLMResult As String = ""
+            Dim archiveReplyContext As System.String = ""
 
             If AskForPrompt Then
 
@@ -1773,6 +1780,13 @@ Partial Public Class ThisAddIn
                     My.Settings.Save()
                 End If
 
+                If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(OtherPrompt) Then
+                    Dim archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                    OtherPrompt = archivePrepared.CleanPrompt
+                    archiveReplyContext = System.Environment.NewLine & archivePrepared.ContextText
+                End If
+
                 If DoMyStyle Then
                     MyStyleInsert = MyStyleHelpers.SelectPromptFromMyStyle(StylePath, "Outlook", 0, "Choose the style prompt to apply …", $"{AN} MyStyle", True)
                     If MyStyleInsert = "ERROR" Then Return
@@ -1780,7 +1794,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' Call LLM function with selected text
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_MailReply) & If(DoMyStyle, " " & MyStyleInsert, ""), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
+                LLMResult = Await LLM(InterpolateAtRuntime(SP_MailReply) & If(DoMyStyle, " " & MyStyleInsert, "") & archiveReplyContext, "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
             Else
                 LLMResult = Await LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
             End If
@@ -2196,6 +2210,7 @@ Partial Public Class ThisAddIn
             Dim DoMyStyle As Boolean = False
             Dim DoAddMail As Boolean = False
             Dim MailChainText As String = ""
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
 
             Dim UseSecondAPI As Boolean = False
 
@@ -2332,6 +2347,7 @@ SkipPromptWin:
             End Try
 
             Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                .SourceMenuProvider = Global.SharedLibrary.SharedLibrary.RetrievalSourceDiscovery.CreateMenuProvider(_context),
                 .Title = $"{AN} Freestyle",
                 .Heading = "What would you like Red Ink to do?",
                 .ModeCaption = "Output",
@@ -2861,6 +2877,33 @@ SkipPromptWin:
                 End Select
             End If
 
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(OtherPrompt) Then
+                Dim saSplash As New SLib.SplashScreen("Querying Semantic Archive...   ")
+                saSplash.Show()
+                System.Windows.Forms.Application.DoEvents()
+                Try
+                    archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                Finally
+                    If saSplash.InvokeRequired Then
+                        saSplash.Invoke(Sub()
+                                            saSplash.Close()
+                                            saSplash.Dispose()
+                                        End Sub)
+                    Else
+                        saSplash.Close()
+                        saSplash.Dispose()
+                    End If
+                End Try
+                OtherPrompt = archivePrepared.CleanPrompt
+                If Not System.String.Equals(archivePrepared.Status, "ok", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(archivePrepared.Status, "partial", System.StringComparison.OrdinalIgnoreCase) Then
+                    ShowCustomMessageBox("Semantic Archive: " & archivePrepared.Status &
+                        If(System.String.IsNullOrWhiteSpace(archivePrepared.ContextText), "", System.Environment.NewLine & archivePrepared.ContextText),
+                        $"{AN} Semantic Archive")
+                End If
+            End If
+
             Dim trailingCR As Boolean = selectedText.EndsWith(vbCrLf)
 
             ' Word returns a paragraph mark as a single vbCr (not vbCrLf) in Selection.Text,
@@ -2902,6 +2945,9 @@ SkipPromptWin:
                 UserPrompt &= "<MAILCHAIN>" & MailChainText & "</MAILCHAIN>"
             End If
 
+            If archivePrepared IsNot Nothing AndAlso archivePrepared.HasTrigger Then
+                SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+            End If
             LLMResult = Await LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
 
             If Not NoText Then
@@ -3520,6 +3566,12 @@ SkipPromptWin:
                         {"ToolingLogWindow", "Agents: Show log window"},
                         {"ToolingDryRun", $"Agents: Show {ToolFriendlyName.ToLower} overview before running"},
                         {"ToolingMaximumIterations", $"Agents: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
+                        {"SemanticArchiveCatalogPathLocal", "Semantic Archives: Catalog directory"},
+                        {"SemanticArchiveCatalogLibraryPath", "Semantic Archives: Central library directory"},
+                        {"SemanticArchiveBackgroundIndexingEnabled", "Semantic Archives: Background indexing"},
+                        {"SemanticArchiveBackgroundIndexingWindow", "Semantic Archives: Background processing window"},
+                        {"SemanticArchivePermissionMaintenanceEnabled", "Semantic Archives: Automatic permission maintenance"},
+                        {"SemanticArchivePermissionMaintenanceWindow", "Semantic Archives: Permission maintenance window"},
                         {"KnowledgeStorePath", "Knowledge store file (central)"},
                         {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
                         {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},
@@ -3560,6 +3612,12 @@ SkipPromptWin:
                         {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
                         {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
                         {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."},
+                        {"SemanticArchiveCatalogPathLocal", "Directory containing redink-sa-catalog.json and semantic archive indexes; supports environment variables. Empty disables archive search and indexing."},
+                        {"SemanticArchiveCatalogLibraryPath", "Optional central directory of per-archive definitions. Requires a local catalog path. Readable entries are automatically subscribed; write access is required to publish, update or withdraw. Supports SharedMethods placeholders."},
+                        {"SemanticArchiveBackgroundIndexingEnabled", "Independent per-user switch for automatic archive indexing while Word or Outlook is running. Defaults to off. Manual maintenance and published search remain available."},
+                        {"SemanticArchiveBackgroundIndexingWindow", "Independent local-time window, e.g. allow:22:00-06:00;12:00-13:00 or deny:08:00-18:00. Empty allows any time; archive preferences can narrow it."},
+                        {"SemanticArchivePermissionMaintenanceEnabled", "Controls independent background reconciliation of generated artifact permissions while Word or Outlook is running. Content indexing may remain off; retrieval still checks current source access."},
+                        {"SemanticArchivePermissionMaintenanceWindow", "Independent local-time window for automatic permission maintenance, e.g. allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. Empty permits any time. Separate from the content-indexing window."},
                         {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
                         {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
                         {"KnowledgeStoreUseLLMIndex", "When enabled, the indexer uses the LLM to generate richer summaries and keywords (uses API credits)"},
@@ -3573,6 +3631,7 @@ SkipPromptWin:
 
         ApplyEffectiveToolingLogWindowSettingToContext()
         ShowSettingsWindow(Settings, SettingsTips)
+        InitializeKnowledgeStoreService()
 
         If hadToolingLogOverrideBefore OrElse _context.INI_ToolingLogWindow <> toolingLogSettingBefore Then
             SetToolingLogWindowOverride(_context.INI_ToolingLogWindow)

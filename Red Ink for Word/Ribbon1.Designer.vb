@@ -110,8 +110,10 @@ Partial Class Ribbon1
         Me.RI_FreestyleRepeat = Me.Factory.CreateRibbonButton
         Me.RI_Chat2 = Me.Factory.CreateRibbonButton
         Me.RI_DiscussInky = Me.Factory.CreateRibbonButton
+        Me.RI_SemanticArchives = Me.Factory.CreateRibbonButton
         Me.RI_Search = Me.Factory.CreateRibbonButton
         Me.Menu2 = Me.Factory.CreateRibbonMenu
+        Me.RI_MarkdownEditor = Me.Factory.CreateRibbonButton
         Me.RI_Translator = Me.Factory.CreateRibbonButton
         Me.RI_Halves = Me.Factory.CreateRibbonButton
         Me.RI_LiveCompare = Me.Factory.CreateRibbonButton
@@ -482,6 +484,7 @@ Partial Class Ribbon1
         '
         'Menu3
         '
+        Me.Menu3.Items.Add(Me.RI_SemanticArchives)
         Me.Menu3.Items.Add(Me.RI_Summarize)
         Me.Menu3.Items.Add(Me.RI_Explain)
         Me.Menu3.Items.Add(Me.RI_ArgueAgainst)
@@ -692,14 +695,27 @@ Partial Class Ribbon1
         '
         'RI_Search
         '
+        Me.RI_SemanticArchives.Label = "Semantic Archives"
+        Me.RI_SemanticArchives.Name = "RI_SemanticArchives"
+        Me.RI_SemanticArchives.OfficeImageId = "DatabaseCopyDatabaseFile"
+        Me.RI_SemanticArchives.ScreenTip = "Create, manage and index semantic archives"
+        Me.RI_SemanticArchives.ShowImage = True
+        '
         Me.RI_Search.Label = "Context Search"
         Me.RI_Search.Name = "RI_Search"
         Me.RI_Search.OfficeImageId = "Insights"
         Me.RI_Search.ScreenTip = "Allows you to search your text for information based on its meaning"
         Me.RI_Search.ShowImage = True
         '
+        'Shared Markdown Editor
+        Me.RI_MarkdownEditor.Label = "Markdown Editor"
+        Me.RI_MarkdownEditor.Name = "RI_MarkdownEditor"
+        Me.RI_MarkdownEditor.Image = SharedMethods.CreateMarkdownDocumentBitmap()
+        Me.RI_MarkdownEditor.ShowImage = True
+        '
         'Menu2
         '
+        Me.Menu2.Items.Add(Me.RI_MarkdownEditor)
         Me.Menu2.Items.Add(Me.RI_Translator)
         Me.Menu2.Items.Add(Me.RI_Halves)
         Me.Menu2.Items.Add(Me.RI_LiveCompare)
@@ -1300,6 +1316,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Regex As RibbonButton
     Friend WithEvents RI_Import As RibbonButton
     Friend WithEvents RI_Chat2 As RibbonButton
+    Friend WithEvents RI_SemanticArchives As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_Search As RibbonButton
     Friend WithEvents RI_Transcriptor As RibbonButton
     Friend WithEvents RI_TalkToMe As RibbonButton
@@ -1314,6 +1331,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Convincing As RibbonButton
     Friend WithEvents RI_SpecialModel As RibbonButton
     Friend WithEvents RI_InsertClipboard As RibbonButton
+    Friend WithEvents RI_MarkdownEditor As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_Translator As RibbonButton
     Friend WithEvents RI_BalloonMergePart As RibbonButton
     Friend WithEvents RI_BalloonMergeFull As RibbonButton
