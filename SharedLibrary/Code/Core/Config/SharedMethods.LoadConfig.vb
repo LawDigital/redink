@@ -216,6 +216,7 @@ Namespace SharedLibrary
                 context.SP_RemoveClutter = If(configDict.ContainsKey("SP_RemoveClutter"), configDict("SP_RemoveClutter"), Default_SP_RemoveClutter)
                 context.SP_Redact = If(configDict.ContainsKey("SP_Redact"), configDict("SP_Redact"), Default_SP_Redact)
                 context.SP_CheckforII = If(configDict.ContainsKey("SP_CheckforII"), configDict("SP_CheckforII"), Default_SP_CheckforII)
+                context.SP_CheckforPhishing = If(configDict.ContainsKey("SP_CheckforPhishing"), configDict("SP_CheckforPhishing"), Default_SP_CheckforPhishing)
                 context.SP_Extract = If(configDict.ContainsKey("SP_Extract"), configDict("SP_Extract"), Default_SP_Extract)
                 context.SP_ExtractBuilder = If(configDict.ContainsKey("SP_ExtractBuilder"), configDict("SP_ExtractBuilder"), Default_SP_ExtractBuilder)
                 context.SP_ExtractSchema = If(configDict.ContainsKey("SP_ExtractSchema"), configDict("SP_ExtractSchema"), Default_SP_ExtractSchema)

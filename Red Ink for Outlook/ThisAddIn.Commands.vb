@@ -829,6 +829,12 @@ Partial Public Class ThisAddIn
 
             If GPTSetupError OrElse INIValuesMissing() Or Not INIloaded Then Return
 
+            If RI_Command = "CheckPhishing" Then CheckPhishing() : Return
+            If RI_Command = "MarkdownEditor" Then
+                Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.ShowEditor("Outlook")
+                Return
+            End If
+
             ' Use fully qualified names to avoid ambiguity
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
 

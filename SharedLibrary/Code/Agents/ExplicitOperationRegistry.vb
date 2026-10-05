@@ -143,6 +143,9 @@ Namespace Agents
         Public Property AttemptCount As Integer
         Public Property Status As ExplicitOperationStatus = ExplicitOperationStatus.Pending
         Public Property TerminalReason As String = ""
+        Public Property SucceededToolName As System.String = ""
+        Public Property SucceededArgumentsHash As System.String = ""
+        Public Property SucceededResponse As System.String = ""
         Public Property UpdatedUtc As DateTime = DateTime.UtcNow
     End Class
 
@@ -166,6 +169,9 @@ Namespace Agents
                         .AttemptCount = record.AttemptCount,
                         .Status = record.Status,
                         .TerminalReason = record.TerminalReason,
+                        .SucceededToolName = record.SucceededToolName,
+                        .SucceededArgumentsHash = record.SucceededArgumentsHash,
+                        .SucceededResponse = record.SucceededResponse,
                         .UpdatedUtc = record.UpdatedUtc
                     }).
                     ToList()
@@ -187,6 +193,9 @@ Namespace Agents
                         .AttemptCount = System.Math.Max(0, source.AttemptCount),
                         .Status = source.Status,
                         .TerminalReason = If(source.TerminalReason, ""),
+                        .SucceededToolName = If(source.SucceededToolName, ""),
+                        .SucceededArgumentsHash = If(source.SucceededArgumentsHash, ""),
+                        .SucceededResponse = If(source.SucceededResponse, ""),
                         .UpdatedUtc = source.UpdatedUtc
                     }
                     _records(BuildRecordKey(copy.OperationId, copy.StepId)) = copy
@@ -227,6 +236,86 @@ Namespace Agents
                 End If
             Next
             Return False
+        End Function
+
+        ' Identity remains operation_id + step_id. The binding only validates a replay;
+        ' it never infers operation identity or permits another execution of a succeeded step.
+        Public Sub CaptureSucceededResult(toolName As System.String,
+                                          arguments As System.Collections.Generic.IDictionary(Of System.String, Object),
+                                          responseText As System.String)
+            If System.String.IsNullOrWhiteSpace(toolName) OrElse System.String.IsNullOrWhiteSpace(responseText) Then Return
+            ' Bound journal growth. Oversized results retain success state but cannot authorize replay.
+            If responseText.Length > 65536 Then Return
+            Dim fingerprint As System.String = HashReplayArguments(arguments)
+            If fingerprint = "" Then Return
+            SyncLock _syncRoot
+                For Each identity As ExplicitOperationIdentity In ExtractOperationIdentities(arguments)
+                    Dim record As ExplicitOperationRecord = Nothing
+                    If Not _records.TryGetValue(BuildRecordKey(identity.OperationId, identity.StepId), record) OrElse record Is Nothing Then Continue For
+                    If record.Status <> ExplicitOperationStatus.Succeeded OrElse record.SucceededArgumentsHash <> "" Then Continue For
+                    record.SucceededToolName = toolName
+                    record.SucceededArgumentsHash = fingerprint
+                    record.SucceededResponse = responseText
+                Next
+            End SyncLock
+        End Sub
+
+        Public Function TryReplaySucceededResult(toolName As System.String,
+                                                arguments As System.Collections.Generic.IDictionary(Of System.String, Object),
+                                                ByRef responseText As System.String) As System.Boolean
+            responseText = ""
+            Dim identities As System.Collections.Generic.List(Of ExplicitOperationIdentity) = ExtractOperationIdentities(arguments)
+            If identities.Count = 0 Then Return False
+            Dim fingerprint As System.String = HashReplayArguments(arguments)
+            If fingerprint = "" Then Return False
+            SyncLock _syncRoot
+                Dim captured As System.String = Nothing
+                For Each identity As ExplicitOperationIdentity In identities
+                    Dim record As ExplicitOperationRecord = Nothing
+                    If Not _records.TryGetValue(BuildRecordKey(identity.OperationId, identity.StepId), record) OrElse record Is Nothing Then Return False
+                    If record.Status <> ExplicitOperationStatus.Succeeded OrElse
+                       Not System.String.Equals(record.SucceededToolName, toolName, System.StringComparison.Ordinal) OrElse
+                       Not System.String.Equals(record.SucceededArgumentsHash, fingerprint, System.StringComparison.Ordinal) OrElse
+                       System.String.IsNullOrWhiteSpace(record.SucceededResponse) Then Return False
+                    If captured IsNot Nothing AndAlso Not System.String.Equals(captured, record.SucceededResponse, System.StringComparison.Ordinal) Then Return False
+                    captured = record.SucceededResponse
+                Next
+                responseText = If(captured, "")
+                Return responseText <> ""
+            End SyncLock
+        End Function
+
+        Private Shared Function HashReplayArguments(arguments As System.Collections.Generic.IDictionary(Of System.String, Object)) As System.String
+            If arguments Is Nothing Then Return ""
+            Try
+                Dim canonical As System.String = CanonicalReplayToken(Newtonsoft.Json.Linq.JToken.FromObject(arguments)).ToString(Newtonsoft.Json.Formatting.None)
+                Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                    Return System.BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(canonical))).Replace("-", "")
+                End Using
+            Catch ex As System.Exception
+                ' An unrepresentable binding cannot authorize replay.
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function CanonicalReplayToken(token As Newtonsoft.Json.Linq.JToken) As Newtonsoft.Json.Linq.JToken
+            Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+            If obj IsNot Nothing Then
+                Dim result As New Newtonsoft.Json.Linq.JObject()
+                For Each prop As Newtonsoft.Json.Linq.JProperty In obj.Properties().OrderBy(Function(item) item.Name, System.StringComparer.Ordinal)
+                    result.Add(prop.Name, CanonicalReplayToken(prop.Value))
+                Next
+                Return result
+            End If
+            Dim array As Newtonsoft.Json.Linq.JArray = TryCast(token, Newtonsoft.Json.Linq.JArray)
+            If array IsNot Nothing Then
+                Dim result As New Newtonsoft.Json.Linq.JArray()
+                For Each item As Newtonsoft.Json.Linq.JToken In array
+                    result.Add(CanonicalReplayToken(item))
+                Next
+                Return result
+            End If
+            Return token.DeepClone()
         End Function
 
         Public Function TryGetFirstTerminalOperationId(arguments As System.Collections.Generic.IDictionary(Of String, Object),
@@ -833,14 +922,15 @@ Namespace Agents
             responseText As System.String,
             registry As ExplicitOperationRegistry)
 
-            If registry Is Nothing OrElse Not HasCapability(tool) Then Return
+            If registry Is Nothing OrElse tool Is Nothing Then Return
             If ToolCallSequencing.IsZeroChangeOperationResult(responseText) Then Return
 
             Dim operationId As System.String = ""
             Dim stepId As System.String = ""
-            If TryGetTopLevelOperationIdentity(arguments, operationId, stepId) Then
+            If HasCapability(tool) AndAlso TryGetTopLevelOperationIdentity(arguments, operationId, stepId) Then
                 registry.MarkSucceeded(operationId, stepId)
             End If
+            registry.CaptureSucceededResult(tool.ToolName, arguments, responseText)
         End Sub
     End Class
 

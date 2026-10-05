@@ -526,7 +526,9 @@
     <Compile Include="ThisAddIn.ChatAgentScope.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />
+    <Compile Include="ThisAddIn.Commands.CheckPhishing.vb" />
     <Compile Include="ThisAddIn.Commands.PSTConverter.vb" />
+    <Compile Include="ThisAddIn.Commands.PSTServerExport.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
     <Compile Include="ThisAddIn.KnowledgeStoreWiring.vb" />
     <Compile Include="ThisAddIn.M365SearchForm.vb">

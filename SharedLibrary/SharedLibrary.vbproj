@@ -604,6 +604,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\CommonFeatures\M365\M365Service.Extensions.vb" />
+    <Compile Include="Code\CommonFeatures\M365\M365Service.MailExport.vb" />
     <Compile Include="Code\CommonFeatures\M365\M365Service.Threads.vb" />
     <Compile Include="Code\CommonFeatures\M365\M365Service.vb" />
     <Compile Include="Code\CommonFeatures\M365\M365ToolService.vb" />
@@ -656,6 +657,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Core\Config\IniImportManager.vb" />
+    <Compile Include="Code\CommonFeatures\MarkdownEditorForm.vb" />
     <Compile Include="Code\CommonFeatures\QuickTranslateWidget.vb">
       <SubType>Form</SubType>
     </Compile>
@@ -771,6 +773,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
+    <EmbeddedResource Include="Code\CommonFeatures\MarkdownEditor.html">
+      <LogicalName>RedInk.MarkdownEditor.html</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="Code\Core\Config\ConfigWizard.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </EmbeddedResource>

@@ -1215,6 +1215,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_CheckforPhishing As String
+        Get
+            Return _context.SP_CheckforPhishing
+        End Get
+        Set(value As String)
+            _context.SP_CheckforPhishing = value
+        End Set
+    End Property
+
 
 
     Public Shared Property SP_ContextSearch As String

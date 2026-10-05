@@ -113,6 +113,7 @@ Partial Class Ribbon1
         Me.RI_SemanticArchives = Me.Factory.CreateRibbonButton
         Me.RI_Search = Me.Factory.CreateRibbonButton
         Me.Menu2 = Me.Factory.CreateRibbonMenu
+        Me.RI_MarkdownEditor = Me.Factory.CreateRibbonButton
         Me.RI_Translator = Me.Factory.CreateRibbonButton
         Me.RI_Halves = Me.Factory.CreateRibbonButton
         Me.RI_LiveCompare = Me.Factory.CreateRibbonButton
@@ -706,8 +707,15 @@ Partial Class Ribbon1
         Me.RI_Search.ScreenTip = "Allows you to search your text for information based on its meaning"
         Me.RI_Search.ShowImage = True
         '
+        'Shared Markdown Editor
+        Me.RI_MarkdownEditor.Label = "Markdown Editor"
+        Me.RI_MarkdownEditor.Name = "RI_MarkdownEditor"
+        Me.RI_MarkdownEditor.Image = SharedMethods.CreateMarkdownDocumentBitmap()
+        Me.RI_MarkdownEditor.ShowImage = True
+        '
         'Menu2
         '
+        Me.Menu2.Items.Add(Me.RI_MarkdownEditor)
         Me.Menu2.Items.Add(Me.RI_Translator)
         Me.Menu2.Items.Add(Me.RI_Halves)
         Me.Menu2.Items.Add(Me.RI_LiveCompare)
@@ -1323,6 +1331,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Convincing As RibbonButton
     Friend WithEvents RI_SpecialModel As RibbonButton
     Friend WithEvents RI_InsertClipboard As RibbonButton
+    Friend WithEvents RI_MarkdownEditor As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_Translator As RibbonButton
     Friend WithEvents RI_BalloonMergePart As RibbonButton
     Friend WithEvents RI_BalloonMergeFull As RibbonButton

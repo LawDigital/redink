@@ -169,6 +169,44 @@ Namespace SharedLibrary
         End Function
 
         Private Shared ReadOnly CurrentFailureBudgetStorage As New System.Threading.AsyncLocal(Of TransientFailureBudgetState)()
+        Private Shared ReadOnly DiagnosticSinkStorage As New System.Threading.AsyncLocal(Of System.Action(Of System.String))()
+
+        Public Shared Function PushDiagnosticSink(sink As System.Action(Of System.String)) As System.IDisposable
+            Dim previous As System.Action(Of System.String) = DiagnosticSinkStorage.Value
+            DiagnosticSinkStorage.Value = sink
+            Return New DiagnosticScope(previous)
+        End Function
+
+        Public Shared Sub ReportTransientAttempt(profile As LlmTransportRetryProfile, statusCode As System.Int32,
+                                                  attempt As System.Int32, maxAttempts As System.Int32,
+                                                  nextDelayMilliseconds As System.Int32)
+            Dim policy As LlmTransportRetryPolicy = LlmTransportRetryPolicy.ForProfile(profile)
+            Dim remaining As System.Int32 = GetRemainingTransientFailureBudgetMilliseconds(policy.MaxTransientFailureWallClockMilliseconds)
+            Dim message As System.String = $"[LLM TRANSIENT TRANSPORT] profile={profile}; status={statusCode}; attempt={attempt}/{maxAttempts}; nextDelayMs={nextDelayMilliseconds}; remainingBudgetMs={remaining}."
+            System.Diagnostics.Debug.WriteLine(message)
+            Try
+                Dim sink As System.Action(Of System.String) = DiagnosticSinkStorage.Value
+                If sink IsNot Nothing Then sink(message)
+            Catch ex As System.Exception
+                ' Diagnostic failure must never change transport or cancellation behavior.
+                System.Diagnostics.Debug.WriteLine("[LLM TRANSIENT TRANSPORT] Diagnostic sink failed: " & ex.GetType().FullName)
+            End Try
+        End Sub
+
+        Private NotInheritable Class DiagnosticScope
+            Implements System.IDisposable
+            Private ReadOnly _previous As System.Action(Of System.String)
+            Private _disposed As System.Boolean
+            Public Sub New(previous As System.Action(Of System.String))
+                _previous = previous
+            End Sub
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If _disposed Then Return
+                _disposed = True
+                DiagnosticSinkStorage.Value = _previous
+            End Sub
+        End Class
+
 
         Public Shared Sub NoteTransientFailure(maxWallClockMilliseconds As System.Int32)
             If ResolveProfile(LlmTransportRetryProfile.Inherit) <> LlmTransportRetryProfile.Unattended Then Return

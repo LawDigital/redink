@@ -951,6 +951,14 @@ Public Class Ribbon2
         Globals.ThisAddIn.MainMenu("M365")
     End Sub
 
+    Private Sub RI_CheckPhishing_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_CheckPhishing.Click
+        Globals.ThisAddIn.MainMenu("CheckPhishing")
+    End Sub
+
+    Private Sub RI_MarkdownEditor_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_MarkdownEditor.Click
+        Globals.ThisAddIn.MainMenu("MarkdownEditor")
+    End Sub
+
     Private Sub RI_MailMover_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_MailMover.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "MailMover_Outlook invoked")
         Globals.ThisAddIn.MainMenu("MailMover")

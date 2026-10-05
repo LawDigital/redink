@@ -501,6 +501,8 @@ Partial Class Ribbon2
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
         Me.RI_M365 = Me.Factory.CreateRibbonButton
+        Me.RI_CheckPhishing = Me.Factory.CreateRibbonButton
+        Me.RI_MarkdownEditor = Me.Factory.CreateRibbonButton
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
@@ -556,8 +558,10 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
         Me.Menu1.Items.Add(Me.RI_M365)
+        Me.Menu1.Items.Add(Me.RI_CheckPhishing)
         Me.Menu1.Items.Add(Me.RI_MailMover)
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
+        Me.Menu1.Items.Add(Me.RI_MarkdownEditor)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
         Me.Menu1.Items.Add(Me.SearchTools)
         Me.Menu1.Items.Add(Me.RI_AutoPilot)
@@ -724,6 +728,17 @@ Partial Class Ribbon2
         Me.RI_M365.OfficeImageId = "NewSearchFolder"
         Me.RI_M365.ScreenTip = "Searches your Microsoft 365 content with and without the help of AI"
         Me.RI_M365.ShowImage = True
+        '
+        'Passive security check and shared modeless editor
+        Me.RI_CheckPhishing.Label = "Check Phishing"
+        Me.RI_CheckPhishing.Name = "RI_CheckPhishing"
+        Me.RI_CheckPhishing.ScreenTip = "Assess the current mail, literal links and attachment metadata without opening them"
+        Me.RI_CheckPhishing.OfficeImageId = "ProtectDocument"
+        Me.RI_CheckPhishing.ShowImage = True
+        Me.RI_MarkdownEditor.Label = "Markdown Editor"
+        Me.RI_MarkdownEditor.Name = "RI_MarkdownEditor"
+        Me.RI_MarkdownEditor.Image = SharedMethods.CreateMarkdownDocumentBitmap()
+        Me.RI_MarkdownEditor.ShowImage = True
         '
         'RI_MailMover
         '
@@ -942,6 +957,8 @@ Partial Class Ribbon2
     Friend WithEvents RI_Freestyle As RibbonButton
     Friend WithEvents RI_Clipboard As RibbonButton
     Friend WithEvents RI_M365 As RibbonButton
+    Friend WithEvents RI_CheckPhishing As Microsoft.Office.Tools.Ribbon.RibbonButton
+    Friend WithEvents RI_MarkdownEditor As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_MailMover As RibbonButton
     Friend WithEvents RI_InboxBoard As RibbonButton
     Friend WithEvents RI_Translate As RibbonButton

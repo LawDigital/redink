@@ -750,7 +750,15 @@ Namespace SharedLibrary
                 LlmTransportRetryPolicy.ForProfile(transportRetryProfile)
 
             Await Agents.AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
+            Dim requestProfileScope As System.IDisposable = Nothing
+            Dim requestFailureScope As System.IDisposable = Nothing
             Try
+                If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended Then
+                    ' One logical request owns its bounded retry budget. Do not reset a
+                    ' mutable parent budget: other concurrent requests may still use it.
+                    requestProfileScope = LlmTransportRetryPolicyScope.Push(transportRetryPolicy.Profile)
+                    requestFailureScope = LlmTransportRetryPolicyScope.PushIsolatedFailureBudget()
+                End If
 
                 ' Anonymization features
 
@@ -1006,6 +1014,7 @@ Namespace SharedLibrary
                         End Sub
                     Dim ct As System.Threading.CancellationToken = cts.Token
 
+                    Dim lastAttemptTimeoutMilliseconds As System.Int32 = 0
                     Dim restartCountdownAndTimeout As Action(Of String) =
                             Sub(newBaseText As String)
                                 Dim effectiveTimeoutMilliseconds As System.Int32 =
@@ -1027,6 +1036,7 @@ Namespace SharedLibrary
                                                 remainingFailureBudgetMilliseconds))
                                 End If
 
+                                lastAttemptTimeoutMilliseconds = effectiveTimeoutMilliseconds
                                 cts.CancelAfter(System.TimeSpan.FromMilliseconds(effectiveTimeoutMilliseconds))
 
                                 If Not Hidesplash Then
@@ -1411,6 +1421,7 @@ Namespace SharedLibrary
                                                 lastTransientStatusCode = CInt(response.StatusCode)
                                                 LlmTransportRetryPolicyScope.NoteTransientFailure(
                                                     transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                                LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, CInt(response.StatusCode), attempt + 1, maxRetries + 1, -1)
 
                                                 If attempt = maxRetries OrElse
                                                    (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
@@ -1434,8 +1445,7 @@ Namespace SharedLibrary
                                                     attempt,
                                                     cumulativeRetryDelayMs,
                                                     transportRetryPolicy)
-                                                System.Diagnostics.Debug.WriteLine(
-                                                    $"[LLM TRANSIENT TRANSPORT] profile={transportRetryPolicy.Profile}; status={CInt(response.StatusCode)}; attempt={attempt + 1}/{maxRetries + 1}; nextDelayMs={pendingRetryDelayMs}; cumulativeDelayMs={cumulativeRetryDelayMs}.")
+                                                LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, CInt(response.StatusCode), attempt + 1, maxRetries + 1, pendingRetryDelayMs)
                                                 Continue For
                                             Else
                                                 Dim errorContent As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
@@ -1538,7 +1548,7 @@ Namespace SharedLibrary
                             End If
 
                             Throw New System.TimeoutException(
-                                $"LLM request timed out after {TimeoutValue} ms.",
+                                $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                                 ex)
                         Finally
                             cts.Dispose()
@@ -1622,6 +1632,7 @@ Namespace SharedLibrary
                                     lastTransientStatusCode = result.StatusCode
                                     LlmTransportRetryPolicyScope.NoteTransientFailure(
                                         transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                    LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, result.StatusCode, attempt + 1, maxRetries + 1, -1)
 
                                     If attempt = maxRetries OrElse
                                        (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
@@ -1644,8 +1655,7 @@ Namespace SharedLibrary
                                         attempt,
                                         cumulativeRetryDelayMs,
                                         transportRetryPolicy)
-                                    System.Diagnostics.Debug.WriteLine(
-                                        $"[LLM TRANSIENT TRANSPORT] profile={transportRetryPolicy.Profile}; status={result.StatusCode}; attempt={attempt + 1}/{maxRetries + 1}; nextDelayMs={pendingRetryDelayMs}; cumulativeDelayMs={cumulativeRetryDelayMs}.")
+                                    LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, result.StatusCode, attempt + 1, maxRetries + 1, pendingRetryDelayMs)
                                     Continue For
                                 Else
                                     Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: {result.Body}"
@@ -1813,6 +1823,7 @@ Namespace SharedLibrary
                                         getLastTransientStatusCode = getResult.StatusCode
                                         LlmTransportRetryPolicyScope.NoteTransientFailure(
                                             transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                        LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, getResult.StatusCode, getAttempt + 1, transportRetryPolicy.MaxRetries + 1, -1)
 
                                         If getAttempt = transportRetryPolicy.MaxRetries OrElse
                                            (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
@@ -1835,6 +1846,7 @@ Namespace SharedLibrary
                                             getAttempt,
                                             getCumulativeRetryDelayMs,
                                             transportRetryPolicy)
+                                        LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, getResult.StatusCode, getAttempt + 1, transportRetryPolicy.MaxRetries + 1, getPendingRetryDelayMs)
                                         Continue For
                                     End If
 
@@ -1967,7 +1979,7 @@ Namespace SharedLibrary
                         End If
 
                         Throw New System.TimeoutException(
-                            $"LLM request timed out after {TimeoutValue} ms.",
+                            $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                             ex)
                     Finally
                         cts.Dispose()
@@ -2047,6 +2059,8 @@ PostProcess:
                     End If
                 End Try
             Finally
+                If requestFailureScope IsNot Nothing Then requestFailureScope.Dispose()
+                If requestProfileScope IsNot Nothing Then requestProfileScope.Dispose()
                 Agents.AgentGate.Release()
             End Try
         End Function

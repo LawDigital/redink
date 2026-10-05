@@ -2996,6 +2996,7 @@ Namespace SharedLibrary
                     {"SP_RemoveClutter", context.SP_RemoveClutter},
                     {"SP_Redact", context.SP_Redact},
                     {"SP_CheckforII", context.SP_CheckforII},
+                    {"SP_CheckforPhishing", context.SP_CheckforPhishing},
                     {"SP_Extract", context.SP_Extract},
                     {"SP_ExtractBuilder", context.SP_ExtractBuilder},
                     {"SP_ExtractSchema", context.SP_ExtractSchema},
@@ -3297,6 +3298,7 @@ Namespace SharedLibrary
                 {"SP_RemoveClutter", Default_SP_RemoveClutter},
                 {"SP_Redact", Default_SP_Redact},
                 {"SP_CheckforII", Default_SP_CheckforII},
+                {"SP_CheckforPhishing", Default_SP_CheckforPhishing},
                 {"SP_Extract", Default_SP_Extract},
                 {"SP_ExtractBuilder", Default_SP_ExtractBuilder},
                 {"SP_ExtractSchema", Default_SP_ExtractSchema},
@@ -4607,6 +4609,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_RemoveClutter", context.SP_RemoveClutter)
             variableValues.Add("SP_Redact", context.SP_Redact)
             variableValues.Add("SP_CheckforII", context.SP_CheckforII)
+            variableValues.Add("SP_CheckforPhishing", context.SP_CheckforPhishing)
             variableValues.Add("SP_Extract", context.SP_Extract)
             variableValues.Add("SP_ExtractBuilder", context.SP_ExtractBuilder)
             variableValues.Add("SP_ExtractSchema", context.SP_ExtractSchema)
@@ -4819,6 +4822,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_RemoveClutter") Then context.SP_RemoveClutter = CStr(updatedValues("SP_RemoveClutter"))
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))
                 If updatedValues.ContainsKey("SP_CheckforII") Then context.SP_CheckforII = CStr(updatedValues("SP_CheckforII"))
+                If updatedValues.ContainsKey("SP_CheckforPhishing") Then context.SP_CheckforPhishing = CStr(updatedValues("SP_CheckforPhishing"))
                 If updatedValues.ContainsKey("SP_Extract") Then context.SP_Extract = CStr(updatedValues("SP_Extract"))
                 If updatedValues.ContainsKey("SP_ExtractBuilder") Then context.SP_ExtractBuilder = CStr(updatedValues("SP_ExtractBuilder"))
                 If updatedValues.ContainsKey("SP_ExtractSchema") Then context.SP_ExtractSchema = CStr(updatedValues("SP_ExtractSchema"))

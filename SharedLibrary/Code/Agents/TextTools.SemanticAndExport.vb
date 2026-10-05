@@ -184,12 +184,13 @@ Namespace Agents
             Return New List(Of ModelConfig) From {
                 BuildToolConfig(
                     ToolExportToText,
-                    "Silently extracts readable text to UTF-8 .txt files. Items retain source_path/output_path/status and add char_count (UTF-16), byte_count, snapshot_sha256 (exact output bytes/BOM), source_sha256, resource_id/resource_reuse, secret-free adapter/config fingerprints and observed PDF page/OCR fields. Successful extraction uses an immutable captured source and a session-scoped single-flight resource: identical source bytes plus identical effective adapter/options reuse the same successful extraction instead of rerunning OCR. Failed/cancelled extraction is never cached. overwrite=false still checks an existing output before extraction; an output published by this session is provenance-verified against its resource, while an unrelated pre-existing .txt remains reuse_validation=not_verified. processed_ranges are host-known ranges only and do not claim paragraph-to-page mapping. Null metadata means unknown, not false or complete. output_path can feed create_word_document.markdown_path when explicitly interpreted as Markdown. Newly written exports are published atomically. Hashes prove byte identity, not OCR accuracy. For directories, structure is preserved.",
+                    "Silently extracts readable text to UTF-8 .txt files by default. Optional output_format=markdown writes PDF/DOCX/DOCM/MD to .md through existing structured readers without model copying; other formats retain .txt and their actual content_format. Markdown PDF extraction is text-only: ocr_pdf=true is rejected for this combination, scanned PDFs fail explicitly. No plain-text fallback is silently labelled Markdown. Items retain source_path/output_path/status and add char_count (UTF-16), byte_count, snapshot_sha256 (exact output bytes/BOM), source_sha256, resource_id/resource_reuse, secret-free adapter/config fingerprints and observed PDF page/OCR fields. Successful extraction uses an immutable captured source and a session-scoped single-flight resource: identical source bytes plus identical effective adapter/options reuse the same successful extraction instead of rerunning OCR. Failed/cancelled extraction is never cached. overwrite=false still checks an existing output before extraction; an output published by this session is provenance-verified against its resource, while an unrelated pre-existing .txt remains reuse_validation=not_verified. processed_ranges are host-known ranges only and do not claim paragraph-to-page mapping. Null metadata means unknown, not false or complete. output_path can feed create_word_document.markdown_path when explicitly interpreted as Markdown. Newly written exports are published atomically. Hashes prove byte identity, not OCR accuracy. For directories, structure is preserved.",
                     "{""type"":""object"",""properties"":{" &
                         """input_path"":{""type"":""string"",""description"":""Required file or directory path.""}," &
                         """output_directory"":{""type"":""string"",""description"":""Optional output directory. For directory input, relative paths are preserved under this root.""}," &
+                        """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Default text. Markdown for PDF/DOCX/DOCM/MD; other formats retain text outputs. PDF Markdown does not support OCR.""}," &
                         """recursive"":{""type"":""boolean"",""description"":""For directory input, include subdirectories. Default true.""}," &
-                        """overwrite"":{""type"":""boolean"",""description"":""Overwrite existing .txt outputs only when true. Default false.""}," &
+                        """overwrite"":{""type"":""boolean"",""description"":""Overwrite existing outputs only when true. Default false.""}," &
                         """ocr_pdf"":{""type"":""boolean"",""description"":""Enable silent OCR heuristics for PDFs when a suitable model is configured. Default false.""}}," &
                         """required"":[""input_path""]}",
                     923,
@@ -825,6 +826,11 @@ Namespace Agents
             Dim overwrite As Boolean = GetBool(args, "overwrite", False)
             Dim ocrPdf As Boolean = GetBool(args, "ocr_pdf", False)
             Dim outputDirectoryArg As String = GetStr(args, "output_directory")
+            Dim outputFormat As System.String = GetStr(args, "output_format").Trim().ToLowerInvariant()
+            If outputFormat = "" Then outputFormat = "text"
+            If outputFormat <> "text" AndAlso outputFormat <> "markdown" Then
+                Return BuildError("invalid_output_format", "output_format must be text or markdown.")
+            End If
 
             Dim inputIsFile As Boolean = File.Exists(inputPath)
             Dim inputIsDirectory As Boolean = Directory.Exists(inputPath)
@@ -840,9 +846,9 @@ Namespace Agents
 
             If inputIsFile Then
                 cancellationToken.ThrowIfCancellationRequested()
-                Dim outputPath As System.String = ResolveSingleFileTextOutputPath(inputPath, outputDirectoryArg)
+                Dim outputPath As System.String = ResolveSingleFileTextOutputPath(inputPath, outputDirectoryArg, outputFormat)
                 Dim item As Newtonsoft.Json.Linq.JObject = Await ExportSingleTextFileAsync(
-                    inputPath, outputPath, overwrite, ocrPdf, context, cancellationToken).ConfigureAwait(False)
+                    inputPath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat).ConfigureAwait(False)
                 items.Add(item)
                 CountTextExportItem(item, convertedCount, skippedCount, failedCount)
                 Return JsonConvert.SerializeObject(New With {
@@ -876,10 +882,10 @@ Namespace Agents
                 End If
 
                 Dim relativePath As String = sourcePath.Substring(inputPath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                Dim outputPath As String = PathPolicy.Resolve(Path.Combine(outputRoot, relativePath & ".txt"), PathAccess.Write)
+                Dim outputPath As String = PathPolicy.Resolve(Path.Combine(outputRoot, relativePath & TextExportOutputExtension(sourcePath, outputFormat)), PathAccess.Write)
 
                 Dim item As Newtonsoft.Json.Linq.JObject = Await ExportSingleTextFileAsync(
-                    sourcePath, outputPath, overwrite, ocrPdf, context, cancellationToken).ConfigureAwait(False)
+                    sourcePath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat).ConfigureAwait(False)
                 items.Add(item)
                 CountTextExportItem(item, convertedCount, skippedCount, failedCount)
             Next
@@ -911,9 +917,10 @@ Namespace Agents
                                                                  overwrite As System.Boolean,
                                                                  ocrPdf As System.Boolean,
                                                                  context As ISharedContext,
-                                                                 cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+                                                                 cancellationToken As System.Threading.CancellationToken,
+                                                                 Optional outputFormat As System.String = "text") As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
             Dim result As TextExportResult = Await TextExportService.ExportFileAsync(
-                context, sourcePath, outputPath, New TextExportOptions With {.Overwrite = overwrite, .OcrPdf = ocrPdf},
+                context, sourcePath, outputPath, New TextExportOptions With {.Overwrite = overwrite, .OcrPdf = ocrPdf, .OutputFormat = outputFormat},
                 cancellationToken).ConfigureAwait(False)
             Return result.LegacyItem
         End Function
@@ -942,7 +949,7 @@ Namespace Agents
             Dim isolatedContext As ISharedContext = CreateTextExportCallContext(sourcePath, context, options)
             Return BuildTextExportProcessingSignature(GetExtractionAdapterId(sourcePath), TextExportAdapterVersion,
                 GetExtractionConfigurationFingerprint(sourcePath, isolatedContext, options.OcrPdf),
-                TextExtractionResourceRegistry.HashString("ocr_pdf=" & options.OcrPdf.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|ocr_batch_pages=" & options.OcrBatchPages.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+                TextExportOptionsFingerprint(options, options.OcrPdf))
         End Function
 
         Friend Shared Function BuildTextExportProcessingSignature(adapterId As System.String, adapterVersion As System.String,
@@ -974,6 +981,8 @@ Namespace Agents
                 {"source_association_verified", False}, {"extraction_duration_ms", 0}
             }
             Try
+                Dim outputFormat As System.String = NormalizeTextExportFormat(If(executionOptions, New TextExportOptions()).OutputFormat)
+                item("output_format") = outputFormat
                 sourcePath = PathPolicy.Resolve(sourcePath, PathAccess.Read)
                 outputPath = PathPolicy.Resolve(outputPath, PathAccess.Write)
                 item("source_path") = sourcePath
@@ -992,8 +1001,7 @@ Namespace Agents
                             Dim knownAdapterId As System.String = GetExtractionAdapterId(sourcePath)
                             Dim knownAdapterVersion As System.String = TextExportAdapterVersion
                             Dim knownConfigurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf)
-                            Dim knownOptionsFingerprint As System.String = TextExtractionResourceRegistry.HashString(
-                                "ocr_pdf=" & ocrPdf.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|ocr_batch_pages=" & If(executionOptions, New TextExportOptions()).OcrBatchPages.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                            Dim knownOptionsFingerprint As System.String = TextExportOptionsFingerprint(executionOptions, ocrPdf)
                             If TextExtractionResourceRegistry.TryGetVerifiedPublishedOutput(
                                 outputPath, currentSourceHash, knownAdapterId, knownAdapterVersion,
                                 knownConfigurationFingerprint, knownOptionsFingerprint, knownResource) Then
@@ -1046,8 +1054,7 @@ Namespace Agents
                 Dim adapterId As System.String = GetExtractionAdapterId(sourcePath)
                 Dim adapterVersion As System.String = TextExportAdapterVersion
                 Dim configurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf)
-                Dim optionsFingerprint As System.String = TextExtractionResourceRegistry.HashString(
-                    "ocr_pdf=" & ocrPdf.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|ocr_batch_pages=" & If(executionOptions, New TextExportOptions()).OcrBatchPages.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                Dim optionsFingerprint As System.String = TextExportOptionsFingerprint(executionOptions, ocrPdf)
 
                 Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                 Dim result As TextExtractionOutcome = Nothing
@@ -1261,6 +1268,7 @@ Namespace Agents
                                                                    Optional cancellationToken As System.Threading.CancellationToken = Nothing,
                                                                    Optional executionOptions As TextExportOptions = Nothing) As System.Threading.Tasks.Task(Of TextExtractionOutcome)
             Dim ext As String = Path.GetExtension(filePath).ToLowerInvariant()
+            Dim markdown As System.Boolean = NormalizeTextExportFormat(If(executionOptions, New TextExportOptions()).OutputFormat) = "markdown"
 
             Select Case ext
                 Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
@@ -1318,8 +1326,9 @@ Namespace Agents
                 Case ".docx", ".docm"
                     Dim docxError As System.String = Nothing
                     Dim docxCoverageComplete As System.Nullable(Of System.Boolean) = Nothing
-                    Dim docxText As System.String = SharedMethods.ReadDocxSandboxed(filePath, False, docxError, docxCoverageComplete)
+                    Dim docxText As System.String = SharedMethods.ReadDocxSandboxed(filePath, markdown, docxError, docxCoverageComplete)
                     Dim docxResult As TextExtractionOutcome = NormalizeLegacyExtractionResult(docxText, "word", docxError)
+                    If markdown Then docxResult.ContentFormat = "markdown"
                     If docxResult.Success Then
                         docxResult.ExtractionComplete = docxCoverageComplete
                         If docxCoverageComplete.HasValue Then
@@ -1341,6 +1350,21 @@ Namespace Agents
                     Return NormalizeLegacyExtractionResult(pptxText, "powerpoint", pptxError)
 
                 Case ".pdf"
+                    If markdown Then
+                        If ocrPdf Then Return New TextExtractionOutcome With {
+                            .ErrorCode = "markdown_pdf_ocr_unsupported",
+                            .Message = "PDF Markdown uses the text-only layout reader. Use output_format=text with ocr_pdf=true for OCR; no plain-text fallback was written."
+                        }
+                        Dim markdownError As System.String = Nothing
+                        Dim markdownText As System.String = SharedMethods.PdfMarkdownExtractor.ReadPdfAsMarkdown(filePath, Nothing, markdownError)
+                        Dim markdownResult As TextExtractionOutcome = NormalizeLegacyExtractionResult(markdownText, "pdf-markdown", markdownError)
+                        markdownResult.ContentFormat = "markdown"
+                        markdownResult.OcrUsed = False
+                        markdownResult.OcrAttempted = False
+                        ' Layout heuristics do not prove complete coverage or page-to-text mapping.
+                        markdownResult.ExtractionCoverageBasis = "pdf_markdown_layout_heuristics_unverified"
+                        Return markdownResult
+                    End If
                     Dim pdf As SharedMethods.PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
                         pdfPath:=filePath,
                         ReturnErrorInsteadOfEmpty:=False,
@@ -1686,14 +1710,39 @@ Namespace Agents
             Next
         End Sub
 
+        Private Shared Function NormalizeTextExportFormat(value As System.String) As System.String
+            Dim normalized As System.String = If(value, "").Trim().ToLowerInvariant()
+            If normalized = "" Then normalized = "text"
+            If normalized <> "text" AndAlso normalized <> "markdown" Then Throw New System.ArgumentException("output_format must be text or markdown.")
+            Return normalized
+        End Function
+
+        Private Shared Function TextExportOutputExtension(sourcePath As System.String, outputFormat As System.String) As System.String
+            Dim ext As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
+            If NormalizeTextExportFormat(outputFormat) = "markdown" AndAlso
+               (ext = ".pdf" OrElse ext = ".docx" OrElse ext = ".docm" OrElse ext = ".md") Then Return ".md"
+            Return ".txt"
+        End Function
+
+        Private Shared Function TextExportOptionsFingerprint(options As TextExportOptions, ocrPdf As System.Boolean) As System.String
+            Dim effective As TextExportOptions = If(options, New TextExportOptions())
+            ' Keep the default text signature byte-for-byte: existing Semantic Archive
+            ' representations are not invalidated by adding an opt-in output format.
+            Dim value As System.String = "ocr_pdf=" & ocrPdf.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "|ocr_batch_pages=" & effective.OcrBatchPages.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            If NormalizeTextExportFormat(effective.OutputFormat) = "markdown" Then value &= "|output_format=markdown"
+            Return TextExtractionResourceRegistry.HashString(value)
+        End Function
+
         Private Shared Function ResolveSingleFileTextOutputPath(inputPath As String,
-                                                                outputDirectoryArg As String) As String
+                                                                outputDirectoryArg As String,
+                                                                Optional outputFormat As System.String = "text") As String
             If String.IsNullOrWhiteSpace(outputDirectoryArg) Then
-                Return PathPolicy.Resolve(inputPath & ".txt", PathAccess.Write)
+                Return PathPolicy.Resolve(inputPath & TextExportOutputExtension(inputPath, outputFormat), PathAccess.Write)
             End If
 
             Dim outputRoot As String = ResolveRelativeOrAbsoluteOutputDirectory(inputPath, outputDirectoryArg, False)
-            Return PathPolicy.Resolve(Path.Combine(outputRoot, Path.GetFileName(inputPath) & ".txt"), PathAccess.Write)
+            Return PathPolicy.Resolve(Path.Combine(outputRoot, Path.GetFileName(inputPath) & TextExportOutputExtension(inputPath, outputFormat)), PathAccess.Write)
         End Function
 
         Private Shared Function ResolveDirectoryTextOutputRoot(inputDirectory As String,

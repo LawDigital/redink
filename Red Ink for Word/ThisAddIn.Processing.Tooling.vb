@@ -845,6 +845,8 @@ Partial Public Class ThisAddIn
             Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.ResolveProfile(transportRetryProfile)
         Dim transportRetryScope As System.IDisposable =
             Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.Push(effectiveTransportRetryProfile)
+        Dim transportDiagnosticScope As System.IDisposable =
+            Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.PushDiagnosticSink(Sub(message) context.Log(message, "diag"))
         context.Log("LLM transport retry profile: " & effectiveTransportRetryProfile.ToString(), "diag")
 
         Try
@@ -1969,22 +1971,29 @@ Partial Public Class ThisAddIn
                                tc.Arguments,
                                succeededExplicitOperationId) Then
 
+                            Dim replayResponse As System.String = ""
+                            Dim verifiedReplay As System.Boolean = context.SequencingState.OperationRegistry.TryReplaySucceededResult(
+                                tc.ToolName, tc.Arguments, replayResponse)
+                            If Not verifiedReplay Then
+                                replayResponse = JsonConvert.SerializeObject(New With {
+                                    Key .status = "operation_replay_conflict",
+                                    Key .operation_id = succeededExplicitOperationId,
+                                    Key .message = "A step in this call already succeeded. The tool, arguments or complete batch do not match a recorded result, or the historical record lacks replay evidence. No execution or output creation occurred. For a distinct continuation use a new step_id; for a mixed batch resubmit only pending tasks. Do not change ids to repeat an already completed step."
+                                })
+                            End If
                             Dim syntheticAlreadyCompleted As New ToolResponse() With {
                                 .CallId = tc.CallId,
                                 .ToolName = tc.ToolName,
-                                .Success = True,
-                                .ResultKind = "success",
-                                .Response =
-                                    "{""status"":""already_completed"",""operation_id"":" &
-                                    JsonConvert.SerializeObject(succeededExplicitOperationId) &
-                                    ",""message"":""This logical operation already succeeded earlier in the same tooling run; no physical tool execution was repeated.""}",
+                                .Success = verifiedReplay,
+                                .ResultKind = If(verifiedReplay, "success", "error"),
+                                .Response = replayResponse,
                                 .OriginalCallJson = tc.RawJson,
                                 .NormalizedCallSignature = normalizedToolCallSignature
                             }
 
                             AddToolResponseToHistory(context, syntheticAlreadyCompleted)
                             context.Log(
-                                "Skipped already-completed explicit logical operation without creating a new failure. " &
+                                "Skipped completed step; verified_replay=" & verifiedReplay.ToString() & "; " &
                                 "host=" & context.HostKind &
                                 "; tool=" & tc.ToolName &
                                 "; operation_id=" & succeededExplicitOperationId,
@@ -4110,6 +4119,7 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, $"Exception: {ex.Message}", ex:=ex)
             Return ""
         Finally
+            If transportDiagnosticScope IsNot Nothing Then transportDiagnosticScope.Dispose()
             If transportRetryScope IsNot Nothing Then
                 transportRetryScope.Dispose()
                 transportRetryScope = Nothing

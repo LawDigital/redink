@@ -296,7 +296,7 @@ Namespace SharedLibrary
                            CInt(100.0 * completed / Math.Max(totalSources, 1)),
                            totalHits)
                     Try
-                        Dim hits = Await SearchOneSourceAsync(token, query, src, options, ct).ConfigureAwait(False)
+                        Dim hits = Await SearchOneSourceAsync(token, query, src, options, result, ct).ConfigureAwait(False)
                         SyncLock sync
                             result.Hits.AddRange(hits)
                             result.CountsBySource(src) = hits.Count
@@ -376,6 +376,7 @@ Namespace SharedLibrary
         Private Async Function SearchOneSourceAsync(token As String, query As String,
                                                     src As M365SearchSources,
                                                     options As M365SearchOptions,
+                                                    result As M365SearchResult,
                                                     ct As CancellationToken) As Task(Of List(Of M365SearchHit))
             Select Case src
                 Case M365SearchSources.OneNote
@@ -389,10 +390,10 @@ Namespace SharedLibrary
                         Return Await SearchCalendarViewAsync(token, query, options, ct).ConfigureAwait(False)
                     End If
 
-                    Return Await SearchViaQueryEndpointAsync(token, query, src, options, ct).ConfigureAwait(False)
+                    Return Await SearchViaQueryEndpointAsync(token, query, src, options, result, ct).ConfigureAwait(False)
 
                 Case Else
-                    Return Await SearchViaQueryEndpointAsync(token, query, src, options, ct).ConfigureAwait(False)
+                    Return Await SearchViaQueryEndpointAsync(token, query, src, options, result, ct).ConfigureAwait(False)
             End Select
         End Function
 
@@ -712,6 +713,7 @@ Namespace SharedLibrary
 
         Private Async Function SearchViaQueryEndpointAsync(token As String, query As String, src As M365SearchSources,
                                                            options As M365SearchOptions,
+                                                           result As M365SearchResult,
                                                            ct As CancellationToken) As Task(Of List(Of M365SearchHit))
             Dim entityType = MapEntityType(src)
             Dim kql As String = ApplyKqlFilters(query, src, options)
@@ -720,7 +722,7 @@ Namespace SharedLibrary
                 {"entityTypes", New JArray From {entityType}},
                 {"query", New JObject From {{"queryString", kql}}},
                 {"from", Math.Max(0, options.FromIndex)},
-                {"size", Math.Max(1, Math.Min(options.MaxPerSource, 500))}
+                {"size", System.Math.Max(1, System.Math.Min(options.MaxPerSource, If(src = M365SearchSources.Mail OrElse src = M365SearchSources.Calendar, 25, 500)))}
             }
 
             If src = M365SearchSources.Mail Then
@@ -758,24 +760,51 @@ Namespace SharedLibrary
                 {"requests", New JArray From {requestObject}}
             }
 
-            Dim resp = Await GraphPostAsync(token, GraphV1 & "/search/query", req, ct).ConfigureAwait(False)
-
-            Dim hits As New List(Of M365SearchHit)()
-            Dim values = TryCast(resp("value"), JArray)
-            If values Is Nothing OrElse values.Count = 0 Then Return hits
-
-            For Each respObj In values
-                Dim containers = TryCast(respObj("hitsContainers"), JArray)
-                If containers Is Nothing Then Continue For
-                For Each c In containers
-                    Dim hitArr = TryCast(c("hits"), JArray)
-                    If hitArr Is Nothing Then Continue For
-                    For Each h In hitArr
-                        Dim hit = ParseSearchHit(CType(h, JObject), src, options)
-                        If hit IsNot Nothing Then hits.Add(hit)
+            Dim hits As New System.Collections.Generic.List(Of M365SearchHit)()
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            Dim seenPages As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            Dim target = System.Math.Max(1, System.Math.Min(options.MaxPerSource, 2500))
+            Dim offset = System.Math.Max(0, options.FromIndex)
+            Dim maximumPage = If(src = M365SearchSources.Mail OrElse src = M365SearchSources.Calendar, 25, 500)
+            Do While hits.Count < target
+                ct.ThrowIfCancellationRequested()
+                requestObject("from") = offset
+                requestObject("size") = System.Math.Min(maximumPage, target - hits.Count)
+                Dim resp = Await GraphPostAsync(token, GraphV1 & "/search/query", req, ct).ConfigureAwait(False)
+                Dim values = TryCast(resp("value"), Newtonsoft.Json.Linq.JArray)
+                If values Is Nothing OrElse values.Count = 0 Then Throw New System.IO.InvalidDataException("Search returned no result collection.")
+                Dim pageIdentities As New System.Collections.Generic.List(Of System.String)()
+                Dim pageCount As System.Int32 = 0
+                Dim more As System.Boolean = False
+                For Each respObj In values
+                    Dim containers = TryCast(respObj("hitsContainers"), Newtonsoft.Json.Linq.JArray)
+                    If containers Is Nothing OrElse containers.Count = 0 Then Throw New System.IO.InvalidDataException("Search returned no hit containers.")
+                    For Each container In containers
+                        Dim hitArr = TryCast(container("hits"), Newtonsoft.Json.Linq.JArray)
+                        If hitArr Is Nothing Then Throw New System.IO.InvalidDataException("Search returned no hits array.")
+                        Dim continuation = container("moreResultsAvailable")
+                        If continuation Is Nothing OrElse continuation.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean Then Throw New System.IO.InvalidDataException("Search returned no valid continuation state.")
+                        more = more OrElse continuation.Value(Of System.Boolean)()
+                        pageCount += hitArr.Count
+                        For Each item In hitArr
+                            Dim hit = ParseSearchHit(CType(item, Newtonsoft.Json.Linq.JObject), src, options)
+                            If hit Is Nothing Then Continue For
+                            Dim identity = If(hit.RawJson?("id")?.ToString(), If(hit.Id, hit.WebUrl))
+                            If System.String.IsNullOrWhiteSpace(identity) Then Throw New System.IO.InvalidDataException("Search hit has no stable identity.")
+                            pageIdentities.Add(identity)
+                            If seen.Add(identity) Then hits.Add(hit)
+                        Next
                     Next
                 Next
-            Next
+                If pageCount > requestObject.Value(Of System.Int32)("size") Then Throw New System.IO.InvalidDataException("Search exceeded the requested page size.")
+                If pageCount > 0 AndAlso Not seenPages.Add(System.String.Join(vbLf, pageIdentities)) Then Throw New System.IO.InvalidDataException("Search repeated a result page; coverage cannot be confirmed.")
+                offset += pageCount ' Advance by actual raw page count, never by requested total.
+                SyncLock result
+                    result.NextFromIndexBySource(src) = offset
+                    result.ExhaustedBySource(src) = Not more OrElse pageCount = 0
+                End SyncLock
+                If pageCount = 0 OrElse Not more Then Exit Do
+            Loop
 
             Return hits
         End Function

@@ -16,6 +16,7 @@ Namespace Agents
     End Enum
 
     Public NotInheritable Class TextExportOptions
+        Public Property OutputFormat As System.String = "text"
         Public Property OcrPdf As System.Boolean
         Public Property OcrBatchPages As System.Int32 = 1
         Public Property Overwrite As System.Boolean

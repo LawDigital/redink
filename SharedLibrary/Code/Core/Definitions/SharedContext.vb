@@ -231,6 +231,7 @@ Namespace SharedLibrary
             Property SP_RemoveClutter As String
             Property SP_Redact As String
             Property SP_CheckforII As String
+            Property SP_CheckforPhishing As String
             Property SP_ContextSearch As String
             Property SP_ContextSearchMulti As String
             Property SP_WriteNeatly As String
@@ -625,6 +626,7 @@ Namespace SharedLibrary
         Public Property SP_RemoveClutter As String Implements ISharedContext.SP_RemoveClutter
         Public Property SP_Redact As String Implements ISharedContext.SP_Redact
         Public Property SP_CheckforII As String Implements ISharedContext.SP_CheckforII
+        Public Property SP_CheckforPhishing As String Implements ISharedContext.SP_CheckforPhishing
         Public Property SP_ContextSearch As String Implements ISharedContext.SP_ContextSearch
         Public Property SP_ContextSearchMulti As String Implements ISharedContext.SP_ContextSearchMulti
         Public Property SP_RangeOfCells As String Implements ISharedContext.SP_RangeOfCells
