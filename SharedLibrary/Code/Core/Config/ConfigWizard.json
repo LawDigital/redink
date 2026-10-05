@@ -1563,6 +1563,58 @@
       ]
     },
     {
+      "id": "semantic_archive",
+      "title": "Semantic Archive",
+      "description": "Global Semantic Archive configuration defaults. Explicit personal maintenance preferences override these INI defaults. Archive definitions, source bindings and document-index thresholds are configured separately in the Semantic Archive console.",
+      "fields": [
+        {
+          "key": "SemanticArchiveCatalogPathLocal",
+          "label": "Semantic Archive Catalog Directory",
+          "type": "path",
+          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL",
+          "description": "Directory (not a JSON filename) for the private Semantic Archive catalog and personal index state. Leave empty to disable Semantic Archive integration. SharedMethods placeholders such as %APPDATA%, %LOCALAPPDATA%, %DESKTOP% and %DOCUMENTS% are supported. Example: %LOCALAPPDATA%\\RedInk\\SA. Source archives and shared artifact roots can be local or UNC paths and are recorded per archive in this catalog. [SemanticArchiveCatalogPathLocal]"
+        },
+        {
+          "key": "SemanticArchiveCatalogLibraryPath",
+          "type": "path",
+          "label": "Semantic Archive library directory",
+          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH",
+          "description": "Optional centrally administered directory containing per-archive .json definitions. Users automatically subscribe to readable published definitions; publishers can publish, update or withdraw their own entries from Semantic Archives administration. Local catalog and index data stay private. Requires SemanticArchiveCatalogPathLocal; an empty local path disables all Semantic Archive entry points even when this path is set. Uses SharedMethods environment/Red Ink placeholders. Example: \\\\server\\share\\RedInk\\SemanticArchives. [SemanticArchiveCatalogLibraryPath]"
+        },
+        {
+          "key": "SemanticArchiveBackgroundIndexingEnabled",
+          "label": "Semantic Archive Automatic Content Indexing",
+          "type": "boolean",
+          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED",
+          "description": "Default for automatic Semantic Archive content indexing while Office is idle. This is independent of Knowledge Store indexing and permission reconciliation. A saved personal preference takes precedence. Individual archives must also allow automatic indexing. [SemanticArchiveBackgroundIndexingEnabled]"
+        },
+        {
+          "key": "SemanticArchiveBackgroundIndexingWindow",
+          "label": "Semantic Archive Content Indexing Window",
+          "type": "string",
+          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_WINDOW",
+          "validation": "ProcessingWindow",
+          "description": "Default local-time window for automatic Semantic Archive content indexing. Empty permits any time. Use allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. An explicit personal window, including an empty one, takes precedence. [SemanticArchiveBackgroundIndexingWindow]"
+        },
+        {
+          "key": "SemanticArchivePermissionMaintenanceEnabled",
+          "label": "Semantic Archive Automatic Permission Maintenance",
+          "type": "boolean",
+          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED",
+          "description": "Default for independent background reconciliation of generated artifact permissions. Permission reconciliation can run while content indexing is off. A saved personal preference takes precedence. Read-time source authorization remains mandatory regardless of this setting. [SemanticArchivePermissionMaintenanceEnabled]"
+        },
+        {
+          "key": "SemanticArchivePermissionMaintenanceWindow",
+          "label": "Semantic Archive Permission Maintenance Window",
+          "type": "string",
+          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_WINDOW",
+          "validation": "ProcessingWindow",
+          "description": "Default local-time window for independent permission reconciliation. Empty permits any time. Use allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. An explicit personal window, including an empty one, takes precedence. [SemanticArchivePermissionMaintenanceWindow]"
+        }
+      ],
+      "note": "Use sastore in Word or Outlook to manage archive-specific settings, including SemanticArchiveSourceIndexThresholdBytes and the per-binding SemanticArchiveSharedArtifactRoot. A threshold of 0 disables only the additional per-document section index. These are catalog values, not global INI settings. Reset Optional Values keeps the catalog pointer and personal preferences, removes the four optional INI maintenance defaults, and never deletes archive data."
+    },
+    {
       "id": "search",
       "title": "Internet Search (ISearch)",
       "description": "Configuration for Red Ink internet searching inside Freestyle. These values describe the search engine endpoint and how result links are extracted from its HTML.",

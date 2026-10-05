@@ -478,6 +478,7 @@
   -->
   <ItemGroup>
     <AppDesigner Include="My Project\" />
+    <Compile Include="ThisAddIn.SemanticArchives.vb" />
     <Compile Include="DragDropForm.Designer.vb">
       <DependentUpon>DragDropForm.vb</DependentUpon>
     </Compile>
@@ -502,6 +503,7 @@
     <Compile Include="ThisAddIn.AutoPilot.CommentProcessor.vb" />
     <Compile Include="ThisAddIn.Autopilot.CompleteTables.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Config.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.LogDiagnostics.vb" />
     <Compile Include="ThisAddIn.AutoPilot.DocProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PDFCommentProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
@@ -524,7 +526,9 @@
     <Compile Include="ThisAddIn.ChatAgentScope.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />
+    <Compile Include="ThisAddIn.Commands.CheckPhishing.vb" />
     <Compile Include="ThisAddIn.Commands.PSTConverter.vb" />
+    <Compile Include="ThisAddIn.Commands.PSTServerExport.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
     <Compile Include="ThisAddIn.KnowledgeStoreWiring.vb" />
     <Compile Include="ThisAddIn.M365SearchForm.vb">

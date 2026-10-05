@@ -40,6 +40,7 @@ Namespace SharedLibrary
         Private Shared _enabled As Boolean = False
         Private Shared _lastPeriodicScan As DateTime = DateTime.MinValue
         Private Shared ReadOnly _lock As New Object()
+        Private Shared ReadOnly _tickGate As New System.Threading.SemaphoreSlim(1, 1)
 
         ''' <summary>Interval between full periodic scans (minutes).</summary>
         Private Const PeriodicScanIntervalMinutes As Integer = 15
@@ -187,71 +188,80 @@ Namespace SharedLibrary
                 _watcher.StartWatching()
                 _enabled = True
 
-                If CanRunNow(_context) Then
-                    _watcher.RunPeriodicScan()
-                    _lastPeriodicScan = DateTime.UtcNow
-                Else
-                    _lastPeriodicScan = DateTime.MinValue
-                    Debug.WriteLine("KSIdleService: Started outside allowed processing window; awaiting next allowed tick.")
-                End If
+                ' Directory scans run only inside the worker-backed idle batch.
+                _lastPeriodicScan = DateTime.MinValue
 
                 Debug.WriteLine("KSIdleService: Started")
-            Catch ex As Exception
+            Catch ex As System.Exception
+                If _watcher IsNot Nothing Then _watcher.Dispose()
+                _watcher = Nothing
+                _enabled = False
                 Debug.WriteLine($"KSIdleService: Start error: {ex.Message}")
             End Try
         End Sub
 
         Private Shared Sub StopInternal()
-            If _watcher IsNot Nothing Then
-                _watcher.Dispose()
-                _watcher = Nothing
-                Debug.WriteLine("KSIdleService: Stopped")
-            End If
-
+            Dim previous = _watcher
+            _watcher = Nothing
             _enabled = False
+            If previous Is Nothing Then Return
+            ' A running batch may still own the watcher/process semaphore. Never dispose underneath it.
+            System.Threading.Tasks.Task.Run(
+                Async Function()
+                    Await _tickGate.WaitAsync().ConfigureAwait(False)
+                    Try
+                        previous.Dispose()
+                    Finally
+                        _tickGate.Release()
+                    End Try
+                End Function)
         End Sub
 
         ''' <summary>
         ''' Called by the host's idle timer. No-op if disabled.
         ''' Returns the number of files indexed this tick.
         ''' </summary>
-        Public Shared Async Function OnIdleTickAsync() As Task(Of Integer)
-            Debug.WriteLine($"KSIdleService: OnIdleTickAsync called. Enabled={_enabled}, WatcherIsNothing={_watcher Is Nothing}")
-
-            If Not _enabled OrElse _watcher Is Nothing Then Return 0
-
-            If Not CanRunNow(_context) Then
-                Debug.WriteLine("KSIdleService: Skipping tick — outside configured processing window.")
-                Return 0
-            End If
-
+        Public Shared Async Function OnIdleTickAsync(
+                Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+                Optional maxFiles As Integer = KnowledgeStoreWatcher.MaxFilesPerTick) As System.Threading.Tasks.Task(Of Integer)
+            If Not Await _tickGate.WaitAsync(0, cancellationToken).ConfigureAwait(False) Then Return 0
             Try
-                Dim mustRescanNow As Boolean =
-                    HasWritableSharedStores() OrElse
-                    (DateTime.UtcNow - _lastPeriodicScan).TotalMinutes >= PeriodicScanIntervalMinutes
-
+                Dim watcher As KnowledgeStoreWatcher
+                SyncLock _lock
+                    If Not _enabled OrElse _watcher Is Nothing Then Return 0
+                    watcher = _watcher
+                End SyncLock
+                If Not CanRunNow(_context) Then Return 0
+                cancellationToken.ThrowIfCancellationRequested()
+                Dim mustRescanNow As Boolean = HasWritableSharedStores() OrElse
+                    (System.DateTime.UtcNow - _lastPeriodicScan).TotalMinutes >= PeriodicScanIntervalMinutes
                 If mustRescanNow Then
-                    Debug.WriteLine("KSIdleService: Running periodic watcher scan.")
-                    _watcher.RunPeriodicScan()
-                    _lastPeriodicScan = DateTime.UtcNow
+                    Await System.Threading.Tasks.Task.Run(Sub() watcher.RunPeriodicScan(cancellationToken), cancellationToken).ConfigureAwait(False)
+                    _lastPeriodicScan = System.DateTime.UtcNow
                 End If
-
-                Dim results = Await _watcher.ProcessPendingAsync().ConfigureAwait(False)
-
-                For Each r In results
-                    If r.Success Then
-                        Debug.WriteLine($"KSIdleService: Indexed '{r.Title}'")
-                    Else
-                        Debug.WriteLine($"KSIdleService: Failed '{r.FilePath}': {r.ErrorMessage}")
-                    End If
+                cancellationToken.ThrowIfCancellationRequested()
+                Dim callContext As ISharedContext = SharedMethods.CreateIsolatedModelCallContext(_context)
+                Dim results = Await watcher.ProcessPendingAsync(maxFiles, cancellationToken, callContext).ConfigureAwait(False)
+                For Each result In results
+                    If Not result.Success Then System.Diagnostics.Debug.WriteLine("KSIdleService: " & result.ErrorMessage)
                 Next
-
-                Return Enumerable.Count(results, Function(r) r.Success)
-            Catch ex As Exception
-                Debug.WriteLine($"KSIdleService: Tick error: {ex.Message}")
-                Return 0
+                Return Enumerable.Count(results, Function(result) result.Success)
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("KSIdleService: Tick error: " & ex.Message)
+                Throw
+            Finally
+                _tickGate.Release()
             End Try
         End Function
+
+        ''' <summary>Synchronization point used independently of SA's controls and processing window.</summary>
+        Public Shared Sub RefreshPersistedControls(context As ISharedContext)
+            If context Is Nothing Then Return
+            context.INI_KnowledgeStoreBackgroundIndexingWindow = GetPersistedBackgroundWindow(context)
+            SetEnabled(GetPersistedBackgroundEnabled(context))
+        End Sub
 
         Private Shared Function HasWritableSharedStores() As Boolean
             If _context Is Nothing Then Return False
@@ -265,7 +275,8 @@ Namespace SharedLibrary
 
         Private Shared Function GetPersistedBackgroundEnabled(context As ISharedContext) As Boolean
             Try
-                Dim rawValue = My.Settings.Item(BackgroundEnabledSettingName)
+                Dim persisted As New Global.SharedLibrary.My.MySettings()
+                Dim rawValue = persisted.Item(BackgroundEnabledSettingName)
                 If rawValue IsNot Nothing Then
                     Return CBool(rawValue)
                 End If
@@ -281,7 +292,8 @@ Namespace SharedLibrary
 
         Private Shared Function GetPersistedBackgroundWindow(context As ISharedContext) As String
             Try
-                Dim rawValue = My.Settings.Item(BackgroundWindowSettingName)
+                Dim persisted As New Global.SharedLibrary.My.MySettings()
+                Dim rawValue = persisted.Item(BackgroundWindowSettingName)
                 If rawValue IsNot Nothing Then
                     Return rawValue.ToString().Trim()
                 End If

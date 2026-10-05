@@ -42,6 +42,9 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Class ToolExecutionContext
 
+        ''' <summary>Host-authorized archive selection and retained search/read handles; inherited only from the parent run.</summary>
+        Public Property SemanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope
+
         ''' <summary>Tools selected for this session.</summary>
         Public Property SelectedTools As List(Of ModelConfig)
 
@@ -130,6 +133,9 @@ Partial Public Class ThisAddIn
         Public Property ConsecutiveToolFailureAbortThreshold As Integer
 
         Public Property PrematureTextRetryCount As Integer = 0
+
+        ''' <summary>Tool-response count already covered by the last host evidence-finalization review; -1 means no review yet.</summary>
+        Public Property EvidenceFinalizationReviewResponseCount As Integer = -1
 
         ''' <summary>Number of full finalization re-planning passes already consumed in this run.</summary>
         Public Property FinalizationRecoveryRestartCount As Integer = 0

@@ -41,6 +41,41 @@ Namespace Agents
         Private Shared _workspaceRoot As String = Nothing
         Private Shared ReadOnly _restrictToWorkspaceRootOnly As New AsyncLocal(Of Boolean)
 
+        ' A host may run a previously authorized single-file operation outside an agent
+        ' workspace. This capability is internal, scoped to its async flow and exclusive:
+        ' denied paths never fall through to broader workspace/Desktop permissions.
+        Private Shared ReadOnly _hostFileOperation As New System.Threading.AsyncLocal(Of HostFileOperationScope)()
+
+        Friend Shared Function BeginHostFileOperationScope(authorizePath As System.Func(Of System.String, PathAccess, System.Boolean)) As System.IDisposable
+            If authorizePath Is Nothing Then Throw New System.ArgumentNullException(NameOf(authorizePath))
+            Return New HostFileOperationScope(authorizePath)
+        End Function
+
+        Private NotInheritable Class HostFileOperationScope
+            Implements System.IDisposable
+            Private ReadOnly _previous As HostFileOperationScope
+            Private ReadOnly _authorizePath As System.Func(Of System.String, PathAccess, System.Boolean)
+            Private _disposed As System.Int32
+
+            Public Sub New(authorizePath As System.Func(Of System.String, PathAccess, System.Boolean))
+                _previous = _hostFileOperation.Value
+                _authorizePath = authorizePath
+                _hostFileOperation.Value = Me
+            End Sub
+
+            Public Function Resolve(fullPath As System.String, access As PathAccess) As System.String
+                If System.Threading.Volatile.Read(_disposed) <> 0 Then Throw New System.ObjectDisposedException("Host file operation")
+                If Not _authorizePath.Invoke(fullPath, access) Then Throw New System.UnauthorizedAccessException("The path is outside this authorized host file operation.")
+                If System.Threading.Volatile.Read(_disposed) <> 0 Then Throw New System.ObjectDisposedException("Host file operation")
+                Return fullPath
+            End Function
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If System.Threading.Interlocked.Exchange(_disposed, 1) <> 0 Then Return
+                If System.Object.ReferenceEquals(_hostFileOperation.Value, Me) Then _hostFileOperation.Value = _previous
+            End Sub
+        End Class
+
         ' User-configured workspace permissions (mirrored from WorkspaceState by the host).
         ' These apply ONLY to paths that resolve under the workspace root; skill and
         ' staging/Desktop roots are governed by their own gates and are unaffected.
@@ -244,8 +279,17 @@ Namespace Agents
                 Throw New UnauthorizedAccessException("Device paths are not allowed.")
             End If
 
-            Dim ws = If(_workspaceRoot, "")
             Dim allowCentralAuthorWrites As System.Boolean = SkillAuthorMode.AllowCentralWrites
+            Dim hostOperation As HostFileOperationScope = _hostFileOperation.Value
+            If hostOperation IsNot Nothing Then
+                If wasRelative Then Throw New System.UnauthorizedAccessException("Authorized host file operations require absolute paths.")
+                ' A host capability replaces the workspace allow-set, never the explicit
+                ' protection against writes to centrally configured agent resources.
+                EnforceCentralWriteAuthority(full, access, allowCentralAuthorWrites)
+                Return hostOperation.Resolve(full, access)
+            End If
+
+            Dim ws = If(_workspaceRoot, "")
 
             ' Enforce user-configured workspace permissions for any path that resolves
             ' under the workspace root. Skill and staging/Desktop roots are governed by

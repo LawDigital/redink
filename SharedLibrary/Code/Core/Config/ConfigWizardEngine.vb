@@ -118,6 +118,9 @@ Namespace SharedLibrary
         ''' <summary>Default value specified in the wizard definition.</summary>
         Public Property [Default] As String = ""
 
+        ''' <summary>Optional public DEFAULT_* constant from SharedMethods.Constants.vb; resolved when loading the definition.</summary>
+        Public Property DefaultConstant As System.String = System.String.Empty
+
         ''' <summary>Optional descriptive text displayed below the field.</summary>
         Public Property Description As String = ""
 
@@ -284,10 +287,33 @@ Namespace SharedLibrary
             Using stream = asm.GetManifestResourceStream(resourceName)
                 Using reader As New StreamReader(stream, System.Text.Encoding.UTF8)
                     Dim json As String = reader.ReadToEnd()
-                    Return JsonConvert.DeserializeObject(Of WizardDefinition)(json)
+                    Dim definition As WizardDefinition = JsonConvert.DeserializeObject(Of WizardDefinition)(json)
+                    ResolveDefaultConstants(definition)
+                    Return definition
                 End Using
             End Using
         End Function
+
+        Public Shared Sub ResolveDefaultConstants(definition As WizardDefinition)
+            If definition Is Nothing Then Throw New System.Configuration.ConfigurationErrorsException("The configuration wizard definition is empty.")
+            For Each group As WizardGroup In definition.Groups
+                For Each field As WizardField In group.Fields
+                    If System.String.IsNullOrWhiteSpace(field.DefaultConstant) Then Continue For
+                    Dim name As System.String = field.DefaultConstant.Trim()
+                    Dim constantField As System.Reflection.FieldInfo = GetType(SharedMethods).GetField(name,
+                        System.Reflection.BindingFlags.Public Or System.Reflection.BindingFlags.Static)
+                    If Not name.StartsWith("DEFAULT_", System.StringComparison.Ordinal) OrElse constantField Is Nothing OrElse Not constantField.IsLiteral Then
+                        Throw New System.Configuration.ConfigurationErrorsException("Unknown configuration default constant: " & name)
+                    End If
+                    Dim value As System.Object = constantField.GetRawConstantValue()
+                    If value IsNot Nothing AndAlso Not TypeOf value Is System.String AndAlso Not TypeOf value Is System.Boolean AndAlso
+                       Not TypeOf value Is System.Int32 AndAlso Not TypeOf value Is System.Int64 AndAlso Not TypeOf value Is System.Double AndAlso Not TypeOf value Is System.Decimal Then
+                        Throw New System.Configuration.ConfigurationErrorsException("Unsupported configuration default constant: " & name)
+                    End If
+                    field.Default = System.Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)
+                Next
+            Next
+        End Sub
 
         ''' <summary>
         ''' Reads the active INI file into a case-insensitive key/value dictionary.
@@ -309,7 +335,7 @@ Namespace SharedLibrary
                     result(parts(0).Trim()) = parts(1).Trim()
                 End If
             Next
-            Return result
+            Return SemanticArchiveConfiguration.NormalizeIniValues(result)
         End Function
 
         ''' <summary>
@@ -321,6 +347,42 @@ Namespace SharedLibrary
         ''' <param name="iniPath">Path to the INI file to update.</param>
         ''' <param name="editedValues">Only the changed key/value pairs to write.</param>
         Public Shared Sub WriteIniValues(iniPath As String, editedValues As Dictionary(Of String, String))
+            WriteIniValuesCore(iniPath, editedValues, Nothing)
+        End Sub
+
+        ''' <summary>Writes only the supplied keys to the established personal INI. When no personal file exists,
+        ''' the complete active configuration is used as the initial content of the same atomic write.</summary>
+        Public Shared Function WriteLocalIniValues(context As ISharedContext,
+                editedValues As System.Collections.Generic.Dictionary(Of System.String, System.String)) As System.String
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            If editedValues Is Nothing Then Throw New System.ArgumentNullException(NameOf(editedValues))
+            If context.INI_NoLocalConfig Then Throw New System.InvalidOperationException("Local configuration changes are disabled by NoLocalConfig=True.")
+            Dim iniPath As System.String = SharedMethods.GetWritableLocalConfigPath(context)
+            If System.String.IsNullOrWhiteSpace(iniPath) Then Throw New System.Configuration.ConfigurationErrorsException("No standard personal configuration path is available for this Office host.")
+            Dim activeSource As System.String = SharedMethods.GetActiveConfigSource(context)
+            If SharedMethods.RegPath_IniPrio AndAlso
+               Not System.String.IsNullOrWhiteSpace(SharedMethods.GetFromRegistry(SharedMethods.RegPath_Base, SharedMethods.RegPath_IniPath, True)) Then
+                Dim sameFile As System.Boolean = ConfigurationResourceLoader.ClassifyConfigurationSource(activeSource) = ConfigurationSourceKind.FileSystem AndAlso
+                    System.String.Equals(System.IO.Path.GetFullPath(activeSource), System.IO.Path.GetFullPath(iniPath), System.StringComparison.OrdinalIgnoreCase)
+                If Not sameFile Then Throw New System.InvalidOperationException("Registry configuration priority prevents a personal INI override. Ask your configuration administrator to change the active configuration.")
+            End If
+            ' A non-Nothing seed also guards an existing personal file disappearing before the core reads it.
+            Dim initialConfigurationPath As System.String = iniPath
+            If Not System.IO.File.Exists(iniPath) Then
+                initialConfigurationPath = SharedMethods.GetActiveConfigReadPath(context)
+                If System.String.IsNullOrWhiteSpace(initialConfigurationPath) OrElse Not System.IO.File.Exists(initialConfigurationPath) Then
+                    Throw New System.IO.FileNotFoundException("The active configuration must exist before a complete personal copy can be saved.", initialConfigurationPath)
+                End If
+            End If
+            Dim directory As System.String = System.IO.Path.GetDirectoryName(iniPath)
+            If Not System.String.IsNullOrWhiteSpace(directory) Then System.IO.Directory.CreateDirectory(directory)
+            WriteIniValuesCore(iniPath, editedValues, initialConfigurationPath)
+            Return iniPath
+        End Function
+
+        Private Shared Sub WriteIniValuesCore(iniPath As System.String,
+                editedValues As System.Collections.Generic.Dictionary(Of System.String, System.String),
+                initialConfigurationPath As System.String)
             If ConfigurationResourceLoader.ClassifyConfigurationSource(iniPath) <> ConfigurationSourceKind.FileSystem Then
                 Throw New System.InvalidOperationException("Remote configuration sources are read-only and cannot be modified.")
             End If
@@ -328,8 +390,14 @@ Namespace SharedLibrary
                 Throw New ArgumentNullException(NameOf(iniPath))
             End If
 
-            ' Create timestamped backup (same convention as CommitDryRunPlan)
-            CreateWizardBackup(iniPath)
+            If editedValues Is Nothing Then Throw New System.ArgumentNullException(NameOf(editedValues))
+            editedValues = SemanticArchiveConfiguration.NormalizeIniValues(editedValues)
+            SemanticArchiveConfiguration.ReadConfiguredControlValues(editedValues)
+
+            ' Create timestamped backup before touching an existing configuration.
+            If System.IO.File.Exists(iniPath) AndAlso CreateWizardBackup(iniPath) Is Nothing Then
+                Throw New System.IO.IOException("The configuration backup could not be created.")
+            End If
 
             ' Retrieve the canonical default-skip dictionary (same source as UpdateAppConfig)
             Dim defaults As Dictionary(Of String, Object) = GetKeysToSkipWhenDefault()
@@ -337,8 +405,19 @@ Namespace SharedLibrary
             Dim existingLines As New List(Of String)
             If File.Exists(iniPath) Then
                 existingLines.AddRange(File.ReadAllLines(iniPath))
+            ElseIf initialConfigurationPath IsNot Nothing Then
+                If Not System.IO.File.Exists(initialConfigurationPath) Then Throw New System.IO.FileNotFoundException("The complete initial configuration is unavailable.", initialConfigurationPath)
+                existingLines.AddRange(System.IO.File.ReadAllLines(initialConfigurationPath))
             End If
 
+            Dim rawExistingValues As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each existingLine As System.String In existingLines
+                Dim trimmedExisting As System.String = existingLine.Trim()
+                If trimmedExisting.Length = 0 OrElse trimmedExisting.StartsWith(";", System.StringComparison.Ordinal) Then Continue For
+                Dim existingParts As System.String() = trimmedExisting.Split(New System.Char() {"="c}, 2)
+                If existingParts.Length = 2 Then rawExistingValues(existingParts(0).Trim()) = existingParts(1).Trim()
+            Next
+            Dim normalizedExisting As System.Collections.Generic.Dictionary(Of System.String, System.String) = SemanticArchiveConfiguration.NormalizeIniValues(rawExistingValues)
             Dim updatedContent As New System.Text.StringBuilder()
             Dim foundKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
@@ -353,7 +432,14 @@ Namespace SharedLibrary
 
                 Dim parts = trimmed.Split({"="c}, 2)
                 If parts.Length = 2 Then
-                    Dim key = parts(0).Trim()
+                    Dim key As System.String = SemanticArchiveConfiguration.CanonicalizeIniKey(parts(0).Trim())
+                    If SemanticArchiveConfiguration.IsGlobalKey(key) Then
+                        If Not foundKeys.Add(key) Then Continue For
+                        Dim archiveValue As System.String = If(editedValues.ContainsKey(key), editedValues(key), normalizedExisting(key))
+                        ' Keep an explicit canonical blank/False even when it is the built-in default.
+                        updatedContent.AppendLine($"{key} = {archiveValue}")
+                        Continue For
+                    End If
                     foundKeys.Add(key)
 
                     If editedValues.ContainsKey(key) Then
@@ -372,6 +458,10 @@ Namespace SharedLibrary
             For Each kvp In editedValues
                 If Not foundKeys.Contains(kvp.Key) Then
                     Dim value As String = kvp.Value
+                    If SemanticArchiveConfiguration.IsGlobalKey(kvp.Key) Then
+                        updatedContent.AppendLine($"{kvp.Key} = {value}")
+                        Continue For
+                    End If
 
                     ' Skip if the value matches its built-in default (same as UpdateAppConfig)
                     If IsDefaultValue(kvp.Key, value, defaults) Then
@@ -393,19 +483,21 @@ Namespace SharedLibrary
             Dim ext As String = Path.GetExtension(iniPath)
             Dim tmpPath As String = Path.Combine(directory, baseName & "_tmp_" & Guid.NewGuid().ToString("N") & ext)
 
-            File.WriteAllText(tmpPath, updatedContent.ToString(), System.Text.Encoding.UTF8)
-
             Try
+                File.WriteAllText(tmpPath, updatedContent.ToString(), System.Text.Encoding.UTF8)
                 If File.Exists(iniPath) Then
                     File.Replace(tmpPath, iniPath, Nothing, True)
                 Else
                     File.Move(tmpPath, iniPath)
                 End If
-            Catch
-                If File.Exists(iniPath) Then
-                    Try : File.Delete(iniPath) : Catch : End Try
+            Finally
+                If System.IO.File.Exists(tmpPath) Then
+                    Try
+                        System.IO.File.Delete(tmpPath)
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("Configuration staging cleanup failed: " & ex.Message)
+                    End Try
                 End If
-                File.Move(tmpPath, iniPath)
             End Try
         End Sub
 
@@ -424,10 +516,13 @@ Namespace SharedLibrary
             End If
             If Not File.Exists(iniPath) Then Return
 
-            ' Create timestamped backup (same convention as WriteIniValues)
-            CreateWizardBackup(iniPath)
+            If keys Is Nothing Then Throw New System.ArgumentNullException(NameOf(keys))
+            If CreateWizardBackup(iniPath) Is Nothing Then Throw New System.IO.IOException("The configuration backup could not be created.")
 
-            Dim removeSet As New HashSet(Of String)(keys, StringComparer.OrdinalIgnoreCase)
+            Dim removeSet As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each key As System.String In keys
+                removeSet.Add(SemanticArchiveConfiguration.CanonicalizeIniKey(key))
+            Next
 
             Dim updatedContent As New System.Text.StringBuilder()
             For Each line In File.ReadAllLines(iniPath)
@@ -440,7 +535,7 @@ Namespace SharedLibrary
                 End If
 
                 Dim parts = trimmed.Split({"="c}, 2)
-                If parts.Length = 2 AndAlso removeSet.Contains(parts(0).Trim()) Then
+                If parts.Length = 2 AndAlso removeSet.Contains(SemanticArchiveConfiguration.CanonicalizeIniKey(parts(0).Trim())) Then
                     ' Drop this key line
                     Continue For
                 End If
@@ -462,11 +557,14 @@ Namespace SharedLibrary
                 Else
                     File.Move(tmpPath, iniPath)
                 End If
-            Catch
-                If File.Exists(iniPath) Then
-                    Try : File.Delete(iniPath) : Catch : End Try
+            Finally
+                If System.IO.File.Exists(tmpPath) Then
+                    Try
+                        System.IO.File.Delete(tmpPath)
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("Configuration staging cleanup failed: " & ex.Message)
+                    End Try
                 End If
-                File.Move(tmpPath, iniPath)
             End Try
         End Sub
 
@@ -538,6 +636,10 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(field.Validation) Then Return ""
 
             Dim rule = field.Validation.Trim()
+
+            If rule.Equals("ProcessingWindow", System.StringComparison.OrdinalIgnoreCase) AndAlso Not BackgroundProcessingWindow.IsValid(value) Then
+                Return $"'{field.Label}' must be empty or use allow:HH:mm-HH:mm / deny:HH:mm-HH:mm, with semicolons between ranges."
+            End If
 
             If rule.Equals("NotEmpty", StringComparison.OrdinalIgnoreCase) Then
                 If String.IsNullOrWhiteSpace(value) Then

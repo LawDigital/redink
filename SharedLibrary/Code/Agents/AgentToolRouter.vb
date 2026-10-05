@@ -44,8 +44,13 @@ Namespace Agents
                                                     host As ISubAgentHost,
                                                     Optional cancellationToken As CancellationToken = Nothing,
                                                     Optional sharedContext As ISharedContext = Nothing,
-                                                    Optional authoritativeUserRequest As System.String = Nothing) As System.Threading.Tasks.Task(Of System.String)
+                                                    Optional authoritativeUserRequest As System.String = Nothing,
+                                                    Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing) As System.Threading.Tasks.Task(Of System.String)
             If String.IsNullOrWhiteSpace(toolName) Then Return Nothing
+
+            If SemanticArchiveTools.IsSemanticArchiveTool(toolName) Then
+                Return Await SemanticArchiveTools.ExecuteAsync(toolName, arguments, sharedContext, semanticArchiveScope, cancellationToken).ConfigureAwait(False)
+            End If
 
             If MemoryTools.IsMemoryTool(toolName) Then
                 Return MemoryTools.Execute(toolName, arguments)
@@ -209,6 +214,7 @@ Namespace Agents
         ''' <summary>True if the tool name belongs to the agent layer (memory_*, skill_use, agent_*).</summary>
         Public Shared Function IsAgentLayerTool(toolName As String) As Boolean
             If String.IsNullOrWhiteSpace(toolName) Then Return False
+            If SemanticArchiveTools.IsSemanticArchiveTool(toolName) Then Return True
             If MemoryTools.IsMemoryTool(toolName) Then Return True
             If TextTools.IsTextTool(toolName) Then Return True
             If FileTools.IsFileTool(toolName) Then Return True

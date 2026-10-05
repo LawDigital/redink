@@ -53,6 +53,7 @@ Namespace SharedLibrary
                                                          prefilledProductId As String,
                                                          prefilledUserId As String,
                                                          prefilled As Boolean) As Boolean
+            RequireInteractiveExecution("license_activation")
             Using form As New Form()
                 ' Let WinForms handle DPI scaling automatically
                 ' Set AutoScaleDimensions to 96 DPI (design baseline), then AutoScaleMode.Dpi

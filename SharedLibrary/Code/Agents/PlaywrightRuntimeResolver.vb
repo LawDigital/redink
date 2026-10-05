@@ -4,6 +4,18 @@
 ' Resolves the externally provisioned Playwright runtime used by BrowserTools.
 ' The runtime is intentionally independent from Word/Outlook ClickOnce deployment.
 
+
+' =============================================================================
+' File: PlaywrightRuntimeResolver.vb
+' Purpose:
+'   Validates and resolves externally provisioned Playwright runtimes and their
+'   compatible local cache.
+'
+' Architecture / Function:
+'   Keeps browser runtime provisioning independent of Office deployment; invalid or
+'   incompatible cache entries are rejected.
+' =============================================================================
+
 Option Explicit On
 Option Strict On
 Option Infer On

@@ -42,6 +42,11 @@ Namespace Agents
         Public Const ModelEmptyResponsePhase As String = "main_loop"
         Public Const ModelEmptyResponseMessage As String = "The model returned no tool calls and no final answer."
 
+        Public Const TimeoutSummary As String = "Sub-agent timed out before completing its delegated task."
+        Public Const TimeoutCode As String = "subagent_timeout"
+        Public Const TimeoutPhase As String = "subagent_execution"
+        Public Const TimeoutMessage As String = "The isolated sub-agent attempt exceeded its execution deadline."
+
         Private Const StructuredJsonFallbackSummary As String = "Sub-agent returned structured JSON."
 
         Public NotInheritable Class NormalizedEnvelope
@@ -207,6 +212,36 @@ Namespace Agents
         New JProperty("result", JValue.CreateNull()),
         New JProperty("resultKind", "error"),
         New JProperty("error", err))
+
+            Return obj.ToString(Formatting.None)
+        End Function
+
+        ''' <summary>
+        ''' Builds the canonical retryable timeout envelope for one isolated sub-agent
+        ''' attempt. A timeout is not an empty model result and must therefore never be
+        ''' routed through the runner's agent_empty_result retry path.
+        ''' </summary>
+        Public Shared Function BuildTimeoutPayload(agentName As String,
+                                                   Optional timeoutSeconds As System.Int32 = 0,
+                                                   Optional message As String = Nothing) As String
+            Dim effectiveMessage As String = If(message, "").Trim()
+            If effectiveMessage = "" Then effectiveMessage = TimeoutMessage
+
+            Dim err As New JObject(
+                New JProperty("code", TimeoutCode),
+                New JProperty("phase", TimeoutPhase),
+                New JProperty("message", effectiveMessage),
+                New JProperty("retryable", True))
+
+            Dim normalizedAgentName As String = If(agentName, "").Trim()
+            If normalizedAgentName <> "" Then err("agent") = normalizedAgentName
+            If timeoutSeconds > 0 Then err("timeoutSeconds") = timeoutSeconds
+
+            Dim obj As New JObject(
+                New JProperty("summary", TimeoutSummary),
+                New JProperty("result", JValue.CreateNull()),
+                New JProperty("resultKind", "error"),
+                New JProperty("error", err))
 
             Return obj.ToString(Formatting.None)
         End Function

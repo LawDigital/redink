@@ -1,3 +1,17 @@
+
+' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: ToolingPhaseTelemetry.vb
+' Purpose:
+'   Sanitized host-neutral phase-timing records and deterministic tool-phase
+'   classification.
+'
+' Architecture / Function:
+'   Formats elapsed/queue-wait/outcome tokens without performing log I/O or changing
+'   execution policy.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

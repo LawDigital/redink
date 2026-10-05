@@ -784,10 +784,11 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Ensures a persisted task is only executed by the runtime identity that owns it.
-    ''' AutoPilot tasks require an explicit authenticated CreatedBy identity. When the
+    ''' AutoPilot tasks require an explicit stored CreatedBy ownership key. When the
     ''' Local Agent scheduler is active instead, the task owner must be the local main
     ''' mailbox. This also prevents legacy tasks without CreatedBy from being silently
-    ''' adopted after a mode/user transition.
+    ''' adopted after a mode/user transition. This routing check does not independently
+    ''' authenticate a requester or grant Semantic Archive source access.
     ''' </summary>
     Private Function IsScheduledTaskOwnedByCurrentRuntime(task As ScheduledTask) As Boolean
         If task Is Nothing OrElse String.IsNullOrWhiteSpace(task.CreatedBy) Then Return False
@@ -923,6 +924,10 @@ Partial Public Class ThisAddIn
         Dim senderDesignScope As System.IDisposable = Nothing
 
         Try
+            ' A due scheduled task is foreground AutoPilot work. Pre-empt any idle log
+            ' diagnostics before waiting for the shared LLM/agent gate.
+            CancelAutoPilotLogDiagnosticsForForegroundWork()
+
             Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
             runIsolationOwned = True
 
@@ -939,6 +944,8 @@ Partial Public Class ThisAddIn
             ' Every scheduled execution owns a fresh top-level tooling/delivery result.
             ' A no-tool scheduled run must never see the previous AutoPilot/Local-Agent registry.
             _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolingWorkflowId = System.String.Empty
+            _lastCompletedToolingWasBlocked = False
             _lastCompletedToolResponses = New List(Of ToolResponse)()
 
             ' Create isolated temp directory
@@ -1041,12 +1048,24 @@ Partial Public Class ThisAddIn
             senderDesignScope = SharedLibrary.Agents.DesignRepository.PushAccessScope(
                 senderDesignAccess.AllowDesigns, senderDesignAccess.AllowDesignSets)
 
+            ' Scheduled archive access requires fresh independent verification; a
+            ' persisted CreatedBy email never restores an earlier or interactive grant.
+            Dim archiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope =
+                Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                    Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.ScheduledTask, task.Id, task.CreatedBy, ct)
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest =
+                Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, If(task Is Nothing, "", task.Instruction), archiveScope,
+                    allowInteractiveSelection:=False, cancellationToken:=ct)
+
             ' Build prompts — tell the LLM it is executing a scheduled task
             Dim userPrompt As StringBuilder =
                 BuildScheduledTaskExecutionPrompt(
                     task,
                     inputFileNames,
-                    workspaceFileNames)
+                    workspaceFileNames,
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+            If archivePrepared.HasTrigger Then userPrompt.AppendLine(archivePrepared.ContextText)
 
             Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
 
@@ -1102,6 +1121,7 @@ Partial Public Class ThisAddIn
                         toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
                             task.CreatedBy,
                             If(String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject)),
+                        semanticArchivePrepared:=archivePrepared,
                         transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 Else
                     response = Await LLM(systemPrompt, userPrompt.ToString(),
@@ -1167,6 +1187,7 @@ Partial Public Class ThisAddIn
                 ' Re-sync the workspace file list
                 SyncWorkspaceFileList(task)
             End If
+            AddSemanticArchiveEvidenceAttachments(resultAttachments, archiveScope, tempDir)
 
             ' Send result e-mail
             Await SwitchToUi(Sub() SendScheduledTaskResult(task, response, resultAttachments, sourcesHtml))
@@ -1646,7 +1667,8 @@ Partial Public Class ThisAddIn
 
     Private Function BuildScheduledTaskExecutionPrompt(task As ScheduledTask,
                                                        inputFileNames As IEnumerable(Of String),
-                                                       workspaceFileNames As IEnumerable(Of String)) As StringBuilder
+                                                       workspaceFileNames As IEnumerable(Of String),
+                                                       Optional authoritativeInstructionOverride As System.String = Nothing) As System.Text.StringBuilder
         Dim prompt As New StringBuilder()
         Dim shortTaskId As String = ""
 
@@ -1673,9 +1695,16 @@ Partial Public Class ThisAddIn
                 OrderBy(Function(name) name, StringComparer.OrdinalIgnoreCase).
                 ToList()
 
+        Dim executionLocal As System.DateTimeOffset = System.DateTimeOffset.Now
+
         prompt.AppendLine("[SCHEDULED TASK EXECUTION]")
         prompt.AppendLine($"You are executing a previously scheduled task (ID: {shortTaskId}...).")
         prompt.AppendLine($"Schedule: {If(task?.ScheduleDescription, "one-time")}")
+        prompt.AppendLine($"Execution local datetime: {executionLocal:yyyy-MM-ddTHH:mm:sszzz}")
+        prompt.AppendLine($"Execution local date: {executionLocal:yyyy-MM-dd}")
+        prompt.AppendLine($"Execution UTC datetime: {executionLocal.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}")
+        prompt.AppendLine($"Execution timezone: {System.TimeZoneInfo.Local.Id}")
+        prompt.AppendLine("Treat these execution timestamps as authoritative for relative date/time terms such as today, tomorrow, this morning, and tonight.")
         prompt.AppendLine("This task is already scheduled — do NOT call manage_scheduled_tasks to create, update, or re-schedule it.")
         prompt.AppendLine("Just perform the work described below and return the result.")
 
@@ -1696,7 +1725,7 @@ Partial Public Class ThisAddIn
 
         prompt.AppendLine()
         prompt.AppendLine("[TASK INSTRUCTION]")
-        prompt.AppendLine(If(task?.Instruction, ""))
+        prompt.AppendLine(If(authoritativeInstructionOverride, If(task?.Instruction, "")))
         prompt.AppendLine("[/TASK INSTRUCTION]")
 
         Return prompt

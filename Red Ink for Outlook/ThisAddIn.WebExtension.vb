@@ -1317,6 +1317,20 @@ Partial Public Class ThisAddIn
         Public PreAgentModelKey As System.String = ""
         Public PreAgentUseSecondApi As System.Boolean = False
         Public AgentModelActive As System.Boolean = False
+
+        ' Local Chat cross-run continuation. The session id is stable for the lifetime
+        ' of one chat and is rotated by Clear. Pending* describes only the one tooling
+        ' run that may currently be resumed; it is cleared by a new non-retry request.
+        Public ContinuationSessionId As System.String = ""
+        Public PendingContinuationWorkflowId As System.String = ""
+        Public PendingContinuationWasAgentMode As System.Boolean = False
+        Public PendingContinuationUseToolTrigger As System.Boolean = False
+        Public PendingContinuationUseSecondApi As System.Boolean = False
+        Public PendingContinuationSelectedModelKey As System.String = ""
+        Public PendingContinuationToolNames As System.Collections.Generic.List(Of System.String) = New System.Collections.Generic.List(Of System.String)()
+        Public PendingContinuationRequiresInputRestore As System.Boolean = False
+        Public PendingContinuationInputsPersisted As System.Boolean = False
+        Public PendingContinuationWorkspaceFingerprint As System.String = ""
     End Class
 
     ''' <summary>
@@ -1399,6 +1413,194 @@ Partial Public Class ThisAddIn
         Catch
             Return False
         End Try
+    End Function
+
+    Private Function ModelConfigSupportsFileUploads(config As ModelConfig) As System.Boolean
+        If config Is Nothing Then Return False
+        Try
+            Return Not System.String.IsNullOrWhiteSpace(config.APICall_Object)
+        Catch
+            Try
+                Dim propertyInfo As System.Reflection.PropertyInfo =
+                    GetType(ModelConfig).GetProperty("APICall_Object", System.Reflection.BindingFlags.Public Or System.Reflection.BindingFlags.Instance)
+                If propertyInfo Is Nothing Then Return False
+                Dim rawValue As System.Object = propertyInfo.GetValue(config, Nothing)
+                Return rawValue IsNot Nothing AndAlso
+                       Not System.String.IsNullOrWhiteSpace(System.Convert.ToString(rawValue, System.Globalization.CultureInfo.InvariantCulture))
+            Catch
+                Return False
+            End Try
+        End Try
+    End Function
+
+    Private Function EnsureLocalChatContinuationSessionId(st As InkyState, Optional rotate As System.Boolean = False) As System.Boolean
+        If st Is Nothing Then Return False
+
+        Dim current As System.String = If(st.ContinuationSessionId, System.String.Empty).Trim()
+        Dim parsed As System.Guid
+        If rotate OrElse Not System.Guid.TryParse(current, parsed) Then
+            st.ContinuationSessionId = System.Guid.NewGuid().ToString("N")
+            Return True
+        End If
+
+        st.ContinuationSessionId = parsed.ToString("N")
+        Return False
+    End Function
+
+    Private Function BuildLocalChatContinuationKey(st As InkyState, chatId As System.Int32) As System.String
+        If st Is Nothing Then Return System.String.Empty
+        EnsureLocalChatContinuationSessionId(st)
+        Return "localchat:v1:" & chatId.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" & st.ContinuationSessionId
+    End Function
+
+    Private Sub ClearLocalChatPendingContinuation(st As InkyState)
+        If st Is Nothing Then Return
+        st.PendingContinuationWorkflowId = System.String.Empty
+        st.PendingContinuationWasAgentMode = False
+        st.PendingContinuationUseToolTrigger = False
+        st.PendingContinuationUseSecondApi = False
+        st.PendingContinuationSelectedModelKey = System.String.Empty
+        st.PendingContinuationToolNames = New System.Collections.Generic.List(Of System.String)()
+        st.PendingContinuationRequiresInputRestore = False
+        st.PendingContinuationInputsPersisted = False
+        st.PendingContinuationWorkspaceFingerprint = System.String.Empty
+    End Sub
+
+    Private Function TryParseLocalChatRetryRequest(text As System.String, ByRef additionalInstructions As System.String) As System.Boolean
+        additionalInstructions = System.String.Empty
+        Dim value As System.String = If(text, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        Dim lines() As System.String = value.Split(New System.Char() {Microsoft.VisualBasic.ChrW(10)})
+        Dim firstNonEmpty As System.Int32 = -1
+
+        For i As System.Int32 = 0 To lines.Length - 1
+            If Not System.String.IsNullOrWhiteSpace(lines(i)) Then
+                firstNonEmpty = i
+                Exit For
+            End If
+        Next
+
+        If firstNonEmpty < 0 Then Return False
+        Dim firstLine As System.String = lines(firstNonEmpty).Trim()
+        Dim normalized As System.String = firstLine
+        If normalized.StartsWith("#", System.StringComparison.Ordinal) Then normalized = normalized.Substring(1).TrimStart()
+
+        If Not (normalized.Equals("retry", System.StringComparison.OrdinalIgnoreCase) OrElse
+                normalized.StartsWith("retry ", System.StringComparison.OrdinalIgnoreCase) OrElse
+                normalized.StartsWith("retry:", System.StringComparison.OrdinalIgnoreCase)) Then
+            Return False
+        End If
+
+        Dim remainder As New System.Text.StringBuilder()
+        Dim sameLineRemainder As System.String = normalized.Substring(5).TrimStart(" "c, ":"c, "-"c, Microsoft.VisualBasic.ChrW(9))
+        If sameLineRemainder.Length > 0 Then remainder.AppendLine(sameLineRemainder)
+        For i As System.Int32 = firstNonEmpty + 1 To lines.Length - 1
+            remainder.AppendLine(lines(i))
+        Next
+        additionalInstructions = remainder.ToString().Trim()
+        Return True
+    End Function
+
+    Private Function NormalizeLocalChatLanguageKey(userLanguage As System.String) As System.String
+        Dim language As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant()
+        Dim separator As System.Int32 = language.IndexOfAny(New System.Char() {"-"c, "_"c})
+        If separator > 0 Then language = language.Substring(0, separator)
+        Return language
+    End Function
+
+    Private Function BuildLocalChatRetryHint(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Um diesen technisch blockierten Vorgang fortzusetzen, senden Sie `retry` als nächste Nachricht. Darunter können Sie weitere Anweisungen ergänzen. Bereits erfolgreich erledigte Arbeit wird nach Möglichkeit wiederverwendet."
+            Case "fr"
+                Return "Pour poursuivre cette exécution techniquement bloquée, envoyez `retry` comme prochain message. Vous pouvez ajouter des instructions supplémentaires en dessous. Le travail déjà effectué avec succès sera réutilisé dans la mesure du possible."
+            Case "it"
+                Return "Per continuare questa esecuzione tecnicamente bloccata, invia `retry` come prossimo messaggio. Puoi aggiungere ulteriori istruzioni nelle righe successive. Il lavoro già completato con successo verrà riutilizzato ove possibile."
+            Case "es"
+                Return "Para continuar esta ejecución bloqueada técnicamente, envíe `retry` como siguiente mensaje. Puede añadir instrucciones adicionales debajo. El trabajo ya completado correctamente se reutilizará cuando sea posible."
+            Case Else
+                Return "To continue this technically blocked run, send `retry` as your next message. You may add further instructions below it. Work that already succeeded will be reused where possible."
+        End Select
+    End Function
+
+    Private Function BuildLocalChatRetryUnavailableNotice(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Für diesen Chat ist kein fortsetzbarer blockierter Vorgang mehr verfügbar. Ich habe keinen neuen Lauf gestartet, weil dadurch Dateien oder andere bereits erfolgreich ausgeführte Aktionen doppelt erzeugt werden könnten. Wenn Sie die Aufgabe neu starten möchten, formulieren Sie sie bitte erneut als normale Anfrage."
+            Case "fr"
+                Return "Aucune exécution bloquée pouvant être reprise n’est plus disponible pour ce chat. Je n’ai pas lancé une nouvelle exécution, car cela pourrait recréer des fichiers ou répéter des actions déjà effectuées avec succès. Si vous souhaitez recommencer, reformulez la tâche comme une nouvelle demande normale."
+            Case "it"
+                Return "Per questa chat non è più disponibile un'esecuzione bloccata che possa essere ripresa. Non ho avviato una nuova esecuzione, perché ciò potrebbe ricreare file o ripetere azioni già completate con successo. Se desideri ricominciare, formula nuovamente l'attività come una normale nuova richiesta."
+            Case "es"
+                Return "Ya no hay una ejecución bloqueada reanudable disponible para este chat. No he iniciado una nueva ejecución, porque podría volver a crear archivos o repetir acciones ya completadas correctamente. Si desea empezar de nuevo, formule la tarea otra vez como una solicitud nueva normal."
+            Case Else
+                Return "There is no longer a resumable blocked run available for this chat. I did not start a new run because that could recreate files or repeat actions that already succeeded. If you want to start again, please restate the task as a normal new request."
+        End Select
+    End Function
+
+    Private Function BuildLocalChatRetryEnvironmentUnavailableNotice(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Der blockierte Vorgang kann mit der aktuell verfügbaren Modell-/Tool-Konfiguration nicht sicher fortgesetzt werden. Ich habe keinen neuen Lauf gestartet. Stellen Sie nach Möglichkeit die ursprünglich verwendete Modell- und Tool-Konfiguration wieder her und senden Sie danach erneut `retry`. Alternativ können Sie die Aufgabe als neue Anfrage formulieren."
+            Case "fr"
+                Return "L’exécution bloquée ne peut pas être reprise en toute sécurité avec la configuration de modèle et d’outils actuellement disponible. Je n’ai pas lancé une nouvelle exécution. Si possible, rétablissez la configuration de modèle et d’outils utilisée à l’origine, puis envoyez de nouveau `retry`. Vous pouvez aussi reformuler la tâche comme une nouvelle demande."
+            Case "it"
+                Return "L’esecuzione bloccata non può essere ripresa in sicurezza con la configurazione di modello e strumenti attualmente disponibile. Non ho avviato una nuova esecuzione. Se possibile, ripristina la configurazione di modello e strumenti usata originariamente e invia di nuovo `retry`. In alternativa, formula l’attività come una nuova richiesta."
+            Case "es"
+                Return "La ejecución bloqueada no puede reanudarse de forma segura con la configuración de modelo y herramientas disponible actualmente. No he iniciado una nueva ejecución. Si es posible, restaure la configuración de modelo y herramientas utilizada originalmente y envíe de nuevo `retry`. También puede formular la tarea como una solicitud nueva."
+            Case Else
+                Return "The blocked run cannot be resumed safely with the model/tool configuration currently available. I did not start a new run. If possible, restore the model and tool configuration used for the original run and send `retry` again. Alternatively, restate the task as a new request."
+        End Select
+    End Function
+
+    Private Function BuildLocalChatRetryInputsUnavailableNotice(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Der Vorgang ist technisch blockiert. Ein automatischer `retry` ist für diesen Lauf nicht verfügbar, weil mindestens eine dafür benötigte Eingabedatei nicht dauerhaft gesichert werden konnte. Bereits erzeugte Ergebnisse können trotzdem brauchbar sein. Für einen neuen Versuch senden Sie die Aufgabe bitte erneut und hängen die benötigten Dateien nochmals an."
+            Case "fr"
+                Return "L’exécution est techniquement bloquée. Un `retry` automatique n’est pas disponible pour cette exécution, car au moins un fichier d’entrée nécessaire n’a pas pu être conservé durablement. Les résultats déjà produits peuvent néanmoins rester utilisables. Pour réessayer, envoyez la tâche comme une nouvelle demande et joignez à nouveau les fichiers nécessaires."
+            Case "it"
+                Return "L’esecuzione è tecnicamente bloccata. Un `retry` automatico non è disponibile per questa esecuzione perché almeno un file di input necessario non ha potuto essere conservato in modo persistente. I risultati già prodotti possono comunque essere utilizzabili. Per riprovare, invia nuovamente l’attività come nuova richiesta e allega di nuovo i file necessari."
+            Case "es"
+                Return "La ejecución está bloqueada técnicamente. No hay un `retry` automático disponible para esta ejecución porque no se pudo conservar de forma persistente al menos un archivo de entrada necesario. Los resultados ya generados pueden seguir siendo utilizables. Para volver a intentarlo, envíe la tarea como una solicitud nueva y adjunte de nuevo los archivos necesarios."
+            Case Else
+                Return "The run is technically blocked. Automatic `retry` is not available for this run because at least one required input file could not be retained persistently. Results already produced may still be usable. To try again, send the task as a new request and attach the required files again."
+        End Select
+    End Function
+
+    Private Function IsMatchingBlockedLocalChatContinuation(workflowId As System.String,
+                                                            continuationKey As System.String) As System.Boolean
+        Dim id As System.String = If(workflowId, System.String.Empty).Trim()
+        Dim key As System.String = If(continuationKey, System.String.Empty).Trim()
+        If id = System.String.Empty OrElse key = System.String.Empty Then Return False
+
+        Dim snapshot As SharedLibrary.Agents.ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+        If Not SharedLibrary.Agents.WorkflowContinuity.TryGetContinuationSnapshot(id, snapshot) OrElse snapshot Is Nothing Then Return False
+        If Not System.String.Equals(If(snapshot.ContinuationKey, System.String.Empty).Trim(), key, System.StringComparison.Ordinal) Then Return False
+
+        Dim runtime As SharedLibrary.Agents.WorkflowRuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(id)
+        If runtime Is Nothing Then Return False
+        If Not System.String.Equals(If(runtime.HostPipeline, System.String.Empty), "Outlook", System.StringComparison.OrdinalIgnoreCase) Then Return False
+        Return System.String.Equals(If(runtime.CurrentPhase, System.String.Empty), "final_blocked", System.StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Function ResolveLocalChatContinuationTools(toolNames As System.Collections.Generic.IEnumerable(Of System.String),
+                                                       includeAdvanced As System.Boolean) As System.Collections.Generic.List(Of ModelConfig)
+        Dim requested As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If toolNames IsNot Nothing Then
+            For Each name As System.String In toolNames
+                If Not System.String.IsNullOrWhiteSpace(name) Then requested.Add(name.Trim())
+            Next
+        End If
+
+        Dim available As New System.Collections.Generic.List(Of ModelConfig)()
+        available.AddRange(GetLocalChatMainSelectableTools(includeInteractiveM365Tools:=True))
+        If includeAdvanced Then available.AddRange(GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools:=True))
+
+        Return available.
+            Where(Function(t) t IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(t.ToolName) AndAlso requested.Contains(t.ToolName)).
+            GroupBy(Function(t) t.ToolName, System.StringComparer.OrdinalIgnoreCase).
+            Select(Function(g) g.First()).
+            ToList()
     End Function
 
     ''' <summary>
@@ -2132,7 +2334,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId||__jobCanceled)return;__jobCanceled=true;cancelBtn.disabled=true;setTypingStatus('Cancelling…');await api('inky_cancel',{Job:__currentJobId});});")
-        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
+        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();e.stopPropagation();if(e.stopImmediatePropagation)e.stopImmediatePropagation();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}},true);")
         html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});syncRuntimeStatus(r);updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
@@ -3388,13 +3590,82 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
                         Dim st As InkyState = LoadInkyState()
-                        ' Recompute upload capability (client may be stale)
+                        Dim continuationStateChanged As System.Boolean = EnsureLocalChatContinuationSessionId(st)
+                        Dim retryAdditionalInstructions As System.String = System.String.Empty
+                        Dim isLocalChatRetry As System.Boolean = TryParseLocalChatRetryRequest(textBody, retryAdditionalInstructions)
+                        Dim continuationKeyForRequest As System.String = BuildLocalChatContinuationKey(st, activeChatId)
+                        Dim retryWorkflowId As System.String = System.String.Empty
+                        Dim continuationLanguage As System.String = GetUserLanguageTwoLetter()
+                        Dim restoredContinuationRequestFile As System.String = Nothing
+                        Dim continuationRequestFileSource As System.String = uploadedTempPath
+
+                        If isLocalChatRetry Then
+                            retryWorkflowId = If(st.PendingContinuationWorkflowId, System.String.Empty).Trim()
+                            If Not IsMatchingBlockedLocalChatContinuation(retryWorkflowId, continuationKeyForRequest) Then
+                                retryWorkflowId = SharedLibrary.Agents.WorkflowContinuity.FindBlockedContinuationWorkflowId(continuationKeyForRequest, "Outlook")
+                            End If
+
+                            Dim storedLanguage As System.String = SharedLibrary.Agents.WorkflowContinuity.GetLatestBlockedContinuationUserLanguage(continuationKeyForRequest, "Outlook")
+                            If Not System.String.IsNullOrWhiteSpace(storedLanguage) Then continuationLanguage = storedLanguage
+
+                            If Not IsMatchingBlockedLocalChatContinuation(retryWorkflowId, continuationKeyForRequest) Then
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "user",
+                                    .Markdown = textBody,
+                                    .Html = MarkdownToHtml(textBody),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                Dim unavailable As System.String = BuildLocalChatRetryUnavailableNotice(continuationLanguage)
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "assistant",
+                                    .Markdown = unavailable,
+                                    .Html = MarkdownToHtml(unavailable),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                st.LastAssistantText = unavailable
+                                ClearLocalChatPendingContinuation(st)
+                                SaveInkyState(st)
+                                DeleteLocalChatContinuationInputs(st.ContinuationSessionId)
+                                Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                            End If
+
+                            If st.PendingContinuationWasAgentMode Then
+                                Dim currentWorkspaceFingerprint As System.String = GetLocalChatWorkspaceContinuationFingerprint()
+                                If Not System.String.Equals(If(st.PendingContinuationWorkspaceFingerprint, System.String.Empty),
+                                                            If(currentWorkspaceFingerprint, System.String.Empty),
+                                                            System.StringComparison.Ordinal) Then
+                                    st.History.Add(New ChatTurn With {
+                                        .Role = "user",
+                                        .Markdown = textBody,
+                                        .Html = MarkdownToHtml(textBody),
+                                        .Utc = System.DateTime.UtcNow
+                                    })
+                                    Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                                    st.History.Add(New ChatTurn With {
+                                        .Role = "assistant",
+                                        .Markdown = unavailable,
+                                        .Html = MarkdownToHtml(unavailable),
+                                        .Utc = System.DateTime.UtcNow
+                                    })
+                                    st.LastAssistantText = unavailable
+                                    SaveInkyState(st)
+                                    Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                                End If
+                            End If
+                        Else
+                            If Not System.String.IsNullOrWhiteSpace(st.PendingContinuationWorkflowId) Then
+                                Dim abandonedContinuationSessionId As System.String = st.ContinuationSessionId
+                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(st.PendingContinuationWorkflowId, continuationKeyForRequest, "Outlook")
+                                DeleteLocalChatContinuationInputs(abandonedContinuationSessionId)
+                                ClearLocalChatPendingContinuation(st)
+                                EnsureLocalChatContinuationSessionId(st, rotate:=True)
+                                continuationKeyForRequest = BuildLocalChatContinuationKey(st, activeChatId)
+                                continuationStateChanged = True
+                            End If
+                        End If
+
+                        If continuationStateChanged Then SaveInkyState(st)
                         Dim supportsFilesNow As System.Boolean = False
-                        Try
-                            supportsFilesNow = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
-                        Catch
-                            supportsFilesNow = False
-                        End Try
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Send invoked")
 
@@ -3475,6 +3746,78 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
+                        If isLocalChatRetry AndAlso st.PendingContinuationUseToolTrigger AndAlso Not toolTriggerDetected Then
+                            Try
+                                Dim retryToolConfig As ModelConfig = Nothing
+                                If TryGetSpecialTaskModelConfig(_context, INI_AlternateModelPath, "ToolDefaultModel", retryToolConfig) AndAlso
+                                   retryToolConfig IsNot Nothing AndAlso ModelSupportsTooling(retryToolConfig) Then
+                                    toolTriggerConfig = retryToolConfig
+                                    toolTriggerDetected = True
+                                End If
+                            Catch
+                            End Try
+
+                            If Not toolTriggerDetected Then
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "user",
+                                    .Markdown = textBody,
+                                    .Html = MarkdownToHtml(textBody),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "assistant",
+                                    .Markdown = unavailable,
+                                    .Html = MarkdownToHtml(unavailable),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                st.LastAssistantText = unavailable
+                                SaveInkyState(st)
+                                Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                            End If
+                        End If
+
+                        Try
+                            If toolTriggerDetected AndAlso toolTriggerConfig IsNot Nothing Then
+                                supportsFilesNow = ModelConfigSupportsFileUploads(toolTriggerConfig)
+                            Else
+                                supportsFilesNow = ComputeSupportsFiles(
+                                    If(isLocalChatRetry, st.PendingContinuationUseSecondApi, st.UseSecondApi),
+                                    If(isLocalChatRetry, If(st.PendingContinuationSelectedModelKey, System.String.Empty), st.SelectedModelKey))
+                            End If
+                        Catch
+                            supportsFilesNow = False
+                        End Try
+
+                        If isLocalChatRetry AndAlso st.PendingContinuationRequiresInputRestore Then
+                            If Not st.PendingContinuationInputsPersisted OrElse
+                               Not RestoreLocalChatContinuationInputs(st.ContinuationSessionId, restoredContinuationRequestFile) Then
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "user",
+                                    .Markdown = textBody,
+                                    .Html = MarkdownToHtml(textBody),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(retryWorkflowId, continuationKeyForRequest, "Outlook")
+                                ClearLocalChatPendingContinuation(st)
+                                DeleteLocalChatContinuationInputs(st.ContinuationSessionId)
+                                Dim unavailable As System.String = BuildLocalChatRetryInputsUnavailableNotice(continuationLanguage)
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "assistant",
+                                    .Markdown = unavailable,
+                                    .Html = MarkdownToHtml(unavailable),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                st.LastAssistantText = unavailable
+                                SaveInkyState(st)
+                                Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                            End If
+                            If Not System.String.IsNullOrWhiteSpace(restoredContinuationRequestFile) Then
+                                fileObject = restoredContinuationRequestFile
+                                continuationRequestFileSource = restoredContinuationRequestFile
+                            End If
+                        End If
+
                         ' ------------------ (B) File / clipboard object extraction (unchanged logic) ------------
                         Dim extractedDoc As System.String = Nothing
                         Dim extractedLabel As System.String = Nothing
@@ -3537,6 +3880,32 @@ Partial Public Class ThisAddIn
                             st = LoadInkyState()
                         End If
 
+                        ' Capture only the current user instruction as retrieval authority.
+                        ' A saved dialog, attachment, or workspace listing cannot select archives.
+                        Dim archiveRequestForJob As System.String = textBody
+                        Dim archiveScopeForJob As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope
+                        If Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            archiveScopeForJob = Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                                Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.ScheduledTask, scheduledTaskId, System.String.Empty, System.Threading.CancellationToken.None).ConfigureAwait(False)
+                        Else
+                            archiveScopeForJob = CreateSelectedSemanticArchiveRunScope()
+                        End If
+                        Dim hasArchiveRequestForJob As System.Boolean = Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(archiveRequestForJob)
+                        If hasArchiveRequestForJob AndAlso archiveScopeForJob IsNot Nothing AndAlso
+                           archiveScopeForJob.AccessContext.DenialCode.Length = 0 AndAlso
+                           archiveScopeForJob.SelectedArchiveIds.Count = 0 AndAlso System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            Dim hasNamedArchive As System.Boolean = False
+                            For Each archiveRequest As Global.SharedLibrary.SharedLibrary.SemanticArchiveRequest In Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.Parse(archiveRequestForJob)
+                                If archiveRequest.ArchiveSelectors.Count > 0 Then hasNamedArchive = True
+                            Next
+                            If Not hasNamedArchive Then
+                                Await SwitchToUi(Sub()
+                                                     Dim selectedScope = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.ShowArchiveScopePicker(_context, archiveScopeForJob)
+                                                     If selectedScope IsNot Nothing Then archiveScopeForJob = selectedScope
+                                                 End Sub).ConfigureAwait(False)
+                            End If
+                        End If
+
                         ' ------------------ (C) Append user turn immediately ------------------
                         Dim userTurn As New ChatTurn With {
                             .Role = "user",
@@ -3554,7 +3923,11 @@ Partial Public Class ThisAddIn
                         sbDialog.AppendLine("<DIALOG>")
                         For Each t In clipped
                             If t.Role = "user" Then
-                                sbDialog.AppendLine("[USER] " & t.Markdown)
+                                Dim turnText As System.String = t.Markdown
+                                If hasArchiveRequestForJob AndAlso System.Object.ReferenceEquals(t, clipped(clipped.Count - 1)) Then
+                                    turnText = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.RemoveRequestControlSpans(archiveRequestForJob)
+                                End If
+                                sbDialog.AppendLine("[USER] " & turnText)
                             Else
                                 sbDialog.AppendLine("[ASSISTANT] " & t.Markdown)
                             End If
@@ -3570,8 +3943,10 @@ Partial Public Class ThisAddIn
                             sbDialog.AppendLine("</ATTACHED_DOCUMENT>")
                         End If
 
+                        Dim advancedToolsForRequest As System.Boolean = If(isLocalChatRetry, st.PendingContinuationWasAgentMode, _chatAdvancedToolsEnabled)
+
                         ' Add agent file listing so the model knows which files are already loaded/staged
-                        If _chatAdvancedToolsEnabled AndAlso _chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Count > 0 Then
+                        If advancedToolsForRequest AndAlso _chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Count > 0 Then
                             sbDialog.AppendLine()
                             sbDialog.AppendLine("[LOADED FILES]")
                             For i As Integer = 0 To _chatAgentFiles.Count - 1
@@ -3586,7 +3961,7 @@ Partial Public Class ThisAddIn
                         End If
 
                         ' Add workspace context independently of whether any files are already staged
-                        If _chatAdvancedToolsEnabled Then
+                        If advancedToolsForRequest Then
                             Dim workspacePromptBlock As String = BuildAgentWorkspacePromptBlock()
                             If Not String.IsNullOrWhiteSpace(workspacePromptBlock) Then
                                 sbDialog.AppendLine()
@@ -3594,7 +3969,7 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        If _chatAdvancedToolsEnabled Then
+                        If advancedToolsForRequest Then
                             Dim sessionFilesPromptBlock As String = BuildAgentSessionFilesPromptBlock()
                             If Not String.IsNullOrWhiteSpace(sessionFilesPromptBlock) Then
                                 sbDialog.AppendLine()
@@ -3616,7 +3991,7 @@ Partial Public Class ThisAddIn
                         sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
                         sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
 
-                        If _chatAdvancedToolsEnabled Then
+                        If advancedToolsForRequest Then
                             sysPromptBase &= Environment.NewLine &
                                 "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
                         End If
@@ -3630,16 +4005,95 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        Dim useSecondApiLocal As Boolean = st.UseSecondApi
-                        Dim selectedModelKeyLocal As String = st.SelectedModelKey
-                        Dim supportsToolingForJob As Boolean = CurrentModelSupportsTooling(st)
-                        Dim toolingEnabledForJob As Boolean = st.ToolingEnabled AndAlso supportsToolingForJob AndAlso Not _apActive
-                        Dim agentModeEnabledForJob As Boolean = st.AgentModeEnabled AndAlso toolingEnabledForJob
-                        Dim selectedToolsForJob As List(Of ModelConfig) =
-                            GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
-                        ' Capture file object (may be Nothing after extraction)
+                        Dim useSecondApiLocal As Boolean = If(isLocalChatRetry, st.PendingContinuationUseSecondApi, st.UseSecondApi)
+                        Dim selectedModelKeyLocal As String = If(isLocalChatRetry, If(st.PendingContinuationSelectedModelKey, System.String.Empty), st.SelectedModelKey)
+
+                        Dim capabilityState As InkyState = st
+                        If isLocalChatRetry Then
+                            capabilityState = New InkyState() With {
+                                .UseSecondApi = useSecondApiLocal,
+                                .SelectedModelKey = selectedModelKeyLocal
+                            }
+                        End If
+
+                        Dim supportsToolingForJob As Boolean = If(toolTriggerDetected AndAlso toolTriggerConfig IsNot Nothing, True, CurrentModelSupportsTooling(capabilityState))
+                        Dim toolingEnabledForJob As Boolean = (If(isLocalChatRetry, True, st.ToolingEnabled)) AndAlso supportsToolingForJob AndAlso Not _apActive
+                        Dim agentModeEnabledForJob As Boolean = If(isLocalChatRetry, st.PendingContinuationWasAgentMode, st.AgentModeEnabled) AndAlso toolingEnabledForJob
+                        Dim selectedToolsForJob As List(Of ModelConfig)
+                        If isLocalChatRetry AndAlso st.PendingContinuationToolNames IsNot Nothing AndAlso st.PendingContinuationToolNames.Count > 0 Then
+                            selectedToolsForJob = ResolveLocalChatContinuationTools(st.PendingContinuationToolNames, agentModeEnabledForJob)
+                        Else
+                            selectedToolsForJob = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
+                        End If
+
+                        If isLocalChatRetry AndAlso Not supportsToolingForJob Then
+                            Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                            st.History.Add(New ChatTurn With {.Role = "assistant", .Markdown = unavailable, .Html = MarkdownToHtml(unavailable), .Utc = System.DateTime.UtcNow})
+                            st.LastAssistantText = unavailable
+                            SaveInkyState(st)
+                            Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                        End If
+
+                        If isLocalChatRetry AndAlso st.PendingContinuationToolNames IsNot Nothing AndAlso
+                           st.PendingContinuationToolNames.Count > 0 AndAlso
+                           selectedToolsForJob.Count <> st.PendingContinuationToolNames.Distinct(System.StringComparer.OrdinalIgnoreCase).Count() Then
+                            Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                            st.History.Add(New ChatTurn With {.Role = "assistant", .Markdown = unavailable, .Html = MarkdownToHtml(unavailable), .Utc = System.DateTime.UtcNow})
+                            st.LastAssistantText = unavailable
+                            SaveInkyState(st)
+                            Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                        End If
+
+                        ' Capture file object (may be Nothing after extraction or restored from continuation input cache).
                         Dim finalFileObject As String = fileObject
+
                         Dim tempUploadPathCopy As String = uploadedTempPath
+                        Dim localUserLanguage As System.String = If(System.String.IsNullOrWhiteSpace(continuationLanguage), GetUserLanguageTwoLetter(), continuationLanguage)
+                        Dim workflowIdForJob As System.String = If(isLocalChatRetry, retryWorkflowId, SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId())
+                        Dim continuationKeyForJob As System.String = continuationKeyForRequest
+                        Dim continuationSessionIdForJob As System.String = st.ContinuationSessionId
+                        Dim continuationRetentionDays As System.Int32 = SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
+                        Dim workspaceFingerprintForJob As System.String =
+                            If(agentModeEnabledForJob,
+                               If(isLocalChatRetry, If(st.PendingContinuationWorkspaceFingerprint, System.String.Empty), GetLocalChatWorkspaceContinuationFingerprint()),
+                               System.String.Empty)
+
+                        Dim plannedToolingRun As System.Boolean =
+                            isLocalChatRetry OrElse toolTriggerDetected OrElse
+                            (toolingEnabledForJob AndAlso (selectedToolsForJob.Count > 0 OrElse agentModeEnabledForJob OrElse IsChatAgentWorkspaceConnected()))
+                        Dim continuationEligibleForJob As System.Boolean = plannedToolingRun AndAlso System.String.IsNullOrWhiteSpace(scheduledTaskId)
+                        If Not continuationEligibleForJob Then continuationKeyForJob = System.String.Empty
+
+                        If continuationEligibleForJob Then
+                            Dim continuationRequestPath As System.String =
+                                If(Not System.String.IsNullOrWhiteSpace(continuationRequestFileSource) AndAlso System.IO.File.Exists(continuationRequestFileSource),
+                                   continuationRequestFileSource,
+                                   finalFileObject)
+                            Dim requiresInputRestore As System.Boolean =
+                                (Not System.String.IsNullOrWhiteSpace(continuationRequestPath) AndAlso System.IO.File.Exists(continuationRequestPath)) OrElse
+                                (_chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Any(Function(a) a IsNot Nothing AndAlso Not a.IsToolOutput))
+                            Dim inputsPersisted As System.Boolean = PersistLocalChatContinuationInputs(continuationSessionIdForJob, continuationRequestPath)
+
+                            st.PendingContinuationWorkflowId = workflowIdForJob
+                            st.PendingContinuationWasAgentMode = agentModeEnabledForJob
+                            st.PendingContinuationUseToolTrigger = toolTriggerDetected
+                            st.PendingContinuationUseSecondApi = useSecondApiLocal
+                            st.PendingContinuationSelectedModelKey = If(selectedModelKeyLocal, System.String.Empty)
+                            st.PendingContinuationToolNames = selectedToolsForJob.Select(Function(t) t.ToolName).Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+                            st.PendingContinuationRequiresInputRestore = requiresInputRestore
+                            st.PendingContinuationInputsPersisted = inputsPersisted
+                            st.PendingContinuationWorkspaceFingerprint = workspaceFingerprintForJob
+                            SaveInkyState(st)
+                        End If
+
+                        If isLocalChatRetry Then
+                            sysPromptBase &= Environment.NewLine &
+                                "This is a continuation of a previously blocked Local Chat tooling workflow. Continue the original task using the restored workflow state. Do not repeat successful side effects merely to recreate prior work."
+                            If Not System.String.IsNullOrWhiteSpace(retryAdditionalInstructions) Then
+                                sysPromptBase &= Environment.NewLine & "Additional continuation instruction from the user: " & retryAdditionalInstructions
+                            End If
+                        End If
+
                         ' ------------------ (E) Create background job ------------------
                         Dim jobId As String = Guid.NewGuid().ToString("N")
                         Dim jobCts As New CancellationTokenSource()
@@ -3696,11 +4150,19 @@ Partial Public Class ThisAddIn
                                 Dim agentOutputFiles As List(Of String) = Nothing
                                 Dim scheduledTaskFinalized As Boolean = False
                                 Dim runIsolationOwned As Boolean = False
+                                Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
                                 Try
                                     ' Serialize the complete Local Agent run because model configuration,
                                     ' current attachments, PathPolicy and delivery state are shared host state.
                                     SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(jobCts.Token).GetAwaiter().GetResult()
                                     runIsolationOwned = True
+
+                                    If hasArchiveRequestForJob Then
+                                        archivePrepared = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                                            _context, archiveRequestForJob, archiveScopeForJob,
+                                            allowInteractiveSelection:=False, cancellationToken:=jobCts.Token).GetAwaiter().GetResult()
+                                        sysPromptBase &= System.Environment.NewLine & archivePrepared.ContextText
+                                    End If
 
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -3774,7 +4236,14 @@ Partial Public Class ThisAddIn
                                                     Not INI_ToolingLogWindow,
                                                     False,
                                                     jobCts.Token,
-                                                    progressSink:=Sub(s) job.StatusMessage = s
+                                                    progressSink:=Sub(s) job.StatusMessage = s,
+                                                    userLanguage:=localUserLanguage,
+                                                    workflowId:=workflowIdForJob,
+                                                    resumeWorkflowFromCheckpoint:=isLocalChatRetry,
+                                                    workflowContinuationKey:=continuationKeyForJob,
+                                                    workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3801,7 +4270,14 @@ Partial Public Class ThisAddIn
                                                 False,
                                                 jobCts.Token,
                                                 _chatAgentTempDir,
-                                                progressSink:=Sub(s) job.StatusMessage = s
+                                                progressSink:=Sub(s) job.StatusMessage = s,
+                                                userLanguage:=localUserLanguage,
+                                                workflowId:=workflowIdForJob,
+                                                resumeWorkflowFromCheckpoint:=isLocalChatRetry,
+                                                workflowContinuationKey:=continuationKeyForJob,
+                                                workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                             ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3869,7 +4345,14 @@ Partial Public Class ThisAddIn
                                                     Not INI_ToolingLogWindow,
                                                     False,
                                                     jobCts.Token,
-                                                    progressSink:=Sub(s) job.StatusMessage = s
+                                                    progressSink:=Sub(s) job.StatusMessage = s,
+                                                    userLanguage:=localUserLanguage,
+                                                    workflowId:=workflowIdForJob,
+                                                    resumeWorkflowFromCheckpoint:=isLocalChatRetry,
+                                                    workflowContinuationKey:=continuationKeyForJob,
+                                                    workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3895,6 +4378,65 @@ Partial Public Class ThisAddIn
                                             ChatAgentTeardownToolContext()
                                         End If
                                     End Try
+                                    If continuationEligibleForJob Then
+                                        Dim completedBlocked As System.Boolean =
+                                            _lastCompletedToolingWasBlocked AndAlso
+                                            System.String.Equals(_lastCompletedToolingWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                                            SharedLibrary.Agents.WorkflowContinuity.HasContinuationSnapshot(workflowIdForJob)
+
+                                        Dim continuationState As InkyState = LoadInkyState(originatingChatId)
+                                        EnsureLocalChatContinuationSessionId(continuationState)
+                                        Dim currentContinuationKey As System.String = BuildLocalChatContinuationKey(continuationState, originatingChatId)
+                                        Dim sameContinuationSession As System.Boolean =
+                                            System.String.Equals(currentContinuationKey, continuationKeyForJob, System.StringComparison.Ordinal) AndAlso
+                                            System.String.Equals(continuationState.ContinuationSessionId, continuationSessionIdForJob, System.StringComparison.OrdinalIgnoreCase)
+
+                                        If completedBlocked AndAlso sameContinuationSession Then
+                                            continuationState.PendingContinuationWorkflowId = workflowIdForJob
+                                            continuationState.PendingContinuationWasAgentMode = agentModeEnabledForJob
+                                            continuationState.PendingContinuationUseToolTrigger = toolTriggerDetected
+                                            continuationState.PendingContinuationUseSecondApi = useSecondApiLocal
+                                            continuationState.PendingContinuationSelectedModelKey = If(selectedModelKeyLocal, System.String.Empty)
+                                            continuationState.PendingContinuationToolNames = selectedToolsForJob.Select(Function(t) t.ToolName).Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+                                            Dim refreshedContinuationRequestPath As System.String =
+                                                If(Not System.String.IsNullOrWhiteSpace(continuationRequestFileSource) AndAlso System.IO.File.Exists(continuationRequestFileSource),
+                                                   continuationRequestFileSource,
+                                                   finalFileObject)
+                                            Dim refreshedInputsPersisted As System.Boolean = PersistLocalChatContinuationInputs(continuationSessionIdForJob, refreshedContinuationRequestPath)
+                                            continuationState.PendingContinuationInputsPersisted = refreshedInputsPersisted
+                                            continuationState.PendingContinuationWorkspaceFingerprint = workspaceFingerprintForJob
+
+                                            If continuationState.PendingContinuationRequiresInputRestore AndAlso Not refreshedInputsPersisted Then
+                                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                                ClearLocalChatPendingContinuation(continuationState)
+                                                DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                                SaveInkyState(continuationState, originatingChatId)
+
+                                                Dim inputRetryUnavailable As System.String = BuildLocalChatRetryInputsUnavailableNotice(localUserLanguage)
+                                                If Not System.String.IsNullOrWhiteSpace(inputRetryUnavailable) Then
+                                                    localOutput = If(localOutput, System.String.Empty).TrimEnd() & vbCrLf & vbCrLf & inputRetryUnavailable
+                                                End If
+                                            Else
+                                                SaveInkyState(continuationState, originatingChatId)
+
+                                                Dim retryHint As System.String = BuildLocalChatRetryHint(localUserLanguage)
+                                                If Not System.String.IsNullOrWhiteSpace(retryHint) AndAlso
+                                                   (localOutput Is Nothing OrElse localOutput.IndexOf("`retry`", System.StringComparison.OrdinalIgnoreCase) < 0) Then
+                                                    localOutput = If(localOutput, System.String.Empty).TrimEnd() & vbCrLf & vbCrLf & retryHint
+                                                End If
+                                            End If
+                                        Else
+                                            If completedBlocked AndAlso Not sameContinuationSession Then
+                                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                            End If
+                                            If System.String.Equals(continuationState.PendingContinuationWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) Then
+                                                ClearLocalChatPendingContinuation(continuationState)
+                                                SaveInkyState(continuationState, originatingChatId)
+                                            End If
+                                            DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                        End If
+                                    End If
+
                                     If localOutput Is Nothing Then localOutput = String.Empty
                                     localOutput = SanitizeModelOutputForBrowser(localOutput).Trim()
                                     ToolingFileLogger.LogStep(
@@ -3945,6 +4487,16 @@ Partial Public Class ThisAddIn
                                             $"Local Chat job completion signaled: job={job.Id}; status=done; accepted={If(resultAccepted, "true", "false")}; assistantLen={assistantText.Length}")
                                     End If
                                 Catch exOp As OperationCanceledException
+                                    If continuationEligibleForJob Then
+                                        SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                        Dim canceledContinuationState As InkyState = LoadInkyState(originatingChatId)
+                                        If System.String.Equals(canceledContinuationState.PendingContinuationWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) Then
+                                            ClearLocalChatPendingContinuation(canceledContinuationState)
+                                            SaveInkyState(canceledContinuationState, originatingChatId)
+                                        End If
+                                        DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                    End If
+
                                     If Not assistantTurnPersisted Then
                                         Dim cancellationPersisted As System.Boolean = PersistCancellationTurnForJob(job)
                                         assistantTurnPersisted = cancellationPersisted
@@ -3957,10 +4509,57 @@ Partial Public Class ThisAddIn
                                     End If
                                     tcs.TrySetCanceled()
                                 Catch ex As System.Exception
+                                    Dim continuationFailureSuffix As System.String = System.String.Empty
+                                    If continuationEligibleForJob Then
+                                        Dim failureContinuationState As InkyState = LoadInkyState(originatingChatId)
+                                        Dim failureCurrentContinuationKey As System.String = BuildLocalChatContinuationKey(failureContinuationState, originatingChatId)
+                                        Dim resumableFailure As System.Boolean =
+                                            System.String.Equals(failureCurrentContinuationKey, continuationKeyForJob, System.StringComparison.Ordinal) AndAlso
+                                            IsMatchingBlockedLocalChatContinuation(workflowIdForJob, continuationKeyForJob)
+
+                                        If resumableFailure Then
+                                            Dim failureContinuationRequestPath As System.String =
+                                                If(Not System.String.IsNullOrWhiteSpace(continuationRequestFileSource) AndAlso System.IO.File.Exists(continuationRequestFileSource),
+                                                   continuationRequestFileSource,
+                                                   finalFileObject)
+                                            Dim failureInputsPersisted As System.Boolean =
+                                                PersistLocalChatContinuationInputs(continuationSessionIdForJob, failureContinuationRequestPath)
+
+                                            failureContinuationState.PendingContinuationWorkflowId = workflowIdForJob
+                                            failureContinuationState.PendingContinuationWasAgentMode = agentModeEnabledForJob
+                                            failureContinuationState.PendingContinuationUseToolTrigger = toolTriggerDetected
+                                            failureContinuationState.PendingContinuationUseSecondApi = useSecondApiLocal
+                                            failureContinuationState.PendingContinuationSelectedModelKey = If(selectedModelKeyLocal, System.String.Empty)
+                                            failureContinuationState.PendingContinuationToolNames = selectedToolsForJob.Select(Function(t) t.ToolName).Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+                                            failureContinuationState.PendingContinuationInputsPersisted = failureInputsPersisted
+                                            failureContinuationState.PendingContinuationWorkspaceFingerprint = workspaceFingerprintForJob
+
+                                            If failureContinuationState.PendingContinuationRequiresInputRestore AndAlso Not failureInputsPersisted Then
+                                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                                ClearLocalChatPendingContinuation(failureContinuationState)
+                                                DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                                continuationFailureSuffix = BuildLocalChatRetryInputsUnavailableNotice(localUserLanguage)
+                                            Else
+                                                continuationFailureSuffix = BuildLocalChatRetryHint(localUserLanguage)
+                                            End If
+                                            SaveInkyState(failureContinuationState, originatingChatId)
+                                        Else
+                                            If System.String.Equals(failureContinuationState.PendingContinuationWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) Then
+                                                ClearLocalChatPendingContinuation(failureContinuationState)
+                                                SaveInkyState(failureContinuationState, originatingChatId)
+                                            End If
+                                            DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                        End If
+                                    End If
+
                                     Dim terminalFailureText As System.String =
                                         BuildLocalChatTerminalFailureText(
                                             If(assistantTurnPersisted, System.String.Empty, localOutput),
                                             ex.Message)
+                                    If Not System.String.IsNullOrWhiteSpace(continuationFailureSuffix) AndAlso
+                                       terminalFailureText.IndexOf("`retry`", System.StringComparison.OrdinalIgnoreCase) < 0 Then
+                                        terminalFailureText = terminalFailureText.TrimEnd() & vbCrLf & vbCrLf & continuationFailureSuffix
+                                    End If
                                     Dim terminalFailureHtml As System.String = MarkdownToHtml(terminalFailureText)
                                     job.TerminalResultText = terminalFailureText
                                     job.TerminalResultHtml = terminalFailureHtml
@@ -4316,6 +4915,15 @@ Partial Public Class ThisAddIn
 
                         stClear.History = New System.Collections.Generic.List(Of ChatTurn)()
                         stClear.LastAssistantText = ""
+
+                        Dim oldContinuationSessionId As System.String = If(stClear.ContinuationSessionId, System.String.Empty)
+                        Dim oldContinuationKey As System.String = BuildLocalChatContinuationKey(stClear, activeChatId)
+                        If Not System.String.IsNullOrWhiteSpace(stClear.PendingContinuationWorkflowId) Then
+                            SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(stClear.PendingContinuationWorkflowId, oldContinuationKey, "Outlook")
+                        End If
+                        ClearLocalChatPendingContinuation(stClear)
+                        EnsureLocalChatContinuationSessionId(stClear, rotate:=True)
+                        DeleteLocalChatContinuationInputs(oldContinuationSessionId)
 
                         ' Clear agent files on chat clear
                         ChatAgentClearFiles()

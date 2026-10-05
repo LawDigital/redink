@@ -1964,7 +1964,8 @@ Public Class DiscussInky
     ''' Runs an LLM request while temporarily applying any selected alternate model, restoring afterward.
     ''' Supports tooling when enabled and model supports it.
     ''' </summary>
-    Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, userPrompt As String) As Task(Of String)
+    Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, userPrompt As String,
+                                                          Optional archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing) As System.Threading.Tasks.Task(Of System.String)
         ' Capture UI state before leaving the UI thread
         Dim hideLog As Boolean = Not _chkShowToolingLog.Checked
         Dim shouldUseTool As Boolean = ShouldUseTooling()
@@ -2003,7 +2004,8 @@ Public Class DiscussInky
                     fullPromptOverride:=userPrompt,
                     hideSplash:=True,
                     hideLogWindow:=hideLog,
-                    progressSink:=Sub(status) UpdateAssistantThinking(status)).ConfigureAwait(False)
+                    progressSink:=Sub(status) UpdateAssistantThinking(status),
+                    semanticArchivePrepared:=archivePrepared).ConfigureAwait(False)
             Else
                 ' Standard LLM call
                 Return Await LLM(_context,
@@ -5254,6 +5256,10 @@ Public Class DiscussInky
             sb.Append($" | Type '(kb)' to search all stores, '(kb:storename)' for a specific store, or '(kb:tag:...)' for tagged documents")
         End If
 
+        If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+            sb.Append(" | Type '(sa)' to retrieve evidence from the selected Semantic Archives, or '(sa: archive:""Name"" query)' for a named archive; agent tools are optional.")
+        End If
+
         ' ToolTrigger hint
         Dim toolTriggerAvailable As Boolean =
             SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
@@ -5403,8 +5409,16 @@ Public Class DiscussInky
 
             ' (kb) / (kb:...) trigger: Supplement with knowledge store results
             Dim kbContext As String = Nothing
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
             Dim cleanedUserText = userText
-            If KnowledgeTriggerHelper.HasKnowledgeTrigger(cleanedUserText) Then
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(userText) Then
+                archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, userText, Globals.ThisAddIn.CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                cleanedUserText = archivePrepared.CleanPrompt
+                systemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+                AppendSystemMessage("Semantic Archives: " & archivePrepared.Status)
+            End If
+            If archivePrepared Is Nothing AndAlso KnowledgeTriggerHelper.HasKnowledgeTrigger(cleanedUserText) Then
                 Try
                     Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(cleanedUserText)
                     If kbRequest IsNot Nothing Then
@@ -5605,7 +5619,8 @@ Public Class DiscussInky
                         True,
                         fullPromptOverride:=sb.ToString(),
                         hideSplash:=True,
-                        hideLogWindow:=hideLog).ConfigureAwait(False)
+                        hideLogWindow:=hideLog,
+                        semanticArchivePrepared:=archivePrepared).ConfigureAwait(False)
 
                     answer = If(answer, "").Trim()
 
@@ -5654,7 +5669,7 @@ Public Class DiscussInky
             ' CallLlmWithSelectedModelAsync already handles that path.
             ' ──────────────────────────────────────────────────────────────
             Dim sw = Stopwatch.StartNew()
-            Dim stdAnswer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())
+            Dim stdAnswer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString(), archivePrepared)
             sw.Stop()
 
             stdAnswer = If(stdAnswer, "").Trim()

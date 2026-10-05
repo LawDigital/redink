@@ -750,7 +750,15 @@ Namespace SharedLibrary
                 LlmTransportRetryPolicy.ForProfile(transportRetryProfile)
 
             Await Agents.AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
+            Dim requestProfileScope As System.IDisposable = Nothing
+            Dim requestFailureScope As System.IDisposable = Nothing
             Try
+                If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended Then
+                    ' One logical request owns its bounded retry budget. Do not reset a
+                    ' mutable parent budget: other concurrent requests may still use it.
+                    requestProfileScope = LlmTransportRetryPolicyScope.Push(transportRetryPolicy.Profile)
+                    requestFailureScope = LlmTransportRetryPolicyScope.PushIsolatedFailureBudget()
+                End If
 
                 ' Anonymization features
 
@@ -832,13 +840,13 @@ Namespace SharedLibrary
                     If UseSecondAPI Then
 
                         If context.INI_OAuth2_2 Then
-                            context.DecodedAPI_2 = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail_2, context.INI_OAuth2Scopes_2, context.INI_APIKey_2, context.INI_OAuth2Endpoint_2, context.INI_OAuth2ATExpiry_2, True, Hidesplash)
+                            context.DecodedAPI_2 = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail_2, context.INI_OAuth2Scopes_2, context.INI_APIKey_2, context.INI_OAuth2Endpoint_2, context.INI_OAuth2ATExpiry_2, True, Hidesplash, cancellationToken:=cancellationToken)
                             If context.DecodedAPI_2 = "" Then Exit Function
                         End If
 
                     Else
                         If context.INI_OAuth2 Then
-                            context.DecodedAPI = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail, context.INI_OAuth2Scopes, context.INI_APIKey, context.INI_OAuth2Endpoint, context.INI_OAuth2ATExpiry, False, Hidesplash)
+                            context.DecodedAPI = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail, context.INI_OAuth2Scopes, context.INI_APIKey, context.INI_OAuth2Endpoint, context.INI_OAuth2ATExpiry, False, Hidesplash, cancellationToken:=cancellationToken)
                             If context.DecodedAPI = "" Then Exit Function
                         End If
                     End If
@@ -1006,6 +1014,7 @@ Namespace SharedLibrary
                         End Sub
                     Dim ct As System.Threading.CancellationToken = cts.Token
 
+                    Dim lastAttemptTimeoutMilliseconds As System.Int32 = 0
                     Dim restartCountdownAndTimeout As Action(Of String) =
                             Sub(newBaseText As String)
                                 Dim effectiveTimeoutMilliseconds As System.Int32 =
@@ -1027,6 +1036,7 @@ Namespace SharedLibrary
                                                 remainingFailureBudgetMilliseconds))
                                 End If
 
+                                lastAttemptTimeoutMilliseconds = effectiveTimeoutMilliseconds
                                 cts.CancelAfter(System.TimeSpan.FromMilliseconds(effectiveTimeoutMilliseconds))
 
                                 If Not Hidesplash Then
@@ -1063,6 +1073,7 @@ Namespace SharedLibrary
 
                     restartCountdownAndTimeout(Nothing)
 
+                    ValidateIsolatedEndpointPromptBudget(context, Endpoint, promptSystem, promptUser)
                     Endpoint = Endpoint.Replace("{promptsystem}", CleanString(Left(promptSystem, 32000)))
                     Endpoint = Endpoint.Replace("{promptuser}", CleanString(Left(promptUser, 32000).Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "").Trim()))
                     Endpoint = Endpoint.Replace("{userinstruction}", CleanString(AddUserPrompt))
@@ -1295,6 +1306,7 @@ Namespace SharedLibrary
                     End If
 
                     requestBody = requestBody.Replace("{objectcall}", "")
+                    ValidateIsolatedSerializedRequestBudget(context, Endpoint, requestBody)
 
                     Dim Returnvalue As String = ""
 
@@ -1409,6 +1421,7 @@ Namespace SharedLibrary
                                                 lastTransientStatusCode = CInt(response.StatusCode)
                                                 LlmTransportRetryPolicyScope.NoteTransientFailure(
                                                     transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                                LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, CInt(response.StatusCode), attempt + 1, maxRetries + 1, -1)
 
                                                 If attempt = maxRetries OrElse
                                                    (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
@@ -1432,8 +1445,7 @@ Namespace SharedLibrary
                                                     attempt,
                                                     cumulativeRetryDelayMs,
                                                     transportRetryPolicy)
-                                                System.Diagnostics.Debug.WriteLine(
-                                                    $"[LLM TRANSIENT TRANSPORT] profile={transportRetryPolicy.Profile}; status={CInt(response.StatusCode)}; attempt={attempt + 1}/{maxRetries + 1}; nextDelayMs={pendingRetryDelayMs}; cumulativeDelayMs={cumulativeRetryDelayMs}.")
+                                                LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, CInt(response.StatusCode), attempt + 1, maxRetries + 1, pendingRetryDelayMs)
                                                 Continue For
                                             Else
                                                 Dim errorContent As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
@@ -1536,7 +1548,7 @@ Namespace SharedLibrary
                             End If
 
                             Throw New System.TimeoutException(
-                                $"LLM request timed out after {TimeoutValue} ms.",
+                                $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                                 ex)
                         Finally
                             cts.Dispose()
@@ -1620,6 +1632,7 @@ Namespace SharedLibrary
                                     lastTransientStatusCode = result.StatusCode
                                     LlmTransportRetryPolicyScope.NoteTransientFailure(
                                         transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                    LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, result.StatusCode, attempt + 1, maxRetries + 1, -1)
 
                                     If attempt = maxRetries OrElse
                                        (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
@@ -1642,8 +1655,7 @@ Namespace SharedLibrary
                                         attempt,
                                         cumulativeRetryDelayMs,
                                         transportRetryPolicy)
-                                    System.Diagnostics.Debug.WriteLine(
-                                        $"[LLM TRANSIENT TRANSPORT] profile={transportRetryPolicy.Profile}; status={result.StatusCode}; attempt={attempt + 1}/{maxRetries + 1}; nextDelayMs={pendingRetryDelayMs}; cumulativeDelayMs={cumulativeRetryDelayMs}.")
+                                    LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, result.StatusCode, attempt + 1, maxRetries + 1, pendingRetryDelayMs)
                                     Continue For
                                 Else
                                     Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: {result.Body}"
@@ -1753,6 +1765,7 @@ Namespace SharedLibrary
                                     Next
                                 End If
 
+                                ValidateIsolatedSerializedRequestBudget(context, rawGetEndpoint, rawGetBody)
                                 If context.INI_APIDebug Then
                                     Debug.WriteLine($"SENT TO API as GET ({rawGetEndpoint}):{Environment.NewLine}{rawGetBody}")
                                     Try
@@ -1810,6 +1823,7 @@ Namespace SharedLibrary
                                         getLastTransientStatusCode = getResult.StatusCode
                                         LlmTransportRetryPolicyScope.NoteTransientFailure(
                                             transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                        LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, getResult.StatusCode, getAttempt + 1, transportRetryPolicy.MaxRetries + 1, -1)
 
                                         If getAttempt = transportRetryPolicy.MaxRetries OrElse
                                            (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
@@ -1832,6 +1846,7 @@ Namespace SharedLibrary
                                             getAttempt,
                                             getCumulativeRetryDelayMs,
                                             transportRetryPolicy)
+                                        LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, getResult.StatusCode, getAttempt + 1, transportRetryPolicy.MaxRetries + 1, getPendingRetryDelayMs)
                                         Continue For
                                     End If
 
@@ -1941,6 +1956,8 @@ Namespace SharedLibrary
                             End If
                         Catch ex As LlmTransientTransportException
                             Throw
+                        Catch ex As SemanticSearchRequestBudgetException
+                            Throw
                         Catch ex As System.Net.WebException When Not ct.IsCancellationRequested
                             If context.INI_APIDebug Then WriteDebugError("HTTP request exception when accessing the LLM endpoint (2).", Endpoint, requestBody, "", ex)
                             If Not Hidesplash Then ShowCustomMessageBox($"An HTTP request exception occurred: {ex.Message} when accessing the LLM endpoint (2).")
@@ -1962,7 +1979,7 @@ Namespace SharedLibrary
                         End If
 
                         Throw New System.TimeoutException(
-                            $"LLM request timed out after {TimeoutValue} ms.",
+                            $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                             ex)
                     Finally
                         cts.Dispose()
@@ -2021,6 +2038,9 @@ PostProcess:
                 Catch ex As LlmTransientTransportException
                     Throw
 
+                Catch ex As SemanticSearchRequestBudgetException
+                    Throw
+
                 Catch ex As System.Exception
 
 #If DEBUG Then
@@ -2039,6 +2059,8 @@ PostProcess:
                     End If
                 End Try
             Finally
+                If requestFailureScope IsNot Nothing Then requestFailureScope.Dispose()
+                If requestProfileScope IsNot Nothing Then requestProfileScope.Dispose()
                 Agents.AgentGate.Release()
             End Try
         End Function
@@ -3343,7 +3365,8 @@ PostProcess:
         ''' <param name="TLife">Lifetime in seconds used to compute expiry timestamps in <paramref name="context"/>.</param>
         ''' <param name="SecondAPI">If <c>True</c>, updates the secondary token fields in <paramref name="context"/>.</param>
         ''' <returns>Access token string; returns an empty string on errors.</returns>
-        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False, Optional ByVal forceRefresh As Boolean = False) As Task(Of String)
+        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False, Optional ByVal forceRefresh As Boolean = False, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of String)
+            cancellationToken.ThrowIfCancellationRequested()
             Try
 
                 Dim accessToken As String = String.Empty
@@ -3393,6 +3416,10 @@ PostProcess:
                         WriteDebugError("[OAuth2 Debug] MCP token cache miss, expired, or forced refresh — acquiring fresh token via interactive flow.")
                     End If
 
+                    If IsHeadlessExecution Then RequireInteractiveExecution("model OAuth authorization", "noninteractive_auth_required")
+                    If TypeOf context Is IsolatedModelCallContext Then
+                        Throw New System.InvalidOperationException("The configured model requires foreground OAuth authorization before an isolated call can use it.")
+                    End If
                     SetMCPOAuthDebugEnabled(context.INI_APIDebug)
 
                     Dim oauthResult As MCPProtectedResourceOAuthResult =
@@ -3430,6 +3457,23 @@ PostProcess:
                         formattedKey &= PrivateKey.Substring(i) & vbLf
                     End If
                 Next
+
+                If TypeOf context Is IsolatedModelCallContext Then
+                    If forceRefresh OrElse System.String.IsNullOrEmpty(accessToken) OrElse System.DateTime.UtcNow >= currentexpiry Then
+                        Dim lifetime As System.Int64 = If(TLife > 0, TLife, 3600)
+                        Dim pemKey As System.String = "-----BEGIN PRIVATE KEY-----" & Microsoft.VisualBasic.vbLf & formattedKey & "-----END PRIVATE KEY-----" & Microsoft.VisualBasic.vbLf
+                        accessToken = Await GoogleOAuthHelper.GetAccessToken(clientEmail, pemKey, ClientScopes,
+                            AuthServer, lifetime, True, cancellationToken).ConfigureAwait(False)
+                        If SecondAPI Then
+                            context.TokenExpiry_2 = System.DateTime.UtcNow.AddSeconds(System.Math.Max(1, lifetime - 300))
+                            context.DecodedAPI_2 = accessToken
+                        Else
+                            context.TokenExpiry = System.DateTime.UtcNow.AddSeconds(System.Math.Max(1, lifetime - 300))
+                            context.DecodedAPI = accessToken
+                        End If
+                    End If
+                    Return accessToken
+                End If
 
                 GoogleOAuthHelper.client_email = clientEmail
                 GoogleOAuthHelper.private_key = "-----BEGIN PRIVATE KEY-----" & vbLf & formattedKey & "-----END PRIVATE KEY-----" & vbLf
@@ -3471,7 +3515,10 @@ PostProcess:
 
                 Return accessToken
 
+            Catch ex As System.OperationCanceledException When cancellationToken.IsCancellationRequested
+                Throw
             Catch ex As System.Exception
+                If TypeOf context Is IsolatedModelCallContext Then Throw
                 ' Handle exceptions explicitly with System.Exception
                 If context.INI_APIDebug Then WriteDebugError("[OAuth2 Debug] Exception in GetFreshAccessToken.", "", "", "", ex)
                 If Not silent Then

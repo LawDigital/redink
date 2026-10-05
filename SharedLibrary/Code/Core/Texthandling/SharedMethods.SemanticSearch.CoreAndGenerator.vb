@@ -59,7 +59,6 @@ Namespace SharedLibrary
         Public Const SemanticSearchDefaultProfileSelectionHeader As String = "Semantic indexing profile"
 
         Private Shared ReadOnly SemanticSearchUtf8NoBom As New System.Text.UTF8Encoding(False, True)
-        Private Shared ReadOnly SemanticSearchSpecialTaskSemaphore As New System.Threading.SemaphoreSlim(1, 1)
 
         ' Generic structured-document wrapper markers (combine-standard separator):
         '   <documentN name="..."> ... </documentN>
@@ -329,6 +328,10 @@ Namespace SharedLibrary
             Public Property MaximumTitleCharacters As Integer = SemanticSearchDefaultMaximumTitleCharacters
             Public Property MaximumSummaryCharacters As Integer = SemanticSearchDefaultMaximumSummaryCharacters
             Public Property OverwriteOutput As Boolean = False
+            ' Zero preserves the established caller contract. New bounded consumers set a total
+            ' context budget, including the configured output allowance and request framing.
+            Public Property MaximumRequestTokens As System.Int32 = 0
+            Public Property ReservedOutputTokens As System.Int32 = 4096
         End Class
 
         ''' <summary>
@@ -358,7 +361,9 @@ Namespace SharedLibrary
         .MaximumMetadataItemCharacters = options.MaximumMetadataItemCharacters,
         .MaximumTitleCharacters = options.MaximumTitleCharacters,
         .MaximumSummaryCharacters = options.MaximumSummaryCharacters,
-        .OverwriteOutput = options.OverwriteOutput
+        .OverwriteOutput = options.OverwriteOutput,
+        .MaximumRequestTokens = options.MaximumRequestTokens,
+        .ReservedOutputTokens = options.ReservedOutputTokens
     }
         End Function
 
@@ -678,64 +683,37 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Executes a serialized LLM call and applies an available special-task model in the
-        ''' same manner as the existing application code. The prior configuration is restored.
+        ''' Executes an isolated LLM call using a pinned accessible special-task assignment.
+        ''' Host and module model state remain untouched; optional budgets reject oversized requests.
         ''' </summary>
         Public Shared Async Function CallSemanticSearchSpecialTaskLlmAsync(
             context As ISharedContext,
             specialTaskName As String,
             systemPrompt As String,
             userPrompt As String,
-            Optional cancellationToken As System.Threading.CancellationToken = Nothing
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+            Optional maximumRequestTokens As System.Int32 = 0,
+            Optional reservedOutputTokens As System.Int32 = 4096
         ) As System.Threading.Tasks.Task(Of String)
-
-            If context Is Nothing Then
-                Throw New System.ArgumentNullException(NameOf(context))
-            End If
-            If String.IsNullOrWhiteSpace(specialTaskName) Then
-                Throw New System.ArgumentException("A special-task name is required.", NameOf(specialTaskName))
-            End If
-
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            If String.IsNullOrWhiteSpace(specialTaskName) Then Throw New System.ArgumentException("A special-task name is required.", NameOf(specialTaskName))
             cancellationToken.ThrowIfCancellationRequested()
-            Await SemanticSearchSpecialTaskSemaphore.WaitAsync(cancellationToken).ConfigureAwait(False)
-
-            Dim restoreConfiguration As System.Action = Nothing
-            Dim useSecondApi As Boolean = False
-            Dim timeout As Long = context.INI_Timeout
-
-            Try
-                If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                    Dim previousConfiguration = SharedMethods.GetCurrentConfig(context)
-                    If previousConfiguration IsNot Nothing Then
-                        restoreConfiguration = Sub() SharedMethods.RestoreDefaults(context, previousConfiguration)
-                    End If
-
-                    If SharedMethods.GetSpecialTaskModel(context, context.INI_AlternateModelPath, specialTaskName) Then
-                        useSecondApi = True
-                        timeout = If(context.INI_Timeout_2 > 0, context.INI_Timeout_2, context.INI_Timeout)
-                    End If
-                End If
-
-                cancellationToken.ThrowIfCancellationRequested()
-
-                Return Await SharedMethods.LLM(
-                    context,
-                    systemPrompt,
-                    userPrompt,
-                    "",
-                    "",
-                    timeout,
-                    useSecondApi,
-                    True).ConfigureAwait(False)
-            Finally
-                Try
-                    If restoreConfiguration IsNot Nothing Then
-                        restoreConfiguration()
-                    End If
-                Finally
-                    SemanticSearchSpecialTaskSemaphore.Release()
-                End Try
-            End Try
+            Dim resolved As IsolatedSpecialTaskModel = ResolveIsolatedSpecialTaskModel(context, specialTaskName)
+            If maximumRequestTokens > 0 Then
+                ValidateSemanticSearchRequestBudget(resolved, systemPrompt, userPrompt, maximumRequestTokens, reservedOutputTokens)
+            End If
+            ' LLM may refresh credentials or write call-local settings. Give each request its
+            ' own copy; no backup/restore or module-level model state is touched.
+            Dim callContext As ISharedContext = CreateIsolatedModelCallContext(resolved.Context)
+            If maximumRequestTokens > 0 Then
+                Dim boundedContext As IsolatedModelCallContext = DirectCast(callContext, IsolatedModelCallContext)
+                boundedContext.RequestBudgetTokens = If(resolved.ContextWindowTokens > 0,
+                    System.Math.Min(maximumRequestTokens, resolved.ContextWindowTokens), maximumRequestTokens)
+                boundedContext.ReservedResponseTokens = System.Math.Max(reservedOutputTokens, System.Math.Max(0, resolved.MaximumOutputTokens))
+            End If
+            Return Await SharedMethods.LLM(
+                callContext, systemPrompt, userPrompt, "", "", resolved.TimeoutMilliseconds,
+                resolved.UsesSecondApi, True, cancellationToken:=cancellationToken).ConfigureAwait(False)
         End Function
 
         Private Shared Async Function CallSemanticSearchStructuredLlmAsync(Of TResult As Class)(
@@ -745,7 +723,11 @@ Namespace SharedLibrary
             userPrompt As String,
             maximumAttempts As Integer,
             cancellationToken As System.Threading.CancellationToken,
-            Optional sanitizeResponse As Boolean = False
+            Optional sanitizeResponse As Boolean = False,
+            Optional maximumRequestTokens As System.Int32 = 0,
+            Optional reservedOutputTokens As System.Int32 = 4096,
+            Optional onCallAttempt As System.Action = Nothing,
+            Optional requiredProperties As System.Collections.Generic.IEnumerable(Of System.String) = Nothing
         ) As System.Threading.Tasks.Task(Of TResult)
 
             If maximumAttempts < 1 OrElse maximumAttempts > 5 Then
@@ -760,12 +742,19 @@ Namespace SharedLibrary
                 cancellationToken.ThrowIfCancellationRequested()
 
                 Try
+                    If maximumRequestTokens > 0 Then
+                        ValidateSemanticSearchRequestBudget(ResolveIsolatedSpecialTaskModel(context, specialTaskName),
+                            systemPrompt, effectiveUserPrompt, maximumRequestTokens, reservedOutputTokens)
+                    End If
+                    If onCallAttempt IsNot Nothing Then onCallAttempt()
                     Dim response As String = Await CallSemanticSearchSpecialTaskLlmAsync(
                         context,
                         specialTaskName,
                         systemPrompt,
                         effectiveUserPrompt,
-                        cancellationToken).ConfigureAwait(False)
+                        cancellationToken,
+                        maximumRequestTokens,
+                        reservedOutputTokens).ConfigureAwait(False)
 
                     If sanitizeResponse Then
                         response = WebAgentInterpreter.SanitizeLlmResult(response)
@@ -773,6 +762,16 @@ Namespace SharedLibrary
                     lastRawResponse = If(response, "")
 
                     Dim json As String = ExtractSemanticSearchJsonObject(response)
+                    json = NormalizeSemanticSearchStructuredJson(Of TResult)(json)
+                    If requiredProperties IsNot Nothing Then
+                        Dim responseObject As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(json)
+                        For Each requiredName As System.String In requiredProperties
+                            Dim propertyValue As Newtonsoft.Json.Linq.JToken = responseObject.GetValue(requiredName, System.StringComparison.OrdinalIgnoreCase)
+                            If propertyValue Is Nothing OrElse propertyValue.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                                Throw New System.FormatException("The structured response is missing required property " & requiredName & ".")
+                            End If
+                        Next
+                    End If
                     Dim result As TResult = DeserializeSemanticSearchJson(Of TResult)(json)
                     If result Is Nothing Then
                         Throw New System.FormatException("The LLM returned no usable JSON object.")
@@ -780,6 +779,8 @@ Namespace SharedLibrary
 
                     Return result
                 Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As SemanticSearchRequestBudgetException
                     Throw
                 Catch ex As System.Exception
                     lastException = ex
@@ -806,6 +807,27 @@ Namespace SharedLibrary
         ''' single-line snippet of the last raw model response so the concrete cause is visible
         ''' without attaching a debugger.
         ''' </summary>
+        Private Shared Function NormalizeSemanticSearchStructuredJson(Of TResult As Class)(json As System.String) As System.String
+            If GetType(TResult) IsNot GetType(SemanticSearchSegmentMetadataResult) Then Return json
+            Dim value As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(json)
+            NormalizeScalarMetadataProperty(value, "Title")
+            NormalizeScalarMetadataProperty(value, "Summary")
+            Return value.ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        Private Shared Sub NormalizeScalarMetadataProperty(value As Newtonsoft.Json.Linq.JObject, propertyName As System.String)
+            Dim token As Newtonsoft.Json.Linq.JToken = value.GetValue(propertyName, System.StringComparison.OrdinalIgnoreCase)
+            If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return
+            Dim items As Newtonsoft.Json.Linq.JArray = DirectCast(token, Newtonsoft.Json.Linq.JArray)
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            For Each item As Newtonsoft.Json.Linq.JToken In items
+                If item Is Nothing OrElse item.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Continue For
+                Dim text As System.String = If(item.Type = Newtonsoft.Json.Linq.JTokenType.String, item.ToString(), item.ToString(Newtonsoft.Json.Formatting.None)).Trim()
+                If text.Length > 0 Then parts.Add(text)
+            Next
+            value(propertyName) = System.String.Join(" ", parts)
+        End Sub
+
         Private Shared Function BuildSemanticSearchStructuredFailureDetail(
             specialTaskName As String,
             lastException As System.Exception,
@@ -843,6 +865,20 @@ Namespace SharedLibrary
             End If
 
             Return detail.ToString()
+        End Function
+
+        ''' <summary>Generates one complete generic card through the established metadata adapter.</summary>
+        Public Shared Async Function GenerateSemanticSearchMetadataAsync(
+            context As ISharedContext, text As System.String,
+            Optional options As SemanticSearchIndexGeneratorOptions = Nothing,
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing
+        ) As System.Threading.Tasks.Task(Of SemanticSearchSegmentMetadataResult)
+            Dim effective As SemanticSearchIndexGeneratorOptions = CloneSemanticSearchIndexGeneratorOptions(options)
+            ValidateSemanticSearchGeneratorOptions(effective)
+            If System.String.IsNullOrWhiteSpace(text) Then Throw New System.ArgumentException("Non-empty source text is required.", NameOf(text))
+            If effective.MaximumRequestTokens <= 0 Then effective.MaximumRequestTokens = 65536
+            Return Await GenerateSemanticSearchSegmentMetadataAsync(context, effective.SpecialTaskName,
+                "metadata", text, Nothing, Nothing, effective, cancellationToken).ConfigureAwait(False)
         End Function
 
         Private Shared Async Function GenerateSemanticSearchSegmentMetadataAsync(
@@ -896,7 +932,9 @@ Namespace SharedLibrary
                     userPrompt,
                     options.MaximumMetadataAttempts,
                     cancellationToken,
-                    True).ConfigureAwait(False)
+                    True,
+                    options.MaximumRequestTokens,
+                    options.ReservedOutputTokens).ConfigureAwait(False)
 
             NormalizeSemanticSearchMetadata(metadata, options)
 

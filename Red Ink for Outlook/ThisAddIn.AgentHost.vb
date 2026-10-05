@@ -114,6 +114,22 @@ Partial Public Class ThisAddIn
                 })
         End If
 
+        ' Every isolated sub-agent invocation owns a fresh child cancellation source.
+        ' The parent token can cancel the child, but a child timeout/cancellation can
+        ' never cancel or poison the parent tooling run. Runner retries call this host
+        ' again and therefore receive a completely fresh source/deadline.
+        Dim attemptCts As System.Threading.CancellationTokenSource =
+            System.Threading.CancellationTokenSource.CreateLinkedTokenSource(ct)
+        If request.TimeoutSeconds > 0 Then
+            attemptCts.CancelAfter(System.TimeSpan.FromSeconds(request.TimeoutSeconds))
+        End If
+
+        ' Keep the retry profile, but isolate the transient-failure wall-clock budget
+        ' from the parent async flow. Nested LLM calls within this attempt still share
+        ' one bounded child budget.
+        Dim isolatedFailureBudgetScope As System.IDisposable =
+            Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.PushIsolatedFailureBudget()
+
         Try
             If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
                 Throw New InvalidOperationException(
@@ -388,7 +404,7 @@ Partial Public Class ThisAddIn
                     fullPromptOverride:=request.UserMessage,
                     hideSplash:=True,
                     hideLogWindow:=True,
-                    cancellationToken:=ct,
+                    cancellationToken:=attemptCts.Token,
                     subAgentMode:=True,
                     subAgentAllowedToolNames:=effectiveAllowedToolNames,
                     subAgentSpecialModelKey:=request.SpecialModelKey,
@@ -476,6 +492,63 @@ Partial Public Class ThisAddIn
             End If
 
             Return If(result, "")
+        Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkUnresolved(
+                    request.AgentName,
+                    subAgentTaskId,
+                    "parent_cancelled",
+                    forceTerminal:=False)
+            End If
+
+            Throw
+        Catch ex As System.OperationCanceledException When attemptCts.IsCancellationRequested AndAlso
+                                                           Not ct.IsCancellationRequested
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                    request.AgentName,
+                    subAgentTaskId,
+                    Global.SharedLibrary.Agents.SubAgentRuntimeHardening.TimeoutCode,
+                    forceTerminal:=False)
+            End If
+
+            ToolingFileLogger.LogWarn(
+                "[subagent-host] Isolated sub-agent attempt reached its local cancellation deadline; parent run remains active.",
+                details:=$"agent={If(request.AgentName, "")}; timeoutSeconds={request.TimeoutSeconds}; retryIndex={request.RunnerRetryIndex}")
+
+            Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                request.AgentName,
+                request.TimeoutSeconds,
+                ex.Message)
+        Catch ex As System.TimeoutException
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                    request.AgentName,
+                    subAgentTaskId,
+                    Global.SharedLibrary.Agents.SubAgentRuntimeHardening.TimeoutCode,
+                    forceTerminal:=False)
+            End If
+
+            ToolingFileLogger.LogWarn(
+                "[subagent-host] Isolated sub-agent attempt timed out; parent run remains active.",
+                details:=$"agent={If(request.AgentName, "")}; timeoutSeconds={request.TimeoutSeconds}; retryIndex={request.RunnerRetryIndex}; error={ex.Message}")
+
+            Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                request.AgentName,
+                request.TimeoutSeconds,
+                ex.Message)
         Catch ex As System.Exception
             If subAgentTaskId <> "" AndAlso
                _activeToolingContext IsNot Nothing AndAlso
@@ -490,6 +563,8 @@ Partial Public Class ThisAddIn
 
             Throw
         Finally
+            If isolatedFailureBudgetScope IsNot Nothing Then isolatedFailureBudgetScope.Dispose()
+            If attemptCts IsNot Nothing Then attemptCts.Dispose()
             RestoreModelConfigScope(_context, scope)
         End Try
     End Function

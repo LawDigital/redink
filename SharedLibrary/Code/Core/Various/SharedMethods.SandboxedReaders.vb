@@ -66,8 +66,16 @@ Namespace SharedLibrary
         ' ═══════════════════════════════════════════════════════════════════════
 
         Public Shared Function ReadDocxSandboxed(docxPath As String,
-                                                 Optional returnMarkdown As System.Boolean = False) As String
-            Return DocxTextExtractor.ReadDocxSandboxed(docxPath, returnMarkdown)
+                                                 Optional returnMarkdown As System.Boolean = False,
+                                                 Optional ByRef readError As System.String = Nothing) As String
+            Return DocxTextExtractor.ReadDocxSandboxed(docxPath, returnMarkdown, readError)
+        End Function
+
+        Public Shared Function ReadDocxSandboxed(docxPath As System.String,
+                                                 returnMarkdown As System.Boolean,
+                                                 ByRef readError As System.String,
+                                                 ByRef extractionComplete As System.Nullable(Of System.Boolean)) As System.String
+            Return DocxTextExtractor.ReadDocxSandboxed(docxPath, returnMarkdown, readError, extractionComplete)
         End Function
 
         Public Shared Function ReadPdfMarkdownSandboxed(pdfPath As String) As String
@@ -626,13 +634,15 @@ Namespace SharedLibrary
         ''' </returns>
         Public Shared Function ReadXlsxSandboxed(xlsxPath As String,
                                                  Optional silent As Boolean = True,
-                                                 Optional askWorksheetSelection As Boolean = False) As String
+                                                 Optional askWorksheetSelection As Boolean = False,
+                                                 Optional ByRef readError As System.String = Nothing) As String
+            readError = System.String.Empty
             If String.IsNullOrWhiteSpace(xlsxPath) OrElse Not File.Exists(xlsxPath) Then
-                Return "Error: File not found."
+                Return ReportLegacyTextReaderError("Error: File not found.", readError)
             End If
 
             If Not EnsureClosedWorkbookForSandboxedRead(xlsxPath, silent) Then
-                Return "Error: The workbook is open in Excel."
+                Return ReportLegacyTextReaderError("Error: The workbook is open in Excel.", readError)
             End If
 
             Dim tempDir As String = Path.Combine(Path.GetTempPath(), "ri_xlsx_" & Guid.NewGuid().ToString("N"))
@@ -665,7 +675,7 @@ Namespace SharedLibrary
 
                 ' ── Discover sheet names from workbook.xml ──
                 Dim wbPath = Path.Combine(tempDir, "xl", "workbook.xml")
-                If Not File.Exists(wbPath) Then Return "Error: Not a valid .xlsx file (missing xl/workbook.xml)."
+                If Not File.Exists(wbPath) Then Return ReportLegacyTextReaderError("Error: Not a valid .xlsx file (missing xl/workbook.xml).", readError)
 
                 Dim wbDoc As New XmlDocument()
                 wbDoc.Load(wbPath)
@@ -674,7 +684,7 @@ Namespace SharedLibrary
                 wbNs.AddNamespace("r", SB_XlsxRelNs)
 
                 Dim sheetNodes = wbDoc.SelectNodes("//x:sheets/x:sheet", wbNs)
-                If sheetNodes Is Nothing OrElse sheetNodes.Count = 0 Then Return "Error: No sheets found in workbook."
+                If sheetNodes Is Nothing OrElse sheetNodes.Count = 0 Then Return ReportLegacyTextReaderError("Error: No sheets found in workbook.", readError)
 
                 ' ── Map rId → file path via workbook.xml.rels ──
                 Dim relsPath = Path.Combine(tempDir, "xl", "_rels", "workbook.xml.rels")
@@ -719,7 +729,7 @@ Namespace SharedLibrary
                 Next
 
                 If availableSheets.Count = 0 Then
-                    Return "Error: No readable sheets found in workbook."
+                    Return ReportLegacyTextReaderError("Error: No readable sheets found in workbook.", readError)
                 End If
 
                 Dim sheetsToRead As New List(Of XlsxSheetEntry)()
@@ -753,7 +763,7 @@ Namespace SharedLibrary
 
                         If String.IsNullOrWhiteSpace(selectedSheet.SheetXmlPath) OrElse
                            Not File.Exists(selectedSheet.SheetXmlPath) Then
-                            Return "Error: The selected worksheet could not be read."
+                            Return ReportLegacyTextReaderError("Error: The selected worksheet could not be read.", readError)
                         End If
 
                         sheetsToRead.Clear()
@@ -823,21 +833,21 @@ Namespace SharedLibrary
                 Next
 
                 Dim result = sb.ToString().Trim()
-                Return If(String.IsNullOrWhiteSpace(result), "Error: No data found in .xlsx.", result)
+                Return If(String.IsNullOrWhiteSpace(result), ReportLegacyTextReaderError("Error: No data found in .xlsx.", readError), result)
 
             Catch ex As IOException
                 If Not silent AndAlso IsWorkbookOpenInExcel(xlsxPath) Then
                     If EnsureClosedWorkbookForSandboxedRead(xlsxPath, silent) Then
-                        Return ReadXlsxSandboxed(xlsxPath, silent, askWorksheetSelection)
+                        Return ReadXlsxSandboxed(xlsxPath, silent, askWorksheetSelection, readError)
                     End If
 
-                    Return "Error: The workbook is open in Excel."
+                    Return ReportLegacyTextReaderError("Error: The workbook is open in Excel.", readError)
                 End If
 
-                Return $"Error reading .xlsx: {ex.Message}"
+                Return ReportLegacyTextReaderError($"Error reading .xlsx: {ex.Message}", readError)
 
             Catch ex As Exception
-                Return $"Error reading .xlsx: {ex.Message}"
+                Return ReportLegacyTextReaderError($"Error reading .xlsx: {ex.Message}", readError)
 
             Finally
                 Try : If Directory.Exists(tempDir) Then Directory.Delete(tempDir, True)
@@ -923,9 +933,11 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="pptxPath">Absolute path to the .pptx file.</param>
         ''' <returns>Extracted text content, or an error string on failure.</returns>
-        Public Shared Function ReadPptxSandboxed(pptxPath As String) As String
+        Public Shared Function ReadPptxSandboxed(pptxPath As String,
+                                                 Optional ByRef readError As System.String = Nothing) As String
+            readError = System.String.Empty
             If String.IsNullOrWhiteSpace(pptxPath) OrElse Not File.Exists(pptxPath) Then
-                Return "Error: File not found."
+                Return ReportLegacyTextReaderError("Error: File not found.", readError)
             End If
 
             Dim tempDir As String = Path.Combine(Path.GetTempPath(), "ri_pptx_" & Guid.NewGuid().ToString("N"))
@@ -933,7 +945,7 @@ Namespace SharedLibrary
                 ZipFile.ExtractToDirectory(pptxPath, tempDir)
 
                 Dim presPath = Path.Combine(tempDir, "ppt", "presentation.xml")
-                If Not File.Exists(presPath) Then Return "Error: Not a valid .pptx file (missing ppt/presentation.xml)."
+                If Not File.Exists(presPath) Then Return ReportLegacyTextReaderError("Error: Not a valid .pptx file (missing ppt/presentation.xml).", readError)
 
                 Dim presDoc As New XmlDocument()
                 presDoc.Load(presPath)
@@ -984,10 +996,10 @@ Namespace SharedLibrary
                 End If
 
                 Dim result = sb.ToString().Trim()
-                Return If(String.IsNullOrWhiteSpace(result), "Error: No text content found in .pptx.", result)
+                Return If(String.IsNullOrWhiteSpace(result), ReportLegacyTextReaderError("Error: No text content found in .pptx.", readError), result)
 
             Catch ex As Exception
-                Return $"Error reading .pptx: {ex.Message}"
+                Return ReportLegacyTextReaderError($"Error reading .pptx: {ex.Message}", readError)
             Finally
                 Try : If Directory.Exists(tempDir) Then Directory.Delete(tempDir, True)
                 Catch : End Try
@@ -1111,8 +1123,8 @@ Namespace SharedLibrary
         ''' Output matches <c>ParseEmlAsText</c> format in AutoPilot.
         ''' Attachments are extracted inline when they can be decoded safely.
         ''' </summary>
-        Public Shared Function ReadEmlSandboxed(emlPath As String) As String
-            Return ReadEmlSandboxedInternal(emlPath, 0)
+        Public Shared Function ReadEmlSandboxed(emlPath As String, Optional ByRef readError As System.String = Nothing) As String
+            Return ReadEmlSandboxedInternal(emlPath, 0, readError)
         End Function
 
 
@@ -1548,9 +1560,11 @@ Namespace SharedLibrary
             Return result
         End Function
 
-        Private Shared Function ReadEmlSandboxedInternal(emlPath As String, depth As Integer) As String
+        Private Shared Function ReadEmlSandboxedInternal(emlPath As String, depth As Integer,
+                                                 Optional ByRef readError As System.String = Nothing) As String
+            readError = System.String.Empty
             If String.IsNullOrWhiteSpace(emlPath) OrElse Not File.Exists(emlPath) Then
-                Return "Error: File not found."
+                Return ReportLegacyTextReaderError("Error: File not found.", readError)
             End If
 
             If depth > 5 Then
@@ -1559,7 +1573,7 @@ Namespace SharedLibrary
 
             Try
                 Dim emlContent As String = ReadMailTextFileBestEffort(emlPath)
-                If String.IsNullOrWhiteSpace(emlContent) Then Return "Error: Empty .eml file."
+                If String.IsNullOrWhiteSpace(emlContent) Then Return ReportLegacyTextReaderError("Error: Empty .eml file.", readError)
 
                 Dim headerEnd = emlContent.IndexOf(vbCrLf & vbCrLf, StringComparison.Ordinal)
                 If headerEnd < 0 Then headerEnd = emlContent.IndexOf(vbLf & vbLf, StringComparison.Ordinal)
@@ -1665,7 +1679,7 @@ Namespace SharedLibrary
 
                 Return sb.ToString().Trim()
             Catch ex As Exception
-                Return $"Error reading .eml: {ex.Message}"
+                Return ReportLegacyTextReaderError($"Error reading .eml: {ex.Message}", readError)
             End Try
         End Function
 
@@ -1724,9 +1738,11 @@ Namespace SharedLibrary
         ''' </summary>
         Public Shared Function ReadMsgSandboxed(msgPath As String,
                                                 Optional msgReadFunc As MsgReadCallback = Nothing,
-                                                Optional depth As Integer = 0) As String
+                                                Optional depth As Integer = 0,
+                                                 Optional ByRef readError As System.String = Nothing) As String
+            readError = System.String.Empty
             If System.String.IsNullOrWhiteSpace(msgPath) OrElse Not System.IO.File.Exists(msgPath) Then
-                Return "Error: File not found."
+                Return ReportLegacyTextReaderError("Error: File not found.", readError)
             End If
 
             If depth > 5 Then
@@ -1735,7 +1751,7 @@ Namespace SharedLibrary
 
             Try
                 If Not IsMsgOleCompoundFile(msgPath) Then
-                    Return "Error: The file is not a valid Outlook .msg file because it is not an OLE Compound File."
+                    Return ReportLegacyTextReaderError("Error: The file is not a valid Outlook .msg file because it is not an OLE Compound File.", readError)
                 End If
 
                 Using oleDoc As New MsgOleCompoundDocument(msgPath)
@@ -1746,10 +1762,10 @@ Namespace SharedLibrary
                     End If
                 End Using
 
-                Return "Error: The .msg file does not contain readable MAPI message properties."
+                Return ReportLegacyTextReaderError("Error: The .msg file does not contain readable MAPI message properties.", readError)
 
             Catch ex As System.Exception
-                Return "Error reading .msg: " & ex.Message
+                Return ReportLegacyTextReaderError("Error reading .msg: " & ex.Message, readError)
             End Try
         End Function
 

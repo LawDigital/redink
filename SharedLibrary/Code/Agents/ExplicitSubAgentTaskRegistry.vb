@@ -68,6 +68,46 @@ Namespace Agents
             System.StringComparer.Ordinal)
         Private ReadOnly _syncRoot As New Object()
 
+        Public Function ExportRecords() As System.Collections.Generic.List(Of ExplicitSubAgentTaskRecord)
+            SyncLock _syncRoot
+                Dim result As New System.Collections.Generic.List(Of ExplicitSubAgentTaskRecord)()
+                For Each source As ExplicitSubAgentTaskRecord In _records.Values
+                    If source Is Nothing Then Continue For
+                    result.Add(New ExplicitSubAgentTaskRecord With {
+                        .TaskId = source.TaskId,
+                        .AgentName = source.AgentName,
+                        .Status = source.Status,
+                        .TerminalReason = source.TerminalReason,
+                        .AttemptCount = source.AttemptCount,
+                        .UpdatedUtc = source.UpdatedUtc
+                    })
+                Next
+                Return result
+            End SyncLock
+        End Function
+
+        Public Sub ImportRecords(records As System.Collections.Generic.IEnumerable(Of ExplicitSubAgentTaskRecord))
+            If records Is Nothing Then Return
+
+            SyncLock _syncRoot
+                For Each source As ExplicitSubAgentTaskRecord In records
+                    If source Is Nothing Then Continue For
+                    Dim taskId As String = If(source.TaskId, "").Trim()
+                    If taskId = "" Then Continue For
+
+                    _records(BuildKey(source.AgentName, taskId)) =
+                        New ExplicitSubAgentTaskRecord With {
+                            .TaskId = taskId,
+                            .AgentName = If(source.AgentName, "").Trim(),
+                            .Status = source.Status,
+                            .TerminalReason = If(source.TerminalReason, ""),
+                            .AttemptCount = System.Math.Max(0, source.AttemptCount),
+                            .UpdatedUtc = source.UpdatedUtc
+                        }
+                Next
+            End SyncLock
+        End Sub
+
         Public Function IsTerminal(agentName As String, taskId As String) As Boolean
             Dim key As String = BuildKey(agentName, taskId)
             If key = "" Then Return False

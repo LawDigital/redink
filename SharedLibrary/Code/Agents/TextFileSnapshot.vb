@@ -4,6 +4,18 @@
 ' File-backed text input and publication. Hashes always cover the exact file bytes,
 ' including a BOM. Character offsets are UTF-16 code units, not bytes or graphemes.
 ' No cache, content normalization, OCR, document renderer or organization policy here.
+
+' =============================================================================
+' File: TextFileSnapshot.vb
+' Purpose:
+'   Strict file-backed text snapshots, exact-byte hashes, UTF-16 offsets and atomic
+'   UTF-8 publication.
+'
+' Architecture / Function:
+'   Separates input validation/publication from extraction or content normalization;
+'   byte identity includes the file BOM.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Option Infer On

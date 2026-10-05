@@ -119,8 +119,10 @@ Partial Public Class ThisAddIn
     Public Async Function AssembleDocumentFromTemplates(
         userInstruction As String,
         additionalContext As String,
-        useSecondAPI As Boolean) As System.Threading.Tasks.Task
+        useSecondAPI As Boolean,
+        Optional semanticArchivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing) As System.Threading.Tasks.Task
 
+        Dim retrievalContext As System.String = If(semanticArchivePrepared Is Nothing, System.String.Empty, semanticArchivePrepared.ContextText)
         Dim templatePaths As New List(Of String)()
         Dim templates As New Dictionary(Of String, AssemblyTemplateInfo)(StringComparer.OrdinalIgnoreCase)
         Dim primaryTemplateName As String = ""
@@ -263,6 +265,12 @@ Partial Public Class ThisAddIn
                 planPromptBuilder.AppendLine("</CONTEXT>")
             End If
 
+            ' Prepared source evidence is already resolved and must not be interpreted as control syntax.
+            If Not System.String.IsNullOrWhiteSpace(retrievalContext) Then
+                planPromptBuilder.AppendLine()
+                planPromptBuilder.AppendLine(retrievalContext)
+            End If
+
             ' ═══ Step 5: Planning LLM Call ═══
 
             Dim planSystemPrompt As String = InterpolateAtRuntime(SP_Assemble_Plan)
@@ -396,7 +404,7 @@ Partial Public Class ThisAddIn
                             ' For tables, use the table-specific execution flow
                             If srcNodeType = "tbl" Then
                                 Dim adaptedTableText As String = Await AssembleExecuteTableSection(
-                                    sourceText, instruction, userInstruction, contextSummary.ToString(), useSecondAPI)
+                                    sourceText, instruction, userInstruction, contextSummary.ToString(), useSecondAPI, retrievalContext)
 
                                 Dim cloned As System.Xml.XmlNode = AssembleCloneAndImport(primaryTemplate.XmlDoc, templates, srcTmpl, paraIdx)
                                 If cloned IsNot Nothing Then
@@ -409,7 +417,7 @@ Partial Public Class ThisAddIn
                             Else
                                 ' Paragraph: standard execution + proportional distribution
                                 Dim adaptedText As String = Await AssembleExecuteSection(
-                                    sourceText, instruction, userInstruction, contextSummary.ToString(), useSecondAPI)
+                                    sourceText, instruction, userInstruction, contextSummary.ToString(), useSecondAPI, retrievalContext)
 
                                 Dim cloned As System.Xml.XmlNode = AssembleCloneAndImport(primaryTemplate.XmlDoc, templates, srcTmpl, paraIdx)
                                 If cloned IsNot Nothing Then
@@ -432,7 +440,7 @@ Partial Public Class ThisAddIn
 
                             ' LLM call to generate
                             Dim generatedText As String = Await AssembleExecuteSection(
-                                "", instruction, userInstruction, contextSummary.ToString(), useSecondAPI)
+                                "", instruction, userInstruction, contextSummary.ToString(), useSecondAPI, retrievalContext)
 
                             If Not String.IsNullOrWhiteSpace(generatedText) Then
                                 ' Split on paragraph boundaries
@@ -480,7 +488,7 @@ Partial Public Class ThisAddIn
 
                             ' LLM call to merge
                             Dim mergedText As String = Await AssembleExecuteSection(
-                                mergeSourceText.ToString(), instruction, userInstruction, contextSummary.ToString(), useSecondAPI)
+                                mergeSourceText.ToString(), instruction, userInstruction, contextSummary.ToString(), useSecondAPI, retrievalContext)
 
                             If Not String.IsNullOrWhiteSpace(mergedText) Then
                                 Dim mergeParagraphs As String() = mergedText.Split(
@@ -874,7 +882,8 @@ Partial Public Class ThisAddIn
         instruction As String,
         facts As String,
         contextSummaryText As String,
-        useSecondAPI As Boolean) As System.Threading.Tasks.Task(Of String)
+        useSecondAPI As Boolean,
+        Optional retrievalContext As System.String = Nothing) As System.Threading.Tasks.Task(Of String)
 
         Dim promptBuilder As New StringBuilder()
 
@@ -908,6 +917,11 @@ Partial Public Class ThisAddIn
             promptBuilder.AppendLine("</CONTEXT>")
         End If
 
+        If Not System.String.IsNullOrWhiteSpace(retrievalContext) Then
+            promptBuilder.AppendLine()
+            promptBuilder.AppendLine(retrievalContext)
+        End If
+
         Dim systemPrompt As String = InterpolateAtRuntime(SP_Assemble_Execute)
 
         Dim response As String = Await SharedMethods.LLM(
@@ -935,7 +949,8 @@ Partial Public Class ThisAddIn
         instruction As String,
         facts As String,
         contextSummaryText As String,
-        useSecondAPI As Boolean) As System.Threading.Tasks.Task(Of String)
+        useSecondAPI As Boolean,
+        Optional retrievalContext As System.String = Nothing) As System.Threading.Tasks.Task(Of String)
 
         Dim promptBuilder As New StringBuilder()
 
@@ -975,6 +990,11 @@ Partial Public Class ThisAddIn
             promptBuilder.AppendLine("<CONTEXT>")
             promptBuilder.AppendLine(contextSummaryText)
             promptBuilder.AppendLine("</CONTEXT>")
+        End If
+
+        If Not System.String.IsNullOrWhiteSpace(retrievalContext) Then
+            promptBuilder.AppendLine()
+            promptBuilder.AppendLine(retrievalContext)
         End If
 
         Dim systemPrompt As String = InterpolateAtRuntime(SP_Assemble_Execute)

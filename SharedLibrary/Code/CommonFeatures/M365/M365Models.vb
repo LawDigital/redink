@@ -88,6 +88,8 @@ Namespace SharedLibrary
         Public Property TotalEstimated As Integer
         Public Property StartedUtc As DateTime
         Public Property FinishedUtc As DateTime
+        Public Property NextFromIndexBySource As New System.Collections.Generic.Dictionary(Of M365SearchSources, System.Int32)()
+        Public Property ExhaustedBySource As New System.Collections.Generic.Dictionary(Of M365SearchSources, System.Boolean)()
 
         Public ReadOnly Property HasErrors As Boolean
             Get
@@ -98,7 +100,7 @@ Namespace SharedLibrary
 
     ''' <summary>Options for <see cref="M365Service.SearchAsync"/>.</summary>
     Public Class M365SearchOptions
-        ''' <summary>Maximum hits returned per source (Graph caps at 500; default 25).</summary>
+        ''' <summary>Maximum hits returned per source (up to 2500; default 25). Mail/event Graph pages are at most 25.</summary>
         Public Property MaxPerSource As Integer = 25
         ''' <summary>Optional zero-based offset for paged search retrieval.</summary>
         Public Property FromIndex As Integer = 0

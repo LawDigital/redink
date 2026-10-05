@@ -5,6 +5,18 @@
 ' their existing semantics; HTTPS sources are downloaded through SharedMethods' existing
 ' HTTP stack and materialized as process-local read snapshots.
 
+
+' =============================================================================
+' File: ConfigurationResourceLoader.vb
+' Purpose:
+'   Read-only configuration resource resolution for filesystem sources and HTTPS
+'   process-local snapshots.
+'
+' Architecture / Function:
+'   Retains local-file semantics and uses the existing HTTP stack for remote
+'   configuration materialization.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

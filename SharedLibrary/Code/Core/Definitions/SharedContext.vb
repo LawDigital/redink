@@ -231,6 +231,7 @@ Namespace SharedLibrary
             Property SP_RemoveClutter As String
             Property SP_Redact As String
             Property SP_CheckforII As String
+            Property SP_CheckforPhishing As String
             Property SP_ContextSearch As String
             Property SP_ContextSearchMulti As String
             Property SP_WriteNeatly As String
@@ -319,6 +320,12 @@ Namespace SharedLibrary
 
             Property INI_DocCheckPath As String
             Property INI_DocCheckPathLocal As String
+            Property INI_SemanticArchiveCatalogPathLocal As System.String
+            Property INI_SemanticArchiveCatalogLibraryPath As System.String
+            Property INI_SemanticArchiveBackgroundIndexing As System.Boolean
+            Property INI_SemanticArchiveBackgroundIndexingWindow As System.String
+            Property INI_SemanticArchivePermissionMaintenanceEnabled As System.Boolean
+            Property INI_SemanticArchivePermissionMaintenanceWindow As System.String
             Property INI_KnowledgeStorePath As String
             Property INI_KnowledgeStorePathLocal As String
             Property INI_KnowledgeStoreUseLLMIndex As Boolean
@@ -424,6 +431,12 @@ Namespace SharedLibrary
             ' Initialize the PromptTitles and PromptLibrary properties
             PromptTitles = New List(Of String)()
             PromptLibrary = New List(Of String)()
+            INI_SemanticArchiveCatalogPathLocal = SharedMethods.DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL
+            INI_SemanticArchiveCatalogLibraryPath = SharedMethods.DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH
+            INI_SemanticArchiveBackgroundIndexing = SharedMethods.DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED
+            INI_SemanticArchiveBackgroundIndexingWindow = SharedMethods.DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_WINDOW
+            INI_SemanticArchivePermissionMaintenanceEnabled = SharedMethods.DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED
+            INI_SemanticArchivePermissionMaintenanceWindow = SharedMethods.DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_WINDOW
         End Sub
 
         Public Property INI_APIKey As String Implements ISharedContext.INI_APIKey
@@ -613,6 +626,7 @@ Namespace SharedLibrary
         Public Property SP_RemoveClutter As String Implements ISharedContext.SP_RemoveClutter
         Public Property SP_Redact As String Implements ISharedContext.SP_Redact
         Public Property SP_CheckforII As String Implements ISharedContext.SP_CheckforII
+        Public Property SP_CheckforPhishing As String Implements ISharedContext.SP_CheckforPhishing
         Public Property SP_ContextSearch As String Implements ISharedContext.SP_ContextSearch
         Public Property SP_ContextSearchMulti As String Implements ISharedContext.SP_ContextSearchMulti
         Public Property SP_RangeOfCells As String Implements ISharedContext.SP_RangeOfCells
@@ -699,6 +713,12 @@ Namespace SharedLibrary
 
         Public Property INI_DocCheckPath As String Implements ISharedContext.INI_DocCheckPath
         Public Property INI_DocCheckPathLocal As String Implements ISharedContext.INI_DocCheckPathLocal
+        Public Property INI_SemanticArchiveCatalogPathLocal As System.String Implements ISharedContext.INI_SemanticArchiveCatalogPathLocal
+        Public Property INI_SemanticArchiveCatalogLibraryPath As System.String Implements ISharedContext.INI_SemanticArchiveCatalogLibraryPath
+        Public Property INI_SemanticArchiveBackgroundIndexing As System.Boolean Implements ISharedContext.INI_SemanticArchiveBackgroundIndexing
+        Public Property INI_SemanticArchiveBackgroundIndexingWindow As System.String Implements ISharedContext.INI_SemanticArchiveBackgroundIndexingWindow
+        Public Property INI_SemanticArchivePermissionMaintenanceEnabled As System.Boolean Implements ISharedContext.INI_SemanticArchivePermissionMaintenanceEnabled
+        Public Property INI_SemanticArchivePermissionMaintenanceWindow As System.String Implements ISharedContext.INI_SemanticArchivePermissionMaintenanceWindow
         Public Property INI_KnowledgeStorePath As String Implements ISharedContext.INI_KnowledgeStorePath
         Public Property INI_KnowledgeStorePathLocal As String Implements ISharedContext.INI_KnowledgeStorePathLocal
         Public Property INI_KnowledgeStoreUseLLMIndex As Boolean Implements ISharedContext.INI_KnowledgeStoreUseLLMIndex
