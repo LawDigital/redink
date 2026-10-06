@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 5.10.2026
+' 6.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -71,7 +71,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.051026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.061026" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
