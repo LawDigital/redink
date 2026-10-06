@@ -221,9 +221,14 @@ Namespace SharedLibrary
 
         Public Shared Function ReadEffectiveControls(context As SharedContext.ISharedContext) As ControlsSnapshot
             SyncLock UserSettingsGate
+                Dim configured As ControlsSnapshot = ReadConfiguredControls(context)
+                ' An absent catalog disables SA without reading or changing saved personal preferences.
+                If context Is Nothing OrElse System.String.IsNullOrWhiteSpace(context.INI_SemanticArchiveCatalogPathLocal) Then
+                    Return New ControlsSnapshot(False, configured.BackgroundWindow, False, configured.PermissionWindow)
+                End If
                 ' A fresh provider instance cannot expose unrelated, unsaved My.Settings edits.
                 Dim persisted As New Global.SharedLibrary.My.MySettings()
-                Return ResolveUserControls(persisted, ReadConfiguredControls(context))
+                Return ResolveUserControls(persisted, configured)
             End SyncLock
         End Function
 
@@ -484,7 +489,11 @@ Namespace SharedLibrary
                     System.Configuration.ConfigurationUserLevel.PerUserRoaming,
                     System.Configuration.ConfigurationUserLevel.PerUserRoamingAndLocal}
                 Dim configuration As System.Configuration.Configuration = System.Configuration.ConfigurationManager.OpenExeConfiguration(level)
-                If Not paths.Contains(configuration.FilePath) Then paths.Add(configuration.FilePath)
+                Dim configurationPath As System.String = configuration.FilePath
+                ' Some Office/profile environments have no file for a user-configuration level.
+                If Not System.String.IsNullOrWhiteSpace(configurationPath) AndAlso Not paths.Contains(configurationPath) Then
+                    paths.Add(configurationPath)
+                End If
             Next
             Return ReadPersistedSettingNames(paths, groupName)
         End Function
@@ -497,6 +506,8 @@ Namespace SharedLibrary
             Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
             Dim encodedGroup As System.String = System.Xml.XmlConvert.EncodeLocalName(groupName)
             For Each path As System.String In configurationPaths
+                ' An unavailable configuration level contributes no persisted setting names.
+                If System.String.IsNullOrWhiteSpace(path) Then Continue For
                 Dim input As System.IO.FileStream
                 Try
                     input = New System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
