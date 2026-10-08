@@ -690,6 +690,7 @@
     <Compile Include="ThisAddIn.AgentHost.vb" />
     <Compile Include="ThisAddIn.AssembleDocuments.vb" />
     <Compile Include="ThisAddIn.Commands.Freestyle.vb" />
+    <Compile Include="ThisAddIn.OcrMarkdownCleanup.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
     <Compile Include="ThisAddIn.CompleteTables.vb" />
     <Compile Include="ThisAddIn.ContextSearch.vb" />

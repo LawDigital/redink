@@ -1119,84 +1119,9 @@ Partial Public Class ThisAddIn
                                 SelectedText = GetTextWithSpecialElementsInline(rng, If(NoFormatting, False, ParaFormatInline), False)
                             End If
 
-                            ' ── Universal revision fix ──────────────────────────────
-                            ' GetTextWithSpecialElementsInline reads rng.Text internally,
-                            ' which includes deleted revision text. The placeholders it
-                            ' embedded ({{WFLD:...}}, {{WFNT:...}}, **bold**, etc.) are
-                            ' correct, but the base text between them contains ghost
-                            ' deletions. Fix: re-read just the visible text from the
-                            ' (now Markdown-converted) range and re-inject the placeholders.
-                            If Not DoTPMarkup Then
-                                Try
-                                    Dim revCount As Integer = 0
-                                    Try : revCount = rng.Revisions.Count : Catch : End Try
-                                    If revCount > 0 Then
-                                        ' Extract all placeholders from the processed SelectedText
-                                        Dim placeholderTokens As New List(Of String)
-                                        Dim stripped As String = System.Text.RegularExpressions.Regex.Replace(
-                                            SelectedText, "\{\{(?:WFLD|WFNT|WENT|PFOR):[^}]*\}\}",
-                                            Function(m)
-                                                placeholderTokens.Add(m.Value)
-                                                Return $"[[RVPH{placeholderTokens.Count - 1}]]"
-                                            End Function)
+                            ' Extraction filters existing deletion/move-from revisions using physical
+                            ' source positions before serializing placeholders. No view-switch retry.
 
-                                        ' Get the visible (accepted) text from the same range
-                                        ' — the range has already been Markdown-converted by
-                                        '   GetTextWithSpecialElementsInline, so bold is now
-                                        '   **bold** etc. in the live range too.
-                                        Dim visText As String = GetVisibleText(rng)
-
-                                        If Not String.IsNullOrWhiteSpace(visText) Then
-                                            ' Re-inject placeholders into the visible text at
-                                            ' their original relative positions. Because the
-                                            ' visible text is shorter (no deleted chars), we
-                                            ' can't use absolute offsets. Instead, use the
-                                            ' surrounding context words as anchors.
-                                            '
-                                            ' Simplest viable approach: the visible text is the
-                                            ' correct base. Placeholders mark positions of
-                                            ' footnotes/fields/etc. that exist in the visible
-                                            ' text too (as single reference chars). So just
-                                            ' re-run GetTextWithSpecialElementsInline in Final
-                                            ' view — the function will find the same footnotes/
-                                            ' fields at their (now correct) visible-text offsets.
-
-                                            Dim viewObj = currentdoc.ActiveWindow.View
-                                            Dim savedRevView = viewObj.RevisionsView
-                                            Dim savedShowRevs = viewObj.ShowRevisionsAndComments
-                                            Dim savedSelStart = selection.Start
-                                            Dim savedSelEnd = selection.End
-
-                                            Try
-                                                viewObj.RevisionsView = WdRevisionsView.wdRevisionsViewFinal
-                                                viewObj.ShowRevisionsAndComments = False
-
-                                                ' Re-run extraction in Final view — same range,
-                                                ' same Markdown state, but rng.Text now excludes
-                                                ' deleted revisions. Placeholder offsets will be
-                                                ' correct against the visible character positions.
-                                                SelectedText = GetTextWithSpecialElementsInline(
-                                                    rng,
-                                                    If(NoFormatting, False, ParaFormatInline),
-                                                    False,
-                                                    IncludeMarkdownListPrefixes:=True)  ' Markdown already applied; list markers are virtual placeholders.
-
-                                                Debug.WriteLine($"RevisionFix: re-extracted SelectedText in Final view, len={SelectedText.Length}")
-                                            Finally
-                                                viewObj.RevisionsView = savedRevView
-                                                viewObj.ShowRevisionsAndComments = savedShowRevs
-                                                Try
-                                                    selection.SetRange(savedSelStart, savedSelEnd)
-                                                Catch
-                                                End Try
-                                            End Try
-                                        End If
-                                    End If
-                                Catch ex As Exception
-                                    Debug.WriteLine($"RevisionFix error: {ex.Message}")
-                                End Try
-                            End If
-                            ' ── End revision fix ────────────────────────────────────
                         End If
                         trailingCR = (SelectedText.EndsWith(vbCrLf) Or SelectedText.EndsWith(vbLf) Or SelectedText.EndsWith(vbCr))
                         Dim tempText As String = SelectedText
@@ -2529,107 +2454,38 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Returns the visible text of a range in Final view, excluding deleted revisions.
-    ''' Falls back to raw <see cref="Range.Text"/> when there are no revisions
-    ''' or when the Final-view extraction fails.
+    ''' Returns the final source projection without deleted/move-from revisions or field codes.
+    ''' Uses physical ranges without changing the document's revision view.
+    ''' Mapping failures are surfaced rather than returning ghost deletion text.
     ''' </summary>
     ''' <param name="src">Word range to extract visible text from.</param>
     ''' <returns>Text with deletions omitted and insertions preserved.</returns>
-    Public Function GetVisibleText(ByVal src As Range) As String
-        Try
-            ' 1) Catch null/empty range
-            If src Is Nothing Then Return String.Empty
-
-            ' 2) Fetch raw text once for fast path
-            Dim raw As String
-            Try
-                raw = src.Text
-                If String.IsNullOrEmpty(raw) Then Return String.Empty
-            Catch
-                Return String.Empty
-            End Try
-
-            ' 3) Fast path: no revisions in this range
-            Try
-                If src.Revisions.Count = 0 Then Return raw
-            Catch
-                Return raw
-            End Try
-
-            ' 4) Use Selection + Final view to read accepted text.
-            '    Switching RevisionsView changes the position space, so a stale Range
-            '    object returns wrong text. The live Selection is re-evaluated by Word.            
-            Try
-                Dim app As Microsoft.Office.Interop.Word.Application = src.Application
-
-                ' ── FIX: Use the window that belongs to the range's own document,
-                '    NOT app.ActiveWindow. When multiple documents are open,
-                '    ActiveWindow may point to a different document, causing the
-                '    view switch and Select() call to operate on the wrong window.
-                Dim srcDoc As Microsoft.Office.Interop.Word.Document = src.Document
-                Dim docWindow As Microsoft.Office.Interop.Word.Window = srcDoc.ActiveWindow
-                Dim view As Microsoft.Office.Interop.Word.View = docWindow.View
-
-                ' Save current view state
-                Dim origRevView As WdRevisionsView = view.RevisionsView
-                Dim origShowRevs As Boolean = view.ShowRevisionsAndComments
-
-                ' Save current selection (in the original view's position space)
-                Dim origSelStart As Integer = app.Selection.Start
-                Dim origSelEnd As Integer = app.Selection.End
-
-                ' Remember which window was active so we can restore it
-                Dim origActiveWindow As Microsoft.Office.Interop.Word.Window = app.ActiveWindow
-
-                Try
-                    ' Activate the range's document window before selecting
-                    If Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
-                        docWindow.Activate()
-                    End If
-
-                    ' Select the target range so Word treats it as the live Selection
-                    src.Select()
-
-                    ' Switch to Final view — Selection.Text now returns accepted text
-                    view.RevisionsView = WdRevisionsView.wdRevisionsViewFinal
-                    view.ShowRevisionsAndComments = False
-
-                    Dim finalText As String = app.Selection.Text
-                    If finalText Is Nothing Then finalText = String.Empty
-                    Return finalText
-                Finally
-                    ' Restore view FIRST (so position space matches the saved selection)
-                    view.RevisionsView = origRevView
-                    view.ShowRevisionsAndComments = origShowRevs
-
-                    ' Restore the original selection
-                    Try
-                        app.Selection.SetRange(origSelStart, origSelEnd)
-                    Catch
-                    End Try
-
-                    ' Restore the previously active window if we switched away
-                    Try
-                        If Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
-                            origActiveWindow.Activate()
-                        End If
-                    Catch
-                    End Try
-                End Try
-
-            Catch ex As Exception
-                Debug.WriteLine($"Selection/Final-view approach failed: {ex.Message}")
-                Return raw
-            End Try
-
-        Catch ex As Exception
-            Debug.WriteLine($"Exception in GetVisibleText: {ex.Message}{vbCrLf}{ex.StackTrace}")
-            Try
-                Return If(src IsNot Nothing, src.Text, String.Empty)
-            Catch
-                Return String.Empty
-            End Try
-        End Try
+    Public Function GetVisibleText(ByVal src As Microsoft.Office.Interop.Word.Range) As System.String
+        If src Is Nothing Then Return System.String.Empty
+        ' Use the same physical ranges and revision filtering as surgical insertion.
+        ' Changing the window's revision view cannot establish a reliable source contract.
+        Dim hiddenFieldSpans As New System.Collections.Generic.List(Of SurgicalPositionSpan)()
+        For Each field As Microsoft.Office.Interop.Word.Field In src.Fields
+            hiddenFieldSpans.Add(New SurgicalPositionSpan With {.StartPos = field.Code.Start - 1, .EndPos = field.Result.Start})
+            hiddenFieldSpans.Add(New SurgicalPositionSpan With {.StartPos = field.Result.End, .EndPos = field.Result.End + 1})
+        Next
+        hiddenFieldSpans.Sort(Function(a, b) a.StartPos.CompareTo(b.StartPos))
+        Dim merged As New System.Collections.Generic.List(Of SurgicalPositionSpan)()
+        For Each span As SurgicalPositionSpan In hiddenFieldSpans
+            If merged.Count > 0 AndAlso span.StartPos <= merged(merged.Count - 1).EndPos Then
+                Dim previous As SurgicalPositionSpan = merged(merged.Count - 1)
+                previous.EndPos = System.Math.Max(previous.EndPos, span.EndPos)
+                merged(merged.Count - 1) = previous
+            Else
+                merged.Add(span)
+            End If
+        Next
+        Dim fieldIndex As System.Int32 = 0
+        Dim visible As New System.Text.StringBuilder()
+        For Each atom As SurgicalLiveCharAtom In BuildSurgicalLiveCharAtoms(src)
+            If Not atom.IsTrackedDeletion AndAlso Not SurgicalPositionIsInsideSpan(atom.LiveStart, merged, fieldIndex) Then visible.Append(atom.Text)
+        Next
+        Return visible.ToString()
     End Function
 
 
@@ -4616,15 +4472,18 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String, ByVal disableInternetAfterLoad As Boolean)
         Try
-            Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath, disableInternetAfterLoad:=disableInternetAfterLoad)
+            ' Create standalone HWNDs in a consistent context; restore Office immediately.
+            Using dpiScope As System.IDisposable = Global.SharedLibrary.SharedLibrary.WebView2DpiHost.StandaloneWindow()
+                Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath, disableInternetAfterLoad:=disableInternetAfterLoad)
 
             ' For Custom PDF export on form 
             'AddHandler editorForm.Shown, Sub()            
             '                                editorForm.ExportPdfToDevice()
             '                            End Sub
 
-            editorForm.Show()
-        Catch ex As Exception
+                editorForm.Show()
+            End Using
+        Catch ex As System.Exception
             Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")
             ShowCustomMessageBox(
                 $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &

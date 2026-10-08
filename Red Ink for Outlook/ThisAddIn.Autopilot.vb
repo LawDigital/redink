@@ -26,7 +26,7 @@
 '  - Catch-up processing:
 '      * On start, scans recent mailbox history since last processed UTC timestamp,
 '        applies full filter pipeline, and offers operator selection dialog.
-'      * Mails marked with holding-only MAPI value (`AP_LoopHeaderValueHolding`)
+'      * Mails marked with holding-only MAPI/MIME value (`AP_LoopHeaderValueHolding`)
 '        are re-eligible for full processing.
 '  - Queue + timing:
 '      * Central mail queue with processing pump.
@@ -105,6 +105,8 @@ Partial Public Class ThisAddIn
     Private Const AP_LoopHeaderProperty As String =
         "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoReply"
     Private Const AP_LoopHeaderValue As String = "true"
+    Private Const AP_AutoSubmittedHeaderProperty As System.String =
+        "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/Auto-Submitted"
 
     ''' <summary>Header value for holding-only notices (not substantive replies).
     ''' The catch-up scan uses this to distinguish "already fully replied" from "only holding notice sent".</summary>
@@ -1399,21 +1401,9 @@ Partial Public Class ThisAddIn
 
                         totalScanned += 1
 
-                        ' 1. Skip our own substantive AutoPilot replies.
-                        Try
-                            Dim prop As Object =
-                            mi.PropertyAccessor.GetProperty(
-                                AP_LoopHeaderProperty)
-
-                            If prop IsNot Nothing AndAlso
-                           prop.ToString().Equals(
-                               AP_LoopHeaderValue,
-                               StringComparison.OrdinalIgnoreCase) Then
-
-                                Continue For
-                            End If
-                        Catch
-                        End Try
+                        ' 1. Skip our own substantive AutoPilot replies, including IMAP MIME headers.
+                        ' Holding notices still do not mean the original mail was fully answered.
+                        If ReadAutoPilotReplyMarker(mi) = AP_LoopHeaderValue Then Continue For
 
                         ' 2. Determine whether already processed.
                         Dim isAlreadyProcessed As Boolean = False
@@ -1732,16 +1722,8 @@ Partial Public Class ThisAddIn
             Dim nodeMail = TryCast(item, MailItem)
             If nodeMail IsNot Nothing Then
                 Try
-                    Dim prop As Object = Nothing
-                    Try
-                        prop = nodeMail.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
-                    Catch
-                        ' Property not set — normal for user mails
-                    End Try
-                    ' Only "true" counts as substantive; "holding" does not
-                    If prop IsNot Nothing AndAlso CStr(prop).Equals(AP_LoopHeaderValue, StringComparison.OrdinalIgnoreCase) Then
-                        Return True
-                    End If
+                    ' Only substantive replies count; MIME "holding" is not completion.
+                    If ReadAutoPilotReplyMarker(nodeMail) = AP_LoopHeaderValue Then Return True
                 Catch
                 End Try
             End If
@@ -2322,15 +2304,16 @@ Partial Public Class ThisAddIn
             WriteAutoPilotHeartbeat("running")
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
-            Await SendQueuePositionNotificationsAsync(ct.Value)
-            Await SendActiveJobProgressNotificationAsync(ct.Value)
-
             ' Engineering diagnostics run only during genuine AutoPilot idle periods and
             ' are launched without blocking the heartbeat/notification timer itself.
             If _apMailQueue.IsEmpty AndAlso
                System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then
                 TryStartAutoPilotLogDiagnosticsIdle(ct.Value)
             End If
+
+            ' Notification failures must not prevent the independent idle diagnostics launch.
+            Await SendQueuePositionNotificationsAsync(ct.Value)
+            Await SendActiveJobProgressNotificationAsync(ct.Value)
         Catch ex As OperationCanceledException
             ' Expected during shutdown
         Catch ex As System.Exception
@@ -4210,12 +4193,6 @@ Partial Public Class ThisAddIn
             End Try
             info.Body = If(mi.Body, "")
             info.FormattingAwareBody = BuildFormattingAwareMailBody(mi, info.Body)
-            Try
-                Dim propVal = mi.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
-                info.HasAutoReplyHeader = (propVal IsNot Nothing AndAlso (propVal.ToString() = AP_LoopHeaderValue OrElse propVal.ToString() = AP_LoopHeaderValueHolding))
-            Catch
-                info.HasAutoReplyHeader = False
-            End Try
             info.ThreadAIReplyCount = 0
             Try
                 Dim conv = mi.GetConversation()
@@ -4247,12 +4224,8 @@ Partial Public Class ThisAddIn
                 info.FolderPath = ""
             End Try
             info.MessageClass = If(mi.MessageClass, "")
-            info.InternetHeaders = ""
-            Try
-                Dim headers = mi.PropertyAccessor.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x007D001F")
-                info.InternetHeaders = If(headers?.ToString(), "")
-            Catch
-            End Try
+            info.InternetHeaders = ReadAutoPilotTransportHeaders(mi)
+            info.HasAutoReplyHeader = ReadAutoPilotReplyMarker(mi, info.InternetHeaders).Length > 0
             Try
                 info.ConversationID = If(mi.ConversationID, "")
             Catch
@@ -4279,9 +4252,10 @@ Partial Public Class ThisAddIn
         If info.MessageClass.IndexOf("Report", StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
         If info.InternetHeaders.Length > 0 Then
             Dim headersLower = info.InternetHeaders.ToLowerInvariant()
-            If headersLower.Contains("auto-submitted: auto-replied") Then Return True
-            If headersLower.Contains("auto-submitted: auto-generated") Then Return True
-            If headersLower.Contains("auto-submitted: auto-notified") Then Return True
+            For Each value As System.String In ReadTransportHeaderValues(info.InternetHeaders, "Auto-Submitted")
+                Dim keyword As System.String = value.Split(";"c)(0).Trim().ToLowerInvariant()
+                If keyword = "auto-replied" OrElse keyword = "auto-generated" OrElse keyword = "auto-notified" Then Return True
+            Next
             If Regex.IsMatch(headersLower, "precedence:\s*(bulk|junk|list)") Then Return True
         End If
         Return False
@@ -6331,18 +6305,7 @@ Partial Public Class ThisAddIn
             Next
 
             If tagAsAutoReply Then
-                Try
-                    Dim headerValue As String =
-                    If(
-                        isHoldingOnly,
-                        AP_LoopHeaderValueHolding,
-                        AP_LoopHeaderValue)
-
-                    reply.PropertyAccessor.SetProperty(
-                    AP_LoopHeaderProperty,
-                    headerValue)
-                Catch
-                End Try
+                StampAutoPilotReplyHeaders(reply, If(isHoldingOnly, AP_LoopHeaderValueHolding, AP_LoopHeaderValue))
             End If
 
             Try
@@ -7462,28 +7425,116 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    ''' <summary>Checks whether a mail item has the X-RedInk-AutoReply MAPI property set (any value: "true" or "holding").</summary>
-    Private Function HasAutoReplyHeader(mi As MailItem) As Boolean
-        Try
-            Dim prop As Object = Nothing
-            Try
-                Dim pa As PropertyAccessor = mi.PropertyAccessor
-                prop = pa.GetProperty(AP_LoopHeaderProperty)
-            Catch
-                ' Property not set — this is normal for user-sent mails
-                Return False
-            End Try
-            If prop IsNot Nothing Then
-                Dim val = CStr(prop)
-                If val.Equals(AP_LoopHeaderValue, StringComparison.OrdinalIgnoreCase) OrElse
-                   val.Equals(AP_LoopHeaderValueHolding, StringComparison.OrdinalIgnoreCase) Then
-                    Return True
-                End If
+    ''' <summary>Checks the named MAPI property and transport MIME headers for an own reply ("true" or "holding").</summary>
+    ' Read exact RFC header fields rather than substring matches. Continuations belong
+    ' only to the immediately preceding field; stop at the header/body separator.
+    Private Shared Function ReadTransportHeaderValues(headers As System.String, fieldName As System.String) As System.Collections.Generic.List(Of System.String)
+        Dim values As New System.Collections.Generic.List(Of System.String)()
+        If System.String.IsNullOrEmpty(headers) Then Return values
+        Dim currentName As System.String = System.String.Empty
+        Dim currentValue As New System.Text.StringBuilder()
+        Dim text As System.String = headers.Replace(Microsoft.VisualBasic.vbCrLf, Microsoft.VisualBasic.vbLf).Replace(Microsoft.VisualBasic.vbCr, Microsoft.VisualBasic.vbLf)
+        For Each line As System.String In text.Split(Microsoft.VisualBasic.ChrW(10))
+            If line.Length = 0 Then Exit For
+            If line(0) = " "c OrElse line(0) = Microsoft.VisualBasic.ChrW(9) Then
+                If currentName.Length > 0 Then currentValue.Append(" " & line.Trim())
+                Continue For
             End If
-        Catch
-            ' Ignore errors
+            If System.String.Equals(currentName, fieldName, System.StringComparison.OrdinalIgnoreCase) Then values.Add(currentValue.ToString().Trim())
+            currentName = System.String.Empty
+            currentValue.Clear()
+            Dim colon As System.Int32 = line.IndexOf(":"c)
+            If colon <= 0 Then Continue For
+            ' RFC field names contain printable ASCII except colon; no whitespace.
+            Dim candidate As System.String = line.Substring(0, colon)
+            Dim valid As System.Boolean = True
+            For Each ch As System.Char In candidate
+                If ch < "!"c OrElse ch > "~"c Then valid = False : Exit For
+            Next
+            If Not valid Then Continue For
+            currentName = candidate
+            currentValue.Append(line.Substring(colon + 1).Trim())
+        Next
+        If System.String.Equals(currentName, fieldName, System.StringComparison.OrdinalIgnoreCase) Then values.Add(currentValue.ToString().Trim())
+        Return values
+    End Function
+
+    Private Shared Function NormalizeAutoPilotReplyMarker(value As System.String) As System.String
+        Dim marker As System.String = If(value, System.String.Empty).Trim()
+        If System.String.Equals(marker, AP_LoopHeaderValue, System.StringComparison.OrdinalIgnoreCase) Then Return AP_LoopHeaderValue
+        If System.String.Equals(marker, AP_LoopHeaderValueHolding, System.StringComparison.OrdinalIgnoreCase) Then Return AP_LoopHeaderValueHolding
+        Return System.String.Empty
+    End Function
+
+    Private Shared Function ReadAutoPilotMarkerFromTransportHeaders(headers As System.String) As System.String
+        Dim holding As System.Boolean = False
+        For Each value As System.String In ReadTransportHeaderValues(headers, "X-RedInk-AutoReply")
+            Dim marker As System.String = NormalizeAutoPilotReplyMarker(value)
+            If marker = AP_LoopHeaderValue Then Return marker
+            If marker = AP_LoopHeaderValueHolding Then holding = True
+        Next
+        Return If(holding, AP_LoopHeaderValueHolding, System.String.Empty)
+    End Function
+
+    Private Function ReadAutoPilotTransportHeaders(mi As Microsoft.Office.Interop.Outlook.MailItem) As System.String
+        If mi Is Nothing Then Return System.String.Empty
+        ' Some stores expose only the ANSI variant of PR_TRANSPORT_MESSAGE_HEADERS.
+        For Each propertyName As System.String In New System.String() {
+            "http://schemas.microsoft.com/mapi/proptag/0x007D001F",
+            "http://schemas.microsoft.com/mapi/proptag/0x007D001E"}
+            Try
+                Dim value As System.Object = mi.PropertyAccessor.GetProperty(propertyName)
+                Dim headers As System.String = If(value Is Nothing, System.String.Empty, value.ToString())
+                If Not System.String.IsNullOrWhiteSpace(headers) Then Return headers
+            Catch ex As System.Exception
+                ' Missing/unsupported property is expected; try the other representation.
+            End Try
+        Next
+        Return System.String.Empty
+    End Function
+
+    Private Function ReadAutoPilotReplyMarker(mi As Microsoft.Office.Interop.Outlook.MailItem, Optional transportHeaders As System.String = Nothing) As System.String
+        If mi Is Nothing Then Return System.String.Empty
+        Try
+            Dim value As System.Object = mi.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
+            Dim marker As System.String = NormalizeAutoPilotReplyMarker(If(value Is Nothing, System.String.Empty, value.ToString()))
+            If marker.Length > 0 Then Return marker
+        Catch ex As System.Exception
+            ' IMAP may leave this named property unpromoted even though the MIME header exists.
         End Try
-        Return False
+        Return ReadAutoPilotMarkerFromTransportHeaders(If(transportHeaders, ReadAutoPilotTransportHeaders(mi)))
+    End Function
+
+    Private Sub LogAutoPilotHeaderStampFailure(headerName As System.String, failure As System.Exception)
+        Dim message As System.String = "Could not stamp " & headerName & ": " & failure.GetType().Name &
+            " (HRESULT=0x" & failure.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture) & "): " & failure.Message
+        Try
+            ApDashboardLog(message, "warn")
+        Catch ex As System.Exception
+            ' Diagnostics must not change submission policy or prevent the other header attempt.
+            System.Diagnostics.Debug.WriteLine(message)
+        End Try
+    End Sub
+
+    Private Sub StampAutoPilotReplyHeaders(mail As Microsoft.Office.Interop.Outlook.MailItem, marker As System.String)
+        If mail Is Nothing Then Return
+        Dim normalized As System.String = NormalizeAutoPilotReplyMarker(marker)
+        If normalized.Length = 0 Then Throw New System.ArgumentException("Unknown AutoPilot reply marker.", NameOf(marker))
+        Try
+            mail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, normalized)
+        Catch ex As System.Exception
+            LogAutoPilotHeaderStampFailure("X-RedInk-AutoReply", ex)
+        End Try
+        ' Independent attempt: a failure to stamp the private marker must not skip RFC 3834.
+        Try
+            mail.PropertyAccessor.SetProperty(AP_AutoSubmittedHeaderProperty, "auto-replied")
+        Catch ex As System.Exception
+            LogAutoPilotHeaderStampFailure("Auto-Submitted", ex)
+        End Try
+    End Sub
+
+    Private Function HasAutoReplyHeader(mi As Microsoft.Office.Interop.Outlook.MailItem) As System.Boolean
+        Return ReadAutoPilotReplyMarker(mi).Length > 0
     End Function
 
     ''' <summary>
@@ -8843,10 +8894,7 @@ Partial Public Class ThisAddIn
                     IO.Path.GetFileName(attachPath))
             Next
 
-            Try
-                newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
-            Catch
-            End Try
+            StampAutoPilotReplyHeaders(newMail, AP_LoopHeaderValue)
 
             Try
                 newMail.Categories = AP_CategoryName

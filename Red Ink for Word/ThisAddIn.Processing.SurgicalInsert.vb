@@ -248,14 +248,14 @@ Partial Public Class ThisAddIn
             ' ======================================================================
             ' STEP 2: Normalize line breaks to explicit tokens
             ' ======================================================================
-            text1 = text1.Replace(manualLineBreak, " {vbVt} ").
-                      Replace(vbCrLf, " {vbCrLf} ").
-                      Replace(vbCr, " {vbCrLf} ").
-                      Replace(vbLf, " {vbCrLf} ")
-            text2 = text2.Replace(manualLineBreak, " {vbVt} ").
-                      Replace(vbCrLf, " {vbCrLf} ").
-                      Replace(vbCr, " {vbCrLf} ").
-                      Replace(vbLf, " {vbCrLf} ")
+            text1 = text1.Replace(manualLineBreak, "{vbVt}").
+                      Replace(vbCrLf, "{vbCrLf}").
+                      Replace(vbCr, "{vbCrLf}").
+                      Replace(vbLf, "{vbCrLf}")
+            text2 = text2.Replace(manualLineBreak, "{vbVt}").
+                      Replace(vbCrLf, "{vbCrLf}").
+                      Replace(vbCr, "{vbCrLf}").
+                      Replace(vbLf, "{vbCrLf}")
 
             Debug.WriteLine("==== Surgical raw text1 ====")
             Debug.WriteLine(DebugVisualizeToken(text1))
@@ -346,8 +346,8 @@ Partial Public Class ThisAddIn
                         uiYieldStopwatch.Restart()
                     End If
 
-                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit Do
-                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then Exit Do
+                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Return
+                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then Return
 
                     Dim run As DiffRun = runs(ri)
 
@@ -372,20 +372,8 @@ Partial Public Class ThisAddIn
                             If SurgicalTokensMatchAt(atoms, unchangedTokens, atomIndex) Then
                                 unchangedEnd = atomIndex + unchangedTokens.Count
                                 atomIndex = unchangedEnd
-                            ElseIf unchangedTokens.All(Function(token As String) SurgicalIsWeakAnchorToken(token)) Then
-                                ' Spaces and break-padding tokens are often synthetic artefacts of the
-                                ' diff-normalisation layer. Never resync globally on them; doing so can
-                                ' jump to a much later space and make every later real edit disappear.
-                                Debug.WriteLine($"    Weak unchanged run skipped without resync. text='{DebugVisualizeToken(run.Text)}'")
                             Else
-                                Dim unchangedSearchLimit As Integer = System.Math.Min(atoms.Count, atomIndex + System.Math.Max(64, unchangedTokens.Count * 4))
-
-                                If SurgicalTryFindTokenSequence(atoms, unchangedTokens, atomIndex, unchangedSearchLimit, unchangedStart, unchangedEnd) Then
-                                    Debug.WriteLine($"    Resynced unchanged run locally: {atomIndex} -> {unchangedEnd}; skipped visible atoms={unchangedStart - atomIndex}")
-                                    atomIndex = unchangedEnd
-                                Else
-                                    Debug.WriteLine($"    Unchanged run not found in atom map; leaving atom index unchanged. text='{DebugVisualizeToken(run.Text)}'")
-                                End If
+                                Throw New System.IO.InvalidDataException("Surgical source mismatch in unchanged run " & ri.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; no edits applied.")
                             End If
 
                             ri += 1
@@ -424,7 +412,9 @@ Partial Public Class ThisAddIn
                                IsOnlyBreakCharacters(deletedText) AndAlso
                                IsOnlyBreakCharacters(insertedText) Then
 
-                                Debug.WriteLine($"    Break-only replacement skipped; preserving original break(s). delete='{DebugVisualizeToken(deletedText)}' insert='{DebugVisualizeToken(insertedText)}'")
+                                Dim breakTokens As System.Collections.Generic.List(Of System.String) = SurgicalTokenizeComparableText(deletedText)
+                                If Not SurgicalTokensMatchAt(atoms, breakTokens, atomIndex) Then Throw New System.IO.InvalidDataException("Surgical paragraph source mismatch; no edits applied.")
+                                atomIndex += breakTokens.Count
                                 Continue Do
                             End If
 
@@ -455,29 +445,7 @@ Partial Public Class ThisAddIn
                                 deleteEndIndex = atomIndex + deletedTokens.Count
                                 deleteMatched = True
                             Else
-                                Dim nextAnchorTokens As List(Of String) = SurgicalFindNextUnchangedAnchorTokens(runs, ri)
-                                Dim nextAnchorStart As Integer = atoms.Count
-                                Dim nextAnchorEnd As Integer = atoms.Count
-
-                                If nextAnchorTokens.Count > 0 Then
-                                    If Not SurgicalTryFindTokenSequence(atoms, nextAnchorTokens, atomIndex, atoms.Count, nextAnchorStart, nextAnchorEnd) Then
-                                        nextAnchorStart = atoms.Count
-                                        nextAnchorEnd = atoms.Count
-                                    End If
-                                End If
-
-                                If SurgicalTryFindTokenSequence(atoms, deletedTokens, atomIndex, nextAnchorStart, deleteStartIndex, deleteEndIndex) Then
-                                    deleteMatched = True
-                                    Debug.WriteLine($"    Delete tokens found after resync: {atomIndex} -> {deleteStartIndex}/{deleteEndIndex}")
-                                ElseIf nextAnchorStart >= atomIndex Then
-                                    ' The diff cluster sits between the already-consumed original atom and
-                                    ' the next unchanged anchor. If exact token matching fails, use that
-                                    ' bounded original-side region rather than dropping the cluster.
-                                    deleteStartIndex = atomIndex
-                                    deleteEndIndex = nextAnchorStart
-                                    deleteMatched = (deleteEndIndex > deleteStartIndex)
-                                    Debug.WriteLine($"    Delete tokens not found; using bounded cluster region {deleteStartIndex}..{deleteEndIndex} before next unchanged anchor.")
-                                End If
+                                Throw New System.IO.InvalidDataException("Surgical source mismatch in deletion run " & clusterStartRunIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; no edits applied.")
                             End If
 
                             If deleteMatched Then
@@ -511,6 +479,12 @@ Partial Public Class ThisAddIn
                 ' ==================================================================
                 ' STEP 9: Apply the planned edits right-to-left.
                 ' ==================================================================
+                For remainingIndex As System.Int32 = atomIndex To atoms.Count - 1
+                    If Not SurgicalIsWeakAnchorToken(atoms(remainingIndex).KeyText) Then
+                        Throw New System.IO.InvalidDataException("Surgical source was not fully consumed; no edits applied.")
+                    End If
+                Next
+
                 pendingEdits.Sort(Function(a, b)
                                       Dim startCompare As Integer = b.DeleteStart.CompareTo(a.DeleteStart)
                                       If startCompare <> 0 Then Return startCompare
@@ -524,26 +498,32 @@ Partial Public Class ThisAddIn
                 For Each edit As PendingSurgicalEdit In pendingEdits
                     If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit For
 
-                    Dim contentEnd As Integer = doc.Content.End
-                    Dim editStart As Integer = System.Math.Max(targetRange.Start, System.Math.Min(edit.DeleteStart, contentEnd))
-                    Dim editEnd As Integer = System.Math.Max(editStart, System.Math.Min(edit.DeleteEnd, contentEnd))
+                    Dim editStart As System.Int32 = edit.DeleteStart
+                    Dim editEnd As System.Int32 = edit.DeleteEnd
+                    If editStart < targetRange.Start OrElse editEnd > targetRange.End OrElse editEnd < editStart Then
+                        Throw New System.IO.InvalidDataException("A surgical edit lies outside its original target range.")
+                    End If
 
                     If editEnd > editStart Then
-                        doc.Range(editStart, editEnd).Delete()
+                        Dim deletionRange As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+                        deletionRange.SetRange(editStart, editEnd)
+                        deletionRange.Delete()
                     End If
 
                     If Not String.IsNullOrEmpty(edit.InsertText) Then
-                        Dim insertRange As Microsoft.Office.Interop.Word.Range = doc.Range(editStart, editStart)
+                        Dim insertRange As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+                        insertRange.SetRange(editStart, editStart)
                         insertRange.InsertAfter(edit.InsertText)
                     End If
                 Next
 
-                doc.TrackRevisions = False
-                CollapseDoubleSpacesInFinalView(doc, targetRange.Start, targetRange.End)
+                ' Leave untouched text and existing revisions intact; all whitespace edits belong in the diff.
             End Using
 
         Catch ex As System.Exception
             Debug.WriteLine("SurgicalMarkup error: " & ex.Message & vbCrLf & ex.StackTrace)
+            SharedLibrary.SharedLogger.Log(_context, _context.RDV, "Surgical markup stopped: " & ex.ToString())
+            SLib.ShowCustomMessageBox("Surgical markup stopped: " & ex.Message)
         Finally
             If splash IsNot Nothing Then
                 Try
@@ -672,31 +652,21 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Splits the tokenized text into paragraph bodies plus the break token that followed each body.
-    ''' The normalization step intentionally wrapped every break token in spaces. Those synthetic
-    ''' padding spaces do not exist in Word's live text, so exactly one injected space is removed on
-    ''' each side of a paragraph break while genuine additional spaces are preserved.
+    ''' Break tokens carry no synthetic padding. All original whitespace is preserved.
     ''' </summary>
     Private Shared Function SplitTokenizedIntoParagraphChunks(ByVal text As String) As System.Collections.Generic.List(Of SurgicalParagraphChunk)
         Dim chunks As New System.Collections.Generic.List(Of SurgicalParagraphChunk)()
         Dim current As New System.Text.StringBuilder()
-        Dim skipOneInjectedSpaceAfterBreak As Boolean = False
 
         For Each token As String In TokenizeDiffUnits(If(text, String.Empty))
             If IsDiffLineBreakToken(token) Then
-                RemoveOneTrailingInjectedSpace(current)
                 chunks.Add(New SurgicalParagraphChunk With {
                     .Text = current.ToString(),
                     .BreakText = token
                 })
                 current.Clear()
-                skipOneInjectedSpaceAfterBreak = True
             Else
-                If skipOneInjectedSpaceAfterBreak AndAlso token = " " Then
-                    skipOneInjectedSpaceAfterBreak = False
-                Else
-                    current.Append(token)
-                    skipOneInjectedSpaceAfterBreak = False
-                End If
+                current.Append(token)
             End If
         Next
 
@@ -1795,7 +1765,13 @@ Partial Public Class ThisAddIn
             If fieldIndex < fieldSpans.Count AndAlso
                fieldSpans(fieldIndex).StartPos <= livePos AndAlso livePos < fieldSpans(fieldIndex).EndPos Then
 
-                result.Add(SurgicalCreateFieldAtom(fieldSpans(fieldIndex).KeyText, fieldSpans(fieldIndex).StartPos, fieldSpans(fieldIndex).EndPos))
+                Dim fieldIsVisible As System.Boolean = False
+                Dim probe As System.Int32 = index
+                While probe < liveChars.Count AndAlso liveChars(probe).LiveStart < fieldSpans(fieldIndex).EndPos
+                    If Not liveChars(probe).IsTrackedDeletion Then fieldIsVisible = True
+                    probe += 1
+                End While
+                If fieldIsVisible Then result.Add(SurgicalCreateFieldAtom(fieldSpans(fieldIndex).KeyText, fieldSpans(fieldIndex).StartPos, fieldSpans(fieldIndex).EndPos))
 
                 Dim skipEnd As Integer = fieldSpans(fieldIndex).EndPos
                 Do While index < liveChars.Count AndAlso liveChars(index).LiveStart < skipEnd
@@ -1932,7 +1908,7 @@ Partial Public Class ThisAddIn
                 Return spans
             End If
 
-            For Each field As Microsoft.Office.Interop.Word.Field In doc.Fields
+            For Each field As Microsoft.Office.Interop.Word.Field In targetRange.Fields
                 If field Is Nothing Then
                     Continue For
                 End If
@@ -1967,8 +1943,9 @@ Partial Public Class ThisAddIn
                     Continue For
                 End If
 
-                Dim spanStart As Integer = System.Math.Max(targetRange.Start, resultStart)
-                Dim spanEnd As Integer = System.Math.Min(targetRange.End, resultEnd)
+                Dim fieldStart As System.Int32 = If(codeRange Is Nothing, resultStart, codeRange.Start - 1)
+                Dim spanStart As Integer = System.Math.Max(targetRange.Start, fieldStart)
+                Dim spanEnd As Integer = System.Math.Min(targetRange.End, resultEnd + 1)
 
                 If spanEnd <= spanStart Then
                     Continue For
@@ -2038,7 +2015,12 @@ Partial Public Class ThisAddIn
         End If
 
         Dim deletionSpans As List(Of SurgicalPositionSpan) = BuildSurgicalTrackedDeletionSpans(targetRange)
-        Dim liveText As String = targetRange.Text
+        Dim sourceRange As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+        ' Physical offsets require all characters, including hidden text and field codes.
+        ' Visibility is a projection below, never a window/view setting.
+        sourceRange.TextRetrievalMode.IncludeHiddenText = True
+        sourceRange.TextRetrievalMode.IncludeFieldCodes = True
+        Dim liveText As String = sourceRange.Text
         If liveText Is Nothing Then liveText = String.Empty
 
         Dim rangeStart As Integer = targetRange.Start
@@ -2068,10 +2050,11 @@ Partial Public Class ThisAddIn
             Dim piece As String = String.Empty
 
             Try
-                Dim pieceRange As Microsoft.Office.Interop.Word.Range = targetRange.Document.Range(pos, pos + 1)
+                Dim pieceRange As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate
+                pieceRange.SetRange(pos, pos + 1)
                 piece = pieceRange.Text
             Catch ex As System.Exception
-                piece = String.Empty
+                Throw New System.IO.InvalidDataException("Cannot map the surgical source range at position " & pos.ToString(System.Globalization.CultureInfo.InvariantCulture), ex)
             End Try
 
             If String.IsNullOrEmpty(piece) Then
@@ -2109,7 +2092,8 @@ Partial Public Class ThisAddIn
 
         Try
             For Each revision As Microsoft.Office.Interop.Word.Revision In targetRange.Revisions
-                If revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionDelete Then
+                If revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionDelete OrElse
+                   revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionMovedFrom Then
                     Dim spanStart As Integer = System.Math.Max(targetRange.Start, revision.Range.Start)
                     Dim spanEnd As Integer = System.Math.Min(targetRange.End, revision.Range.End)
 
@@ -2122,7 +2106,7 @@ Partial Public Class ThisAddIn
                 End If
             Next
         Catch ex As System.Exception
-            Debug.WriteLine("BuildSurgicalTrackedDeletionSpans failed: " & ex.Message)
+            Throw New System.IO.InvalidDataException("Cannot read existing tracked deletions; surgical source mapping was stopped.", ex)
         End Try
 
         spans.Sort(Function(a, b) a.StartPos.CompareTo(b.StartPos))

@@ -243,10 +243,7 @@ Partial Public Class ThisAddIn
                         System.IO.Path.GetFileName(attachPath))
                 Next
 
-                Try
-                    followUp.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
-                Catch
-                End Try
+                StampAutoPilotReplyHeaders(followUp, AP_LoopHeaderValue)
                 Try
                     followUp.Categories = AP_CategoryName
                 Catch

@@ -1787,7 +1787,7 @@ Partial Public Class ThisAddIn
     ''' Shows the board in a WebView2-hosted WinForms dialog.
     ''' </summary>
     Private Sub ShowInboxBoardForm(mails As List(Of InboxBoardEntry), columns As List(Of InboxBoardColumn))
-        Dim frm As New Form()
+        Dim frm As New Global.SharedLibrary.SharedLibrary.WebView2HostForm()
         frm.Text = $"{AN} - Inbox Board"
         frm.MinimumSize = New Drawing.Size(900, 500)
         frm.FormBorderStyle = FormBorderStyle.Sizable
@@ -1839,7 +1839,7 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        Dim webView As New WebView2() With {
+        Dim webView As New Global.SharedLibrary.SharedLibrary.DpiAwareWebView2() With {
             .Dock = DockStyle.Fill
         }
         frm.Controls.Add(webView)
@@ -1890,7 +1890,9 @@ Partial Public Class ThisAddIn
                                   Try
                                       Dim userDataFolder As String = SharedLibrary.SharedLibrary.SharedMethods.GetWebView2UserDataFolder()
                                       Dim env As CoreWebView2Environment = Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder, Nothing)
-                                      Await webView.EnsureCoreWebView2Async(env)
+                                      If frm.IsDisposed OrElse webView.IsDisposed Then Return
+                                      Await Global.SharedLibrary.SharedLibrary.WebView2DpiHost.EnsureInitializedAsync(webView, env)
+                                      If frm.IsDisposed OrElse webView.IsDisposed Then Return
 
                                       AddHandler webView.CoreWebView2.ProcessFailed,
                                           Sub(pfSender, pfArgs)

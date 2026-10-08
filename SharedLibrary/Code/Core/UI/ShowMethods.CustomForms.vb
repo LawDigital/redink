@@ -2281,7 +2281,8 @@ Namespace SharedLibrary
                                             ByRef params() As InputParameter,
                                             Optional extraButtonText As System.String = Nothing,
                                             Optional extraButtonAction As System.Action = Nothing,
-                                            Optional CloseAfterExtra As System.Boolean = False
+                                            Optional CloseAfterExtra As System.Boolean = False,
+                                            Optional checkboxRightClearance As System.Int32 = 0
                                         ) As Boolean
             If String.IsNullOrWhiteSpace(header) Then header = String.Empty
 
@@ -2371,7 +2372,7 @@ Namespace SharedLibrary
                         .Checked = initial,
                         .AutoSize = True,
                         .Anchor = AnchorStyles.Left,
-                        .Margin = New Padding(0, 0, 0, 8),
+                        .Margin = New System.Windows.Forms.Padding(0, 0, System.Math.Max(0, checkboxRightClearance), 8),
                         .Enabled = Not isNothing
                     }
                     If isNothing Then

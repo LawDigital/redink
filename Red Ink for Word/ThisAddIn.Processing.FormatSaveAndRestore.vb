@@ -479,6 +479,57 @@ Partial Public Class ThisAddIn
         Return output.ToString()
     End Function
 
+    ''' <summary>Serializes protected elements and ordinary text using one physical revision map.</summary>
+    Private Shared Function BuildRevisionAwareInlineText(rng As Microsoft.Office.Interop.Word.Range,
+                                                         characters As System.Collections.Generic.List(Of SurgicalLiveCharAtom),
+                                                         placeholders As System.Collections.Generic.List(Of PlaceholderInfo)) As System.String
+        If characters Is Nothing Then Throw New System.ArgumentNullException(NameOf(characters))
+        Dim fullText As System.String = System.String.Concat(characters.Select(Function(item As SurgicalLiveCharAtom) item.Text))
+        Dim previousStart As System.Int32 = rng.Start
+        For Each item As SurgicalLiveCharAtom In characters
+            If item.Text Is Nothing OrElse item.Text.Length <> 1 OrElse item.LiveStart < previousStart OrElse
+               item.LiveStart < rng.Start OrElse item.LiveEnd > rng.End OrElse item.LiveEnd <= item.LiveStart Then
+                Throw New System.IO.InvalidDataException("The revision-aware source map contains an invalid physical position; extraction stopped.")
+            End If
+            previousStart = item.LiveStart
+        Next
+        Dim staged As New System.Collections.Generic.List(Of PlaceholderInfo)()
+        For Each placeholder As PlaceholderInfo In placeholders
+            Dim mapped As PlaceholderInfo = placeholder
+            If placeholder.Length = 0 Then
+                ' Paragraph/list markers originate in physical Word positions.
+                Dim position As System.Int32 = rng.Start + placeholder.Offset
+                mapped = New PlaceholderInfo With {.Offset = characters.FindIndex(Function(item As SurgicalLiveCharAtom) item.LiveStart >= position), .Length = 0, .Token = placeholder.Token}
+                If mapped.Offset < 0 Then mapped.Offset = fullText.Length
+            End If
+            staged.Add(mapped)
+        Next
+        staged.Sort(PlaceholderComparer)
+        Dim output As New System.Text.StringBuilder(fullText.Length + staged.Count * 16)
+        Dim last As System.Int32 = 0
+        Dim appendVisible As System.Action(Of System.Int32, System.Int32) =
+            Sub(first As System.Int32, ending As System.Int32)
+                For index As System.Int32 = first To ending - 1
+                    If Not characters(index).IsTrackedDeletion Then output.Append(characters(index).Text)
+                Next
+            End Sub
+        For Each placeholder As PlaceholderInfo In staged
+            If placeholder.Offset < last Then Continue For
+            If placeholder.Offset < 0 OrElse placeholder.Offset + placeholder.Length > characters.Count Then
+                Throw New System.IO.InvalidDataException("A serialized placeholder lies outside the source map.")
+            End If
+            appendVisible(last, placeholder.Offset)
+            Dim visible As System.Boolean = placeholder.Length = 0
+            For index As System.Int32 = placeholder.Offset To placeholder.Offset + placeholder.Length - 1
+                If Not characters(index).IsTrackedDeletion Then visible = True
+            Next
+            If visible Then output.Append(placeholder.Token)
+            last = placeholder.Offset + placeholder.Length
+        Next
+        appendVisible(last, characters.Count)
+        Return output.ToString()
+    End Function
+
     ''' <summary>
     ''' Extracts text from a Word range, replaces special elements with inline placeholders,
     ''' and optionally converts formatting to Markdown-compatible markers.
@@ -524,26 +575,12 @@ Partial Public Class ThisAddIn
                     Return scope.CancelRequested OrElse ProgressBarModule.CancelOperation
                 End Function
 
-            ' Local helper for early-exit assembly (cancel path).
+            ' Capture once after Markdown preparation; scanning and rendering must share
+            ' the exact same stream, even when bulk Range.Text differs from position reads.
+            Dim sourceCharacters As System.Collections.Generic.List(Of SurgicalLiveCharAtom) = Nothing
             Dim BuildPartial As Func(Of Word.Range, List(Of PlaceholderInfo), String) =
                 Function(r As Word.Range, phs As List(Of PlaceholderInfo)) As String
-                    Dim ft As String = r.Text
-                    Dim sorted As New List(Of PlaceholderInfo)(phs)
-                    sorted.Sort(PlaceholderComparer)
-                    Dim sb As New System.Text.StringBuilder(ft.Length + sorted.Count * 16)
-                    Dim lp As Integer = 0
-                    For Each ph In sorted
-                        ' Skip placeholders nested inside an already-emitted outer span.
-                        ' Zero-length markers are allowed to sit exactly at lp.
-                        If ph.Length > 0 AndAlso ph.Offset < lp Then Continue For
-                        If ph.Length = 0 AndAlso ph.Offset < lp Then Continue For
-                        If ph.Offset > lp Then sb.Append(ft.Substring(lp, ph.Offset - lp))
-                        sb.Append(ph.Token)
-                        Dim newLp As Integer = ph.Offset + ph.Length
-                        If newLp > lp Then lp = newLp
-                    Next
-                    If lp < ft.Length Then sb.Append(ft.Substring(lp))
-                    Return sb.ToString()
+                    Return BuildRevisionAwareInlineText(r, sourceCharacters, phs)
                 End Function
 
             Try
@@ -722,37 +759,28 @@ Partial Public Class ThisAddIn
 
                 Dim placeholders As New List(Of PlaceholderInfo)
 
-                '──────────── Read text once; everything below uses STRING indices ─────────
-                ' Critical: positions returned by Word (fld.Code.Start, fn.Reference.Start)
-                ' are absolute document positions and frequently disagree with indices into
-                ' rng.Text after the Markdown phase has inserted characters.  We therefore
-                ' scan rng.Text itself for field markers (Chr(19)/Chr(20)/Chr(21)) and note
-                ' references (Chr(2)) and pair them with Word objects in document order.
-                Dim fullText As String = rng.Text
+                ' One mapped snapshot owns both the string indices and physical positions.
+                ' A second bulk Range.Text read is not an independent correctness oracle:
+                ' Word may serialize revisions/fields differently from per-position reads.
+                sourceCharacters = BuildSurgicalLiveCharAtoms(rng)
+                Dim fullText As System.String = System.String.Concat(sourceCharacters.Select(Function(item As SurgicalLiveCharAtom) item.Text))
 
                 If (DoMarkdown OrElse IncludeMarkdownListPrefixes) AndAlso Not PreserveParagraphFormatInline Then
                     AddMarkdownListPrefixPlaceholders(rng, placeholders)
                 End If
 
-                ' Snapshot notes in document order (their Chr(2) refs appear in fullText
-                ' in the same order as Reference.Start ascending).
-                Dim noteQueue As New Queue(Of Tuple(Of String, String))()
-                Dim mergedNotes As New List(Of Tuple(Of Integer, String, String))()
+                ' Match reference objects by their physical Word positions, not by ordinal
+                ' order: an omitted/deleted reference must not shift later note identities.
+                Dim notesByPosition As New System.Collections.Generic.Dictionary(Of System.Int32, System.Tuple(Of System.String, System.String))()
                 For Each fn As Word.Footnote In rng.Footnotes
-                    mergedNotes.Add(Tuple.Create(CInt(fn.Reference.Start), "WFNT", fn.Range.Text))
+                    notesByPosition.Add(fn.Reference.Start, System.Tuple.Create("WFNT", fn.Range.Text))
                 Next
                 For Each en As Word.Endnote In rng.Endnotes
-                    mergedNotes.Add(Tuple.Create(CInt(en.Reference.Start), "WENT", en.Range.Text))
-                Next
-                mergedNotes.Sort(Function(a, b) a.Item1.CompareTo(b.Item1))
-                For Each m In mergedNotes
-                    noteQueue.Enqueue(Tuple.Create(m.Item2, m.Item3))
+                    notesByPosition.Add(en.Reference.Start, System.Tuple.Create("WENT", en.Range.Text))
                 Next
 
-                ' Snapshot top-level fields in document order. We use Word.Field.Code/Result
-                ' for content (code text, type, display text) and the string scan for
-                ' positions only — avoids any reliance on TextRetrievalMode behaving
-                ' uniformly across field types and Word versions.
+                ' Use native positions to associate top-level fields with the mapped
+                ' marker stream; nested fields remain represented by their outer field.
                 Dim allFields As New List(Of Word.Field)()
                 For Each fld As Word.Field In rng.Fields
                     allFields.Add(fld)
@@ -769,10 +797,12 @@ Partial Public Class ThisAddIn
                     Next
                     If Not isNested Then topLevelFields.Add(fld)
                 Next
-                topLevelFields.Sort(Function(a, b) a.Code.Start.CompareTo(b.Code.Start))
-                Dim topFieldIdx As Integer = 0
+                Dim fieldsByPosition As New System.Collections.Generic.Dictionary(Of System.Int32, Word.Field)()
+                For Each fld As Word.Field In topLevelFields
+                    fieldsByPosition.Add(fld.Code.Start - 1, fld)
+                Next
 
-                ' Scan rng.Text for field begin/end and note references.
+                ' Scan the same mapped stream that the serializer will consume.
                 Dim fieldStack As New Stack(Of Integer)
                 Dim processedFields As Integer = 0
                 Dim processedNotes As Integer = 0
@@ -790,13 +820,9 @@ Partial Public Class ThisAddIn
                             Dim startIdx As Integer = fieldStack.Pop()
                             If fieldStack.Count <> 0 Then Continue For ' nested – outer represents it
 
-                            ' Pair this top-level closure with the next top-level Word.Field
-                            ' in document order. Both are deterministically ordered, so an
-                            ' ordinal pairing is robust to position drift.
                             Dim fld As Word.Field = Nothing
-                            If topFieldIdx < topLevelFields.Count Then
-                                fld = topLevelFields(topFieldIdx)
-                                topFieldIdx += 1
+                            If Not fieldsByPosition.TryGetValue(sourceCharacters(startIdx).LiveStart, fld) Then
+                                Throw New System.IO.InvalidDataException("Cannot associate a field marker with its physical source position; extraction stopped.")
                             End If
 
                             Dim codeText As String = String.Empty
@@ -830,8 +856,8 @@ Partial Public Class ThisAddIn
                                                  label:=$"Fields … {processedFields}/{fieldsCount}")
 
                         Case 2 ' footnote/endnote reference
-                            If noteQueue.Count = 0 Then Continue For
-                            Dim n = noteQueue.Dequeue()
+                            Dim n As System.Tuple(Of System.String, System.String) = Nothing
+                            If Not notesByPosition.TryGetValue(sourceCharacters(i).LiveStart, n) Then Continue For
                             placeholders.Add(New PlaceholderInfo With {
                                 .Offset = i,
                                 .Length = 1,
@@ -913,50 +939,15 @@ Partial Public Class ThisAddIn
                 ProgressScope.Report(current, max:=newMax, label:="Building result …")
 
                 ' ───── Insert placeholders ────────────────────────────────                
-                Dim sbInline As New System.Text.StringBuilder(fullText.Length + placeholders.Count * 16)
-                Dim lastPos As Integer = 0
-                Dim idx As Integer = 0
-
-                For Each ph As PlaceholderInfo In placeholders
-                    idx += 1
-                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:=$"Building … {idx}/{placeholders.Count}")
-
-                    ' (#9) Skip placeholders nested inside a previously emitted outer span.
-                    ' This covers cases like a footnote reference sitting inside a field
-                    ' (e.g. inside a HYPERLINK or REF field result), which would otherwise
-                    ' corrupt the output by duplicating text and dropping lastPos backwards.
-                    If ph.Offset < lastPos Then
-                        If Cancelled() Then
-                            If lastPos < fullText.Length Then sbInline.Append(fullText.Substring(lastPos))
-                            Return sbInline.ToString()
-                        End If
-                        Continue For
-                    End If
-
-                    If ph.Offset > lastPos Then
-                        sbInline.Append(fullText.Substring(lastPos, ph.Offset - lastPos))
-                    End If
-                    sbInline.Append(ph.Token)
-
-                    Dim newLastPos As Integer = ph.Offset + ph.Length
-                    If newLastPos > lastPos Then lastPos = newLastPos
-
-                    If Cancelled() Then
-                        If lastPos < fullText.Length Then sbInline.Append(fullText.Substring(lastPos))
-                        Return sbInline.ToString()
-                    End If
-                Next
-
-                If lastPos < fullText.Length Then
-                    sbInline.Append(fullText.Substring(lastPos))
-                End If
-
+                Dim inlineText As System.String = BuildRevisionAwareInlineText(rng, sourceCharacters, placeholders)
                 ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Done")
-                Return sbInline.ToString()
+                Return inlineText
 
+            Catch ex As System.IO.InvalidDataException
+                Throw
             Catch ex As System.Exception
                 Debug.WriteLine("Error in GetTextWithSpecialElementsInline: " & ex.Message)
-                Return workingrange.Text
+                Throw New System.IO.InvalidDataException("Could not safely serialize the selected text and its protected elements; extraction stopped.", ex)
             Finally
                 app.Options.CheckSpellingAsYouType = oldSpell
                 app.Options.CheckGrammarAsYouType = oldGrammar

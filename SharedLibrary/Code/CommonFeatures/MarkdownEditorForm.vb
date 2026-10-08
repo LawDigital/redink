@@ -18,13 +18,13 @@ Option Explicit On
 
 Namespace SharedLibrary
     Public NotInheritable Class MarkdownEditorForm
-        Inherits System.Windows.Forms.Form
+        Inherits Global.SharedLibrary.SharedLibrary.WebView2HostForm
 
         Private Shared ReadOnly Instances As New System.Collections.Generic.Dictionary(Of System.String, MarkdownEditorForm)(System.StringComparer.OrdinalIgnoreCase)
         Private Const Origin As System.String = "https://redink-markdown.invalid/"
         Private ReadOnly _host As System.String
         Private ReadOnly _registryPath As System.String
-        Private ReadOnly _web As New Microsoft.Web.WebView2.WinForms.WebView2()
+        Private ReadOnly _web As New Global.SharedLibrary.SharedLibrary.DpiAwareWebView2()
         Private ReadOnly _bar As New System.Windows.Forms.FlowLayoutPanel()
         Private ReadOnly _compactButton As New System.Windows.Forms.Button()
         Private ReadOnly _paths As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
@@ -290,7 +290,9 @@ Namespace SharedLibrary
                     End Using
                 End Using
                 Dim environment = Await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(Nothing, System.IO.Path.Combine(root, "Profile"))
-                Await _web.EnsureCoreWebView2Async(environment)
+                If Me.IsDisposed OrElse _web.IsDisposed Then Return
+                Await Global.SharedLibrary.SharedLibrary.WebView2DpiHost.EnsureInitializedAsync(_web, environment)
+                If Me.IsDisposed OrElse _web.IsDisposed Then Return
                 Dim core = _web.CoreWebView2
                 core.Settings.AreDevToolsEnabled = False
                 core.Settings.AreHostObjectsAllowed = False
@@ -344,6 +346,7 @@ Namespace SharedLibrary
                     ClampToWorkingArea()
                 End If
             Catch ex As System.Exception
+                If Me.IsDisposed OrElse _web.IsDisposed Then Return
                 Using SharedMethods.PushDialogOwner(Me)
                     SharedMethods.ShowCustomMessageBox("Markdown Editor could not load. Install/repair the Microsoft Edge WebView2 Runtime. " & ex.Message, Text)
                 End Using
@@ -360,7 +363,7 @@ Namespace SharedLibrary
                     Case "recovery"
                         Dim id = CStr(message("id"))
                         If System.String.IsNullOrWhiteSpace(id) OrElse message("text") Is Nothing OrElse message("text").Type <> Newtonsoft.Json.Linq.JTokenType.String Then Throw New System.IO.InvalidDataException("Invalid recovery text.")
-                        _recovery(id) = New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("id", id), New Newtonsoft.Json.Linq.JProperty("name", CStr(message("name"))), New Newtonsoft.Json.Linq.JProperty("text", CStr(message("text"))), New Newtonsoft.Json.Linq.JProperty("updated", System.DateTime.UtcNow.ToString("o")))
+                        _recovery(id) = New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("id", id), New Newtonsoft.Json.Linq.JProperty("name", CStr(message("name"))), New Newtonsoft.Json.Linq.JProperty("text", CStr(message("text"))), New Newtonsoft.Json.Linq.JProperty("type", If(CStr(message("type")) = "json", "json", "md")), New Newtonsoft.Json.Linq.JProperty("updated", System.DateTime.UtcNow.ToString("o")))
                         If Not _recoveryTimer.Enabled Then _recoveryTimer.Start()
                     Case "recoveryAccepted", "recoveryClear"
                         Dim id = CStr(message("id"))
@@ -431,7 +434,7 @@ Namespace SharedLibrary
                             If Not saveCopy Then _paths.TryGetValue(id, path)
                             If message.Value(Of System.Boolean)("autosave") AndAlso (saveCopy OrElse message.Value(Of System.Boolean)("saveAs") OrElse System.String.IsNullOrWhiteSpace(path) OrElse Not System.IO.File.Exists(path)) Then Throw New System.IO.IOException("Autosave requires an existing linked file. Use Save as to select a destination.")
                             If message.Value(Of System.Boolean)("saveAs") OrElse System.String.IsNullOrWhiteSpace(path) Then
-                                Using dialog As New System.Windows.Forms.SaveFileDialog() With {.Filter = "Markdown / text|*.md;*.markdown;*.txt|All files|*.*", .DefaultExt = "md", .FileName = System.IO.Path.GetFileName(CStr(message("name"))), .OverwritePrompt = True}
+                                Using dialog As New System.Windows.Forms.SaveFileDialog() With {.Filter = "Markdown / JSON / text|*.md;*.markdown;*.mdown;*.mkd;*.txt;*.json;*.jsonc;*.json5;*.geojson;*.jsonl;*.ndjson|All files|*.*", .DefaultExt = If(System.String.IsNullOrEmpty(System.IO.Path.GetExtension(CStr(message("name")))), "md", System.IO.Path.GetExtension(CStr(message("name"))).TrimStart("."c)), .FileName = System.IO.Path.GetFileName(CStr(message("name"))), .OverwritePrompt = True}
                                     If dialog.ShowDialog(EditorDialogOwner(dialog.GetType().FullName)) <> System.Windows.Forms.DialogResult.OK Then
                                         Reply(request, New Newtonsoft.Json.Linq.JProperty("cancelled", True))
                                         Return
@@ -674,7 +677,7 @@ Namespace SharedLibrary
         Private Async Function OpenFilesAsync() As System.Threading.Tasks.Task
             _fileBusy = True
             Try
-                Using dialog As New System.Windows.Forms.OpenFileDialog() With {.Filter = "Markdown / text|*.md;*.markdown;*.mdown;*.mkd;*.txt|All files|*.*", .Multiselect = True}
+                Using dialog As New System.Windows.Forms.OpenFileDialog() With {.Filter = "Markdown / JSON / text|*.md;*.markdown;*.mdown;*.mkd;*.txt;*.json;*.jsonc;*.json5;*.geojson;*.jsonl;*.ndjson|All files|*.*", .Multiselect = True}
                     If dialog.ShowDialog(EditorDialogOwner(dialog.GetType().FullName)) <> System.Windows.Forms.DialogResult.OK Then Return
                     For Each path In dialog.FileNames
                         Await ImportPathAsync(path)
@@ -694,7 +697,7 @@ Namespace SharedLibrary
             For Each pending In _pending.Values
                 If System.String.Equals(CStr(pending("path")), path, System.StringComparison.OrdinalIgnoreCase) Then Return
             Next
-            If Not IsTextPath(path) Then Throw New System.IO.InvalidDataException("Drop Markdown or plain-text files only.")
+            If Not IsTextPath(path) Then Throw New System.IO.InvalidDataException("Drop Markdown, JSON or plain-text files only.")
             If Not _ready Then
                 _queuedPaths.Add(path)
                 Return
@@ -715,7 +718,7 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function IsTextPath(path As System.String) As System.Boolean
-            Return (New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase) From {".md", ".markdown", ".mdown", ".mkd", ".txt"}).Contains(System.IO.Path.GetExtension(path))
+            Return (New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase) From {".md", ".markdown", ".mdown", ".mkd", ".txt", ".json", ".jsonc", ".json5", ".geojson", ".jsonl", ".ndjson"}).Contains(System.IO.Path.GetExtension(path))
         End Function
 
         Private Shared Function ReadTextSnapshot(path As System.String) As Newtonsoft.Json.Linq.JObject
