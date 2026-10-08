@@ -35,6 +35,8 @@ Partial Public Class ThisAddIn
     Private Const AP_LogDiagnosticsModelTimeoutMs As System.Int64 = 300000
 
     Private Shared ReadOnly _apLogDiagnosticsFsSync As New System.Object()
+    Private ReadOnly _apLogDiagnosticsStatusSync As New System.Object()
+    Private ReadOnly _apLogDiagnosticsStatusTimes As New System.Collections.Generic.Dictionary(Of System.String, System.DateTime)(System.StringComparer.Ordinal)
     Private _apLogDiagnosticsRunning As System.Int32 = 0
     Private _apLogDiagnosticsLastIdleCheckUtc As System.DateTime = System.DateTime.MinValue
     Private _apLogDiagnosticsCts As System.Threading.CancellationTokenSource = Nothing
@@ -175,13 +177,43 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private Sub LogAutoPilotLogDiagnosticsStatus(phase As System.String, reason As System.String)
+        Dim nowUtc As System.DateTime = System.DateTime.UtcNow
+        SyncLock _apLogDiagnosticsStatusSync
+            Dim lastUtc As System.DateTime
+            If _apLogDiagnosticsStatusTimes.TryGetValue(phase, lastUtc) AndAlso
+               (nowUtc - lastUtc).TotalMinutes < 5 Then Return
+            _apLogDiagnosticsStatusTimes(phase) = nowUtc
+        End SyncLock
+        ApDashboardLog("AutoPilot log diagnostics [" & phase & "]: " & reason, "info")
+    End Sub
+
+    Private Shared Function IsAutoPilotLogDiagnosticsNightWindow() As System.Boolean
+        Dim localHour As System.Int32 = System.DateTime.Now.Hour
+        Return localHour >= 1 AndAlso localHour < 5
+    End Function
+
+    Private Function IsAutoPilotLogDiagnosticsMailIdle() As System.Boolean
+        Return _apMailQueue.IsEmpty AndAlso
+               System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) AndAlso
+               _apProcessingSemaphore.CurrentCount > 0
+    End Function
+
     Private Sub TryStartAutoPilotLogDiagnosticsIdle(sessionToken As System.Threading.CancellationToken)
-        If Not IsAutoPilotLogDiagnosticsEnabled() Then Return
+        If Not IsAutoPilotLogDiagnosticsEnabled() Then
+            LogAutoPilotLogDiagnosticsStatus("idle", "disabled: no report e-mail address configured.")
+            Return
+        End If
         If sessionToken.IsCancellationRequested Then Return
-        If Not _apMailQueue.IsEmpty Then Return
-        If Not System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then Return
-        If System.Threading.Interlocked.CompareExchange(_apSchedulerCheckRunning, 0, 0) <> 0 Then Return
-        If System.Threading.Interlocked.CompareExchange(activeJobs, 0, 0) > 0 Then Return
+        If Not IsAutoPilotLogDiagnosticsNightWindow() Then
+            CancelAutoPilotLogDiagnosticsForForegroundWork()
+            LogAutoPilotLogDiagnosticsStatus("idle", "outside local analysis window 01:00-05:00.")
+            Return
+        End If
+        If Not IsAutoPilotLogDiagnosticsMailIdle() Then Return
+        ' Idle means no AutoPilot mail queued/processing and no scheduled task executing.
+        ' Scheduler polling and WebExtension job counters do not define mail idle.
+        ' Model/config access is still serialized by AgentGate inside chunk analysis.
 
         Dim nowUtc As System.DateTime = System.DateTime.UtcNow
         If _apLogDiagnosticsLastIdleCheckUtc <> System.DateTime.MinValue AndAlso
@@ -196,6 +228,11 @@ Partial Public Class ThisAddIn
             System.Threading.CancellationTokenSource.CreateLinkedTokenSource(sessionToken)
         _apLogDiagnosticsCts = localCts
 
+        ' Convert the local 05:00 deadline to UTC so DST changes do not shift the end.
+        Dim localEnd As System.DateTime = System.DateTime.SpecifyKind(System.DateTime.Now.Date.AddHours(5), System.DateTimeKind.Unspecified)
+        Dim endUtc As System.DateTime = System.TimeZoneInfo.ConvertTimeToUtc(localEnd, System.TimeZoneInfo.Local)
+        localCts.CancelAfter(System.TimeSpan.FromMilliseconds(System.Math.Max(1, (endUtc - System.DateTime.UtcNow).TotalMilliseconds)))
+
         Dim ignored As System.Threading.Tasks.Task = RunAutoPilotLogDiagnosticsIdleAsync(localCts)
     End Sub
 
@@ -205,22 +242,30 @@ Partial Public Class ThisAddIn
             Dim ct As System.Threading.CancellationToken = localCts.Token
             ct.ThrowIfCancellationRequested()
 
-            If Not _apMailQueue.IsEmpty OrElse Not System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then Return
+            If Not IsAutoPilotLogDiagnosticsMailIdle() OrElse Not IsAutoPilotLogDiagnosticsNightWindow() Then Return
 
             Await MaybeSendPendingImmediateAutoPilotSecurityDiagnosticsAsync(ct).ConfigureAwait(False)
 
+            ' Existing due results must not wait behind an entire raw-log backlog.
+            If IsAutoPilotLogDiagnosticsMailIdle() AndAlso IsAutoPilotLogDiagnosticsNightWindow() Then
+                Await MaybeSendAutoPilotLogDiagnosticsReportAsync(ct).ConfigureAwait(False)
+            End If
+
             While Not ct.IsCancellationRequested AndAlso
-                  _apMailQueue.IsEmpty AndAlso
-                  System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) AndAlso
-                  System.Threading.Interlocked.CompareExchange(_apSchedulerCheckRunning, 0, 0) = 0 AndAlso
-                  System.Threading.Interlocked.CompareExchange(activeJobs, 0, 0) = 0
+                  IsAutoPilotLogDiagnosticsMailIdle() AndAlso IsAutoPilotLogDiagnosticsNightWindow()
 
                 Dim bundle As AutoPilotLogDiagnosticRunBundle = GetNextAutoPilotLogDiagnosticRunBundle()
-                If bundle Is Nothing Then Exit While
+                If bundle Is Nothing Then
+                    LogAutoPilotLogDiagnosticsStatus("analysis", "no unanalysed, settled log bundles available.")
+                    Exit While
+                End If
 
                 ApDashboardLog("🔎 Analysing AutoPilot tooling log " & bundle.RunId & " for engineering diagnostics.", "step")
                 Dim analysed As System.Boolean = Await AnalyseAutoPilotLogDiagnosticRunAsync(bundle, ct).ConfigureAwait(False)
-                If Not analysed Then Exit While
+                If Not analysed Then
+                    LogAutoPilotLogDiagnosticsStatus("analysis", "analysis did not produce a valid result for run " & bundle.RunId & "; retained for retry.")
+                    Exit While
+                End If
 
                 If bundle.IsPending Then DeletePendingAutoPilotLogDiagnosticBundle(bundle.RunKey)
                 CleanupAutoPilotLogDiagnosticResults()
@@ -229,15 +274,12 @@ Partial Public Class ThisAddIn
             End While
 
             ct.ThrowIfCancellationRequested()
-            If _apMailQueue.IsEmpty AndAlso
-               System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) AndAlso
-               System.Threading.Interlocked.CompareExchange(_apSchedulerCheckRunning, 0, 0) = 0 AndAlso
-               System.Threading.Interlocked.CompareExchange(activeJobs, 0, 0) = 0 Then
+            If IsAutoPilotLogDiagnosticsMailIdle() AndAlso IsAutoPilotLogDiagnosticsNightWindow() Then
                 Await MaybeSendAutoPilotLogDiagnosticsReportAsync(ct).ConfigureAwait(False)
                 CleanupAutoPilotLogDiagnosticResults()
             End If
         Catch ex As System.OperationCanceledException
-            ' Foreground work or AutoPilot shutdown pre-empts diagnostics by design.
+            ApDashboardLog("AutoPilot log diagnostics interrupted: mail/scheduler work, shutdown or local 05:00 deadline. Unfinished runs remain available for retry.", "info")
         Catch ex As System.Exception
             ApDashboardLog("AutoPilot log diagnostics idle task failed: " & ex.Message, "warn")
         Finally
@@ -324,7 +366,7 @@ Partial Public Class ThisAddIn
 
         For chunkIndex As System.Int32 = 0 To chunks.Count - 1
             ct.ThrowIfCancellationRequested()
-            If Not _apMailQueue.IsEmpty OrElse Not System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then
+            If Not IsAutoPilotLogDiagnosticsMailIdle() OrElse Not IsAutoPilotLogDiagnosticsNightWindow() Then
                 Throw New System.OperationCanceledException(ct)
             End If
 
@@ -341,6 +383,8 @@ Partial Public Class ThisAddIn
             Next
         Next
 
+        ct.ThrowIfCancellationRequested()
+        If Not IsAutoPilotLogDiagnosticsMailIdle() OrElse Not IsAutoPilotLogDiagnosticsNightWindow() Then Throw New System.OperationCanceledException(ct)
         Dim findingsArray As New Newtonsoft.Json.Linq.JArray()
         For Each finding As Newtonsoft.Json.Linq.JObject In findingsByFingerprint.Values
             findingsArray.Add(finding)
@@ -446,8 +490,12 @@ Partial Public Class ThisAddIn
         Dim gateOwned As System.Boolean = False
 
         Try
+            LogAutoPilotLogDiagnosticsStatus("model", "requesting shared model gate; other model work may delay acquisition.")
             Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
             gateOwned = True
+            ct.ThrowIfCancellationRequested()
+            If Not IsAutoPilotLogDiagnosticsMailIdle() OrElse Not IsAutoPilotLogDiagnosticsNightWindow() Then Throw New System.OperationCanceledException(ct)
+            ApDashboardLog("AutoPilot log diagnostics model gate acquired for run " & runId & ", chunk " & chunkNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".", "info")
 
             backupConfig = Global.SharedLibrary.SharedLibrary.SharedMethods.GetCurrentConfig(_context)
             If _apBaseModelConfig IsNot Nothing Then Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyModelConfig(_context, _apBaseModelConfig)
@@ -780,7 +828,7 @@ Partial Public Class ThisAddIn
 
         For Each resultPath As System.String In paths.OrderBy(Function(x) x, System.StringComparer.OrdinalIgnoreCase)
             ct.ThrowIfCancellationRequested()
-            If Not _apMailQueue.IsEmpty OrElse Not System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then Throw New System.OperationCanceledException(ct)
+            If Not IsAutoPilotLogDiagnosticsMailIdle() OrElse Not IsAutoPilotLogDiagnosticsNightWindow() Then Throw New System.OperationCanceledException(ct)
             Await MaybeSendImmediateAutoPilotSecurityDiagnosticsForResultAsync(resultPath, ct).ConfigureAwait(False)
         Next
     End Function
@@ -860,7 +908,11 @@ Partial Public Class ThisAddIn
         ct.ThrowIfCancellationRequested()
         Try
             Dim recipient As System.String = _apConfig.LogDiagnosticsReportEmail
-            Await SwitchToUi(Sub() SendAutoPilotLogDiagnosticsReportMail(recipient, reportText, True)).ConfigureAwait(False)
+            Await SwitchToUi(Sub()
+                                 ct.ThrowIfCancellationRequested()
+                                 If Not IsAutoPilotLogDiagnosticsMailIdle() OrElse Not IsAutoPilotLogDiagnosticsNightWindow() Then Throw New System.OperationCanceledException(ct)
+                                 SendAutoPilotLogDiagnosticsReportMail(recipient, reportText, True)
+                             End Sub).ConfigureAwait(False)
         Catch ex As System.Exception
             ApDashboardLog("Immediate AutoPilot security diagnostics report could not be sent: " & ex.Message, "warn")
             Return
@@ -992,7 +1044,10 @@ Partial Public Class ThisAddIn
         If Not IsAutoPilotLogDiagnosticsEnabled() Then Return
 
         Dim resultPaths As System.Collections.Generic.List(Of System.String) = GetUnreportedAutoPilotLogDiagnosticResultPaths()
-        If resultPaths.Count = 0 Then Return
+        If resultPaths.Count = 0 Then
+            LogAutoPilotLogDiagnosticsStatus("report", "no unreported findings; no e-mail is generated for empty results.")
+            Return
+        End If
 
         Dim results As New System.Collections.Generic.List(Of Newtonsoft.Json.Linq.JObject)()
         Dim oldestAnalysisUtc As System.DateTime = System.DateTime.MaxValue
@@ -1034,18 +1089,31 @@ Partial Public Class ThisAddIn
         Dim dueByVolume As System.Boolean =
             resultPaths.Count >= System.Math.Max(1, AP_ToolingLogArchiveRetentionCount \ 2)
 
-        If Not dueByTime AndAlso Not dueByVolume Then Return
+        If Not dueByTime AndAlso Not dueByVolume Then
+            Dim nextDueUtc As System.DateTime = If(lastReportUtc = System.DateTime.MinValue, oldestAnalysisUtc, lastReportUtc).AddDays(AP_LogDiagnosticsReportIntervalDays)
+            LogAutoPilotLogDiagnosticsStatus("report", "waiting: " & resultPaths.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " result(s); next time threshold " & nextDueUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture) &
+                "; volume threshold " & System.Math.Max(1, AP_ToolingLogArchiveRetentionCount \ 2).ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+            Return
+        End If
 
         Dim eligibleFingerprints As System.Collections.Generic.HashSet(Of System.String) =
             BuildAutoPilotPeriodicEligibleFingerprintSet(results, state)
-        If eligibleFingerprints.Count = 0 Then Return
+        If eligibleFingerprints.Count = 0 Then
+            LogAutoPilotLogDiagnosticsStatus("report", "due, but no findings pass recurrence/confidence/severity requirements and the seven-day repeat cooldown.")
+            Return
+        End If
 
         ct.ThrowIfCancellationRequested()
         Dim reportText As System.String = BuildAutoPilotLogDiagnosticsReport(results, oldestAnalysisUtc, newestAnalysisUtc, eligibleFingerprints)
         If System.String.IsNullOrWhiteSpace(reportText) Then Return
 
         Dim recipient As System.String = _apConfig.LogDiagnosticsReportEmail
-        Await SwitchToUi(Sub() SendAutoPilotLogDiagnosticsReportMail(recipient, reportText, False)).ConfigureAwait(False)
+        Await SwitchToUi(Sub()
+                             ct.ThrowIfCancellationRequested()
+                             If Not IsAutoPilotLogDiagnosticsMailIdle() OrElse Not IsAutoPilotLogDiagnosticsNightWindow() Then Throw New System.OperationCanceledException(ct)
+                             SendAutoPilotLogDiagnosticsReportMail(recipient, reportText, False)
+                         End Sub).ConfigureAwait(False)
 
         Dim reportedUtc As System.String = System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)
         For Each path As System.String In resultPaths

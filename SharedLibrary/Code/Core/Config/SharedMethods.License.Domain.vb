@@ -422,14 +422,10 @@ Namespace SharedLibrary
                 Return True
             End If
 
-            ' Single-label network identifiers (for example an AD/NetBIOS domain name)
-            ' remain exact matches for backwards compatibility. DNS-style identifiers
-            ' cover their own domain plus true child domains only. The leading dot in
-            ' the suffix check prevents values such as "notfirma.ch" matching "firma.ch".
-            If allowedDomain.IndexOf("."c) < 0 Then
-                Return False
-            End If
-
+            ' Every allowed identifier covers itself and true child domains,
+            ' including single-label suffixes such as "abc" in "xy.cd.wa.abc".
+            ' Require a complete trailing label boundary; arbitrary substrings
+            ' such as "notabc" or "abc.example" must not match "abc".
             Return candidate.EndsWith("." & allowedDomain, System.StringComparison.OrdinalIgnoreCase)
         End Function
 
@@ -581,7 +577,7 @@ Namespace SharedLibrary
                 mainLayout.SetColumnSpan(lblTitle, 2)
 
                 Dim lblDescription As New Label() With {
-                    .Text = "Creates a signed offline-domain license key. Enter one allowed domain or network ID per line. DNS domains such as firma.ch also cover all true subdomains (for example abteilung1.firma.ch). A leading *. is accepted and normalized to the same canonical domain. Single-label network IDs continue to match exactly.",
+                    .Text = "Creates a signed offline-domain license key. Enter one allowed domain or network ID per line. Each identifier covers itself and all true child domains: firma.ch covers abteilung1.firma.ch, and abc covers xy.cd.wa.abc. Matches require a complete domain suffix, not a substring. A leading *. is accepted and normalized to the same canonical identifier.",
                     .AutoSize = True,
                     .MaximumSize = New Size(820, 0),
                     .Margin = New Padding(0, 0, 0, 15)

@@ -41,9 +41,10 @@ Namespace SharedLibrary
     ''' exposed via <see cref="CapturedRedirectUrl"/>. No copy/paste is required.
     ''' </summary>
     Public Class MCPOAuthBrowserForm
-        Inherits Form
+        Inherits Global.SharedLibrary.SharedLibrary.WebView2HostForm
 
         Private WithEvents _webView As WebView2
+        Private _initializationStarted As System.Boolean
 
         Private ReadOnly _authUrl As String
         Private ReadOnly _redirectUriPrefix As String
@@ -60,11 +61,14 @@ Namespace SharedLibrary
             _redirectUriPrefix = redirectUriPrefix
 
             InitializeComponent()
-            InitializeWebViewAsync()
         End Sub
 
         Protected Overrides Sub OnShown(e As EventArgs)
             MyBase.OnShown(e)
+            If Not _initializationStarted Then
+                _initializationStarted = True
+                InitializeWebViewAsync()
+            End If
 
             Try
                 Me.TopMost = True
@@ -93,7 +97,7 @@ Namespace SharedLibrary
             Catch
             End Try
 
-            _webView = New WebView2() With {.Dock = DockStyle.Fill}
+            _webView = New Global.SharedLibrary.SharedLibrary.DpiAwareWebView2() With {.Dock = DockStyle.Fill}
             Me.Controls.Add(_webView)
         End Sub
 
@@ -104,7 +108,9 @@ Namespace SharedLibrary
                 Dim env As CoreWebView2Environment =
                     Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
 
-                Await _webView.EnsureCoreWebView2Async(env)
+                If Me.IsDisposed OrElse _webView.IsDisposed Then Return
+                Await Global.SharedLibrary.SharedLibrary.WebView2DpiHost.EnsureInitializedAsync(_webView, env)
+                If Me.IsDisposed OrElse _webView.IsDisposed Then Return
 
                 AddHandler _webView.CoreWebView2.ProcessFailed,
                     Sub(s, e)
@@ -128,8 +134,11 @@ Namespace SharedLibrary
 
                 _webView.CoreWebView2.Navigate(_authUrl)
 
-            Catch ex As Exception
-                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Could not initialize the OAuth sign-in window: {ex.Message}", $"{AN} – OAuth")
+            Catch ex As System.Exception
+                If Me.IsDisposed OrElse _webView.IsDisposed Then Return
+                Using Global.SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(Me)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Could not initialize the OAuth sign-in window: {ex.Message}", $"{AN} – OAuth")
+                End Using
                 Me.DialogResult = DialogResult.Cancel
                 Me.Close()
             End Try

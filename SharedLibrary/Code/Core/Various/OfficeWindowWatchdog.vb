@@ -64,6 +64,38 @@ Namespace SharedLibrary
         Private Shared DisabledSinceUtc As System.DateTime
         Private Shared LongDisabledReported As System.Boolean
         Private Shared MainHwndInvalidLatched As System.Boolean
+        Private Shared UnresponsiveSinceUtc As System.DateTime
+        Private Shared UnresponsiveReported As System.Boolean
+
+        ' Bounded Win32 probe on a worker; never waits on Office COM or the UI dispatcher.
+        Private Shared Function ObserveResponsiveness(mainHwnd As System.IntPtr) As System.Boolean
+            Dim pid As System.Int32 = 0
+            Dim threadId As System.Int32 = GetWindowThreadProcessId(mainHwnd, pid)
+            If pid <> GetCurrentProcessIdSafe() Then Return True
+            Dim response As System.UIntPtr = System.UIntPtr.Zero
+            Dim responsive As System.Boolean = SendMessageTimeout(mainHwnd, 0UI, System.UIntPtr.Zero, System.IntPtr.Zero,
+                &H23UI, 500UI, response) <> System.IntPtr.Zero
+            Dim nowUtc As System.DateTime = System.DateTime.UtcNow
+            If responsive Then
+                If UnresponsiveReported Then RiCrashLogger.LogMarker("OFFICE_UI_RESPONSIVE_AGAIN", "MainHWND=" & FormatHandle(mainHwnd))
+                UnresponsiveSinceUtc = System.DateTime.MinValue
+                UnresponsiveReported = False
+                Return True
+            End If
+            If UnresponsiveSinceUtc = System.DateTime.MinValue Then UnresponsiveSinceUtc = nowUtc
+            If Not UnresponsiveReported AndAlso nowUtc - UnresponsiveSinceUtc >= System.TimeSpan.FromSeconds(20) Then
+                UnresponsiveReported = True
+                ' Avoid GetWindowText/snapshots here: querying a hung same-process window can itself block.
+                RiCrashLogger.LogMarker("OFFICE_UI_UNRESPONSIVE",
+                    "PID=" & pid.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; UIThreadId=" & threadId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; MainHWND=" & FormatHandle(mainHwnd) &
+                    "; Enabled=" & IsWindowEnabled(mainHwnd).ToString() &
+                    "; SinceUtc=" & UnresponsiveSinceUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture) &
+                    "; WM_NULL probe timed out repeatedly. This records an unresponsive UI, not its cause. Capture an Outlook process dump while it is still frozen.")
+            End If
+            Return False
+        End Function
 
         ' =====================================================================
         ' Lifecycle
@@ -174,6 +206,7 @@ Namespace SharedLibrary
                 End If
 
                 MainHwndInvalidLatched = False
+                If Not ObserveResponsiveness(mainHwnd) Then Return
 
                 Dim enabled As System.Boolean = IsWindowEnabled(mainHwnd)
 
@@ -807,6 +840,13 @@ Namespace SharedLibrary
         Private Delegate Function EnumWindowsProc(
             ByVal hwnd As System.IntPtr,
             ByVal lParam As System.IntPtr) As System.Boolean
+
+        <System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint:="SendMessageTimeoutW", SetLastError:=True)>
+        Private Shared Function SendMessageTimeout(hWnd As System.IntPtr, message As System.UInt32,
+                                                   wParam As System.UIntPtr, lParam As System.IntPtr,
+                                                   flags As System.UInt32, timeout As System.UInt32,
+                                                   ByRef result As System.UIntPtr) As System.IntPtr
+        End Function
 
         <System.Runtime.InteropServices.DllImport("user32.dll")>
         Private Shared Function IsWindow(ByVal hWnd As System.IntPtr) As System.Boolean

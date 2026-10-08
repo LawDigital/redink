@@ -2356,6 +2356,7 @@ SkipPromptInput:
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
                 AddItem("convertmarkdown", "Convert Markdown In the selected text To Word formatting.")
+                AddItem("ocrclean", "Clean selected OCR text into a new document, or clean a .md/.txt file into a separate copy (no LLM call).")
 
                 ' AUDIO / SPEECH
                 AddItem("speech", "Start speech transcription (Transcriptor).")
@@ -2395,6 +2396,12 @@ SkipPromptInput:
 
                 OtherPrompt = idToCommand(chosen)
                 ' Continue normal execution: the short-command checks below will now match.
+            End If
+
+            If System.String.Equals(OtherPrompt.Trim(), "ocrclean", System.StringComparison.OrdinalIgnoreCase) OrElse
+               System.String.Equals(OtherPrompt.Trim(), "cleanocr", System.StringComparison.OrdinalIgnoreCase) Then
+                Await RunOcrMarkdownCleanupCommandAsync()
+                Return
             End If
 
             If Not NoText Then
