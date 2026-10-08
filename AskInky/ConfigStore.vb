@@ -1,0 +1,74 @@
+' Part of Red Ink (AskInky). User settings and DPAPI-protected Helper credentials.
+Public NotInheritable Class ClientConfig
+    Public Property HelperUrl As String = "http://localhost"
+    Public Property UserId As String = ""
+    Public Property LicenseUser As String = ""
+    Public Property HotkeyModifiers As UInteger = 6UI
+    Public Property HotkeyKey As Integer = CInt(System.Windows.Forms.Keys.K)
+    Public Property DarkMode As Boolean = False
+    Public Property UiLanguage As String = "de"
+    Public Property FontSize As Integer = 12
+    Public Property Temperature As Double = 0.7
+    Public Property ShowLlmDebug As Boolean = False
+    Public Property SystemPrompt As String = "Du bist Inky, ein hilfreicher Schreibassistent. Antworte in Markdown."
+    Public Property ApiKeyProtected As String = ""
+    Public Property DeviceTokenProtected As String = ""
+    Public Property CredentialOrigin As String = ""
+    ' Obsolete UseRightClick/ConfirmSend keys in older JSON are deliberately ignored.
+End Class
+
+Public NotInheritable Class ConfigStore
+    Private Shared ReadOnly ConfigPath As String = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "RedInk", "AskInky", "config.json")
+    ' Keep the original entropy: previously registered devices must continue to decrypt.
+    Private Shared ReadOnly Entropy As Byte() = System.Text.Encoding.UTF8.GetBytes("RedInk.AskInky.DeviceAuth.v1")
+    Public Shared Property LoadFailed As Boolean
+
+    Public Shared Function Load() As ClientConfig
+        LoadFailed = False
+        Try
+            If System.IO.File.Exists(ConfigPath) Then
+                Dim result As ClientConfig = System.Text.Json.JsonSerializer.Deserialize(Of ClientConfig)(System.IO.File.ReadAllText(ConfigPath, System.Text.Encoding.UTF8))
+                If result Is Nothing Then Throw New System.IO.InvalidDataException("Empty configuration")
+                result.UiLanguage = UiStrings.NormalizeLanguage(result.UiLanguage)
+                If result.FontSize < 6 OrElse result.FontSize > 16 Then result.FontSize = 12
+                If System.Double.IsNaN(result.Temperature) OrElse result.Temperature < 0 OrElse result.Temperature > 1 Then result.Temperature = 0.7
+                ' Bind legacy credentials to the server already saved with them, never to a new target.
+                If String.IsNullOrEmpty(result.CredentialOrigin) Then result.CredentialOrigin = HelperClient.GetOrigin(result.HelperUrl)
+                Return result
+            End If
+        Catch ex As System.Exception
+            LoadFailed = True
+            ClientLog.Write("config.load.failed.original-file-retained", ex)
+        End Try
+        Return New ClientConfig()
+    End Function
+
+    Public Shared Function Clone(config As ClientConfig) As ClientConfig
+        Return System.Text.Json.JsonSerializer.Deserialize(Of ClientConfig)(System.Text.Json.JsonSerializer.Serialize(config))
+    End Function
+
+    Public Shared Sub Save(config As ClientConfig)
+        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(ConfigPath))
+        Dim temporary As String = ConfigPath & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+        Try
+            System.IO.File.WriteAllText(temporary, System.Text.Json.JsonSerializer.Serialize(config, New System.Text.Json.JsonSerializerOptions With {.WriteIndented = True}), New System.Text.UTF8Encoding(False))
+            System.IO.File.Move(temporary, ConfigPath, True)
+        Finally
+            Try
+                If System.IO.File.Exists(temporary) Then System.IO.File.Delete(temporary)
+            Catch cleanupError As System.Exception
+                ClientLog.Write("config.temporary.cleanup.failed", cleanupError)
+            End Try
+        End Try
+    End Sub
+
+    Public Shared Function Protect(clearValue As String) As String
+        If String.IsNullOrEmpty(clearValue) Then Return ""
+        Return System.Convert.ToBase64String(System.Security.Cryptography.ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(clearValue), Entropy, System.Security.Cryptography.DataProtectionScope.CurrentUser))
+    End Function
+
+    Public Shared Function Reveal(encryptedValue As String) As String
+        If String.IsNullOrEmpty(encryptedValue) Then Return ""
+        Return System.Text.Encoding.UTF8.GetString(System.Security.Cryptography.ProtectedData.Unprotect(System.Convert.FromBase64String(encryptedValue), Entropy, System.Security.Cryptography.DataProtectionScope.CurrentUser))
+    End Function
+End Class

@@ -1,0 +1,105 @@
+/* Red Ink desktop layout. office-web.css remains byte-for-byte the supplied add-in stylesheet.
+   Only the desktop layout and SVG action targets are defined here. */
+html, body { width: 100%; height: 100%; overflow: hidden; }
+body { font-size: var(--base-font-size, 12px); }
+button, input, textarea, select { font-family: inherit; }
+button { touch-action: manipulation; }
+[hidden] { display: none !important; }
+.desktop-shell { height: 100%; display: grid; padding: 12px 12px 8px; gap: 9px;
+    grid-template-rows: minmax(66px, .62fr) minmax(78px, .75fr) minmax(126px, 2.5fr) auto; }
+.desktop-card { min-width: 0; min-height: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) 45px;
+    border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--surface-elevated);
+    box-shadow: var(--shadow-soft); overflow: hidden; transition: border-color .14s, box-shadow .14s; }
+.question-card:focus-within { border-color: var(--accent-color); box-shadow: 0 0 0 3px var(--focus-ring); }
+.desktop-field { display: block; width: 100%; height: 100%; min-height: 0; padding: 12px 3px 12px 12px;
+    font: inherit; line-height: 1.5; color: var(--text-primary); background: transparent; border: 0; outline: 0; resize: none; }
+.desktop-field::placeholder { color: var(--text-secondary); opacity: .9; }
+.source-field { color: var(--text-secondary); font-size: .94em; }
+.action-rail { display: flex; align-items: flex-start; justify-content: center; padding: 8px 8px 8px 0; }
+.question-card .action-rail { align-items: flex-end; }
+.icon-button { display: inline-flex; flex: 0 0 32px; width: 32px; height: 32px; min-height: 32px; min-width: 32px;
+    padding: 6px; align-items: center; justify-content: center; border-radius: 8px; line-height: 1; }
+.icon-button svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7;
+    stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.icon-button:disabled { cursor: default; opacity: .38; }
+.quick-access-btn.icon-button { font-size: inherit; background: var(--surface-subtle); border-color: var(--border-color); color: var(--text-secondary); }
+.quick-access-btn.icon-button:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--border-strong); color: var(--accent-color); }
+.answer-scroll { padding: 13px 0 14px 13px; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+.answer-content.result-text { margin: 0; padding: 0; border: 0; max-height: none; min-height: 0; background: transparent;
+    color: var(--text-primary); white-space: normal; font: inherit; line-height: 1.6; overflow: visible; overflow-wrap: anywhere; }
+.answer-content > :first-child { margin-top: 0; }
+.answer-content > :last-child { margin-bottom: 0; }
+.answer-content p { margin: 0 0 .8em; }
+.answer-content h1, .answer-content h2, .answer-content h3 { margin: 1em 0 .45em; line-height: 1.3; }
+.answer-content h1 { font-size: 1.45em; } .answer-content h2 { font-size: 1.25em; } .answer-content h3 { font-size: 1.1em; }
+.answer-content pre { padding: 10px; border: 1px solid var(--border-color); border-radius: 7px; overflow-x: auto; white-space: pre; background: var(--surface-subtle); }
+.answer-content code { font-family: Consolas, "Cascadia Code", monospace; font-size: .92em; }
+.answer-content :not(pre) > code { border-radius: 3px; padding: 1px 3px; background: var(--surface-subtle); }
+.answer-content table { width: 100%; border-collapse: collapse; margin: .8em 0; }
+.answer-content th, .answer-content td { padding: 6px 8px; border: 1px solid var(--border-strong); vertical-align: top; }
+.answer-content th { background: var(--surface-subtle); font-weight: 600; }
+.answer-content blockquote { margin: .8em 0; padding-left: 10px; border-left: 3px solid var(--border-strong); color: var(--text-secondary); }
+.answer-content ul, .answer-content ol { padding-left: 1.6em; margin: .65em 0; }
+.answer-content a { color: var(--accent-color); text-decoration: underline; text-underline-offset: 2px; }
+.answer-content input[type=checkbox] { accent-color: var(--accent-color); }
+.empty-answer { margin: 0; color: var(--text-secondary); font-size: .94em; }
+.desktop-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 20px;
+    padding: 0 2px; color: var(--text-secondary); font-size: .85em; }
+.desktop-status { min-width: 0; overflow-wrap: anywhere; }
+.desktop-footer .desktop-status { max-height: 60px; overflow-y: auto; }
+.desktop-status.error { color: var(--error-color); }
+.shortcut-hint { white-space: nowrap; opacity: .85; font-size: .92em; }
+body.is-busy .question-card { border-color: var(--border-color); box-shadow: var(--shadow-soft); }
+body.is-busy .desktop-field { opacity: .65; }
+body.is-busy .desktop-status::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px;
+    border: 1.5px solid var(--border-color); border-top-color: var(--accent-color); border-radius: 50%; animation: rotate .8s linear infinite; }
+@keyframes rotate { to { transform: rotate(360deg); } }
+
+/* Settings reuse Office Web's cards, labels, fields, sliders, switches and button classes. */
+.desktop-settings { height: 100%; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+.settings-scroll { padding: 12px; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.settings-group { margin-bottom: 10px; }
+.settings-group .text-input, .settings-group .dropdown { width: 100%; font: inherit; }
+.settings-group label.section-label { display: block; }
+.settings-group p.status-text { line-height: 1.45; margin-bottom: 0; }
+.settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.settings-grid > div { min-width: 0; }
+.settings-grid .settings-toggle-row { min-height: 34px; padding: 5px 9px; border-radius: var(--radius-sm); }
+.settings-grid .settings-toggle-switch { transform: scale(.86); transform-origin: right center; }
+.settings-control + .settings-control { margin-top: 13px; }
+.connection-top { justify-content: space-between; margin-bottom: 13px; }
+.connection-value { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-secondary); }
+.connection-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); flex: none; }
+.connection-dot.connected { background: var(--success-color); }
+.connection-dot.failed { background: var(--error-color); }
+.registration-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.registration-actions button { font-size: .92em; padding: 7px 9px; }
+.hotkey-display { display: flex; align-items: center; gap: 7px; }
+.hotkey-display input { flex: 1; min-width: 0; cursor: pointer; font-weight: 600 !important; }
+.hotkey-display input.recording { border-color: var(--accent-color); box-shadow: 0 0 0 3px var(--focus-ring); }
+.hotkey-options { display: flex; align-items: center; gap: 12px; margin-top: 9px; }
+.hotkey-options label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.hotkey-options input { margin: 0; accent-color: var(--accent-color); }
+.hotkey-options .dropdown { width: 68px; margin-left: auto; min-height: 29px; padding: 3px 6px; }
+.settings-actions { background: var(--bg-primary); border-top: 1px solid var(--border-color); padding: 10px 12px;
+    display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.settings-actions .desktop-status { flex: 1; font-size: .87em; line-height: 1.35; max-height: 84px; overflow-y: auto; }
+.settings-actions button { flex: none; }
+.settings-disclosure { padding: 0; }
+.settings-disclosure > summary { cursor: pointer; padding: 12px; font-weight: 600; color: var(--text-primary); }
+.settings-disclosure .disclosure-body { padding: 0 12px 12px; }
+.settings-disclosure .slider-row span { min-width: 36px; text-align: right; }
+.settings-disclosure textarea.text-input { resize: vertical; min-height: 76px; line-height: 1.5; }
+.settings-debug-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow: auto; font-size: .9em; }
+.settings-footnote { padding: 0 3px 2px; color: var(--text-secondary); font-size: .8em; line-height: 1.45; }
+.settings-footnote p { margin: 0; }
+body.is-busy .settings-actions button, body.is-busy .settings-scroll button { pointer-events: none; }
+@media (max-width: 390px) {
+    .desktop-shell { padding: 9px 9px 7px; gap: 8px; }
+    .settings-scroll { padding: 9px; }
+    .settings-grid { grid-template-columns: 1fr; gap: 10px; }
+    .hotkey-options { gap: 9px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    *, *::before { animation: none !important; transition: none !important; }
+}
