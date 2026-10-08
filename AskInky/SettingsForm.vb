@@ -1,3 +1,11 @@
+' Part of "Red Ink" (Ask Inky)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SettingsForm.vb
+' Purpose: Ask Inky desktop functionality in the modular Windows client.
+' Architecture: Windows native host with embedded Office Web-based interface.
+' Notes: Red Ink License and Ask Inky third-party attributions are embedded in LICENSE.txt.
+' =============================================================================
 ' Part of Red Ink (AskInky). Office Web connection settings plus desktop shortcut configuration.
 Friend NotInheritable Class SettingsForm
     Inherits WebDialog
@@ -42,7 +50,7 @@ Friend NotInheritable Class SettingsForm
                            .language = previewLanguage, .darkMode = draft.DarkMode, .fontSize = draft.FontSize,
                            .values = New With {.helperUrl = draft.HelperUrl, .apiKey = key, .apiKeyReadable = keyReadable,
                                .licenseUser = draft.LicenseUser, .language = previewLanguage, .darkMode = draft.DarkMode,
-                               .fontSize = draft.FontSize, .temperature = draft.Temperature, .systemPrompt = draft.SystemPrompt,
+                               .fontSize = draft.FontSize, .temperature = draft.Temperature, .model = draft.Model, .systemPrompt = draft.SystemPrompt,
                                .showLlmDebug = draft.ShowLlmDebug, .hotkeyModifiers = draft.HotkeyModifiers, .hotkeyKey = draft.HotkeyKey,
                                .registered = Not String.IsNullOrEmpty(draft.UserId) AndAlso Not String.IsNullOrEmpty(draft.DeviceTokenProtected), .userId = draft.UserId},
                            .debugSent = HelperClient.LastRequest, .debugReceived = HelperClient.LastResponse, .feedback = feedback, .failure = failure})
@@ -56,6 +64,7 @@ Friend NotInheritable Class SettingsForm
         If input.FontSize < 6 OrElse input.FontSize > 16 OrElse System.Double.IsNaN(input.Temperature) OrElse input.Temperature < 0 OrElse input.Temperature > 1 Then Throw New HelperFailure("desktop.invalidSettings")
         If input.ApiKey Is Nothing OrElse input.ApiKey.Length > 16384 OrElse input.ApiKey.Contains(vbCr) OrElse input.ApiKey.Contains(vbLf) Then Throw New HelperFailure("desktop.invalidSettings")
         If input.LicenseUser Is Nothing OrElse input.LicenseUser.Length > 1024 OrElse input.LicenseUser.Contains(vbCr) OrElse input.LicenseUser.Contains(vbLf) Then Throw New HelperFailure("desktop.invalidSettings")
+        If input.Model Is Nothing OrElse input.Model.Length > 256 OrElse input.Model.Contains(vbCr) OrElse input.Model.Contains(vbLf) Then Throw New HelperFailure("desktop.invalidSettings")
         If input.SystemPrompt Is Nothing OrElse input.SystemPrompt.Length > 200000 Then Throw New HelperFailure("desktop.invalidSettings")
         Dim result As ClientConfig = ConfigStore.Clone(draft)
         result.HelperUrl = HelperClient.NormalizeHelperUrl(input.HelperUrl)
@@ -73,6 +82,7 @@ Friend NotInheritable Class SettingsForm
         result.DarkMode = input.DarkMode
         result.FontSize = input.FontSize
         result.Temperature = input.Temperature
+        result.Model = input.Model.Trim()
         result.SystemPrompt = input.SystemPrompt
         result.ShowLlmDebug = input.ShowLlmDebug
         result.HotkeyModifiers = input.HotkeyModifiers
@@ -88,6 +98,31 @@ Friend NotInheritable Class SettingsForm
                 previewLanguage = UiStrings.NormalizeLanguage(value)
                 Text = "Ask Inky – " & UiStrings.GetText("settings", previewLanguage)
             End If
+            Return
+        End If
+        If action = "loadModels" Then
+            Try
+                Dim candidate As ClientConfig = ReadCandidate(message)
+                Dim choices As System.Collections.Generic.List(Of HelperModelOption) = Await HelperClient.GetModelsAsync(candidate, Lifetime.Token)
+                SendView(New With {.[type] = "models", .models = choices.Select(Function(m) New With {.id = m.Id, .name = m.Name}).ToArray(), .error = False})
+            Catch ex As System.Exception
+                ClientLog.Write("settings.models.failed", ex)
+                SendView(New With {.[type] = "models", .models = New System.Collections.Generic.List(Of HelperModelOption)(), .error = True})
+            End Try
+            Return
+        End If
+        If action = "openLicenses" Then
+            Using licenses As New LicenseForm(previewLanguage)
+                licenses.ShowDialog(Me)
+            End Using
+            Return
+        End If
+        If action = "openWebsite" Then
+            Try
+                System.Diagnostics.Process.Start(New System.Diagnostics.ProcessStartInfo("https://redink.ai") With {.UseShellExecute = True})
+            Catch ex As System.Exception
+                ClientLog.Write("settings.website.failed", ex)
+            End Try
             Return
         End If
         If action = "recording" Then
@@ -184,6 +219,7 @@ Friend NotInheritable Class SettingsForm
         Public Property DarkMode As Boolean
         Public Property FontSize As Integer = 12
         Public Property Temperature As Double = 0.7
+        Public Property Model As String = ""
         Public Property SystemPrompt As String = ""
         Public Property ShowLlmDebug As Boolean
         Public Property HotkeyModifiers As UInteger = 6UI

@@ -116,5 +116,22 @@
   "desktop.imagePlaceholder": "Bild",
   "desktop.keyUnreadable": "Verschlüsselter Schlüssel vorhanden; zum Ersetzen neu eingeben.",
   "desktop.browserOnly": "Nur Vorschau – nicht mit dem Windows-Client verbunden.",
-  "desktop.contentFiltered": "Aktive oder nicht unterstützte HTML-Elemente wurden entfernt; der übrige Inhalt bleibt erhalten."
+  "desktop.contentFiltered": "Aktive oder nicht unterstützte HTML-Elemente wurden entfernt; der übrige Inhalt bleibt erhalten.",
+  "desktop.includeHistory": "Bisherige Antworten berücksichtigen",
+  "desktop.historyTooLong": "Der Gesprächsverlauf ist für eine Anfrage zu lang. Öffne eine neue Textauswahl oder deaktiviere die Kontext-Checkbox.",
+  "desktop.previousAnswer": "Vorherige Antwort (←)",
+  "desktop.nextAnswer": "Nächste Antwort (→)",
+  "desktop.deleteAnswer": "Aktuelle Antwort löschen",
+  "desktop.clearAnswers": "Alle Antworten löschen",
+  "desktop.confirmClearAnswers": "Alle bisherigen Fragen und Antworten löschen?",
+  "desktop.answerNavigationHint": "Mit ←/→ in der Antwort blättern; im Fragefeld bewegen sie den Cursor.",
+  "desktop.model": "Modell",
+  "desktop.modelDescription": "Modell aus der Liste wählen oder ein eigenes angeben.",
+  "desktop.partOfRedInk": "Ask Inky ist Teil von Red Ink.",
+  "desktop.thirdPartyLicenses": "Verwendete Drittlizenzen",
+  "desktop.defaultModel": "Standardmodell des Helpers",
+  "desktop.customModel": "Anderes Modell eingeben…",
+  "desktop.customModelHint": "Modellname eingeben",
+  "desktop.modelsLoaded": "Verfügbare Modelle des Helpers geladen.",
+  "desktop.modelsUnavailable": "Modellliste nicht erreichbar; gespeichertes oder eigenes Modell verwenden."
 }

@@ -1,3 +1,11 @@
+' Part of "Red Ink" (Ask Inky)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: HotkeyService.vb
+' Purpose: Ask Inky desktop functionality in the modular Windows client.
+' Architecture: Windows native host with embedded Office Web-based interface.
+' Notes: Red Ink License and Ask Inky third-party attributions are embedded in LICENSE.txt.
+' =============================================================================
 ' Part of Red Ink (AskInky). Register candidates before releasing the working shortcut.
 Friend NotInheritable Class HotkeyService
     Implements System.IDisposable

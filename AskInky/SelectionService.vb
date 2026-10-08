@@ -1,3 +1,11 @@
+' Part of "Red Ink" (Ask Inky)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: SelectionService.vb
+' Purpose: Ask Inky desktop functionality in the modular Windows client.
+' Architecture: Windows native host with embedded Office Web-based interface.
+' Notes: Red Ink License and Ask Inky third-party attributions are embedded in LICENSE.txt.
+' =============================================================================
 Public NotInheritable Class SelectionService
     Public Shared Async Function CaptureAsync(expectedWindow As System.IntPtr) As System.Threading.Tasks.Task(Of String)
         ' A registered shortcut can fire while Ctrl/Shift/Alt are still held.

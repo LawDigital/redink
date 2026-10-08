@@ -1,3 +1,11 @@
+' Part of "Red Ink" (Ask Inky)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: ConfigStore.vb
+' Purpose: Ask Inky desktop functionality in the modular Windows client.
+' Architecture: Windows native host with embedded Office Web-based interface.
+' Notes: Red Ink License and Ask Inky third-party attributions are embedded in LICENSE.txt.
+' =============================================================================
 ' Part of Red Ink (AskInky). User settings and DPAPI-protected Helper credentials.
 Public NotInheritable Class ClientConfig
     Public Property HelperUrl As String = "http://localhost"
@@ -9,6 +17,7 @@ Public NotInheritable Class ClientConfig
     Public Property UiLanguage As String = "de"
     Public Property FontSize As Integer = 12
     Public Property Temperature As Double = 0.7
+    Public Property Model As String = ""
     Public Property ShowLlmDebug As Boolean = False
     Public Property SystemPrompt As String = "Du bist Inky, ein hilfreicher Schreibassistent. Antworte in Markdown."
     Public Property ApiKeyProtected As String = ""

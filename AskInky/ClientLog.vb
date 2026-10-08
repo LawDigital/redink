@@ -1,3 +1,11 @@
+' Part of "Red Ink" (Ask Inky)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: ClientLog.vb
+' Purpose: Ask Inky desktop functionality in the modular Windows client.
+' Architecture: Windows native host with embedded Office Web-based interface.
+' Notes: Red Ink License and Ask Inky third-party attributions are embedded in LICENSE.txt.
+' =============================================================================
 ' Part of Red Ink (AskInky). Diagnostics deliberately exclude text, URLs and credentials.
 Friend NotInheritable Class ClientLog
     Private Sub New()

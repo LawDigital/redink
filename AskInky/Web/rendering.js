@@ -1,3 +1,8 @@
+/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+ * File: rendering.js
+ * Purpose: Embedded desktop web user interface behavior.
+ * License: Red Ink License; third-party attribution in embedded LICENSE.txt.
+ */
 /* Deterministic display/clipboard rendering. Untrusted model content never becomes executable UI. */
 (() => {
     'use strict';

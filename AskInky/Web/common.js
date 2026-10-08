@@ -1,3 +1,8 @@
+/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+ * File: common.js
+ * Purpose: Embedded desktop web user interface behavior.
+ * License: Red Ink License; third-party attribution in embedded LICENSE.txt.
+ */
 /* Local, versioned WebView2 message contract. No fetch, storage, remote script or host object. */
 (() => {
     'use strict';

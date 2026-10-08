@@ -1,3 +1,8 @@
+/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+ * File: settings.js
+ * Purpose: Embedded desktop web user interface behavior.
+ * License: Red Ink License; third-party attribution in embedded LICENSE.txt.
+ */
 (() => {
     'use strict';
     const ui = window.redInkUi;
@@ -5,11 +10,39 @@
     let ready = false, busy = false, recording = false, apiChanged = false, registered = false;
     let registeredUser = '', savedOrigin = '', language = 'de', bundles = {}, probe = null;
     const editable = Array.from(document.querySelectorAll('input, textarea, select, button'));
+    let savedModel = '';
     const keyOptions = [];
     for (let k = 65; k <= 90; k++) keyOptions.push([k, String.fromCharCode(k)]);
     for (let k = 48; k <= 57; k++) keyOptions.push([k, String.fromCharCode(k)]);
     for (let n = 1; n <= 24; n++) if (n !== 12) keyOptions.push([111 + n, `F${n}`]);
     for (const [key, text] of keyOptions) $('hotkey-key').add(new Option(text, String(key)));
+    function rebuildModels(models, error) {
+        const selector = $('settings-model');
+        const wanted = modelValue();
+        selector.replaceChildren();
+        selector.add(new Option(ui.t('desktop.defaultModel'), ''));
+        const seen = new Set(['']);
+        for (const entry of Array.isArray(models) ? models : []) {
+            const id = String(entry.id || '').trim();
+            if (!id || id.length > 256 || seen.has(id)) continue;
+            seen.add(id);
+            const label = String(entry.name || id).trim();
+            selector.add(new Option(label && label !== id ? `${label} (${id})` : id, id));
+        }
+        selector.add(new Option(ui.t('desktop.customModel'), '__custom__'));
+        if (wanted && !seen.has(wanted)) {
+            selector.value = '__custom__';
+            $('settings-model-custom').value = wanted;
+        } else selector.value = wanted;
+        showCustomModel();
+        $('model-status').textContent = error ? ui.t('desktop.modelsUnavailable') : ui.t('desktop.modelsLoaded');
+    }
+    function modelValue() {
+        return $('settings-model').value === '__custom__' ? $('settings-model-custom').value.trim() : $('settings-model').value;
+    }
+    function showCustomModel() {
+        $('settings-model-custom').hidden = $('settings-model').value !== '__custom__';
+    }
     function origin(raw) {
         try {
             let text = raw.trim() || 'http://localhost';
@@ -92,7 +125,7 @@
             helperUrl: $('settings-helper-url').value, apiKey: $('settings-helper-apikey').value, apiKeyChanged: apiChanged,
             licenseUser: $('settings-license-user').value, language: $('language-select').value,
             darkMode: $('dark-mode-toggle').checked, fontSize: Number($('font-size').value), temperature: Number($('temperature').value) / 100,
-            systemPrompt: $('system-prompt').value, showLlmDebug: $('settings-show-llm-debug').checked,
+            model: modelValue(), systemPrompt: $('system-prompt').value, showLlmDebug: $('settings-show-llm-debug').checked,
             hotkeyModifiers: key.modifiers, hotkeyKey: key.key
         };
     }
@@ -125,6 +158,9 @@
                 $('font-size').value = v.fontSize;
                 $('temperature').value = Math.round(v.temperature * 100);
                 $('system-prompt').value = v.systemPrompt;
+                savedModel = v.model || '';
+                rebuildModels([], false);
+                if (savedModel) { $('settings-model').value = '__custom__'; $('settings-model-custom').value = savedModel; showCustomModel(); }
                 $('settings-show-llm-debug').checked = v.showLlmDebug;
                 $('debug-sent').textContent = message.debugSent || '';
                 $('debug-received').textContent = message.debugReceived || '';
@@ -132,12 +168,14 @@
                 apiChanged = false; recording = false; probe = null;
                 setShortcut(v.hotkeyModifiers, v.hotkeyKey);
                 ready = true; preview(); state();
+                ui.post('loadModels', { values: values() });
                 ui.status(message.feedback || '', !!message.failure);
                 break;
             }
             case 'busy': busy = !!message.busy; state(); break;
             case 'error': busy = false; ui.status(message.message, true); state(); break;
             case 'probe': probe = message; connectionStatus(); ui.status(message.authorized ? ui.t('desktop.connected') : licenseText(), !message.authorized); break;
+            case 'models': rebuildModels(message.models, !!message.error); break;
             case 'clearInvite': $('settings-registration-link').value = ''; state(); break;
             case 'hotkey': setShortcut(message.modifiers, message.key); setRecording(false); $('hotkey-display').blur(); break;
         }
@@ -163,13 +201,17 @@
     for (const id of ['hotkey-ctrl', 'hotkey-shift', 'hotkey-alt', 'hotkey-key']) $(id).addEventListener('change', () => { setRecording(false); $('hotkey-display').value = shortcutText(); });
     for (const id of ['language-select', 'dark-mode-toggle', 'settings-show-llm-debug']) $(id).addEventListener('change', preview);
     for (const id of ['font-size', 'temperature']) $(id).addEventListener('input', preview);
+    $('settings-model').addEventListener('change', showCustomModel);
     $('settings-helper-apikey').addEventListener('input', () => { apiChanged = true; probe = null; connectionStatus(); });
     $('settings-helper-url').addEventListener('input', () => { probe = null; connectionStatus(); registrationStatus(); });
     $('settings-registration-link').addEventListener('input', state);
+    $('settings-helper-url').addEventListener('change', () => { if (ready && !busy) ui.post('loadModels', { values: values() }); });
     $('save-settings').addEventListener('click', () => commit('save'));
     $('btn-test-connection').addEventListener('click', () => commit('test'));
     $('btn-register-device').addEventListener('click', () => commit('register'));
     $('btn-unregister-device').addEventListener('click', () => commit('unregister'));
+    $('company-website').addEventListener('click', event => { event.preventDefault(); ui.post('openWebsite'); });
+    $('third-party-licenses').addEventListener('click', event => { event.preventDefault(); ui.post('openLicenses'); });
     $('cancel-settings').addEventListener('click', () => { if (!busy) ui.post('cancel'); });
     state();
     if (ui.connected) ui.post('ready');

@@ -116,5 +116,22 @@
   "desktop.imagePlaceholder": "Image",
   "desktop.keyUnreadable": "Encrypted key exists; type a new value to replace it.",
   "desktop.browserOnly": "Preview only – not connected to the Windows client.",
-  "desktop.contentFiltered": "Active or unsupported HTML elements were removed; the remaining content is preserved."
+  "desktop.contentFiltered": "Active or unsupported HTML elements were removed; the remaining content is preserved.",
+  "desktop.includeHistory": "Include previous responses",
+  "desktop.historyTooLong": "Conversation history is too long for one request. Start a new selection or turn off the context checkbox.",
+  "desktop.previousAnswer": "Previous answer (←)",
+  "desktop.nextAnswer": "Next answer (→)",
+  "desktop.deleteAnswer": "Delete current answer",
+  "desktop.clearAnswers": "Clear all answers",
+  "desktop.confirmClearAnswers": "Delete all previous questions and answers?",
+  "desktop.answerNavigationHint": "Use ←/→ when reading an answer; in the question field they move the caret.",
+  "desktop.model": "Model",
+  "desktop.modelDescription": "Choose a listed model or specify your own.",
+  "desktop.partOfRedInk": "Ask Inky is part of Red Ink.",
+  "desktop.thirdPartyLicenses": "Third-party licenses",
+  "desktop.defaultModel": "Helper default model",
+  "desktop.customModel": "Enter another model…",
+  "desktop.customModelHint": "Enter model name",
+  "desktop.modelsLoaded": "Available Helper models loaded.",
+  "desktop.modelsUnavailable": "Model list unavailable; use saved or custom model."
 }

@@ -21,6 +21,7 @@
     <PackageReference Include="Markdig" Version="0.41.3" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="LICENSE.txt" LogicalName="AskInky.LICENSE.txt" />
     <EmbeddedResource Include="Assets\Red_Ink_Logo.png" LogicalName="AskInky.Assets.Red_Ink_Logo.png" />
   </ItemGroup>
   <ItemGroup>

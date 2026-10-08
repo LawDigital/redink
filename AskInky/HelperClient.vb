@@ -1,3 +1,11 @@
+' Part of "Red Ink" (Ask Inky)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' =============================================================================
+' File: HelperClient.vb
+' Purpose: Helper transport, authentication and AI model selection.
+' Architecture: Windows native host with embedded Office Web-based interface.
+' Notes: Red Ink License and Ask Inky third-party attributions are embedded in LICENSE.txt.
+' =============================================================================
 ' Part of Red Ink (AskInky). Office Web Helper contracts; transport stays outside the WebView.
 Friend NotInheritable Class HelperFailure
     Inherits System.Exception
@@ -16,6 +24,11 @@ Friend NotInheritable Class HelperProbe
     Public Property LicenseProduct As String = ""
     Public Property Authorized As Boolean
     Public Property HttpStatus As Integer
+End Class
+
+Public NotInheritable Class HelperModelOption
+    Public Property Id As String = ""
+    Public Property Name As String = ""
 End Class
 
 Public NotInheritable Class HelperClient
@@ -63,6 +76,33 @@ Public NotInheritable Class HelperClient
             req.Dispose()
             Throw
         End Try
+    End Function
+
+    ' Enumerate the models actually configured on this Helper. No provider-specific hardcoded list.
+    Public Shared Async Function GetModelsAsync(config As ClientConfig, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Collections.Generic.List(Of HelperModelOption))
+        Dim result As New System.Collections.Generic.List(Of HelperModelOption)()
+        Using timeout As System.Threading.CancellationTokenSource = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellation)
+            timeout.CancelAfter(System.TimeSpan.FromSeconds(15))
+            Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Get, "llm/models")
+                Using response As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, timeout.Token)
+                    If Not response.IsSuccessStatusCode Then Throw StatusFailure(response.StatusCode)
+                    Dim content As String = Await response.Content.ReadAsStringAsync(timeout.Token)
+                    Using doc As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(content)
+                        Dim records As System.Text.Json.JsonElement
+                        If Not doc.RootElement.TryGetProperty("models", records) OrElse records.ValueKind <> System.Text.Json.JsonValueKind.Array Then Throw New HelperFailure("desktop.invalidResponse")
+                        Dim seen As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.Ordinal)
+                        For Each record As System.Text.Json.JsonElement In records.EnumerateArray()
+                            If record.ValueKind <> System.Text.Json.JsonValueKind.Object Then Continue For
+                            Dim modelId As String = TextValue(record, "id").Trim()
+                            If modelId.Length = 0 OrElse modelId.Length > 256 OrElse Not seen.Add(modelId) Then Continue For
+                            Dim displayName As String = TextValue(record, "name").Trim()
+                            result.Add(New HelperModelOption With {.Id = modelId, .Name = If(displayName.Length > 0, displayName, modelId)})
+                        Next
+                    End Using
+                End Using
+            End Using
+        End Using
+        Return result
     End Function
 
     Friend Shared Function TextValue(root As System.Text.Json.JsonElement, name As String) As String
@@ -176,7 +216,7 @@ Public NotInheritable Class HelperClient
     Public Shared Async Function AskAsync(config As ClientConfig, prompt As String, text As String, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of String)
         ' Helper decides whether device registration/licensing is necessary; no local prompt.
         Dim userContent As String = If(String.IsNullOrWhiteSpace(text), prompt, "Ausgewählter Text:" & vbLf & text & vbLf & vbLf & "Frage:" & vbLf & prompt)
-        Dim body As String = System.Text.Json.JsonSerializer.Serialize(New With {.prompt_system = config.SystemPrompt, .prompt_user = userContent, .temperature = config.Temperature})
+        Dim body As String = System.Text.Json.JsonSerializer.Serialize(New With {.prompt_system = config.SystemPrompt, .prompt_user = userContent, .temperature = config.Temperature, .model = If(System.String.IsNullOrWhiteSpace(config.Model), Nothing, config.Model.Trim())})
         LastRequest = If(config.ShowLlmDebug, body, "")
         LastResponse = ""
         Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Post, "llm/chat")

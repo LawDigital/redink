@@ -1,4 +1,7 @@
 <!doctype html>
+<!-- Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+     File: settings.html; Purpose: offline WebView2 user interface.
+     License: Red Ink License; notices in bundled LICENSE.txt. -->
 <html lang="de">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -28,6 +31,9 @@
         <div class="settings-control"><label for="settings-helper-apikey" class="ms-font-s section-label" data-text="settings.helperApiKey"></label><input type="password" id="settings-helper-apikey" class="text-input" maxlength="16384" autocomplete="off" spellcheck="false"><p class="ms-font-xs status-text" data-text="settings.helperApiKeyHint"></p></div>
     </section>
     <section class="settings-group">
+            <div class="settings-control"><label for="settings-model" class="ms-font-s section-label" data-text="desktop.model"></label><select id="settings-model" class="dropdown" aria-describedby="model-status"><option value="" data-text="desktop.defaultModel"></option></select><input id="settings-model-custom" class="text-input" type="text" maxlength="256" autocomplete="off" spellcheck="false" data-placeholder="desktop.customModelHint" hidden><p id="model-status" class="ms-font-xs status-text" aria-live="polite"></p><p class="ms-font-xs status-text" data-text="desktop.modelDescription"></p></div>
+    </section>
+    <section class="settings-group">
         <label for="settings-registration-link" class="ms-font-s section-label" data-text="settings.deviceRegistration"></label>
         <p id="registration-state" class="ms-font-xs status-text"></p>
         <input type="text" id="settings-registration-link" class="text-input" maxlength="32768" spellcheck="false" autocomplete="off" data-placeholder="settings.registrationLinkPlaceholder">
@@ -42,6 +48,7 @@
     <details class="settings-group settings-disclosure"><summary data-text="desktop.moreSettings"></summary>
         <div class="disclosure-body">
             <div class="settings-control"><label for="font-size" class="ms-font-s section-label" data-text="settings.fontSize"></label><div class="slider-row"><input type="range" id="font-size" min="6" max="16" value="12"><span id="font-size-value">12 px</span></div></div>
+
             <div class="settings-control"><label for="temperature" class="ms-font-s section-label" data-text="settings.temperature"></label><div class="slider-row"><input type="range" id="temperature" min="0" max="100" value="70"><span id="temperature-value">0.7</span></div></div>
             <div class="settings-control"><label for="system-prompt" class="ms-font-s section-label" data-text="desktop.systemPrompt"></label><textarea id="system-prompt" class="text-input" rows="3" maxlength="200000"></textarea></div>
             <div class="settings-control"><label class="settings-toggle-row" for="settings-show-llm-debug"><span class="settings-toggle-label" data-text="settings.showLlmDebug"></span><span class="settings-toggle-switch"><input type="checkbox" id="settings-show-llm-debug"><span class="settings-toggle-slider" aria-hidden="true"></span></span></label>
@@ -50,6 +57,7 @@
         </div>
     </details>
     <div class="settings-footnote"><p data-text="desktop.secretHint"></p></div>
+    <div class="settings-copyright"><span data-text="desktop.partOfRedInk"></span><span>© LawDigital AG · <a id="company-website" href="https://redink.ai">https://redink.ai</a></span><a href="#" id="third-party-licenses" data-text="desktop.thirdPartyLicenses"></a></div>
 </div>
 <footer class="settings-actions"><span id="status" class="desktop-status" role="status" aria-live="polite"></span><button id="cancel-settings" type="button" class="quick-access-btn" data-text="desktop.cancel"></button><button id="save-settings" type="button" class="action-btn-primary" data-text="desktop.save"></button></footer>
 </main>

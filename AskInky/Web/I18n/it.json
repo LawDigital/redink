@@ -116,5 +116,22 @@
   "desktop.imagePlaceholder": "Immagine",
   "desktop.keyUnreadable": "Chiave cifrata presente; inserisci un nuovo valore per sostituirla.",
   "desktop.browserOnly": "Solo anteprima – non collegata al client Windows.",
-  "desktop.contentFiltered": "Gli elementi HTML attivi o non supportati sono stati rimossi; il resto del contenuto è conservato."
+  "desktop.contentFiltered": "Gli elementi HTML attivi o non supportati sono stati rimossi; il resto del contenuto è conservato.",
+  "desktop.includeHistory": "Considera le risposte precedenti",
+  "desktop.historyTooLong": "La cronologia è troppo lunga per una richiesta. Avvia una nuova selezione o disattiva la casella del contesto.",
+  "desktop.previousAnswer": "Risposta precedente (←)",
+  "desktop.nextAnswer": "Risposta successiva (→)",
+  "desktop.deleteAnswer": "Elimina questa risposta",
+  "desktop.clearAnswers": "Cancella tutte le risposte",
+  "desktop.confirmClearAnswers": "Eliminare tutte le domande e risposte precedenti?",
+  "desktop.answerNavigationHint": "Usa ←/→ nella risposta; nel campo della domanda spostano il cursore.",
+  "desktop.model": "Modello",
+  "desktop.modelDescription": "Seleziona un modello o inseriscine uno personalizzato.",
+  "desktop.partOfRedInk": "Ask Inky fa parte di Red Ink.",
+  "desktop.thirdPartyLicenses": "Licenze di terze parti",
+  "desktop.defaultModel": "Modello predefinito dell’Helper",
+  "desktop.customModel": "Inserisci un altro modello…",
+  "desktop.customModelHint": "Inserisci nome modello",
+  "desktop.modelsLoaded": "Modelli dell’Helper caricati.",
+  "desktop.modelsUnavailable": "Elenco non disponibile; usa il modello salvato o personalizzato."
 }
