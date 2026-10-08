@@ -48,6 +48,11 @@ Namespace SharedLibrary
         ''' Result from reading a file, including content and metadata about potential incompleteness.
         ''' </summary>
         Public Class FileReadResult
+            ' Populated only after an explicitly requested OCR cleanup. Never used by default.
+            Public Property OcrCleanupRawContent As System.String = System.String.Empty
+            Public Property OcrCleanupReport As System.String = System.String.Empty
+            Public Property MarkdownPreparationSkipped As System.Boolean
+            Public Property ExtractionWarnings As New System.Collections.Generic.List(Of System.String)()
             ''' <summary>The extracted text content from the file.</summary>
             Public Property Content As String = ""
 
@@ -71,6 +76,10 @@ Namespace SharedLibrary
         ''' Result from reading a PDF file, including content and metadata about OCR status.
         ''' </summary>
         Public Class PdfReadResult
+            ' Populated only after an explicitly requested OCR cleanup. Never used by default.
+            Public Property OcrCleanupRawContent As System.String = System.String.Empty
+            Public Property OcrCleanupReport As System.String = System.String.Empty
+            Public Property MarkdownPreparationSkipped As System.Boolean
             ''' <summary>The extracted text content from the PDF.</summary>
             Public Property Content As String = ""
 
@@ -477,9 +486,19 @@ Namespace SharedLibrary
                                                      Optional ByVal ocrAdditionalInstruction As String = Nothing,
                                                      Optional ByVal ShowOcrProgressWindow As Boolean = False,
                                                      Optional ByVal ReturnMarkdown As Boolean = False,
-                                                     Optional ByVal OcrBatchPages As System.Int32 = 1,
-                                                     Optional ByVal CancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of PdfReadResult)
+                                                     Optional ByVal OcrBatchPages As System.Int32 = -1,
+                                                     Optional ByVal CancellationToken As System.Threading.CancellationToken = Nothing,
+                                                     Optional ByVal OcrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None,
+                                                     Optional ByVal MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing) As System.Threading.Tasks.Task(Of PdfReadResult)
 
+            ' -1 inherits ChunkOCR; 0 sends each contiguous candidate range without chunking.
+            ' Explicit batch sizes (e.g. Semantic Archives) retain their independent policy.
+            If OcrBatchPages < -1 Then Throw New System.ArgumentOutOfRangeException(NameOf(OcrBatchPages))
+            If OcrBatchPages = -1 Then OcrBatchPages = If(context Is Nothing, 0, System.Math.Max(0, context.INI_ChunkOCR))
+            If Not ReturnMarkdown Then
+                OcrCleanupMode = OcrMarkdownCleanupMode.None
+                MarkdownPreparation = Nothing
+            End If
             Dim result As New PdfReadResult()
 
             Try
@@ -696,7 +715,7 @@ Namespace SharedLibrary
                     End If
 
                     If ReturnMarkdown Then
-                        result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                        Await ReadPreparedPdfMarkdownAsync(pdfPath, result, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                         result.ExtractionComplete = Nothing
                         result.ExtractionCoverageBasis = "markdown_reader_coverage_unverified"
                     Else
@@ -725,7 +744,7 @@ Namespace SharedLibrary
                         End If
 
                         If ReturnMarkdown Then
-                            result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                            Await ReadPreparedPdfMarkdownAsync(pdfPath, result, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                             result.ExtractionComplete = Nothing
                             result.ExtractionCoverageBasis = "markdown_reader_coverage_unverified"
                         Else
@@ -745,7 +764,7 @@ Namespace SharedLibrary
                             result.OcrWasSkippedDueToHeuristics = True
                             Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, "OCR was declined; the existing text layer was retained.")
                             If ReturnMarkdown Then
-                                result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                                Await ReadPreparedPdfMarkdownAsync(pdfPath, result, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                                 result.ExtractionComplete = Nothing
                                 result.ExtractionCoverageBasis = "markdown_reader_coverage_unverified"
                             Else
@@ -773,6 +792,7 @@ Namespace SharedLibrary
                     If selectiveOcr IsNot Nothing AndAlso selectiveOcr.Success Then
                         result.OcrUsed = True
                         result.Content = selectiveOcr.MergedText
+                        Await ApplyOptionalPdfOcrCleanupAsync(result, selectiveOcr, OcrCleanupMode, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                         If pageTexts.Count <> pageCount OrElse Not pageSequenceComplete Then
                             result.ExtractionComplete = False
                             result.ExtractionCoverageBasis = "selective_ocr_incomplete"
@@ -790,6 +810,7 @@ Namespace SharedLibrary
                         If selectiveOcr IsNot Nothing AndAlso selectiveOcr.RetainedOcrPageCount > 0 Then
                             result.OcrUsed = True
                             result.Content = selectiveOcr.MergedText
+                        Await ApplyOptionalPdfOcrCleanupAsync(result, selectiveOcr, OcrCleanupMode, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                             Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, "Selective OCR retained validated pages and the remaining native text; missing/unreadable pages keep the representation incomplete.")
                             Return result
                         End If
@@ -798,7 +819,7 @@ Namespace SharedLibrary
                 End If
 
                 If ReturnMarkdown Then
-                    result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                    Await ReadPreparedPdfMarkdownAsync(pdfPath, result, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                     result.ExtractionComplete = Nothing
                     result.ExtractionCoverageBasis = "markdown_reader_coverage_unverified"
                 Else
@@ -825,7 +846,7 @@ Namespace SharedLibrary
             End Try
 
             Return Await ReadPdfParserFailureFallbackAsync(pdfPath, ReturnErrorInsteadOfEmpty, DoOCR, AskUser, context, ocrAdditionalInstruction, ShowOcrProgressWindow, OcrBatchPages, CancellationToken,
-                New System.IO.InvalidDataException(result.ErrorMessage)).ConfigureAwait(False)
+                New System.IO.InvalidDataException(result.ErrorMessage), OcrCleanupMode, MarkdownPreparation).ConfigureAwait(False)
         End Function
 
         Private Shared Function IsDeterministicPdfParserFailure(failure As System.Exception) As System.Boolean
@@ -849,7 +870,9 @@ Namespace SharedLibrary
                                                                          showProgressWindow As System.Boolean,
                                                                          ocrBatchPages As System.Int32,
                                                                          cancellationToken As System.Threading.CancellationToken,
-                                                                         parserFailure As System.Exception) As System.Threading.Tasks.Task(Of PdfReadResult)
+                                                                         parserFailure As System.Exception,
+                                                                         OcrCleanupMode As OcrMarkdownCleanupMode,
+                                                                         MarkdownPreparation As PdfMarkdownPreparationOptions) As System.Threading.Tasks.Task(Of PdfReadResult)
             Dim result As New PdfReadResult With {
                 .ExtractionComplete = False,
                 .ExtractionCoverageBasis = "pdf_parser_failure",
@@ -926,6 +949,7 @@ Namespace SharedLibrary
             If fallback IsNot Nothing AndAlso fallback.Success AndAlso validRanges AndAlso covered.Count = pageCount Then
                 result.OcrUsed = True
                 result.Content = fallback.MergedText
+                Await ApplyOptionalPdfOcrCleanupAsync(result, fallback, OcrCleanupMode, MarkdownPreparation, context, cancellationToken).ConfigureAwait(False)
                 result.ExtractionComplete = True
                 result.ExtractionCoverageBasis = "pdf_parser_failure_full_ocr_all_pages_covered"
                 result.ErrorCode = System.String.Empty
@@ -938,6 +962,7 @@ Namespace SharedLibrary
                 ' an incomplete representation, never a successful complete extraction.
                 result.OcrUsed = True
                 result.Content = fallback.MergedText
+                Await ApplyOptionalPdfOcrCleanupAsync(result, fallback, OcrCleanupMode, MarkdownPreparation, context, cancellationToken).ConfigureAwait(False)
                 result.ExtractionComplete = False
                 result.ExtractionCoverageBasis = "pdf_parser_failure_ocr_incomplete"
                 result.ErrorCode = System.String.Empty
@@ -1076,6 +1101,7 @@ Namespace SharedLibrary
         Private NotInheritable Class SelectivePdfOcrResult
             Public Property Success As System.Boolean
             Public Property MergedText As System.String = System.String.Empty
+            Public Property PageTexts As New System.Collections.Generic.List(Of System.String)()
             Public Property Warnings As New System.Collections.Generic.List(Of System.String)()
             Public Property RetainedOcrPageCount As System.Int32
             Public Property ProcessedRanges As New System.Collections.Generic.List(Of Agents.TextExtractionProcessedRange)()
@@ -1166,7 +1192,7 @@ Namespace SharedLibrary
                     ' OCR candidates remain page-derived, but contiguous pages may be sent in bounded batches.
                     ' The host validates explicit page results. A request range or long response
                     ' alone never proves completion. Failed pages do not erase completed siblings.
-                    Dim configuredChunkSize As System.Int32 = System.Math.Max(1, System.Math.Min(75, ocrBatchPages))
+                    Dim configuredChunkSize As System.Int32 = If(ocrBatchPages <= 0, candidates.Count, ocrBatchPages)
                     Const ChunkOcrMaxRounds As System.Int32 = 3
 
                     While position < candidates.Count
@@ -1181,10 +1207,16 @@ Namespace SharedLibrary
                             Dim count As System.Int32 = System.Math.Min(configuredChunkSize, remaining)
                             Dim startPage As System.Int32 = candidates(current)
                             Dim endPage As System.Int32 = candidates(current + count - 1)
+                            progressState.SuccessfulRetryBatchPages = 0
                             processingStage = "ocr_range_processing"
                             Dim complete As System.Boolean = Await ProcessOcrRangeWithRetries(pdfPath, startPage, endPage, context, systemPrompt, timeOut, useSecondAPI,
                                 ChunkOcrMaxRounds, progressState, statusDialog, result, chunks, operationToken).ConfigureAwait(False)
                             ThrowIfOcrCancelled(statusDialog, operationToken)
+                            If progressState.SuccessfulRetryBatchPages > 0 AndAlso progressState.SuccessfulRetryBatchPages < configuredChunkSize Then
+                                configuredChunkSize = progressState.SuccessfulRetryBatchPages
+                                Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.Warnings,
+                                    "ocr_batch_size_adjusted: subsequent requests in this document use up to " & configuredChunkSize.ToString(System.Globalization.CultureInfo.InvariantCulture) & " pages.")
+                            End If
                             If Not complete Then Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.Warnings,
                                 "ocr_range_incomplete: page(s) " & startPage.ToString(System.Globalization.CultureInfo.InvariantCulture) & "-" & endPage.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; retained successful pages and continued with later ranges.")
                             current += count
@@ -1241,18 +1273,24 @@ Namespace SharedLibrary
             result.RetainedOcrPageCount = chunks.Count
             Dim byStart As System.Collections.Generic.Dictionary(Of System.Int32, SelectivePdfOcrRangeResult) = chunks.ToDictionary(Function(item As SelectivePdfOcrRangeResult) item.StartPage)
             Dim merged As New System.Text.StringBuilder()
+            result.PageTexts.Clear()
             Dim page As System.Int32 = 1
             While page <= nativePageTexts.Count
                 Dim replacement As SelectivePdfOcrRangeResult = Nothing
                 If byStart.TryGetValue(page, replacement) Then
+                    Dim pageContent As New System.Text.StringBuilder()
                     If merged.Length > 0 Then merged.AppendLine().AppendLine()
                     If Not replacement.IsComplete AndAlso Not System.String.IsNullOrEmpty(nativePageTexts(page - 1)) Then
                         merged.Append(nativePageTexts(page - 1)).AppendLine().AppendLine()
+                        pageContent.Append(nativePageTexts(page - 1)).AppendLine().AppendLine()
                     End If
                     merged.Append(replacement.Text)
+                    pageContent.Append(replacement.Text)
+                    result.PageTexts.Add(pageContent.ToString())
                     page = replacement.EndPage + 1
                 Else
                     Dim nativeText As System.String = If(nativePageTexts(page - 1), System.String.Empty)
+                    result.PageTexts.Add(nativeText)
                     If nativeText.Length > 0 Then
                         If merged.Length > 0 Then merged.AppendLine().AppendLine()
                         merged.Append(nativeText)
@@ -1262,6 +1300,111 @@ Namespace SharedLibrary
             End While
             result.MergedText = merged.ToString()
         End Sub
+
+        Private Shared Async Function ApplyOptionalPdfOcrCleanupAsync(result As PdfReadResult,
+                                                      source As SelectivePdfOcrResult,
+                                                      mode As OcrMarkdownCleanupMode,
+                                                      options As PdfMarkdownPreparationOptions,
+                                                      context As ISharedContext,
+                                                      cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            If options IsNot Nothing AndAlso options.Enabled AndAlso result.OcrUsed AndAlso source IsNot Nothing Then
+                If Not result.PageCount.HasValue OrElse source.PageTexts.Count = result.PageCount.Value Then
+                    Await ApplyPdfMarkdownPreparationAsync(result, source.PageTexts, options, context, cancellationToken).ConfigureAwait(False)
+                Else
+                    result.MarkdownPreparationSkipped = True
+                    result.OcrCleanupRawContent = result.Content
+                    result.OcrCleanupReport = "Markdown preparation skipped: source page mapping is incomplete; original content retained."
+                    Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, result.OcrCleanupReport)
+                End If
+                Return
+            End If
+            If mode = OcrMarkdownCleanupMode.None OrElse Not result.OcrUsed OrElse source Is Nothing Then Return
+            Dim raw As System.String = result.Content
+            result.OcrCleanupRawContent = raw
+            Try
+                If result.PageCount.HasValue AndAlso source.PageTexts.Count <> result.PageCount.Value Then
+                    Throw New System.IO.InvalidDataException("OCR cleanup page mapping does not cover the original page sequence.")
+                End If
+                Dim cleaned As OcrMarkdownCleanupResult = OcrMarkdownCleaner.CleanPages(source.PageTexts, mode)
+                result.OcrCleanupReport = cleaned.Report
+                result.Content = If(cleaned.ValidationPassed, cleaned.Content, raw)
+                Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings,
+                    If(cleaned.ValidationPassed,
+                        "Explicit OCR cleanup applied; original OCR text and the detailed cleanup report are retained separately. Extraction coverage still describes the source transcription.",
+                        "ocr_cleanup_skipped: original OCR content retained; see the detailed cleanup report."))
+            Catch ex As System.Exception
+                result.Content = raw
+                result.OcrCleanupReport = "OCR cleanup failed; original content retained: " & ex.GetType().FullName & ": " & ex.Message
+                Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings,
+                    "ocr_cleanup_failed: returned the original OCR content.")
+            End Try
+        End Function
+
+        Private Shared Async Function ReadPreparedPdfMarkdownAsync(pdfPath As System.String,
+                                                                   result As PdfReadResult,
+                                                                   options As PdfMarkdownPreparationOptions,
+                                                                   context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext,
+                                                                   cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            cancellationToken.ThrowIfCancellationRequested()
+            If options Is Nothing OrElse Not options.Enabled Then
+                result.Content = ReadPdfMarkdownSandboxed(pdfPath)
+                Return
+            End If
+            ' Keep the existing geometry/font/table engine. Apply the explicit policy there,
+            ' before its page map is flattened into Markdown; do not re-infer its layout.
+            Dim nativeOptions As New PdfMarkdownExtractor.PdfMarkdownOptions With {
+                .RemoveRepeatedPageFurniture = options.RemovePageArtifacts,
+                .RemoveHeaders = options.RemovePageArtifacts,
+                .RemoveFooters = options.RemovePageArtifacts,
+                .RemovePageNumbers = options.RemovePageArtifacts,
+                .RemoveRepeatedSideFurniture = False,
+                .RemoveWatermarks = False,
+                .JoinWrappedLines = options.JoinProseLines,
+                .JoinAcrossPageBreaks = options.JoinPageParagraphs,
+                .CollectFootnotesAtEnd = options.CollectFootnotes}
+            Dim readError As System.String = System.String.Empty
+            result.Content = PdfMarkdownExtractor.ReadPdfAsMarkdown(pdfPath, nativeOptions, readError)
+            If Not System.String.IsNullOrEmpty(readError) Then Return
+            cancellationToken.ThrowIfCancellationRequested()
+            Dim rawCopy As System.String = Nothing
+            Dim rawWarning As System.String = System.String.Empty
+            If options.SaveRawCopy Then
+                Dim rawOptions As New PdfMarkdownExtractor.PdfMarkdownOptions With {
+                    .RemoveRepeatedPageFurniture = False, .RemoveHeaders = False,
+                    .RemoveFooters = False, .RemovePageNumbers = False,
+                    .RemoveRepeatedSideFurniture = False, .RemoveWatermarks = False,
+                    .JoinWrappedLines = False, .JoinAcrossPageBreaks = False,
+                    .CollectFootnotesAtEnd = False}
+                Dim rawError As System.String = System.String.Empty
+                rawCopy = PdfMarkdownExtractor.ReadPdfAsMarkdown(pdfPath, rawOptions, rawError)
+                If Not System.String.IsNullOrEmpty(rawError) Then
+                    rawCopy = Nothing
+                    rawWarning = "Uncleaned native Markdown copy unavailable: " & rawError
+                    Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, rawWarning)
+                End If
+            End If
+            Await ApplyPdfMarkdownPreparationAsync(result, New System.String() {result.Content}, options, context, cancellationToken).ConfigureAwait(False)
+            If options.SaveRawCopy Then result.OcrCleanupRawContent = If(rawCopy, result.Content)
+            result.OcrCleanupReport = "Native PDF layout engine retained; explicit page-artifact/line/page-join options applied using source geometry. Side furniture and watermarks are retained." &
+                System.Environment.NewLine & result.OcrCleanupReport
+            If rawWarning.Length > 0 Then result.OcrCleanupReport &= System.Environment.NewLine & rawWarning
+        End Function
+
+        Private Shared Async Function ApplyPdfMarkdownPreparationAsync(result As PdfReadResult,
+                                                                        pages As System.Collections.Generic.IReadOnlyList(Of System.String),
+                                                                        options As PdfMarkdownPreparationOptions,
+                                                                        context As ISharedContext,
+                                                                        cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            If options Is Nothing OrElse Not options.Enabled Then Return
+            Dim raw As System.String = result.Content
+            Dim cleaned As OcrMarkdownCleanupResult = Await PdfMarkdownPreparer.PrepareAsync(pages, options, context, cancellationToken).ConfigureAwait(False)
+            result.OcrCleanupRawContent = raw
+            result.OcrCleanupReport = cleaned.Report
+            result.MarkdownPreparationSkipped = Not cleaned.ValidationPassed
+            result.Content = If(cleaned.ValidationPassed, cleaned.Content, raw)
+            Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings,
+                If(cleaned.ValidationPassed, "Explicit Markdown preparation applied; diagnostic report included. Source extraction coverage is unchanged.", "markdown_preparation_skipped: original source retained; diagnostic report included."))
+        End Function
 
         Private Shared Function BuildPdfOcrPagePrompt(systemPrompt As System.String, pageCount As System.Int32) As System.String
             Return If(systemPrompt, System.String.Empty) & System.Environment.NewLine & System.Environment.NewLine &
@@ -1294,27 +1437,24 @@ Namespace SharedLibrary
                 Dim root As Newtonsoft.Json.Linq.JObject
                 Using textReader As New System.IO.StringReader(json), reader As New Newtonsoft.Json.JsonTextReader(textReader)
                     reader.DateParseHandling = Newtonsoft.Json.DateParseHandling.None
+                    reader.FloatParseHandling = Newtonsoft.Json.FloatParseHandling.Decimal
                     reader.MaxDepth = 32
                     root = Newtonsoft.Json.Linq.JObject.Load(reader, New Newtonsoft.Json.Linq.JsonLoadSettings With {
                         .DuplicatePropertyNameHandling = Newtonsoft.Json.Linq.DuplicatePropertyNameHandling.Error})
                     If reader.Read() Then Return False
                 End Using
-                Dim finished As Newtonsoft.Json.Linq.JToken = root("finished")
                 Dim entries As Newtonsoft.Json.Linq.JArray = TryCast(root("pages"), Newtonsoft.Json.Linq.JArray)
-                If finished Is Nothing OrElse finished.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean OrElse Not finished.ToObject(Of System.Boolean)() OrElse entries Is Nothing Then Return False
+                If Not PdfMarkdownPreparer.ReadBoolean(root, "finished") OrElse entries Is Nothing Then Return False
                 Dim count As System.Int32 = endPage - startPage + 1
                 If entries.Count > count Then Return False
                 Dim seen As New System.Collections.Generic.HashSet(Of System.Int32)()
                 For Each entry As Newtonsoft.Json.Linq.JToken In entries
                     Dim record As Newtonsoft.Json.Linq.JObject = TryCast(entry, Newtonsoft.Json.Linq.JObject)
                     If record Is Nothing Then Return False
-                    Dim number As Newtonsoft.Json.Linq.JToken = record("page")
                     Dim statusToken As Newtonsoft.Json.Linq.JToken = record("status")
                     Dim textToken As Newtonsoft.Json.Linq.JToken = record("text")
-                    If number Is Nothing OrElse (number.Type <> Newtonsoft.Json.Linq.JTokenType.Integer AndAlso number.Type <> Newtonsoft.Json.Linq.JTokenType.String) Then Return False
-                    Dim localPage As System.Int32
-                    If Not System.Int32.TryParse(number.ToString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, localPage) OrElse
-                        localPage < 1 OrElse localPage > count OrElse Not seen.Add(localPage) Then Return False
+                    Dim localPage As System.Int32 = PdfMarkdownPreparer.ReadInteger(record, "page")
+                    If localPage < 1 OrElse localPage > count OrElse Not seen.Add(localPage) Then Return False
                     If statusToken Is Nothing OrElse statusToken.Type <> Newtonsoft.Json.Linq.JTokenType.String OrElse textToken Is Nothing OrElse textToken.Type <> Newtonsoft.Json.Linq.JTokenType.String Then Return False
                     Dim status As System.String = statusToken.ToObject(Of System.String)().Trim().ToLowerInvariant()
                     Dim text As System.String = textToken.ToObject(Of System.String)()
@@ -1331,7 +1471,7 @@ Namespace SharedLibrary
                     End Select
                     staged.Add(New SelectivePdfOcrRangeResult With {.StartPage = startPage + localPage - 1, .EndPage = startPage + localPage - 1, .Text = text, .IsBlank = status = "blank", .IsComplete = status <> "unreadable"})
                 Next
-            Catch ex As Newtonsoft.Json.JsonException
+            Catch ex As System.Exception When TypeOf ex Is Newtonsoft.Json.JsonException OrElse TypeOf ex Is System.IO.InvalidDataException
                 Return False
             End Try
             ' Do not commit any pages from malformed/duplicated/out-of-range responses.
@@ -1347,7 +1487,8 @@ Namespace SharedLibrary
                                                                  progressState As OcrChunkProgressState, statusDialog As OcrChunkStatusDialog,
                                                                  result As SelectivePdfOcrResult,
                                                                  retainedPages As System.Collections.Generic.List(Of SelectivePdfOcrRangeResult),
-                                                                 cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Boolean)
+                                                                 cancellationToken As System.Threading.CancellationToken,
+                                                                 Optional isReducedRange As System.Boolean = False) As System.Threading.Tasks.Task(Of System.Boolean)
             ThrowIfOcrCancelled(statusDialog, cancellationToken)
             Dim pageCount As System.Int32 = endPage - startPage + 1
             If startPage < 1 OrElse pageCount < 1 Then Throw New System.ArgumentOutOfRangeException(NameOf(startPage))
@@ -1355,11 +1496,12 @@ Namespace SharedLibrary
             If System.Linq.Enumerable.Range(startPage, pageCount).All(Function(page As System.Int32) accepted.Contains(page)) Then Return True
             Dim rangeLabel As System.String = startPage.ToString(System.Globalization.CultureInfo.InvariantCulture) & "-" & endPage.ToString(System.Globalization.CultureInfo.InvariantCulture)
             Dim attempted As System.Int32 = 0
-            Dim needsSmallerRange As System.Boolean = False
+            Dim needsSmallerRange As System.Boolean = pageCount > 1
             While attempted < maxRetries
                 attempted += 1
                 ThrowIfOcrCancelled(statusDialog, cancellationToken)
                 UpdateOcrChunkStatus(statusDialog, progressState, startPage, endPage, attempted, maxRetries)
+                If statusDialog IsNot Nothing Then statusDialog.SetPhase("Preparing PDF chunk...")
                 Dim temporaryPath As System.String = Nothing
                 Dim response As System.String = System.String.Empty
                 Dim requestFailed As System.Boolean = False
@@ -1369,6 +1511,7 @@ Namespace SharedLibrary
                     requestStage = "pdf_chunk_creation"
                     CreatePdfChunkForOcr(pdfPath, temporaryPath, startPage, endPage, cancellationToken)
                     requestStage = "model_request"
+                    If statusDialog IsNot Nothing Then statusDialog.BeginModelWait()
                     response = Await LLM(context, BuildPdfOcrPagePrompt(systemPrompt, pageCount), "", "", "", timeOut * 2, useSecondAPI, True, "", temporaryPath,
                         cancellationToken:=cancellationToken).ConfigureAwait(False)
                     ThrowIfOcrCancelled(statusDialog, cancellationToken)
@@ -1394,6 +1537,7 @@ Namespace SharedLibrary
                         requestStage & "; pages=" & rangeLabel & "; attempt=" & attempted.ToString(System.Globalization.CultureInfo.InvariantCulture))
                     Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.Warnings, "ocr_request_failed: pages " & rangeLabel & "; attempt " & attempted.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; " & ex.GetType().Name & ".")
                 Finally
+                    If statusDialog IsNot Nothing Then statusDialog.EndModelWait()
                     If temporaryPath IsNot Nothing Then
                         Try
                             System.IO.File.Delete(temporaryPath)
@@ -1403,6 +1547,7 @@ Namespace SharedLibrary
                     End If
                 End Try
                 ThrowIfOcrCancelled(statusDialog, cancellationToken)
+                If statusDialog IsNot Nothing Then statusDialog.SetPhase(If(requestFailed, "Request failed; preparing retry...", "Validating model response..."))
                 If Not requestFailed Then
                     Dim returnedPages As System.Collections.Generic.List(Of SelectivePdfOcrRangeResult) = Nothing
                     If TryParsePdfOcrPages(response, startPage, endPage, returnedPages) Then
@@ -1420,6 +1565,7 @@ Namespace SharedLibrary
                             End If
                         Next
                         If System.Linq.Enumerable.Range(startPage, pageCount).All(Function(page As System.Int32) accepted.Contains(page)) Then
+                            If isReducedRange Then progressState.SuccessfulRetryBatchPages = System.Math.Max(progressState.SuccessfulRetryBatchPages, pageCount)
                             UpdateOcrChunkStatus(statusDialog, progressState, startPage, endPage, attempted, maxRetries)
                             Return True
                         End If
@@ -1427,12 +1573,10 @@ Namespace SharedLibrary
                         needsSmallerRange = pageCount > 1
                     Else
                         Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.Warnings, "ocr_page_contract_invalid: pages " & rangeLabel & "; no page coverage was inferred from response length.")
-                        Dim beginning As System.String = If(response, System.String.Empty).TrimStart().TrimStart(Microsoft.VisualBasic.ChrW(&HFEFF))
-                        needsSmallerRange = pageCount > 1 AndAlso (beginning.StartsWith("{", System.StringComparison.Ordinal) OrElse beginning.StartsWith("```json", System.StringComparison.OrdinalIgnoreCase))
+                        needsSmallerRange = pageCount > 1
                     End If
-                    ' Missing pages or a truncated JSON envelope can benefit from splitting.
-                    ' Plain error/refusal/empty responses receive bounded retries instead;
-                    ' no provider-specific error strings are interpreted as source text.
+                    ' Any unvalidated multi-page response is retried in smaller ranges.
+                    ' A single page has bounded retries; provider error text never proves coverage.
                     If needsSmallerRange Then Exit While
                 End If
                 If attempted < maxRetries Then
@@ -1441,9 +1585,12 @@ Namespace SharedLibrary
             End While
             If pageCount <= 1 OrElse Not needsSmallerRange Then Return False
 
+            If statusDialog IsNot Nothing Then statusDialog.SetPhase("Reducing chunk size; retaining accepted pages...")
             Dim allComplete As System.Boolean = True
             Dim current As System.Int32 = startPage
             Dim maximumSubrange As System.Int32 = System.Math.Max(1, pageCount \ 2)
+            Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.Warnings,
+                "ocr_range_reduced: pages " & rangeLabel & "; retry batch size=" & maximumSubrange.ToString(System.Globalization.CultureInfo.InvariantCulture))
             While current <= endPage
                 ThrowIfOcrCancelled(statusDialog, cancellationToken)
                 If accepted.Contains(current) Then
@@ -1455,7 +1602,7 @@ Namespace SharedLibrary
                     subEnd += 1
                 End While
                 Dim subComplete As System.Boolean = Await ProcessOcrRangeWithRetries(pdfPath, current, subEnd, context, systemPrompt, timeOut, useSecondAPI,
-                    maxRetries, progressState, statusDialog, result, retainedPages, cancellationToken).ConfigureAwait(False)
+                    maxRetries, progressState, statusDialog, result, retainedPages, cancellationToken, isReducedRange:=True).ConfigureAwait(False)
                 ' A failed page must not discard successful siblings or skip later pages.
                 allComplete = subComplete AndAlso allComplete
                 current = subEnd + 1
@@ -1504,14 +1651,12 @@ Namespace SharedLibrary
             End If
 
             Dim completedPages As Integer = progressState.GetCompletedPages()
-            Dim completedChunks As Integer = progressState.GetCompletedChunks()
 
             statusDialog.UpdateStatus(
                 "OCR is running." & Environment.NewLine & Environment.NewLine &
                 $"Pages done: {completedPages:N0} / {progressState.TotalPages:N0}" & Environment.NewLine &
-                $"Page results accepted: {completedChunks:N0}" & Environment.NewLine &
-                $"Now: {startPage:N0}-{endPage:N0}" & Environment.NewLine &
-                $"Round: {currentAttempt:N0} / {maxRetries:N0}")
+                $"Current chunk: pages {startPage:N0}-{endPage:N0}" & Environment.NewLine &
+                $"Attempt: {currentAttempt:N0} / {maxRetries:N0}")
         End Sub
 
         Private NotInheritable Class OcrChunkProgressState
@@ -1524,6 +1669,9 @@ Namespace SharedLibrary
             End Sub
 
             Public ReadOnly Property TotalPages As Integer
+            ' Largest successful reduced request. A single unreadable page must not force
+            ' every later healthy range to one-page OCR. This state belongs to one document.
+            Public Property SuccessfulRetryBatchPages As System.Int32
 
             Public Sub MarkCompleted(startPage As Integer, endPage As Integer)
                 Dim pagesCompleted As Integer = System.Math.Max(0, endPage - startPage + 1)
@@ -1554,14 +1702,31 @@ Namespace SharedLibrary
             Private ReadOnly _readyEvent As New System.Threading.ManualResetEventSlim(False)
             Private ReadOnly _cancellation As New System.Threading.CancellationTokenSource()
             Private _uiThread As System.Threading.Thread = Nothing
+            Private ReadOnly _operationName As System.String
+            Private ReadOnly _sourceName As System.String
+            Private _progressMaximum As System.Int32 = 0
+            Private _progressValue As System.Int32 = 0
             Private _statusText As String = "Starting OCR..."
+            Private ReadOnly _totalClock As New System.Diagnostics.Stopwatch()
+            Private ReadOnly _requestClock As New System.Diagnostics.Stopwatch()
+            Private _phase As System.String = "Starting OCR..."
             Private _cancelled As Boolean = False
             Private _closeRequested As Boolean = False
             Private _form As System.Windows.Forms.Form = Nothing
 
+            Public Sub New(Optional operationName As System.String = "OCR", Optional sourceName As System.String = "")
+                _operationName = operationName
+                _sourceName = sourceName
+                _statusText = "Starting " & operationName & "..."
+                _phase = _statusText
+            End Sub
+
             Public Sub Show(initialText As String)
                 SyncLock _syncRoot
                     _statusText = initialText
+                    _totalClock.Restart()
+                    _requestClock.Reset()
+                    _phase = "Starting OCR..."
                     _cancelled = False
                     _closeRequested = False
                 End SyncLock
@@ -1581,6 +1746,53 @@ Namespace SharedLibrary
                 End SyncLock
             End Sub
 
+            Public Sub SetProgress(value As System.Int32, maximum As System.Int32)
+                SyncLock _syncRoot
+                    _progressMaximum = System.Math.Max(0, maximum)
+                    _progressValue = System.Math.Max(0, System.Math.Min(value, _progressMaximum))
+                End SyncLock
+            End Sub
+
+            Public Sub SetPhase(phase As System.String)
+                SyncLock _syncRoot
+                    If Not _cancelled Then _phase = phase
+                End SyncLock
+            End Sub
+
+            Public Sub BeginModelWait()
+                SyncLock _syncRoot
+                    If _cancelled Then Return
+                    _requestClock.Restart()
+                    _phase = "Waiting for the model response..."
+                End SyncLock
+            End Sub
+
+            Public Sub EndModelWait()
+                SyncLock _syncRoot
+                    _requestClock.Stop()
+                    If Not _cancelled Then _phase = "Model request finished."
+                End SyncLock
+            End Sub
+
+            Private Shared Function FormatElapsed(elapsed As System.TimeSpan) As System.String
+                Return System.Math.Floor(elapsed.TotalHours).ToString("00", System.Globalization.CultureInfo.InvariantCulture) & ":" &
+                    elapsed.Minutes.ToString("00", System.Globalization.CultureInfo.InvariantCulture) & ":" &
+                    elapsed.Seconds.ToString("00", System.Globalization.CultureInfo.InvariantCulture)
+            End Function
+
+            Private Function GetDisplayText() As System.String
+                SyncLock _syncRoot
+                    Dim sourceHeading As System.String = If(System.String.IsNullOrWhiteSpace(_sourceName), System.String.Empty, _sourceName & System.Environment.NewLine & System.Environment.NewLine)
+                    Dim text As System.String = sourceHeading & _statusText & System.Environment.NewLine & System.Environment.NewLine & _phase &
+                        System.Environment.NewLine & "Total elapsed: " & FormatElapsed(_totalClock.Elapsed)
+                    If _requestClock.IsRunning Then
+                        text &= System.Environment.NewLine & "Waiting this request: " & FormatElapsed(_requestClock.Elapsed) &
+                            System.Environment.NewLine & "Progress updates after the response has been validated."
+                    End If
+                    Return text
+                End SyncLock
+            End Function
+
             Public ReadOnly Property IsCancelled As Boolean
                 Get
                     SyncLock _syncRoot
@@ -1598,7 +1810,9 @@ Namespace SharedLibrary
             Private Sub RequestCancel()
                 SyncLock _syncRoot
                     _cancelled = True
-                    _statusText = "Cancelling OCR..."
+                    _statusText = "Cancelling " & _operationName & "..."
+                    _phase = "Cancellation requested; waiting for the request to stop."
+                    _requestClock.Stop()
                 End SyncLock
                 ' Invoke transport cancellation outside the status lock: callbacks may
                 ' complete on another thread and must not wait for UI state ownership.
@@ -1626,7 +1840,7 @@ Namespace SharedLibrary
                 Try
                     Dim localForm As New System.Windows.Forms.Form() With {
                         .Opacity = 0,
-                        .Text = SharedMethods.AN & " OCR",
+                        .Text = SharedMethods.AN & " " & _operationName,
                         .FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog,
                         .StartPosition = System.Windows.Forms.FormStartPosition.Manual,
                         .MaximizeBox = False,
@@ -1648,9 +1862,9 @@ Namespace SharedLibrary
                     Dim paddingAll As Integer = 20
                     Dim gapAboveButtons As Integer = 10
                     Dim spacerExtra As Integer = 20
-                    Dim minContentWidth As Integer = 220
-                    Dim maxWindowWidth As Integer = CInt(System.Math.Floor(wa.Width * 0.32))
-                    Dim maxWindowHeight As Integer = CInt(System.Math.Floor(wa.Height * 0.35))
+                    Dim minContentWidth As Integer = 320
+                    Dim maxWindowWidth As Integer = System.Math.Min(wa.Width, System.Math.Max(420, CInt(System.Math.Floor(wa.Width * 0.4))))
+                    Dim maxWindowHeight As Integer = CInt(System.Math.Floor(wa.Height * 0.6))
 
                     Dim cancelButton As New System.Windows.Forms.Button() With {
                         .Text = "Cancel",
@@ -1671,7 +1885,7 @@ Namespace SharedLibrary
                     Dim reservedBottomHeight As Integer = bottomFlow.PreferredSize.Height + gapAboveButtons
 
                     Dim statusLabel As New System.Windows.Forms.Label() With {
-                        .Text = If(_statusText, String.Empty),
+                        .Text = GetDisplayText(),
                         .Font = standardFont,
                         .AutoSize = True,
                         .Margin = New System.Windows.Forms.Padding(0)
@@ -1700,6 +1914,8 @@ Namespace SharedLibrary
 
                     Dim bodyPanel As New System.Windows.Forms.Panel() With {
                         .AutoSize = False,
+                        .AutoScroll = True,
+                        .Dock = System.Windows.Forms.DockStyle.Fill,
                         .Size = New System.Drawing.Size(contentWidth, bodyPanelHeight),
                         .Margin = New System.Windows.Forms.Padding(0),
                         .Padding = New System.Windows.Forms.Padding(0)
@@ -1726,9 +1942,17 @@ Namespace SharedLibrary
 
                     Dim spacer As New System.Windows.Forms.Panel() With {
                         .Height = spacerExtra,
+                        .Dock = System.Windows.Forms.DockStyle.Fill,
                         .Width = 1,
                         .Margin = New System.Windows.Forms.Padding(0)
                     }
+                    Dim preparationProgress As New System.Windows.Forms.ProgressBar() With {
+                        .Dock = System.Windows.Forms.DockStyle.Fill,
+                        .Visible = System.String.Equals(_operationName, "Markdown", System.StringComparison.Ordinal),
+                        .Style = System.Windows.Forms.ProgressBarStyle.Marquee,
+                        .MarqueeAnimationSpeed = 30
+                    }
+                    spacer.Controls.Add(preparationProgress)
                     table.Controls.Add(spacer, 0, 1)
 
                     Dim bottomHost As New System.Windows.Forms.Panel() With {
@@ -1777,27 +2001,48 @@ Namespace SharedLibrary
 
                     AddHandler localForm.Shown,
                         Sub(sender As Object, e As System.EventArgs)
-                            localForm.TopMost = False
-                            localForm.TopMost = True
-                            localForm.Activate()
-                            localForm.BringToFront()
+                            SharedMethods.ForceDialogToForeground(localForm)
                         End Sub
 
                     Dim refreshTimer As New System.Windows.Forms.Timer() With {
-                        .Interval = 100
+                        .Interval = 250
                     }
 
                     AddHandler refreshTimer.Tick,
                         Sub(sender As Object, e As System.EventArgs)
                             Dim latestText As String = ""
                             Dim closeRequested As Boolean = False
+                            Dim progressMaximum As System.Int32
+                            Dim progressValue As System.Int32
 
                             SyncLock _syncRoot
-                                latestText = _statusText
+                                latestText = GetDisplayText()
                                 closeRequested = _closeRequested
+                                progressMaximum = _progressMaximum
+                                progressValue = _progressValue
                             End SyncLock
+                            If preparationProgress.Visible Then
+                                If progressMaximum > 0 Then
+                                    preparationProgress.Style = System.Windows.Forms.ProgressBarStyle.Blocks
+                                    If preparationProgress.Maximum <> progressMaximum Then
+                                        ' Reset before lowering Maximum between files/phases.
+                                        preparationProgress.Value = 0
+                                        preparationProgress.Maximum = progressMaximum
+                                    End If
+                                    If preparationProgress.Value <> progressValue Then preparationProgress.Value = progressValue
+                                Else
+                                    preparationProgress.Style = System.Windows.Forms.ProgressBarStyle.Marquee
+                                End If
+                            End If
 
-                            statusLabel.Text = latestText
+                            If statusLabel.Text <> latestText Then
+                                statusLabel.Text = latestText
+                                Dim availableWidth As System.Int32 = System.Math.Max(1, bodyPanel.ClientSize.Width - System.Windows.Forms.SystemInformation.VerticalScrollBarWidth)
+                                Dim updatedHeight As System.Int32 = System.Math.Max(90, System.Math.Min(getLabelPreferred(availableWidth).Height, maxBodyHeightNoScroll))
+                                table.RowStyles(0).Height = updatedHeight
+                                localForm.ClientSize = New System.Drawing.Size(clientW, updatedHeight + spacerExtra + reservedBottomHeight + 2 * paddingAll)
+                                table.PerformLayout()
+                            End If
 
                             If closeRequested Then
                                 refreshTimer.Stop()
@@ -1847,6 +2092,8 @@ Namespace SharedLibrary
             Public Sub Close()
                 SyncLock _syncRoot
                     _closeRequested = True
+                    _totalClock.Stop()
+                    _requestClock.Stop()
                 End SyncLock
 
                 Dim localForm As System.Windows.Forms.Form = Nothing

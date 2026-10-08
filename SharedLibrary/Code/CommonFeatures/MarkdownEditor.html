@@ -4,7 +4,7 @@
 Part of "Red Ink" (SharedLibrary)
 File: MarkdownEditor.html
 Purpose:
-  Offline Markdown note editor and preview embedded by MarkdownEditorForm.
+  Offline Markdown/JSON note editor and preview embedded by MarkdownEditorForm.
 Architecture / Function:
   Self-contained HTML/CSS/JavaScript parser, settings, notes and folder workflow.
   The Red Ink native bridge mediates selected files, linked autosave and recovery;
@@ -66,7 +66,7 @@ The supplied two Obsidian-labelled palettes have been replaced by original Red I
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Markdown Editor</title>
+<title>Editor</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232e3440'/%3E%3Cpath d='M7 22V10l4.5 5 4.5-5v12M21 10v11m-3.5-3.5L21 21l3.5-3.5' fill='none' stroke='%2388c0d0' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 :root{
@@ -346,6 +346,55 @@ body.code-nowrap .cb pre{white-space:pre}
 #editor.reading pre{white-space:pre-wrap}
 #editor.reading .heading-flash,.u.heading-flash{animation:flash 1.2s ease}
 @keyframes flash{0%{background:rgba(var(--accent-rgb),.25)}100%{background:transparent}}
+/* JSON */
+.badge{font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--s-num);border:1px solid rgba(var(--c-purple),.45);border-radius:4px;padding:0 4px;margin-left:6px;line-height:15px;flex:none}
+#editor.json:not(.reading) .u{font-family:var(--code-font);font-size:var(--code-size);line-height:1.6;min-height:0}
+.u-jsonc{content-visibility:auto}
+#editor.json:not(.reading){min-height:50vh}
+.jv{font-family:var(--code-font);font-size:var(--code-size);line-height:1.65;white-space:normal;overflow-wrap:anywhere}
+.jv details>summary{list-style:none;cursor:pointer;display:block;padding-left:1.1em;position:relative;border-radius:4px}
+.jv details>summary::-webkit-details-marker{display:none}
+.jv details>summary::before{content:'';position:absolute;left:.25em;top:calc(.825em - 4px);border-left:6px solid var(--faint);border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .12s}
+.jv details[open]>summary::before{transform:rotate(90deg)}
+.jv details>summary:hover{background:var(--active-bg)}
+.jv details>summary:hover::before{border-left-color:var(--accent)}
+.jv details[open]>summary .jv-sum,.jv details[open]>summary .jv-ci{display:none}
+.jv-kids{margin-left:.55em;padding-left:.55em;border-left:1px solid var(--border)}
+.jv-row,.jv-end{padding-left:1.1em}
+.jv-key{color:var(--s-attr);cursor:copy}
+.jv-key:hover{text-decoration:underline}
+.jv-idx{color:var(--faint)}
+.jv-str{color:var(--s-str)}
+a.jv-str{text-decoration:underline;text-decoration-color:rgba(var(--c-green),.4)}
+a.jv-str::after{display:none}
+.jv-num{color:var(--s-num)}
+.jv-bool,.jv-null{color:var(--s-lit)}
+.jv-p{color:var(--faint)}
+.jv-sum{color:var(--faint);font-style:italic;font-size:.88em;margin:0 .45em;font-family:var(--ui-font)}
+.jv-more{margin:4px 0 4px 1.1em;font:inherit;font-size:.85em;background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:2px 10px;cursor:pointer}
+.jv-more:hover{color:var(--strong)}
+.jv-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 14px;font-family:var(--ui-font);font-size:12.5px;padding-bottom:10px;border-bottom:1px solid var(--border-soft)}
+.jv-bar .btn{padding:3px 10px;font-size:12px}
+.jv-ok{color:rgb(var(--c-green));font-weight:600}
+.jv-meta{color:var(--faint)}
+.jv-warn{color:rgb(var(--c-orange))}
+.jv-sp{flex:1}
+.jv-err{background:rgba(var(--c-red),.1);border-left:3px solid rgb(var(--c-red));border-radius:5px;padding:10px 14px;margin-bottom:12px;font-family:var(--ui-font);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.jv-err b{color:rgb(var(--c-red))}
+.jv-loc{color:var(--muted)}
+.jv-err .btn{margin-left:auto;padding:3px 10px;font-size:12px}
+.jv-snip{background:var(--code-bg);border-radius:6px;padding:.7em 1em;font-family:var(--code-font);font-size:var(--code-size);line-height:1.55;overflow-x:auto;white-space:pre}
+.jv-ln{display:block}
+.jv-ln.bad{background:rgba(var(--c-red),.18)}
+.jv-lno{display:inline-block;min-width:3em;color:var(--faint);user-select:none}
+.cb .cb-tree{width:24px;height:24px;opacity:0;background:var(--code-bg)}
+.cb .cb-tree .ico{width:14px;height:14px}
+.cb:hover .cb-tree,.cb .cb-tree.on{opacity:1}
+.cb .cb-tree.on{color:var(--accent)}
+.cb.tree-on pre{display:none}
+.cb:not(.tree-on) .jv-host{display:none}
+.cb .jv-host{padding:.75em 1em .75em .6em}
+::highlight(json-err){text-decoration:wavy underline rgb(var(--c-red));text-decoration-thickness:2px;background-color:rgba(var(--c-red),.25)}
 ::highlight(find-all){background-color:var(--find-bg)}
 ::highlight(find-cur){background-color:var(--find-cur);color:var(--strong)}
 
@@ -551,7 +600,7 @@ body.code-nowrap .cb pre{white-space:pre}
 </div>
 <div id="print-root"></div>
 <div id="toast"></div>
-<input type="file" id="file-input" multiple accept=".md,.markdown,.mdown,.mkd,.txt,text/markdown,text/plain" hidden>
+<input type="file" id="file-input" multiple accept=".md,.markdown,.mdown,.mkd,.txt,.json,.jsonc,.json5,.geojson,.jsonl,.ndjson,text/markdown,text/plain,application/json" hidden>
 <input type="file" id="import-input" accept=".json,application/json" hidden>
 <script type="text/markdown" id="welcome-md">---
 title: Welcome
@@ -559,7 +608,7 @@ tags: [guide, markdown]
 created: 2026-10-05
 ---
 
-# Welcome to your Markdown editor
+# Welcome to Editor
 
 This is a **live preview** editor in the spirit of *Obsidian*: the line you are editing shows its raw Markdown, everything else is rendered. Click anywhere and start typing.
 
@@ -625,6 +674,19 @@ def fib(n: int) -> int:
     return n if n < 2 else fib(n - 1) + fib(n - 2)
 ```
 
+## JSON
+
+JSON code blocks have a tree button (top right of the block). Whole `.json` files open in a collapsible tree view with validation; try **New JSON document** in the ⋯ menu.
+
+```json
+{
+  "name": "Editor",
+  "offline": true,
+  "formats": ["markdown", "json"],
+  "settings": { "width": "50%", "font": "Monaco", "size": 15 }
+}
+```
+
 ## Tables
 
 | Feature    | Supported | Notes           |
@@ -656,7 +718,7 @@ This note links back to [[Welcome]]. Open the **Outline** tab in the sidebar to 
    ===================================================================== */
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const reEsc = s => s.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
-const MDOPT = { tab: 4, renderHTML: true, strict: false, lineNumbers: false, frontmatter: 'properties', showComments: true };
+const MDOPT = { tab: 4, renderHTML: true, strict: false, lineNumbers: false, frontmatter: 'properties', showComments: true, treeCodes: new Set() };
 const MDHOOK = { docExists: () => false, docContent: () => null, attUrl: () => null };
 
 function wsWidth(s) { let w = 0; for (const c of s) w += c === '\t' ? (MDOPT.tab - (w % MDOPT.tab)) : 1; return w; }
@@ -746,7 +808,7 @@ function makeCtx(doc, o = {}) {
     const k = m[1].toLowerCase().trim(); if (!(k in refs)) refs[k] = { url: m[2], title: m[3] };
   }
   if (doc.includes('[^')) for (const m of doc.matchAll(/\[\^([^\]\s]+)\](?!:)/g)) if (!fn.has(m[1])) fn.set(m[1], fn.size + 1);
-  const ctx = { refs, fn, fnDefs: new Map(), inlineFns: [], depth: o.depth || 0, live: !!o.live, slugs: {} };
+  const ctx = { refs, fn, referencedFns: new Set(fn.keys()), fnDefs: new Map(), inlineFns: [], depth: o.depth || 0, live: !!o.live, slugs: {} };
   ctx.fnNum = id => { if (!fn.has(id)) fn.set(id, fn.size + 1); return fn.get(id); };
   ctx.sig = JSON.stringify(refs) + '|' + [...fn.keys()].join(',');
   return ctx;
@@ -946,7 +1008,7 @@ function defLang(names, d) { for (const n of names.split(/\s+/)) HL[n] = d; }
 const JS_KW = 'break case catch class const continue debugger default delete do else export extends finally for from function if import in instanceof let new of return super switch this throw try typeof var void while with yield async await static get set';
 defLang('js javascript jsx mjs cjs node', { kw: W(JS_KW), lit: W('true false null undefined NaN Infinity'), bi: W('console window document Math JSON Object Array String Number Boolean Promise Map Set WeakMap Date RegExp Error Symbol BigInt globalThis require module exports process'), lc: '//', bc: ['/*', '*/'], str: '"\'`', types: true });
 defLang('ts typescript tsx', { kw: W(JS_KW + ' as interface type enum implements private public protected readonly declare namespace abstract keyof infer is satisfies unique'), lit: W('true false null undefined NaN Infinity'), bi: W('console window document Math JSON Object Array String Number Boolean Promise Map Set Date RegExp Error Symbol Record Partial Required Readonly Pick Omit any unknown never void string number boolean bigint object symbol'), lc: '//', bc: ['/*', '*/'], str: '"\'`', types: true });
-defLang('json jsonc json5', { json: true });
+defLang('json jsonc json5 geojson jsonl ndjson', { json: true });
 defLang('py python python3 py3 gyp', { kw: W('and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case'), lit: W('True False None'), bi: W('print len range self cls str int float list dict set tuple open super isinstance enumerate zip map filter sorted reversed min max sum abs any all type object Exception ValueError TypeError KeyError'), lc: '#', str: '"\'', triple: true, deco: true, types: true });
 defLang('java', { kw: W('abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for goto if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while var record yield sealed permits'), lit: W('true false null'), lc: '//', bc: ['/*', '*/'], str: '"\'', deco: true, types: true });
 defLang('kt kotlin kts', { kw: W('as break class continue do else for fun if in interface is null object package return super this throw try typealias val var when while by catch constructor delegate dynamic field file finally get import init param property receiver set setparam where actual abstract annotation companion const crossinline data enum expect external final infix inline inner internal lateinit noinline open operator out override private protected public reified sealed suspend tailrec vararg'), lit: W('true false null'), lc: '//', bc: ['/*', '*/'], str: '"\'', deco: true, types: true });
@@ -1149,6 +1211,19 @@ function splitUnits(doc) {
   return U;
 }
 
+/* JSON edit view: split large documents into chunks of ~200 lines, cut only before
+   lines with little indentation so that edits never shift the chunks that follow. */
+function jsonUnits(doc) {
+  const lines = doc.split('\n'), U = [];
+  if (lines.length < 400) return [{ t: 'json', a: 0, b: lines.length - 1, s: 0, e: doc.length }];
+  let a = 0, s = 0, o = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (i - a >= 200 && /^[ \t]{0,2}\S/.test(lines[i])) { U.push({ t: 'json', a, b: i - 1, s, e: o - 1 }); a = i; s = o; }
+    o += lines[i].length + 1;
+  }
+  U.push({ t: 'json', a, b: lines.length - 1, s, e: doc.length });
+  return U;
+}
 function listIndentUnit(doc) {
   if (/^\t+(?:[-*+]|\d+[.)])[ \t]/m.test(doc)) return MDOPT.tab;
   const m = doc.match(/^ +(?=(?:[-*+]|\d+[.)])[ \t])/gm);
@@ -1215,20 +1290,194 @@ function renderUnit(u, text, ctx) {
     case 'fm': return { cls: 'u-fm', html: renderFrontmatter(text.split('\n'), true) };
     case 'cmt': return { cls: 'u-cmt', html: MDOPT.showComments ? `<span class="cmt uc">${esc(text)}</span>` : '' };
     case 'html': return { cls: 'u-html', html: sanitizeHTML(text) };
+    case 'json': return { cls: 'u-jsonc', style: `contain-intrinsic-size:auto ${(u.b - u.a + 1) * 1.6}em`, html: `<span class="uc">${text.length < 400000 ? highlight(text, 'json') : esc(text)}</span>` };
     default: return { cls: 'u-p', html: `<span class="uc">${renderInline(text.replace(/^[ \t]+/, ''), ctx)}</span>` };
   }
 }
 
+/* ---------- JSON: validation, lenient parsing, tree view ---------- */
+/* Returns null if `s` is valid JSON, otherwise { pos, msg } pointing at the first error. */
+function jsonCheck(s) {
+  let i = 0;
+  const err = m => { throw { pos: i, msg: m }; };
+  const ws = () => { while (i < s.length && (s[i] === ' ' || s[i] === '\t' || s[i] === '\n' || s[i] === '\r')) i++; };
+  const str = () => {
+    i++;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === '"') { i++; return; }
+      if (c === '\\') { if (!/["\\\/bfnrtu]/.test(s[i + 1] || '')) { i++; err('Invalid escape sequence'); } i += 2; continue; }
+      if (c === '\n') err('Unterminated string (line break inside a string)');
+      i++;
+    }
+    err('Unterminated string');
+  };
+  const val = () => {
+    ws();
+    const c = s[i];
+    if (c === '{') {
+      i++; ws(); if (s[i] === '}') { i++; return; }
+      for (;;) {
+        ws();
+        if (s[i] !== '"') err(s[i] === "'" ? 'Property names must use double quotes' : s[i] === undefined ? 'Unexpected end of input' : 'Expected a "quoted" property name');
+        str(); ws();
+        if (s[i] !== ':') err('Expected ":" after the property name');
+        i++; val(); ws();
+        if (s[i] === ',') { i++; ws(); if (s[i] === '}') err('Trailing comma is not allowed'); continue; }
+        if (s[i] === '}') { i++; return; }
+        err(s[i] === undefined ? 'Unexpected end of input: missing "}"' : 'Expected "," or "}"');
+      }
+    }
+    if (c === '[') {
+      i++; ws(); if (s[i] === ']') { i++; return; }
+      for (;;) {
+        val(); ws();
+        if (s[i] === ',') { i++; ws(); if (s[i] === ']') err('Trailing comma is not allowed'); continue; }
+        if (s[i] === ']') { i++; return; }
+        err(s[i] === undefined ? 'Unexpected end of input: missing "]"' : 'Expected "," or "]"');
+      }
+    }
+    if (c === '"') return str();
+    if (c === '-' || (c >= '0' && c <= '9')) { const m = /^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?/.exec(s.slice(i, i + 500)); if (!m) err('Invalid number'); i += m[0].length; return; }
+    for (const w of ['true', 'false', 'null']) if (s.startsWith(w, i)) { i += w.length; return; }
+    if (i >= s.length) err('Unexpected end of input');
+    err(c === "'" ? 'Strings must use double quotes' : 'Unexpected character ' + JSON.stringify(c));
+  };
+  try { val(); ws(); if (i < s.length) err('Unexpected content after the JSON value'); return null; }
+  catch (e) { if (e && e.pos != null) return e; return { pos: 0, msg: String(e && e.message || e) }; }
+}
+function lineCol(s, pos) { const before = s.slice(0, pos); const line = (before.match(/\n/g) || []).length + 1; return { line, col: pos - before.lastIndexOf('\n') }; }
+/* strip // and /* *\/ comments and trailing commas outside of strings (JSONC) */
+function stripJsonc(s) {
+  return s.replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, str) => str || '')
+    .replace(/("(?:\\.|[^"\\])*")|,(\s*[}\]])/g, (m, str, close) => str || close);
+}
+/* { value, kind: 'json' | 'jsonc' | 'jsonl' } or { error: {pos,msg}, kind: 'invalid' } */
+function parseJsonLenient(s) {
+  const t = s.replace(/^\uFEFF/, '');
+  if (!t.trim()) return { error: { pos: 0, msg: 'The document is empty' }, kind: 'invalid' };
+  try { return { value: JSON.parse(t), kind: 'json' }; } catch (e) { }
+  const e1 = jsonCheck(t);
+  try { return { value: JSON.parse(stripJsonc(t)), kind: 'jsonc', error: e1 }; } catch (e) { }
+  const lines = t.split('\n').filter(l => l.trim());
+  if (lines.length > 1) { try { return { value: lines.map(l => JSON.parse(l)), kind: 'jsonl', error: e1 }; } catch (e) { } }
+  return { error: e1 || { pos: 0, msg: 'Invalid JSON' }, kind: 'invalid' };
+}
+// JSON.parse can round numeric literals and discard duplicate keys. Keep source intact.
+function jsonRewriteWarning(source) {
+  const s = stripJsonc(source), stack = [];
+  const numericKey = value => {
+    const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(value);
+    if (!m) return null;
+    let digits = (m[2] + (m[3] || '')).replace(/^0+/, '');
+    if (!digits) return '0';
+    let exponent = BigInt(m[4] || '0') - BigInt((m[3] || '').length);
+    while (digits.endsWith('0')) { digits = digits.slice(0, -1); exponent++; }
+    return m[1] + digits + 'e' + exponent;
+  };
+  const tokens = /"(?:\\.|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}\[\]]/g;
+  for (const match of s.matchAll(tokens)) {
+    const token = match[0];
+    if (token === '{') { stack.push(new Set()); continue; }
+    if (token === '[') { stack.push(null); continue; }
+    if (token === '}' || token === ']') { stack.pop(); continue; }
+    if (token[0] === '"') {
+      if (/^\s*:/.test(s.slice(match.index + token.length))) {
+        const keys = stack[stack.length - 1];
+        let key; try { key = JSON.parse(token); } catch { return null; }
+        if (keys?.has(key)) return 'Duplicate object keys would be lost. Edit the source directly.';
+        keys?.add(key);
+      }
+    } else {
+      const number = Number(token);
+      if (!Number.isFinite(number) || numericKey(token) !== numericKey(String(number)))
+        return 'A numeric value cannot be rewritten exactly. Edit the source directly.';
+    }
+  }
+  return null;
+}
+
+const JVREG = new Map(); let jvSeq = 0;
+const JV_CHUNK = 300;
+function jvPath(path, k) { return typeof k === 'number' ? `${path}[${k}]` : /^[A-Za-z_$][\w$]*$/.test(k) ? `${path}.${k}` : `${path}[${JSON.stringify(k)}]`; }
+function jvValue(v) {
+  if (v === null) return '<span class="jv-null">null</span>';
+  if (typeof v === 'string') {
+    const q = esc(JSON.stringify(v));
+    return /^(https?:\/\/|mailto:)\S+$/.test(v) ? `<a class="jv-str ext" href="${esc(safeUrl(v))}" target="_blank" rel="noopener">${q}</a>` : `<span class="jv-str">${q}</span>`;
+  }
+  if (typeof v === 'number') return `<span class="jv-num">${esc(String(v))}</span>`;
+  return `<span class="jv-bool">${esc(String(v))}</span>`;
+}
+function jvNode(k, v, path, depth, openDepth) {
+  const keyHtml = k === null ? '' : (typeof k === 'number' ? `<span class="jv-idx">${k}</span>` : `<span class="jv-key" data-path="${esc(path)}" title="Click to copy path: ${esc(path)}">${esc(JSON.stringify(k))}</span>`) + '<span class="jv-p">: </span>';
+  if (v && typeof v === 'object') {
+    const arr = Array.isArray(v), n = arr ? v.length : Object.keys(v).length;
+    const o = arr ? '[' : '{', c = arr ? ']' : '}';
+    if (!n) return `<div class="jv-row">${keyHtml}<span class="jv-p">${o}${c}</span></div>`;
+    const open = depth < openDepth;
+    const id = ++jvSeq; JVREG.set(id, { v, path, depth, openDepth });
+    if (JVREG.size > 200000) JVREG.delete(JVREG.keys().next().value);
+    return `<details class="jv-obj"${open ? ' open' : ''} data-jv="${id}"><summary>${keyHtml}<span class="jv-p">${o}</span><span class="jv-sum">${n} ${arr ? (n === 1 ? 'item' : 'items') : (n === 1 ? 'key' : 'keys')}</span><span class="jv-p jv-ci">${c}</span></summary>` +
+      (open ? `<div class="jv-kids">${jvChildren(v, path, depth + 1, openDepth, 0)}</div>` : '') + `<div class="jv-end"><span class="jv-p">${c}</span></div></details>`;
+  }
+  return `<div class="jv-row">${keyHtml}${jvValue(v)}</div>`;
+}
+function jvChildren(v, path, depth, openDepth, from) {
+  const arr = Array.isArray(v), keys = arr ? null : Object.keys(v), n = arr ? v.length : keys.length;
+  let h = '';
+  const to = Math.min(n, from + JV_CHUNK);
+  for (let i = from; i < to; i++) { const k = arr ? i : keys[i]; h += jvNode(k, v[k], jvPath(path, k), depth, openDepth); }
+  if (to < n) { const id = ++jvSeq; JVREG.set(id, { v, path, depth, openDepth, from: to }); h += `<button class="jv-more" data-more="${id}">Show ${Math.min(JV_CHUNK, n - to)} more of ${n - to} remaining…</button>`; }
+  return h;
+}
+function jvFill(det) {
+  if (det._filled || det.querySelector(':scope > .jv-kids')) { det._filled = true; return; }
+  const r = JVREG.get(+det.dataset.jv); if (!r) return;
+  const kids = document.createElement('div'); kids.className = 'jv-kids';
+  kids.innerHTML = jvChildren(r.v, r.path, r.depth + 1, r.openDepth, 0);
+  det.insertBefore(kids, det.querySelector(':scope > .jv-end'));
+  det._filled = true;
+}
+function jsonTreeHTML(value, openDepth) { return `<div class="jv">${jvNode(null, value, '$', 0, openDepth == null ? 2 : openDepth)}</div>`; }
+function fmtBytes(n) { return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+function jsonSummary(v) {
+  if (Array.isArray(v)) return `array · ${v.length} item${v.length === 1 ? '' : 's'}`;
+  if (v && typeof v === 'object') { const n = Object.keys(v).length; return `object · ${n} key${n === 1 ? '' : 's'}`; }
+  return v === null ? 'null' : typeof v;
+}
+function renderJsonView(text, openDepth) {
+  const warning = jsonRewriteWarning(text);
+  if (warning) return `<div class="jv-err"><b>Source view</b><span>${esc(warning)}</span></div><pre><code>${highlight(text, 'json')}</code></pre>`;
+  const r = parseJsonLenient(text);
+  const size = fmtBytes(new Blob([text]).size);
+  if (r.kind === 'invalid') {
+    const { line, col } = lineCol(text, r.error.pos);
+    const lines = text.split('\n');
+    const from = Math.max(0, line - 6), to = Math.min(lines.length, line + 5);
+    const snippet = lines.slice(from, to).map((l, k) => `<span class="jv-ln${from + k + 1 === line ? ' bad' : ''}"><span class="jv-lno">${from + k + 1}</span>${highlight(l, 'json') || ' '}</span>`).join('');
+    return `<div class="jv-wrap"><div class="jv-err"><span><b>✗ Invalid JSON:</b> ${esc(r.error.msg)} <span class="jv-loc">(line ${line}, column ${col})</span></span><button class="btn" data-jva="goto" data-pos="${r.error.pos}">Show in editor</button></div><pre class="jv-snip">${snippet}</pre></div>`;
+  }
+  const note = r.kind === 'jsonc' ? `<span class="jv-warn">Not strict JSON (comments or trailing commas), shown leniently</span>` : r.kind === 'jsonl' ? `<span class="jv-warn">JSON Lines: one value per line, shown as an array</span>` : '';
+  return `<div class="jv-wrap"><div class="jv-bar"><span class="jv-ok">✓ ${r.kind === 'json' ? 'Valid JSON' : r.kind === 'jsonc' ? 'JSONC' : 'JSON Lines'}</span><span class="jv-meta">${jsonSummary(r.value)} · ${size}</span>${note}<span class="jv-sp"></span>` +
+    `<button class="btn" data-jva="expand">Expand all</button><button class="btn" data-jva="collapse">Collapse all</button>${r.kind === 'json' ? '<button class="btn" data-jva="format">Format</button>' : ''}<button class="btn" data-jva="copy">Copy</button></div>${jsonTreeHTML(r.value, openDepth)}</div>`;
+}
+
 /* ---------- shared block renderers ---------- */
 const ICON = {};
+const JSON_LANGS = /^(json|jsonc|json5|geojson|jsonl|ndjson)$/i;
 function codeBlock(code, lang) {
+  if (JSON_LANGS.test(lang || '') && MDOPT.treeCodes && MDOPT.treeCodes.has(code)) {
+    const r = parseJsonLenient(code);
+    if (r.kind !== 'invalid' && !jsonRewriteWarning(code)) return `<div class="cb tree-on"><div class="cb-head"><span class="cb-lang">${esc(lang)}</span><button class="ib cb-tree on" title="Show as code" tabindex="-1">${ICON.tree || '⊞'}</button><button class="ib cb-copy" title="Copy code" tabindex="-1">${ICON.copy || 'copy'}</button></div><pre><code class="uc">${highlight(code, lang)}</code></pre><div class="jv-host">${jsonTreeHTML(r.value, 2)}</div></div>`;
+  }
   const hl = highlight(code, lang);
   let pre;
   if (MDOPT.lineNumbers) {
     const n = code.split('\n').length;
     pre = `<pre class="lnums"><span class="gut">${Array.from({ length: n }, (_, i) => i + 1).join('\n')}</span><code class="uc">${hl}</code></pre>`;
   } else pre = `<pre><code class="uc">${hl}</code></pre>`;
-  return `<div class="cb"><div class="cb-head">${lang ? `<span class="cb-lang">${esc(lang)}</span>` : ''}<button class="ib cb-copy" title="Copy code" tabindex="-1">${ICON.copy || 'copy'}</button></div>${pre}</div>`;
+  return `<div class="cb"><div class="cb-head">${lang ? `<span class="cb-lang">${esc(lang)}</span>` : ''}${JSON_LANGS.test(lang || '') ? `<button class="ib cb-tree" title="Show as tree" tabindex="-1">${ICON.tree || '⊞'}</button>` : ''}<button class="ib cb-copy" title="Copy code" tabindex="-1">${ICON.copy || 'copy'}</button></div>${pre}</div>`;
 }
 function splitRow(line) {
   let s = line.trim();
@@ -1359,6 +1608,7 @@ function renderBlocks(src, ctx, base = 0) {
       let j = i, body = [L.slice(m[0].length)];
       while (j + 1 < lines.length && /^(?: {2,}|\t)\S/.test(lines[j + 1])) body.push(lines[++j].trim());
       if (!ctx.fnDefs.has(m[1])) ctx.fnDefs.set(m[1], body.join('\n'));
+      ctx.fnNum(m[1]); // Display source definitions even if no body reference was matched.
       i = j + 1; continue;
     }
     if (RE.refDef.test(L)) { i++; continue; }
@@ -1443,11 +1693,15 @@ function renderDocument(doc, o = {}) {
     let fl = '';
     for (const [id, n] of ctx.fn) {
       const d = ctx.fnDefs.get(id);
-      fl += `<li id="fn-${esc(id)}" value="${n}">${d != null ? renderInline(d, ctx) : '<span style="color:var(--faint)">missing footnote</span>'} <a class="backref" data-fnback="${esc(id)}">↩</a></li>`;
+      const backref = ctx.referencedFns.has(id) ? ` <a class="backref" data-fnback="${esc(id)}">↩</a>` : '';
+      fl += `<li id="fn-${esc(id)}" value="${n}">${d != null ? renderInline(d, ctx) : '<span style="color:var(--faint)">missing footnote</span>'}${backref}</li>`;
     }
     ctx.inlineFns.forEach((t, k) => { fl += `<li value="${ctx.fn.size + k + 1}">${renderInline(t, ctx)}</li>`; });
     html += `<section class="footnotes"><hr><ol>${fl}</ol></section>`;
   }
+  // Definitions without body references also receive numbers; resolve inline-note
+  // numbers after every definition has been parsed to keep references consistent.
+  html = html.replace(/(<a data-ifn="(\d+)">)\d+(<\/a>)/g, (_, open, index, close) => open + (ctx.fn.size + Number(index) + 1) + close);
   return html;
 }
 
@@ -1458,7 +1712,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-
+const SELFTEST = /selftest|e2e/.test(location.hash);
 
 /* Icon path data is based on Lucide (https://lucide.dev), used under the ISC License:
    Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT).
@@ -1523,9 +1777,11 @@ const ICON_PATHS = {
   refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
   unplug: '<path d="m19 5 3-3M2 22l3-3M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4ZM7.5 13.5 10 11M10.5 16.5 13 14M12 6l6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z"/>',
   chevronRight: '<path d="m9 18 6-6-6-6"/>',
+  tree: '<path d="M21 12h-8M21 6H8M21 18h-8M3 6v4c0 1.1.9 2 2 2h3M3 10v6c0 1.1.9 2 2 2h3"/>',
+  braces: '<path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/>',
 };
 const icon = (n, cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[n] || ''}</svg>`;
-for (const k of ['copy', 'chevronDown', 'edit', 'info', 'flame', 'check', 'help', 'alert', 'x', 'zap', 'bug', 'list', 'quote', 'clipboard', 'checkCircle']) ICON[k] = icon(k);
+for (const k of ['copy', 'tree', 'chevronDown', 'edit', 'info', 'flame', 'check', 'help', 'alert', 'x', 'zap', 'bug', 'list', 'quote', 'clipboard', 'checkCircle']) ICON[k] = icon(k);
 
 /* ---------- themes ---------- */
 const THEMES = {
@@ -1570,9 +1826,10 @@ const DEFAULTS = {
   imgMaxWidth: 100, showComments: true,
   showSidebar: true, sidebarWidth: 260, showStatus: true, statusWords: true, statusChars: true, statusLines: false, statusReading: true, wpm: 220,
   showToolbar: false, confirmDelete: true,
+  jsonOpen: 'tree', jsonDepth: 2, jsonIndent: '2',
   autosave: true, linkedAutosave: false, autosaveDelay: 400, sortOrder: 'modified', newNoteName: 'Untitled', openLast: true, printLight: true,
 };
-const RERENDER_KEYS = new Set(['renderHTML', 'strictLineBreaks', 'frontmatter', 'codeLineNumbers', 'tabSize', 'showComments', 'theme', 'autoTheme', 'lightTheme']);
+const RERENDER_KEYS = new Set(['jsonDepth', 'jsonIndent', 'renderHTML', 'strictLineBreaks', 'frontmatter', 'codeLineNumbers', 'tabSize', 'showComments', 'theme', 'autoTheme', 'lightTheme']);
 let S = Object.assign({}, DEFAULTS);
 
 /* ---------- storage ---------- */
@@ -1618,8 +1875,9 @@ const Docs = {
     while (this.list.some(d => d.id !== exceptId && d.title.toLowerCase() === n.toLowerCase())) n = t + ' ' + (i++);
     return n;
   },
-  create(title, text = '') {
+  create(title, text = '', type) {
     const d = { id: uid(), title: this.unique(title), created: Date.now(), updated: Date.now(), pinned: false };
+    if (type === 'json') d.type = 'json';
     this.list.push(d); Store.set('doc.' + d.id, text); this.saveIndex(); return d;
   },
   remove(id) { this.list = this.list.filter(d => d.id !== id); Store.del('doc.' + id); this.saveIndex(); },
@@ -1635,7 +1893,7 @@ const Docs = {
 const Att = {
   urls: new Map(), db: null,
   async init() {
-    if (!window.indexedDB) return;
+    if (SELFTEST || !window.indexedDB) return;
     try {
       this.db = await new Promise((res, rej) => {
         const r = indexedDB.open('mdeditor', 2);
@@ -1673,7 +1931,7 @@ const ed = $('#editor'), scroller = $('#scroller');
 const E = {
   doc: '', units: [], ctx: null, region: null, ri: null, el: null, elType: '', mode: 'live', id: null,
   composing: false, preSel: null, epoch: 0, hist: new Map(), undo: [], redo: [], dirty: false,
-  keyOf: new WeakMap(), goalX: null, mouse: null, breakGroup: false,
+  keyOf: new WeakMap(), goalX: null, mouse: null, breakGroup: false, type: 'md', jmode: null, mdMode: null,
 };
 const PT = (() => { const d = document.createElement('div'); try { d.contentEditable = 'plaintext-only'; return d.contentEditable === 'plaintext-only'; } catch (e) { return false; } })();
 
@@ -1807,6 +2065,7 @@ function pointToAbs(x, y) {
 /* ---------- rendering ---------- */
 function activeCls(u, t) {
   if (t === 'multi') return 'u-multi';
+  if (t === 'json') return 'u-json-raw';
   return ({ h: 'u-h', setext: 'u-h', code: 'raw-codeblock', icode: 'raw-codeblock', fm: 'raw-codeblock', blank: 'u-blank', li: 'u-li-raw', cont: 'u-li-raw' })[u.t] || 'u-' + u.t + '-raw';
 }
 function makeActive() {
@@ -1820,7 +2079,7 @@ function makeActive() {
 }
 function paint(el, text) {
   let html;
-  try { html = rawHTML(text, E.region[0] === 0); } catch (e) { html = esc(text); }
+  try { html = E.type === 'json' ? (text.length < 400000 ? highlight(text, 'json') : esc(text)) : rawHTML(text, E.region[0] === 0); } catch (e) { html = esc(text); }
   const tail = (text === '' || text.endsWith('\n')) ? '<br data-s="1">' : '';
   el.innerHTML = html + tail;
   el._text = text;
@@ -1828,15 +2087,18 @@ function paint(el, text) {
   el._epoch = E.epoch; el._start0 = E.region[0] === 0;
 }
 function render(sel, opts = {}) {
-  const U = E.units = splitUnits(E.doc);
-  E.ctx = makeCtx(E.doc, { live: true });
-  E.ctx.iu = listIndentUnit(E.doc);
+  const json = E.type === 'json';
+  if (json && E.mode === 'source') E.mode = 'live';
+  const U = E.units = json ? jsonUnits(E.doc) : splitUnits(E.doc);
+  E.ctx = makeCtx(json ? '' : E.doc, { live: true });
+  E.ctx.iu = json ? 4 : listIndentUnit(E.doc);
   ed.classList.toggle('reading', E.mode === 'reading');
   ed.classList.toggle('source', E.mode === 'source');
+  ed.classList.toggle('json', json);
   if (E.mode === 'reading') {
     E.el = null; E.region = null; E.ri = null;
     ed.removeAttribute('contenteditable');
-    ed.innerHTML = renderDocument(E.doc);
+    ed.innerHTML = json ? renderJsonView(E.doc, S.jsonDepth) : renderDocument(E.doc);
     ed.classList.remove('has-active');
     afterRender(); return;
   }
@@ -1935,7 +2197,8 @@ function redo() { const st = E.redo.pop(); if (!st) return; E.undo.push({ doc: E
 
 const lineStartAt = p => E.doc.lastIndexOf('\n', p - 1) + 1;
 const lineEndAt = p => { const i = E.doc.indexOf('\n', p); return i < 0 ? E.doc.length : i; };
-const indentUnit = () => S.useTabs ? '\t' : ' '.repeat(S.tabSize);
+const indentUnit = () => E.type === 'json' ? jsonIndent() : S.useTabs ? '\t' : ' '.repeat(S.tabSize);
+const jsonIndent = () => S.jsonIndent === 'tab' ? '\t' : ' '.repeat(+S.jsonIndent || 2);
 function outdentStr(ind) { if (ind.startsWith('\t')) return ind.slice(1); return ind.replace(new RegExp('^ {1,' + S.tabSize + '}'), ''); }
 function nextMarker(m) { const mk = m[2]; return /\d/.test(mk) ? (parseInt(mk) + 1) + mk.slice(-1) : mk; }
 
@@ -1943,6 +2206,11 @@ function onEnter(soft) {
   const s = E.preSel || absSel(); if (!s) return;
   const lo = Math.min(s.a, s.f), hi = Math.max(s.a, s.f);
   const ls = lineStartAt(lo), line = E.doc.slice(ls, lineEndAt(lo));
+  if (E.type === 'json') {
+    const ind = /^[ \t]*/.exec(line)[0].slice(0, lo - ls), unit = jsonIndent(), prev = E.doc.slice(ls, lo).trimEnd().slice(-1), next = E.doc[hi];
+    if ((prev === '{' && next === '}') || (prev === '[' && next === ']')) { const p = lo + 1 + ind.length + unit.length; return edit(lo, hi, '\n' + ind + unit + '\n' + ind, { a: p, f: p }); }
+    return edit(lo, hi, '\n' + ind + (prev === '{' || prev === '[' ? unit : ''));
+  }
   const u = E.units[unitIndexAt(E.units, lo)];
   if (u && (u.t === 'code' || u.t === 'icode' || u.t === 'fm')) {
     return edit(lo, hi, '\n' + /^[ \t]*/.exec(line)[0].slice(0, lo - ls));
@@ -1979,6 +2247,7 @@ const MDPAIRS = { '*': '*', '_': '_', '=': '=', '~': '~' };
 function handleTypeChar(ch) {
   const s = E.preSel; if (!s || ch.length !== 1) return false;
   const lo = Math.min(s.a, s.f), hi = Math.max(s.a, s.f), d = E.doc;
+  if (E.type === 'json' && MDPAIRS[ch]) return false;
   if (hi > lo && ((S.autoPair && PAIRS[ch]) || (S.autoPairMd && MDPAIRS[ch]))) {
     const cl = PAIRS[ch] || MDPAIRS[ch];
     const [a, b] = trimRange(lo, hi);
@@ -1986,7 +2255,9 @@ function handleTypeChar(ch) {
   }
   if (hi === lo && S.autoPair) {
     const next = d[lo] || '', prev = d[lo - 1] || '';
-    if (((ch === ')' || ch === ']' || ch === '}') && next === ch) || ((ch === '"' || ch === '`') && next === ch && E.autoPaired === lo)) {
+    const lineBefore = d.slice(lineStartAt(lo), lo).replace(/\\./g, '');
+    const insideQuote = (lineBefore.split(ch).length - 1) % 2 === 1;
+    if (((ch === ')' || ch === ']' || ch === '}') && next === ch) || ((ch === '"' || ch === '`') && next === ch && (E.autoPaired === lo || insideQuote))) {
       E.preSel = null; setSelAbs({ a: lo + 1, f: lo + 1 }); E.autoPaired = null; return true;
     }
     if (PAIRS[ch]) {
@@ -2002,7 +2273,7 @@ function smartBackspace() {
   const s = absSel(); if (!s || s.a !== s.f) return false;
   const p = s.a, d = E.doc, ls = lineStartAt(p), before = d.slice(ls, p);
   if (S.autoPair && p > 0 && PAIRS[d[p - 1]] && d[p] === PAIRS[d[p - 1]] && E.autoPaired === p) { edit(p - 1, p + 1, ''); return true; }
-  if (!S.smartLists) return false;
+  if (!S.smartLists || E.type === 'json') return false;
   const m = RE.li.exec(before);
   if (m && m[0].length === before.length && /[ \t]$/.test(before)) {
     if (m[4]) { edit(p - m[4].length, p, ''); return true; }
@@ -2110,7 +2381,8 @@ function toggleTaskAtLine(lineIdx) {
 /* =====================================================================
    Local folder ("vault"): edit .md files on disk via the File System Access API
    ===================================================================== */
-const MD_FILE = /\.(md|markdown|mdown|mkd)$/i;
+/* documents shown in the folder tree: Markdown and JSON */
+const MD_FILE = /\.(md|markdown|mdown|mkd|json|jsonc|json5|geojson|jsonl|ndjson)$/i;
 const FS = {
   supported: typeof window.showDirectoryPicker === 'function',
   root: null, name: '', saved: null, files: new Map(), dirs: new Map(), images: new Map(),
@@ -2246,9 +2518,9 @@ const FS = {
     const has = async n => { if (this.files.has((dirPath ? dirPath + '/' : '') + n) || this.dirs.has((dirPath ? dirPath + '/' : '') + n)) return true; try { await d.getFileHandle(n); return true; } catch (e) { } try { await d.getDirectoryHandle(n); return true; } catch (e) { } return false; };
     let n = base + ext, i = 1; while (await has(n)) n = base + ' ' + (i++) + ext; return n;
   },
-  async create(dirPath, title, text = '') {
+  async create(dirPath, title, text = '', ext = '.md') {
     const d = this.dirs.get(dirPath) || this.root; dirPath = this.dirs.has(dirPath) ? dirPath : '';
-    const name = await this.uniqueName(d, dirPath, Docs.clean(title) || S.newNoteName || 'Untitled', '.md');
+    const name = await this.uniqueName(d, dirPath, Docs.clean(title) || S.newNoteName || 'Untitled', ext);
     const h = await d.getFileHandle(name, { create: true });
     const path = (dirPath ? dirPath + '/' : '') + name;
     const e = { id: 'fs:' + path, path, name, title: name.replace(MD_FILE, ''), dir: dirPath, handle: h, updated: Date.now(), created: Date.now(), content: '', crlf: false, fs: true, pinned: false };
@@ -2366,7 +2638,7 @@ function treeHTML(dir, depth) {
   return h;
 }
 function fileRow(f, depth, showPath) {
-  return `<div class="ti file${E.id === f.id ? ' on' : ''}" data-path="${esc(f.path)}" style="padding-left:${22 + depth * 14}px" title="${esc(f.path)}"><span class="tn">${esc(f.title)}</span>${showPath && f.dir ? `<span class="tp">${esc(f.dir)}</span>` : ''}${f.error ? '<span class="tp" style="color:rgb(var(--c-red))">!</span>' : ''}</div>`;
+  return `<div class="ti file${E.id === f.id ? ' on' : ''}" data-path="${esc(f.path)}" style="padding-left:${22 + depth * 14}px" title="${esc(f.path)}"><span class="tn">${esc(f.title)}</span>${/\.(json|jsonc|json5|geojson|jsonl|ndjson)$/i.test(f.name) ? '<span class="badge">JSON</span>' : ''}${showPath && f.dir ? `<span class="tp">${esc(f.dir)}</span>` : ''}${f.error ? '<span class="tp" style="color:rgb(var(--c-red))">!</span>' : ''}</div>`;
 }
 async function fsNewFolder(parent) {
   const n = await dialog({ title: 'New folder', input: 'New folder', buttons: [{ label: 'Cancel', value: false }, { label: 'Create', value: true }] });
@@ -2403,6 +2675,7 @@ function wireFolderUI() {
       e.preventDefault(); const p = d.dataset.dir;
       menu([
         { label: 'New note here', icon: 'filePlus', run: () => { FS.targetDir = p; newDoc(); } },
+        { label: 'New JSON file here', icon: 'braces', run: () => { FS.targetDir = p; newJsonDoc(); } },
         { label: 'New folder here', icon: 'folderPlus', run: () => fsNewFolder(p) },
         '-', { label: 'Delete folder', icon: 'trash', danger: true, run: () => fsDeleteDir(p) },
       ], e.clientX, e.clientY);
@@ -2430,6 +2703,111 @@ function fsStartRename(ent) {
   const done = ok => { if (inp._done) return; inp._done = true; if (ok) renameDoc(ent.id, inp.value); else renderTree(); };
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); done(true); } if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } });
   inp.addEventListener('blur', () => done(true)); inp.addEventListener('click', e => e.stopPropagation());
+}
+
+/* ---------- self test (open the file with #selftest) ---------- */
+function runSelfTest() {
+  const R = []; const ok = (name, cond, info) => R.push({ name, pass: !!cond, info: cond ? '' : String(info === undefined ? '' : info).slice(0, 300) });
+  const div = document.createElement('div');
+  const welcome = $('#welcome-md').textContent.replace(/^\n/, '');
+  // 1. raw highlighter keeps text exactly
+  const samples = [welcome, ...welcome.split('\n'), '**a *b* c**', '***x***', '*a **b** c*', '`a` **b** `c`', '[a **b**](http://x.y "t") c', '![img|200](x.png)', '[[a|b]] [[c#d]] ![[e]]',
+    '> [!note]- T\n> body', '- [ ] t\n\t- [x] u', '| a | b |\n|---|:-:|\n| `x|y` | [[p\\|q]] |', '%% c %%', '%%\nblock\n%%', '<b>x</b> <!-- c -->', 'snake_case_name __b__ _i_',
+    '\\*no\\* \\\\ \\`', 'url https://a.b/c?d=e. and www.x.org', '#tag #a/b #1 c#d', '==hi== ~~s~~', 'text\n===', '```js\nconst a = `x${1}`; // c\n```', '```\nunclosed', '---\na: 1\n---\nbody', '[^1] and ^[inline]', 'a  \nb\\', '1) x\n2) y', '\t\tindented', '', '\n', '\n\n', 'end\n',
+    '* * *', '<div>\n<span>x</span>\n</div>', 'a | b\n- | -\n1 | 2', '> > nested\n> > - list', '[ref]: http://x "T"', 'emoji 😀 **ü** ñ'];
+  let bad = 0;
+  for (const s of samples) { div.innerHTML = rawHTML(s, true); if (getText(div) !== s) { bad++; ok('raw invariant: ' + JSON.stringify(s).slice(0, 60), false, JSON.stringify(getText(div)).slice(0, 200)); } }
+  ok(`raw highlighter preserves text (${samples.length} samples)`, bad === 0);
+  // 2. code highlighter keeps text exactly
+  const code = { js: 'const x = `a${b}`; // hi\nfunction f(a) { return /re/g.test("s\\"q") ? 0x1f : 1e3; }', python: 'def f(x):\n    """doc"""\n    return x if x else None # c', css: '.a:hover > #b { color: #fff; margin: 0 1.5em !important; }\n@media (x) { a { b: c } }',
+    html: '<!doctype html><div class="a" id=b data-x=\'y\'>t &amp; <br/></div><!-- c -->', json: '{"a": [1, true, null, "s\\"x"], "b": -1.5e3}', sql: "SELECT * FROM t WHERE a = 'x' -- c\n/* b */", bash: 'echo "$HOME" ${x} # c\nif [ -f x ]; then ls; fi',
+    powershell: 'Get-ChildItem -Path $env:TEMP | Where-Object { $_.Length -gt 1kb } # c\n<# block #>', yaml: 'a: 1\nb:\n  - "x" # c\nc: true', diff: '--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new', rust: 'fn main() { let s = "x"; println!("{}", s); }', go: 'func main() { fmt.Println(`raw`) }',
+    cpp: '#include <x>\nint main() { return 0; }', ini: '[s]\nk = v ; c', md: '# h\n**b** [l](u)', unknown: 'plain <text> & stuff' };
+  bad = 0;
+  for (const [l, c] of Object.entries(code)) { div.innerHTML = highlight(c, l); if (div.textContent !== c) { bad++; ok('highlight invariant ' + l, false, div.textContent); } }
+  ok(`code highlighter preserves text (${Object.keys(code).length} languages)`, bad === 0);
+  div.innerHTML = highlight(code.js, 'js'); ok('js keywords highlighted', div.querySelector('.tk-kw') && div.querySelector('.tk-str') && div.querySelector('.tk-com') && div.querySelector('.tk-fn'));
+  // 3. units
+  const U = splitUnits(welcome); const types = U.map(u => u.t);
+  ok('units: frontmatter first', types[0] === 'fm', types.slice(0, 3));
+  for (const t of ['h', 'p', 'li', 'q', 'callout', 'code', 'table', 'hr', 'fn', 'ref', 'blank']) ok('units contain ' + t, types.includes(t), types.join(','));
+  ok('units cover doc contiguously', U.every((u, i) => i === 0 ? u.s === 0 : u.s === U[i - 1].e + 1) && U[U.length - 1].e === welcome.length);
+  ok('units: 3 callouts, 3 code blocks', types.filter(t => t === 'callout').length === 3 && types.filter(t => t === 'code').length === 3, types.join(','));
+  // JSON
+  ok('json: valid passes', jsonCheck('{"a":[1,2,{"b":null}],"c":"x\\"y","d":-1.5e3}') === null);
+  const je = (s, pos, msgPart) => { const e = jsonCheck(s); ok(`json error in ${JSON.stringify(s)}`, e && e.pos === pos && e.msg.includes(msgPart), JSON.stringify(e)); };
+  je('{"a":1,}', 7, 'Trailing comma'); je("{'a':1}", 1, 'double quotes'); je('{"a" 1}', 5, 'Expected ":"'); je('[1,2', 4, 'end of input'); je('{"a":1}x', 7, 'after the JSON'); je('{"a":tru}', 5, 'Unexpected');
+  ok('json: lineCol', JSON.stringify(lineCol('{\n  "a": x\n}', 10)) === '{"line":2,"col":9}', JSON.stringify(lineCol('{\n  "a": x\n}', 10)));
+  ok('json: lenient jsonc', parseJsonLenient('{\n // c\n "a": 1, /* x */ "b": "//not a comment",\n}').kind === 'jsonc' && parseJsonLenient('{"a":1,"b":"//x",}').value.b === '//x');
+  ok('json: json lines', parseJsonLenient('{"a":1}\n{"a":2}').kind === 'jsonl' && parseJsonLenient('{"a":1}\n{"a":2}').value.length === 2);
+  ok('json: invalid kind', parseJsonLenient('{"a":').kind === 'invalid');
+  const jv = renderJsonView('{"a":{"b":[1,2,3]},"url":"https://x.y","n":null}', 2);
+  ok('json view: tree + stats', jv.includes('class="jv"') && jv.includes('Valid JSON') && jv.includes('object · 3 keys') && jv.includes('class="jv-str ext"') && jv.includes('jv-null'), jv.slice(0, 300));
+  ok('json view: key path', jv.includes('data-path="$.a.b"'), jv);
+  const jvBad = renderJsonView('{\n  "a": 1,\n  "b": ,\n}', 2);
+  ok('json view: error with line', jvBad.includes('Invalid JSON') && jvBad.includes('line 3') && jvBad.includes('jv-ln bad'), jvBad.slice(0, 300));
+  const big = JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ i })));
+  ok('json view: large arrays are chunked', (renderJsonView(big, 2).match(/class="jv-obj"/g) || []).length <= JV_CHUNK + 1 && renderJsonView(big, 2).includes('jv-more'));
+  ok('json code block has tree button', renderDocument('```json\n{"a":1}\n```').includes('cb-tree'));
+  ok('block comment unit', splitUnits('%%\nhidden\n%%').length === 1 && splitUnits('%%\nhidden\n%%')[0].t === 'cmt');
+  ok('setext unit', splitUnits('Title\n===\n').some(u => u.t === 'setext'));
+  ok('table unit', splitUnits('a|b\n-|-\n1|2').length === 1);
+  ok('unclosed fence swallows rest', splitUnits('x\n```\na\n\nb').length === 2);
+  // 4. inline
+  const ctx = makeCtx('[r]: http://ref.example\n[^1]: f');
+  const I = s => renderInline(s, ctx);
+  const cases = [
+    ['**b**', '<strong>b</strong>'], ['*i*', '<em>i</em>'], ['***bi***', '<strong><em>bi</em></strong>'], ['__b__', '<strong>b</strong>'], ['_i_', '<em>i</em>'],
+    ['`c`', '<code class="ic">c</code>'], ['==h==', '<mark>h</mark>'], ['~~s~~', '<del>s</del>'], ['[a](http://x.y)', 'href="http://x.y"'], ['[a][r]', 'href="http://ref.example"'], ['[r]', 'href="http://ref.example"'],
+    ['[[Note|Alias]]', '>Alias</a>'], ['[[Note#Head]]', 'Note › Head'], ['#tag', 'class="tag"'], ['x[^1]', 'class="fnref"'], ['https://a.com/x.', 'href="https://a.com/x"'], ['<b>x</b>', '<b>x</b>'],
+    ['![a|100](p.png)', 'width="100"'], ['<https://x.y>', 'href="https://x.y"'], ['`**not bold**`', '<code class="ic">**not bold**</code>'], ['**`code` in bold**', '<strong><code'],
+  ];
+  for (const [s, want] of cases) { const h = I(s); ok('inline ' + s, h.includes(want), h); }
+  const neg = [['snake_case_word', '<em>'], ['2 * 3 * 4', '<em>'], ['\\*x\\*', '<em>'], ['<script>alert(1)<\/script>', '<script'], ['<img src=x onerror=alert(1)>', 'onerror'], ['[x](javascript:alert(1))', 'javascript:'], ['C# rocks', 'class="tag"'], ['a == b', '<mark>']];
+  for (const [s, bad] of neg) { const h = I(s); ok('inline not ' + s, !h.includes(bad), h); }
+  // 5. blocks
+  const doc = renderDocument(welcome);
+  for (const w of ['<table', 'class="callout', 'class="footnotes"', 'task-cb', '<h1', '<ol', '<ul', '<blockquote', 'class="props', 'tk-kw', '<hr>']) ok('document has ' + w, doc.includes(w));
+  ok('comment hidden in reading', !doc.includes('This is a comment'));
+  ok('nested list', /<li>Another item<ul><li>Nested item<ul><li>Deeper still/.test(doc.replace(/\n/g, '')), doc.match(/<ul>.{0,200}/)?.[0]);
+  ok('ordered list start', renderDocument('3. a\n4. b').includes('start="3"'));
+  ok('loose list paragraphs', renderDocument('- a\n\n- b').includes('<li><p>a</p>'));
+  ok('tight list', renderDocument('- a\n- b').includes('<li>a</li>'));
+  ok('strict breaks off -> br', renderDocument('a\nb').includes('a<br>b'));
+  ok('setext h2', renderDocument('Title\n---').includes('<h2'));
+  ok('indented code', renderDocument('para\n\n    code here').includes('code here</code>'));
+  ok('callout fold', renderDocument('> [!tip]- T\n> x').includes('folded'));
+  ok('table align', renderDocument('|a|b|\n|:-:|-:|\n|1|2|').includes('text-align:center'));
+  ok('html block sanitized', !renderDocument('<div onclick="x()">a</div>').includes('onclick'));
+  // 6. editor engine smoke test
+  try {
+    const E0 = { doc: E.doc, mode: E.mode };
+    E.mode = 'live'; E.doc = '# Title\n\nHello **world**\n- item'; render({ a: 9, f: 9 });
+    ok('engine: active unit is paragraph', E.el && E.elType === 'p' && getText(E.el) === 'Hello **world**', E.elType + ' ' + (E.el && getText(E.el)));
+    ok('engine: caret mapped', JSON.stringify(absSel()) === '{"a":9,"f":9}', JSON.stringify(absSel()));
+    ok('engine: other units rendered', ed.querySelector('.u-h.h1') && ed.querySelector('.u-li .bul'));
+    // simulate typing a char via DOM mutation + input event
+    const [n, o] = posAt(E.el, 5); n.insertData ? n.insertData(o, '!') : null; setSelAbs({ a: 9 + 6, f: 9 + 6 }); E.preSel = { a: 14, f: 14 };
+    syncFromDOM();
+    ok('engine: sync typed char', E.doc === '# Title\n\nHello! **world**\n- item', JSON.stringify(E.doc));
+    E.preSel = { a: E.doc.length, f: E.doc.length }; onEnter(false);
+    ok('engine: smart list continuation', E.doc.endsWith('- item\n- '), JSON.stringify(E.doc));
+    E.preSel = { a: E.doc.length, f: E.doc.length }; onEnter(false);
+    ok('engine: empty item ends list', E.doc.endsWith('- item\n'), JSON.stringify(E.doc));
+    undo(); ok('engine: undo', E.doc.endsWith('- item\n- '), JSON.stringify(E.doc));
+    redo(); ok('engine: redo', E.doc.endsWith('- item\n'), JSON.stringify(E.doc));
+    E.doc = 'abc'; render({ a: 1, f: 2 }); wrapSel('**'); ok('engine: wrap bold', E.doc === 'a**b**c', E.doc);
+    wrapSel('**'); ok('engine: unwrap bold', E.doc === 'abc', E.doc);
+    E.doc = '- [ ] task'; render(null); toggleTaskAtLine(0); ok('engine: toggle task', E.doc === '- [x] task', E.doc);
+    E.doc = 'x\ny'; render({ a: 2, f: 2 }); E.preSel = absSel(); moveLines(-1); ok('engine: move line up', E.doc === 'y\nx', E.doc);
+    E.doc = E0.doc; E.mode = E0.mode; E.undo = []; E.redo = []; render(null);
+  } catch (err) { ok('engine smoke test threw', false, err && err.stack); }
+  const fails = R.filter(r => !r.pass);
+  const pre = document.createElement('pre'); pre.id = 'selftest-result';
+  pre.textContent = (fails.length ? 'SELFTEST FAIL ' : 'SELFTEST PASS ') + (R.length - fails.length) + '/' + R.length + '\n' + fails.map(f => '✗ ' + f.name + ' :: ' + f.info).join('\n');
+  pre.style.cssText = 'position:fixed;inset:auto 0 0 0;max-height:50vh;overflow:auto;background:#000;color:#0f0;z-index:9999;margin:0;padding:8px;font:12px monospace;white-space:pre-wrap';
+  document.body.appendChild(pre);
+  document.title = pre.textContent.split('\n')[0];
 }
 
 /* =====================================================================
@@ -2522,7 +2900,14 @@ function updateStatus() {
   const st = $('#status'); if (!st || !S.showStatus) return;
   const parts = [];
   const s = E.el && document.activeElement === E.el ? absSel() : null;
-  if (s && s.a !== s.f) { const t = E.doc.slice(Math.min(s.a, s.f), Math.max(s.a, s.f)); parts.push(`<span>${countWords(t).toLocaleString()} words, ${t.length.toLocaleString()} chars selected</span>`); }
+  if (E.type === 'json') {
+    const r = jsonState();
+    if (r.err) { const lc = lineCol(E.doc, r.err.pos); parts.push(`<span class="jerr" data-pos="${r.err.pos}" title="Click to jump to the error" style="color:rgb(var(--c-red));cursor:pointer">✗ ${esc(r.err.msg)} · Ln ${lc.line}, Col ${lc.col}</span>`); }
+    else parts.push(`<span style="color:rgb(var(--c-green))">✓ ${r.kind === 'jsonc' ? 'JSONC' : r.kind === 'jsonl' ? 'JSON Lines' : 'Valid JSON'}</span>`);
+    parts.push(`<span class="opt">${fmtBytes(E.doc.length)}</span>`);
+    if (S.statusLines) parts.push(`<span class="opt">${E.doc.split('\n').length.toLocaleString()} lines</span>`);
+  }
+  else if (s && s.a !== s.f) { const t = E.doc.slice(Math.min(s.a, s.f), Math.max(s.a, s.f)); parts.push(`<span>${countWords(t).toLocaleString()} words, ${t.length.toLocaleString()} chars selected</span>`); }
   else {
     const w = countWords(E.doc);
     if (S.statusWords) parts.push(`<span>${w.toLocaleString()} word${w === 1 ? '' : 's'}</span>`);
@@ -2530,14 +2915,44 @@ function updateStatus() {
     if (S.statusLines) parts.push(`<span class="opt">${E.doc.split('\n').length.toLocaleString()} lines</span>`);
     if (S.statusReading) parts.push(`<span class="opt">${Math.max(1, Math.round(w / (S.wpm || 220)))} min read</span>`);
   }
-  if (!Store.persistent()) parts.push('<span style="color:rgb(var(--c-orange))" title="Browser storage is blocked; notes are kept in memory only">⚠ not persisted</span>');
-  parts.push(`<span class="mode" title="Switch view (Ctrl+E)">${{ live: 'Live preview', source: 'Source', reading: 'Reading' }[E.mode]}</span>`);
+  if (!Store.persistent() && !SELFTEST) parts.push('<span style="color:rgb(var(--c-orange))" title="Browser storage is blocked; notes are kept in memory only">⚠ not persisted</span>');
+  parts.push(`<span class="mode" title="Switch view (Ctrl+E)">${E.type === 'json' ? (E.mode === 'reading' ? 'JSON tree' : 'JSON edit') : { live: 'Live preview', source: 'Source', reading: 'Reading' }[E.mode]}</span>`);
   st.innerHTML = parts.join('');
+}
+/* JSON validity of the current document (cached per text) */
+let jsonCache = { text: null, r: null };
+function jsonState() {
+  if (jsonCache.text === E.doc) return jsonCache.r;
+  const r = parseJsonLenient(E.doc);
+  const out = { kind: r.kind, err: r.kind === 'invalid' ? r.error : null };
+  jsonCache = { text: E.doc, r: out };
+  return out;
 }
 function afterRender() {
   updateStatusSoon();
-  $$('#mode-seg button').forEach(b => b.classList.toggle('on', b.dataset.mode === E.mode));
+  const json = E.type === 'json';
+  $$('#mode-seg button').forEach(b => {
+    b.classList.toggle('on', b.dataset.mode === E.mode);
+    b.classList.toggle('hidden', json && b.dataset.mode === 'source');
+    const l = b.querySelector('.lbl'); if (l) l.textContent = json ? ({ live: 'Edit', reading: 'Tree' }[b.dataset.mode] || l.textContent) : ({ live: 'Live', source: 'Source', reading: 'Read' }[b.dataset.mode]);
+  });
+  paintJsonError();
 }
+let jsonErrT;
+function paintJsonError() {
+  if (!HAS_HL) return;
+  clearTimeout(jsonErrT);
+  jsonErrT = setTimeout(() => {
+    CSS.highlights.delete('json-err');
+    if (E.type !== 'json' || !E.el) return;
+    const r = jsonState(); if (!r.err) return;
+    const p = clamp(r.err.pos, 0, Math.max(0, E.doc.length - 1)), q = Math.min(E.doc.length, p + 1);
+    if (q <= p || p < E.region[0] || q > E.region[1]) return;
+    const [a, ao] = posAt(E.el, p - E.region[0]), [b, bo] = posAt(E.el, q - E.region[0]);
+    try { const rg = document.createRange(); rg.setStart(a, ao); rg.setEnd(b, bo); CSS.highlights.set('json-err', new Highlight(rg)); } catch (e) { }
+  }, 250);
+}
+function gotoPos(p) { if (E.mode === 'reading') setMode(E.type === 'json' ? 'live' : 'source'); render({ a: p, f: p }); }
 
 /* ---------- documents ---------- */
 const FILE_HANDLES = new Map();
@@ -2547,9 +2962,10 @@ function openDoc(id, opts = {}) {
   const h = E.hist.get(id) || { undo: [], redo: [], scroll: 0 };
   E.id = id; E.doc = Docs.content(id); E.undo = h.undo; E.redo = h.redo; E.dirty = false;
   E.el = null; E.region = null; ed.innerHTML = '';
+  applyDocType(docType(d));
   if (d.fs) { FS.targetDir = d.dir; if (d.dir) FS.expandTo(d.dir); }
   $('#inline-title').value = d.title;
-  document.title = d.title + ' · Markdown Editor';
+  document.title = d.title + ' · Editor';
   Store.set('last', id);
   render(E.mode === 'source' && opts.focus ? { a: 0, f: 0 } : null);
   scroller.scrollTop = opts.restoreScroll ? h.scroll : 0;
@@ -2593,7 +3009,7 @@ function renameDoc(id, title) {
     FS.rename(d, title).then(e => {
       if (e.title === old) return revert();
       if (E.hist.has(id)) { E.hist.set(e.id, E.hist.get(id)); E.hist.delete(id); }
-      if (E.id === id) { E.id = e.id; Store.set('last', e.id); $('#inline-title').value = e.title; document.title = e.title + ' · Markdown Editor'; }
+      if (E.id === id) { E.id = e.id; Store.set('last', e.id); $('#inline-title').value = e.title; document.title = e.title + ' · Editor'; }
       updateLinks(old, e.title);
       E.epoch++; refresh(); renderTree(); updateCrumb(); scheduleOutline(true);
     }, err => { toast('Could not rename: ' + err.message, 3500); revert(); });
@@ -2603,7 +3019,7 @@ function renameDoc(id, title) {
   if (nt === d.title) return revert();
   const old = d.title; d.title = nt; d.updated = Date.now(); Docs.saveIndex();
   updateLinks(old, nt);
-  if (id === E.id) { $('#inline-title').value = nt; document.title = nt + ' · Markdown Editor'; }
+  if (id === E.id) { $('#inline-title').value = nt; document.title = nt + ' · Editor'; }
   E.epoch++; refresh(); renderFiles(); updateCrumb(); scheduleOutline(true);
 }
 async function deleteDoc(id) {
@@ -2658,7 +3074,7 @@ function renderFiles() {
     });
   }
   list.innerHTML = docs.length ? docs.map(d => `<div class="fi${d.id === E.id ? ' on' : ''}" data-id="${d.id}" title="${esc(d.title)}">` +
-    `<div class="fi-main"><div class="fi-title">${d.pinned ? icon('pin') : ''}<span>${esc(d.title)}</span></div>${snip.has(d.id) ? `<div class="fi-snip">${snip.get(d.id)}</div>` : ''}</div>` +
+    `<div class="fi-main"><div class="fi-title">${d.pinned ? icon('pin') : ''}<span>${esc(d.title)}</span>${d.type === 'json' ? '<span class="badge">JSON</span>' : ''}</div>${snip.has(d.id) ? `<div class="fi-snip">${snip.get(d.id)}</div>` : ''}</div>` +
     `<span class="fi-date">${relTime(d.updated)}</span><button class="ib fi-more" title="More">${icon('more')}</button></div>`).join('')
     : `<div class="sb-empty">${q ? 'No matching notes.' : 'No notes yet.'}<br><button class="btn" id="sb-create" style="margin-top:10px">${q && !q.startsWith('#') ? 'Create “' + esc(q) + '”' : 'New note'}</button></div>`;
   $('#sb-count').textContent = Docs.list.length + ' note' + (Docs.list.length === 1 ? '' : 's');
@@ -2670,7 +3086,7 @@ function fileMenu(id, x, y) {
     { label: 'Rename', icon: 'rename', run: () => startRename(id) },
     { label: 'Duplicate', icon: 'dup', run: () => duplicateDoc(id) },
     { label: d.pinned ? 'Unpin' : 'Pin to top', icon: 'pin', run: () => togglePin(id) },
-    { label: 'Download .md', icon: 'download', run: () => download(d.title + '.md', id === E.id ? E.doc : Docs.content(id), 'text/markdown') },
+    { label: 'Download ' + docExt(d), icon: 'download', run: () => download(d.title + docExt(d), id === E.id ? E.doc : Docs.content(id), docType(d) === 'json' ? 'application/json' : 'text/markdown') },
     '-',
     { label: 'Delete', icon: 'trash', danger: true, run: () => deleteDoc(id) },
   ], x, y);
@@ -2695,7 +3111,7 @@ let outlineT, backlinksFor = null;
 function scheduleOutline(withBacklinks) { clearTimeout(outlineT); outlineT = setTimeout(() => renderOutline(withBacklinks), withBacklinks ? 0 : 300); }
 function renderOutline(withBacklinks) {
   if ($('#panel-outline').classList.contains('hidden')) return;
-  const U = E.units.length ? E.units : splitUnits(E.doc);
+  const U = E.type === 'json' ? [] : E.units.length ? E.units : splitUnits(E.doc);
   const hs = U.filter(u => u.t === 'h' || u.t === 'setext').map(u => {
     const text = E.doc.slice(u.s, u.e); const m = u.t === 'h' ? RE.heading.exec(text) : null;
     return { lvl: m ? m[1].length : u.d.level, txt: plainText(m ? m[2] : text.split('\n')[0]), a: u.a };
@@ -2899,7 +3315,8 @@ function download(name, data, type = 'text/plain') {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name.replace(/[\\/:*?"<>|]/g, '_');
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
-const MD_TYPES = [{ description: 'Markdown', accept: { 'text/markdown': ['.md', '.markdown', '.mdown', '.mkd', '.txt'] } }];
+const MD_TYPES = [{ description: 'Markdown or JSON', accept: { 'text/markdown': ['.md', '.markdown', '.mdown', '.mkd', '.txt'], 'application/json': ['.json', '.jsonc', '.json5', '.geojson', '.jsonl', '.ndjson'] } }];
+const JSON_FILE = /\.(json|jsonc|json5|geojson|jsonl|ndjson)$/i;
 async function openFiles() {
   if (window.showOpenFilePicker) {
     try {
@@ -2912,11 +3329,12 @@ async function openFiles() {
 }
 function importText(name, text, handle) {
   text = text.replace(/\r\n?/g, '\n').replace(/^﻿/, '');
-  const title = name.replace(/\.(md|markdown|mdown|mkd|txt)$/i, '');
+  const isJson = JSON_FILE.test(name);
+  const title = name.replace(/\.(md|markdown|mdown|mkd|txt|json|jsonc|json5|geojson|jsonl|ndjson)$/i, '');
   const ex = Docs.byTitle(Docs.clean(title));
   let d;
   if (ex && (ex.id === E.id ? E.doc : Docs.content(ex.id)) === text) d = ex;
-  else d = Docs.create(title, text);
+  else d = Docs.create(title, text, isJson ? 'json' : undefined);
   if (handle) FILE_HANDLES.set(d.id, handle);
   E.epoch++; renderFiles();
   return d;
@@ -2924,7 +3342,7 @@ function importText(name, text, handle) {
 async function importFileList(files) {
   let last = null, imgs = 0;
   for (const f of files) {
-    if (/\.(md|markdown|mdown|mkd|txt)$/i.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain') last = importText(f.name, await f.text());
+    if (/\.(md|markdown|mdown|mkd|txt)$/i.test(f.name) || JSON_FILE.test(f.name) || f.type === 'text/markdown' || f.type === 'text/plain' || f.type === 'application/json') last = importText(f.name, await f.text());
     else if (f.type.startsWith('image/')) { await Att.add(f, f.name); imgs++; }
   }
   if (last) { openDoc(last.id); toast('Imported ' + files.length + ' file' + (files.length === 1 ? '' : 's')); }
@@ -2935,10 +3353,10 @@ async function saveFile(as) {
   const d = Docs.get(E.id); if (!d) return;
   let h = !as && FILE_HANDLES.get(E.id);
   try {
-    if (!h && window.showSaveFilePicker) { h = await showSaveFilePicker({ suggestedName: d.title + '.md', types: MD_TYPES }); FILE_HANDLES.set(E.id, h); }
+    if (!h && window.showSaveFilePicker) { h = await showSaveFilePicker({ suggestedName: d.title + docExt(d), types: MD_TYPES }); FILE_HANDLES.set(E.id, h); }
     if (h) { const w = await h.createWritable(); await w.write(E.doc); await w.close(); toast('Saved to ' + h.name); updateCrumb(); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; FILE_HANDLES.delete(E.id); }
-  download(d.title + '.md', E.doc, 'text/markdown'); toast('Downloaded ' + d.title + '.md');
+  download(d.title + docExt(d), E.doc, E.type === 'json' ? 'application/json' : 'text/markdown'); toast('Downloaded ' + d.title + docExt(d));
 }
 function saveNow() {
   const ok = flushSave();
@@ -2948,9 +3366,14 @@ function saveNow() {
   toast(ok ? 'Saved' + (Store.persistent() ? ' in this browser' : ' (memory only)') : 'Save failed');
 }
 function cssVarsBlock() { const th = curTheme(); const cs = getComputedStyle(document.documentElement); const keys = ['font', 'font-size', 'line-height', 'letter-spacing', 'code-font', 'code-size', 'hs', 'img-max', 'tab', ...Object.keys(themeVars(th))]; return ':root{' + keys.map(k => `--${k}:${cs.getPropertyValue('--' + k).trim()}`).join(';') + `;color-scheme:${th.dark ? 'dark' : 'light'}}`; }
+function docHTML() {
+  if (E.type !== 'json') return renderDocument(E.doc);
+  const r = parseJsonLenient(E.doc);
+  return `<div class="cb"><pre><code>${highlight(E.doc, 'json')}</code></pre></div>`;
+}
 async function exportHTML() {
   const d = Docs.get(E.id); if (!d) return;
-  let html = renderDocument(E.doc);
+  let html = docHTML();
   for (const [name, url] of Att.urls) if (html.includes(url)) html = html.split(url).join(await Att.dataUrl(url));
   const css = document.querySelector('style').textContent;
   const out = `<!doctype html>
@@ -3007,7 +3430,7 @@ The supplied two Obsidian-labelled palettes have been replaced by original Red I
 }
 function preparePrint() {
   const d = Docs.get(E.id); const pr = $('#print-root');
-  pr.innerHTML = `${S.inlineTitle && d ? `<h1 class="print-title">${esc(d.title)}</h1>` : ''}<div id="print-ed" class="reading">${renderDocument(E.doc)}</div>`;
+  pr.innerHTML = `${S.inlineTitle && d ? `<h1 class="print-title">${esc(d.title)}</h1>` : ''}<div id="print-ed" class="reading">${docHTML()}</div>`;
   pr.classList.toggle('print-light', !!S.printLight);
   const prEd = pr.querySelector('#print-ed'); prEd.id = 'editor-print';
   pr.style.cssText = S.printLight ? Object.entries(themeVars(THEMES['obsidian-light'])).map(([k, v]) => `--${k}:${v}`).join(';') + ';--accent-rgb:' + hexRgb('#5e81ac') : '';
@@ -3038,7 +3461,7 @@ const ACTIONS = {
     flushSave();
     const atts = []; for (const a of await Att.all()) atts.push({ name: a.name, type: a.type, data: await Att.dataUrl(URL.createObjectURL(a.blob)) });
     const data = { app: 'mdeditor', version: 1, exported: new Date().toISOString(), settings: S, docs: Docs.list.map(d => ({ ...d, content: d.id === E.id ? E.doc : Docs.content(d.id) })), attachments: atts };
-    download('mdeditor-backup-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(data, null, 1), 'application/json'); toast('Backup exported');
+    download('editor-backup-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(data, null, 1), 'application/json'); toast('Backup exported');
   },
   importBackup() { pickJSON(async data => {
     if (!data || !Array.isArray(data.docs)) return toast('Not a valid backup file');
@@ -3047,15 +3470,15 @@ const ACTIONS = {
       if (!d || typeof d.content !== 'string') continue;
       const ex = Docs.get(d.id);
       if (ex) { if ((d.updated || 0) > ex.updated) { Docs.write(ex.id, d.content, false); Object.assign(ex, { title: Docs.unique(d.title, ex.id), updated: d.updated, pinned: !!d.pinned }); n++; } }
-      else { const nd = { id: d.id || uid(), title: Docs.unique(d.title), created: d.created || Date.now(), updated: d.updated || Date.now(), pinned: !!d.pinned }; Docs.list.push(nd); Store.set('doc.' + nd.id, d.content); n++; }
+      else { const nd = { id: d.id || uid(), title: Docs.unique(d.title), created: d.created || Date.now(), updated: d.updated || Date.now(), pinned: !!d.pinned }; if (d.type === 'json') nd.type = 'json'; Docs.list.push(nd); Store.set('doc.' + nd.id, d.content); n++; }
     }
     Docs.saveIndex();
     for (const a of data.attachments || []) try { const b = await (await fetch(a.data)).blob(); if (!Att.urls.has(a.name)) await Att.add(b, a.name); } catch (e) { }
     if (data.settings && await dialog({ title: 'Import settings too?', text: 'The backup also contains editor settings.', buttons: [{ label: 'Keep mine', value: false }, { label: 'Import settings', value: true }] })) { S = Object.assign({}, DEFAULTS, data.settings); Store.setJson('settings', S); applySettings(); }
     E.epoch++; if (Docs.get(E.id)) { E.doc = Docs.content(E.id); refresh(); } renderFiles(); toast(`Imported ${n} note${n === 1 ? '' : 's'}`);
   }); },
-  exportAllMd() { flushSave(); const used = new Set(); const files = Docs.list.map(d => { let n = d.title.replace(/[\\/:*?"<>|]/g, '_'), i = 1, b = n; while (used.has(n.toLowerCase())) n = b + ' ' + (i++); used.add(n.toLowerCase()); return { name: n + '.md', data: d.id === E.id ? E.doc : Docs.content(d.id) }; }); download('notes-' + new Date().toISOString().slice(0, 10) + '.zip', makeZip(files)); toast(`Exported ${files.length} notes as .zip`); },
-  exportSettings() { download('mdeditor-settings.json', JSON.stringify(S, null, 2), 'application/json'); },
+  exportAllMd() { flushSave(); const used = new Set(); const files = Docs.list.map(d => { let n = d.title.replace(/[\\/:*?"<>|]/g, '_'), i = 1, b = n; while (used.has(n.toLowerCase())) n = b + ' ' + (i++); used.add(n.toLowerCase()); return { name: n + docExt(d), data: d.id === E.id ? E.doc : Docs.content(d.id) }; }); download('notes-' + new Date().toISOString().slice(0, 10) + '.zip', makeZip(files)); toast(`Exported ${files.length} notes as .zip`); },
+  exportSettings() { download('editor-settings.json', JSON.stringify(S, null, 2), 'application/json'); },
   importSettings() { pickJSON(data => { if (!data || typeof data !== 'object') return toast('Invalid settings file'); S = Object.assign({}, DEFAULTS, data.settings || data); Store.setJson('settings', S); applySettings(); refresh(true); rebuildSettings(); toast('Settings imported'); }); },
   async resetSettings() { if (!await dialog({ title: 'Reset all settings?', text: 'All settings return to their defaults. Notes are not affected.', buttons: [{ label: 'Cancel', value: false }, { label: 'Reset', value: true, cls: 'danger' }] })) return; S = Object.assign({}, DEFAULTS); Store.setJson('settings', S); applySettings(); refresh(true); rebuildSettings(); toast('Settings reset'); },
   async wipe() {
@@ -3148,6 +3571,11 @@ const SECTIONS = [
     { k: 'codeWrap', t: 'toggle', label: 'Wrap long lines in code blocks' },
     { k: 'imgMaxWidth', t: 'range', min: 10, max: 100, step: 5, unit: '%', label: 'Maximum image width' },
   ] },
+  { id: 'json', name: 'JSON', icon: 'braces', items: [
+    { k: 'jsonOpen', t: 'select', label: 'Open JSON documents in', desc: 'Tree view shows collapsible, colored data; edit view shows the highlighted text with live validation. Ctrl+E switches.', opts: [['tree', 'Tree view'], ['edit', 'Edit view']] },
+    { k: 'jsonDepth', t: 'range', min: 0, max: 10, step: 1, label: 'Expand tree to depth', desc: 'How many levels are open when a JSON tree is shown.' },
+    { k: 'jsonIndent', t: 'select', label: 'Indentation for Format', desc: 'Also used when pressing Enter in a JSON document.', opts: [['2', '2 spaces'], ['4', '4 spaces'], ['tab', 'Tab']] },
+  ] },
   { id: 'files', name: 'Files & data', icon: 'database', items: [
     { k: 'autosave', t: 'toggle', label: 'Autosave notes', desc: 'Save editor notes and folder notes automatically while you type. Ctrl+S always saves.' },
     { k: 'linkedAutosave', t: 'toggle', label: 'Autosave linked files', desc: 'Also write already linked native files while typing. Off by default. External-change conflicts stop automatic writes; Save/Reload resolves them.' },
@@ -3178,6 +3606,7 @@ const HOTKEYS = [
   ['Bold', 'Ctrl+B'], ['Italic', 'Ctrl+I'], ['Strikethrough', 'Ctrl+Shift+X'], ['Highlight', 'Ctrl+Shift+H'], ['Inline code', 'Ctrl+`'], ['Link', 'Ctrl+K'],
   ['Heading 1 – 6 / paragraph', 'Ctrl+1 … 6 / Ctrl+0'], ['Toggle checkbox', 'Ctrl+Enter'], ['Bullet list', 'Ctrl+Shift+8'], ['Numbered list', 'Ctrl+Shift+7'], ['Quote', 'Ctrl+Shift+.'],
   ['Comment %%', 'Ctrl+/'], ['Indent / outdent', 'Tab / Shift+Tab  or  Ctrl+] / Ctrl+['], ['Move line up / down', 'Alt+↑ / Alt+↓'], ['Duplicate line', 'Ctrl+Shift+D'],
+  ['JSON: switch tree / edit view', 'Ctrl+E'], ['JSON: format', 'Shift+Alt+F'],
   ['Undo / redo', 'Ctrl+Z / Ctrl+Y'], ['Select all (whole note)', 'Ctrl+A'], ['Soft line break (no list continuation)', 'Shift+Enter'],
 ];
 let setSec = 'appearance', setModal = null;
@@ -3237,7 +3666,7 @@ function rebuildSettings() {
   const sec = SECTIONS.find(s => s.id === setSec);
   let html = close + `<h2>${esc(sec.name)}</h2>`;
   if (sec.custom === 'hotkeys') html += `<p class="sec-desc">On macOS use Cmd instead of Ctrl.</p><table class="keys">${HOTKEYS.map(([n, k]) => `<tr><td>${esc(n)}</td><td>${k.split(/( \/ |  or  | … )/).map(p => /^( \/ |  or  | … )$/.test(p) ? esc(p) : p.split('+').map(x => `<kbd>${esc(x)}</kbd>`).join('+')).join('')}</td></tr>`).join('')}</table>`;
-  else if (sec.custom === 'about') html += `<div class="about"><p><b>Markdown Editor</b>: one self-contained HTML file, fully offline. Automatic remote resources are blocked. Explicit external link clicks ask before opening your default browser.</p><p>Notes are stored in the persistent Red Ink editor profile (localStorage); native file paths and window state are also remembered per Office host; pasted images are stored in IndexedDB. Use <i>Files &amp; data → Export</i> for backups, or open and save real .md files from disk.</p><p>Supported syntax: CommonMark + GFM (tables, task lists, strikethrough, autolinks, footnotes), Obsidian extras (callouts, ==highlights==, [[wikilinks]], ![[embeds]], %%comments%%, #tags, YAML properties), inline HTML and syntax highlighting for ${Object.keys(HL).length}+ language names.</p><p>Local folder: the folder tab (sidebar, top left) connects a folder on disk and edits its .md files directly (Chrome / Edge).</p><p>Parser and editor code are self-contained. Icons are based on <b>Lucide</b> (ISC License, © Lucide Contributors; portions © Cole Bemis, Feather, MIT). Theme color palettes are inspired by Nord, Catppuccin, Tokyo Night, Dracula, Gruvbox and Solarized (all MIT). Red Ink Dark, Red Ink Light and Sepia are standalone custom palettes; no Obsidian application code or assets are included.</p><p>Storage: ${Store.persistent() ? 'persistent ✓' : '<span style="color:rgb(var(--c-orange))">memory only (browser storage blocked)</span>'} · ${Docs.list.length} notes · ${Att.urls.size} images</p></div>`;
+  else if (sec.custom === 'about') html += `<div class="about"><p><b>Markdown / JSON Editor</b>: one self-contained HTML file, fully offline. Automatic remote resources are blocked. Explicit external link clicks ask before opening your default browser.</p><p>Notes are stored in the persistent Red Ink editor profile (localStorage); native file paths and window state are also remembered per Office host; pasted images are stored in IndexedDB. Use <i>Files &amp; data → Export</i> for backups, or open and save real .md files from disk.</p><p>Supported syntax: CommonMark + GFM (tables, task lists, strikethrough, autolinks, footnotes), Obsidian extras (callouts, ==highlights==, [[wikilinks]], ![[embeds]], %%comments%%, #tags, YAML properties), inline HTML and syntax highlighting for ${Object.keys(HL).length}+ language names.</p><p>Local folder: the folder tab (sidebar, top left) connects a folder on disk and edits its .md files directly (Chrome / Edge).</p><p>Parser and editor code are self-contained. Icons are based on <b>Lucide</b> (ISC License, © Lucide Contributors; portions © Cole Bemis, Feather, MIT). Theme color palettes are inspired by Nord, Catppuccin, Tokyo Night, Dracula, Gruvbox and Solarized (all MIT). Red Ink Dark, Red Ink Light and Sepia are standalone custom palettes; no Obsidian application code or assets are included.</p><p>Storage: ${Store.persistent() ? 'persistent ✓' : '<span style="color:rgb(var(--c-orange))">memory only (browser storage blocked)</span>'} · ${Docs.list.length} notes · ${Att.urls.size} images</p></div>`;
   else html += sec.items.map(rowHTML).join('');
   body.innerHTML = html; body.scrollTop = st;
 }
@@ -3262,6 +3691,7 @@ const inEd = () => E.mode !== 'reading';
 const ensureActive = () => { if (!E.el && E.mode !== 'reading') render({ a: E.doc.length, f: E.doc.length }); return !!E.el; };
 const withEd = fn => () => { if (E.mode === 'reading') setMode('live'); if (ensureActive()) { E.preSel = null; fn(); } };
 function setMode(m) {
+  if (E.type === 'json' && m === 'source') m = 'live';
   if (m === E.mode) return;
   const s = E.el && document.activeElement === E.el ? absSel() : null;
   const ratio = scroller.scrollTop / Math.max(1, scroller.scrollHeight - scroller.clientHeight);
@@ -3270,11 +3700,86 @@ function setMode(m) {
   scroller.scrollTop = ratio * (scroller.scrollHeight - scroller.clientHeight);
   if (F.open) findRun();
 }
-function toggleReading() { setMode(E.mode === 'reading' ? (S.defaultMode === 'reading' ? 'live' : S.defaultMode) : 'reading'); }
+function toggleReading() { if (E.type === 'json') return setMode(E.mode === 'reading' ? 'live' : 'reading'); setMode(E.mode === 'reading' ? (S.defaultMode === 'reading' ? 'live' : S.defaultMode) : 'reading'); }
+/* each document type keeps its own view mode */
+function docType(d) { return d && (d.type === 'json' || (d.fs && /\.(json|jsonc|json5|geojson|jsonl|ndjson)$/i.test(d.name))) ? 'json' : 'md'; }
+function docExt(d) { return d && d.fs ? (/\.[^.]+$/.exec(d.name) || ['.md'])[0] : docType(d) === 'json' ? '.json' : '.md'; }
+function applyDocType(t) {
+  if (t === E.type) return;
+  if (t === 'json') { E.mdMode = E.mode; E.mode = E.jmode || (S.jsonOpen === 'edit' ? 'live' : 'reading'); }
+  else { E.jmode = E.mode; E.mode = E.mdMode || S.defaultMode || 'live'; }
+  E.type = t;
+}
+function jsonTransform(kind) {
+  if (E.type !== 'json') return toast('Open a JSON document first');
+  let v;
+  const warning = jsonRewriteWarning(E.doc);
+  if (warning) return toast(warning, 6000);
+  try { v = JSON.parse(E.doc); } catch (e) {
+    const r = parseJsonLenient(E.doc);
+    if (r.kind === 'invalid') { const lc = lineCol(E.doc, r.error.pos); toast(`Can't ${kind}: ${r.error.msg} (line ${lc.line}, column ${lc.col})`, 4000); return; }
+    v = r.value; toast(r.kind === 'jsonc' ? 'Comments and trailing commas were removed' : 'Converted JSON Lines to an array', 3000);
+  }
+  const sortKeys = x => Array.isArray(x) ? x.map(sortKeys) : x && typeof x === 'object' ? Object.keys(x).sort((a, b) => a.localeCompare(b)).reduce((o, k) => (o[k] = sortKeys(x[k]), o), Object.create(null)) : x;
+  if (kind === 'sort') v = sortKeys(v);
+  const out = kind === 'minify' ? JSON.stringify(v) : JSON.stringify(v, null, jsonIndent()) + '\n';
+  if (out === E.doc) return toast(kind === 'minify' ? 'Already minified' : 'Already formatted');
+  replaceDoc(out, null);
+  toast(kind === 'minify' ? 'Minified' : kind === 'sort' ? 'Keys sorted' : 'Formatted');
+}
+function newJsonDoc() {
+  const tpl = '{\n' + jsonIndent() + '"name": "value"\n}\n';
+  if (folderContext()) { flushSave(); FS.create(FS.targetDir, 'data', tpl, '.json').then(f => { renderTree(); afterNew(f, true); }, e => toast('Could not create file: ' + e.message)); return; }
+  const d = Docs.create('data', tpl, 'json'); E.epoch++; afterNew(d, true);
+}
+function jvExpandAll(root, open) {
+  let n = 0;
+  const walk = () => { for (const d of root.querySelectorAll('details.jv-obj:not([open])')) { if (n++ > 4000) return false; jvFill(d); d.open = true; } return true; };
+  if (open) { while (root.querySelector('details.jv-obj:not([open])') && walk()) { } if (n > 4000) toast('Expanded the first 4000 nodes'); }
+  else root.querySelectorAll('details.jv-obj').forEach((d, i) => { d.open = d.parentNode.classList.contains('jv') && i === 0; });
+}
+function toggleCodeTree(cb) {
+  const code = cb.querySelector('pre code').textContent;
+  const btn = cb.querySelector('.cb-tree');
+  if (cb.classList.contains('tree-on')) { cb.classList.remove('tree-on'); btn.classList.remove('on'); btn.title = 'Show as tree'; MDOPT.treeCodes.delete(code); return; }
+  let host = cb.querySelector('.jv-host');
+  if (!host) {
+    const r = parseJsonLenient(code);
+    const warning = jsonRewriteWarning(code);
+    if (warning) return toast(warning, 6000);
+    if (r.kind === 'invalid') { const lc = lineCol(code, r.error.pos); toast(`Invalid JSON: ${r.error.msg} (line ${lc.line}, column ${lc.col})`, 3500); return; }
+    host = document.createElement('div'); host.className = 'jv-host'; host.innerHTML = jsonTreeHTML(r.value, S.jsonDepth); cb.appendChild(host);
+  }
+  cb.classList.add('tree-on'); btn.classList.add('on'); btn.title = 'Show as code'; MDOPT.treeCodes.add(code);
+}
+/* JSON tree interactions (reading view of JSON docs and ```json blocks) */
+document.addEventListener('toggle', e => { const d = e.target; if (d.classList && d.classList.contains('jv-obj') && d.open) jvFill(d); }, true);
+ed.addEventListener('click', e => {
+  const t = e.target;
+  const tb = t.closest('.cb-tree'); if (tb) { e.preventDefault(); toggleCodeTree(tb.closest('.cb')); return; }
+  const more = t.closest('.jv-more');
+  if (more) { const r = JVREG.get(+more.dataset.more); if (r) { const tmp = document.createElement('div'); tmp.innerHTML = jvChildren(r.v, r.path, r.depth, r.openDepth, r.from); more.replaceWith(...tmp.childNodes); } return; }
+  const key = t.closest('.jv-key'); if (key && !getSelection().toString()) { copyText(key.dataset.path); return; }
+  const act = t.closest('[data-jva]');
+  if (act) {
+    const a = act.dataset.jva, root = ed.querySelector('.jv');
+    if (a === 'expand' && root) jvExpandAll(root, true);
+    else if (a === 'collapse' && root) jvExpandAll(root, false);
+    else if (a === 'format') jsonTransform('format');
+    else if (a === 'copy') copyText(E.doc);
+    else if (a === 'goto') gotoPos(+act.dataset.pos);
+  }
+});
 function toggleSidebar() { document.body.classList.toggle('sidebar-hidden'); }
 const TABLE_TPL = '| Column 1 | Column 2 | Column 3 |\n| -------- | -------- | -------- |\n| $SEL     |          |          |';
 const COMMANDS = [
   { name: 'New note', key: 'Alt+N', run: () => newDoc() },
+  { name: 'New JSON document', run: newJsonDoc },
+  { name: 'JSON: format / pretty-print', key: 'Shift+Alt+F', run: () => jsonTransform('format'), when: () => E.type === 'json' },
+  { name: 'JSON: minify', run: () => jsonTransform('minify'), when: () => E.type === 'json' },
+  { name: 'JSON: sort keys', run: () => jsonTransform('sort'), when: () => E.type === 'json' },
+  { name: 'JSON: tree view', key: 'Ctrl+E', run: () => setMode('reading'), when: () => E.type === 'json' },
+  { name: 'JSON: edit', key: 'Ctrl+E', run: () => setMode('live'), when: () => E.type === 'json' },
   { name: 'Quick switcher: open or create note', key: 'Ctrl+O', run: () => openPalette('files') },
   { name: 'Open .md files from disk', key: 'Ctrl+Shift+O', run: openFiles },
   { name: 'Save', key: 'Ctrl+S', run: saveNow },
@@ -3460,6 +3965,8 @@ ed.addEventListener('mousedown', e => {
   E.mouse = null;
   if (E.mode === 'reading') return;
   if (!inActive) {
+    if (t.closest('.cb-tree')) { e.preventDefault(); return; }
+    if (t.closest('.jv-host')) return; // interact with the JSON tree without entering edit mode
     if (t.closest('.task-cb')) { e.preventDefault(); const u = t.closest('#editor > .u'); if (u) { const unit = E.units[+u.dataset.i]; if (unit) { let line = unit.a; if (unit.t === 'callout') { const li = t.closest('[data-line]'); if (li) line = +li.dataset.line; } toggleTaskAtLine(line); } } return; }
     if (t.closest('.cb-copy')) { e.preventDefault(); copyText(t.closest('.cb').querySelector('pre code').textContent); return; }
     const ct = t.closest('.callout-title'); if (ct && ct.parentNode.classList.contains('foldable')) { e.preventDefault(); ct.parentNode.classList.toggle('folded'); return; }
@@ -3581,7 +4088,7 @@ document.addEventListener('keydown', e => {
       if (kl === 'z') return run(() => e.shiftKey ? redo() : undo());
       if (kl === 'y') return run(redo);
     }
-    if (inEditor) {
+    if (inEditor && E.type !== 'json') {
       const map = {
         b: () => wrapSel('**'), i: () => wrapSel('*'), k: insertLink, '`': () => wrapSel('`'), '/': toggleComment,
         ']': () => indentCmd(false), '[': () => indentCmd(true), Enter: toggleTaskLine,
@@ -3593,6 +4100,7 @@ document.addEventListener('keydown', e => {
       if (f) { e.preventDefault(); E.preSel = absSel(); f(); return; }
     }
   }
+  if (e.altKey && e.shiftKey && !mod && (kl === 'f' || e.code === 'KeyF') && E.type === 'json') return run(() => jsonTransform('format'));
   if (e.altKey && !mod) {
     if (kl === 'n') return run(() => newDoc());
     if (inEditor && (k === 'ArrowUp' || k === 'ArrowDown')) return run(() => { E.preSel = absSel(); moveLines(k === 'ArrowUp' ? -1 : 1); });
@@ -3625,6 +4133,8 @@ function wireUI() {
     const r = e.currentTarget.getBoundingClientRect();
     menu([
       { label: 'New note', icon: 'edit', key: 'Alt+N', run: () => newDoc() },
+      { label: 'New JSON document', icon: 'braces', run: newJsonDoc },
+      ...(E.type === 'json' ? [{ label: 'Format JSON', icon: 'braces', key: 'Shift+Alt+F', run: () => jsonTransform('format') }, { label: 'Minify JSON', icon: 'braces', run: () => jsonTransform('minify') }] : []),
       { label: 'Open .md files…', icon: 'folder', key: 'Ctrl+Shift+O', run: openFiles },
       { label: 'Save as .md…', icon: 'download', key: 'Ctrl+Shift+S', run: () => saveFile(true) },
       { label: 'Export as HTML', icon: 'external', run: exportHTML },
@@ -3641,7 +4151,7 @@ function wireUI() {
   };
   $('#mode-seg').addEventListener('click', e => { const b = e.target.closest('button[data-mode]'); if (b) setMode(b.dataset.mode); });
   $('#mode-seg').addEventListener('mousedown', e => e.preventDefault());
-  $('#status').addEventListener('click', e => { if (e.target.closest('.mode')) toggleReading(); });
+  $('#status').addEventListener('click', e => { if (e.target.closest('.mode')) toggleReading(); const je = e.target.closest('.jerr'); if (je) gotoPos(+je.dataset.pos); });
   $$('.sb-tab').forEach(b => b.onclick = () => setTab(b.dataset.tab));
   const q = $('#sb-q'); let qt;
   q.addEventListener('input', () => { clearTimeout(qt); qt = setTimeout(renderFiles, 80); });
@@ -3699,6 +4209,7 @@ function init() {
   const last = S.openLast && Store.get('last');
   openDoc(Docs.get(last) ? last : Docs.sorted()[0].id, { keepSidebar: true });
   Att.init().then(() => { if (Att.urls.size) refresh(true); FS.init(); });
+  if (SELFTEST && /selftest/.test(location.hash)) setTimeout(runSelfTest, 50);
 }
 window.__mde = { get S() { return S; }, E, Docs, FS, render, absSel, setSelAbs, splitUnits, rawHTML, renderDocument, setMode, setSetting, openDoc, newDoc, getText, flushSave };
 /* Red Ink native file bridge. The editor retains its offline note/attachment store. */
@@ -3719,7 +4230,7 @@ const RI = {
       // Reopening a native path never overwrites a newer autosaved note.
       openDoc(d.id); toast('Opened saved editor version. Use Reload from disk to discard it.');
     } else {
-      d = Docs.create(file.name.replace(/\.(md|markdown|mdown|mkd|txt)$/i, ''), file.text.replace(/\r\n?/g, '\n').replace(/^\uFEFF/, ''));
+      d = Docs.create(file.name.replace(/\.(md|markdown|mdown|mkd|txt|json|jsonc|json5|geojson|jsonl|ndjson)$/i, ''), file.text.replace(/\r\n?/g, '\n').replace(/^\uFEFF/, ''), JSON_FILE.test(file.name) ? 'json' : undefined);
       openDoc(d.id);
     }
     this.paths[d.id] = file.path;
@@ -3757,7 +4268,7 @@ saveFile = async function(as) {
   const text=E.doc;
   try {
     if(typeof RILinked!=='undefined') {RILinked.pending.delete(d.id);await RILinked.idle();}
-    const m = await RI.call('save', {id:d.id, name:d.title + '.md', text, saveAs:!!as, copy:!!d.fs});
+    const m = await RI.call('save', {id:d.id, name:d.fs ? d.name : d.title + docExt(d), text, saveAs:!!as, copy:!!d.fs});
     if (m.cancelled) return;
     RILinked.errors.delete(d.id);
     if (!d.fs) { RI.paths[d.id] = m.path; Store.set('redink.paths', JSON.stringify(RI.paths)); updateCrumb(); }
@@ -3771,7 +4282,7 @@ const RILinked = { pending:new Map(), errors:new Map(), timer:null, running:null
     if(!S.linkedAutosave) {this.pending.clear();return;}
     const id=E.id, d=Docs.get(id);
     if(id && RI.paths[id] && !d?.fs && !this.errors.has(id))
-      this.pending.set(id,{id,name:(d?.title||'note')+'.md',text:E.doc});
+      this.pending.set(id,{id,name:(d?.title||'note')+docExt(d),text:E.doc});
     if(this.pending.size) this.timer=setTimeout(()=>this.drain(),Math.max(400,S.autosaveDelay||400));
   },
   drain() {
@@ -3811,7 +4322,7 @@ COMMANDS.push({name:'Reload current file from disk (discard editor version)', ru
 }});
 document.addEventListener('drop', e => {
   const files = [...(e.dataTransfer?.files || [])];
-  if (!files.some(f => /\.(md|markdown|mdown|mkd|txt)$/i.test(f.name))) return;
+  if (!files.some(f => /\.(md|markdown|mdown|mkd|txt)$/i.test(f.name) || JSON_FILE.test(f.name))) return;
   e.preventDefault(); e.stopImmediatePropagation();
   if (window.chrome.webview.postMessageWithAdditionalObjects)
     window.chrome.webview.postMessageWithAdditionalObjects({command:'openDropped'}, files);
@@ -3860,7 +4371,7 @@ window.redInkRecoveryClear=function(id,text) { window.chrome.webview.postMessage
 window.redInkRecovery=function() {
   if (!E.id) return;
   const d=Docs.get(E.id);
-  window.chrome.webview.postMessage({command:'recovery',id:E.id,name:d?.title||d?.name||'Recovered note',text:E.doc});
+  window.chrome.webview.postMessage({command:'recovery',id:E.id,name:d?.title||d?.name||'Recovered note',type:E.type,text:E.doc});
 };
 window.chrome.webview.addEventListener('message',e=> {
   if(e.data.command!=='recover') return;
@@ -3870,7 +4381,7 @@ window.chrome.webview.addEventListener('message',e=> {
   const accepted=()=>{if(Store.flush()) window.chrome.webview.postMessage({command:'recoveryAccepted',id:r.id,updated:r.updated});};
   if(Docs.get(r.id) && Docs.content(r.id)===r.text) {accepted();return;}
   if(Docs.list.some(d=>d.recoveryStamp===r.updated && Docs.content(d.id)===r.text)) {accepted();return;}
-  const d=Docs.create('Recovered: '+(r.name||'note'),r.text); d.recoveryStamp=r.updated; Docs.saveIndex();
+  const d=Docs.create('Recovered: '+(r.name||'note'),r.text,r.type === 'json' || JSON_FILE.test(r.name||'') ? 'json' : undefined); d.recoveryStamp=r.updated; Docs.saveIndex();
   openDoc(d.id); accepted(); toast('Recovered the last editor snapshot. Original files were not overwritten.',6000);
 });
 window.addEventListener('blur',()=>{if(E.dirty || (Docs.get(E.id)?.fs && (FS.busy() || Docs.get(E.id)?.error))) window.redInkRecovery();});

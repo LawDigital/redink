@@ -28,9 +28,10 @@ Imports Microsoft.Web.WebView2.WinForms
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Public Class DrawioEditorForm
-    Inherits Form
+    Inherits Global.SharedLibrary.SharedLibrary.WebView2HostForm
 
-    Private WithEvents webView As WebView2
+    Private WithEvents webView As Global.SharedLibrary.SharedLibrary.DpiAwareWebView2
+    Private _initializationStarted As System.Boolean
 
     Private ReadOnly _xmlContent As String
     Private ReadOnly _saveFilePath As String
@@ -69,7 +70,6 @@ Public Class DrawioEditorForm
         _disableInternetAfterLoad = disableInternetAfterLoad
 
         InitializeComponent()
-        InitializeWebViewAsync()
     End Sub
 
     ''' <summary>
@@ -77,10 +77,12 @@ Public Class DrawioEditorForm
     ''' </summary>
     Private Sub InitializeComponent()
         Me.Text = $"{AN} - Draw.io Diagram Editor"
+        Me.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
+        Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
         Me.Width = 1400
         Me.Height = 900
-        Me.StartPosition = FormStartPosition.CenterScreen
-        Me.FormBorderStyle = FormBorderStyle.Sizable
+        Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
+        Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
 
         Try
             Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
@@ -88,13 +90,55 @@ Public Class DrawioEditorForm
         Catch
         End Try
 
-        webView = New WebView2() With {.Dock = DockStyle.Fill}
+        webView = New Global.SharedLibrary.SharedLibrary.DpiAwareWebView2() With {.Dock = System.Windows.Forms.DockStyle.Fill}
         Me.Controls.Add(webView)
     End Sub
 
-    ''' <summary>
-    ''' Creates the WebView2 environment, wires events, installs network gating, and navigates to the local host HTML.
-    ''' </summary>
+    Protected Overrides Sub OnShown(e As System.EventArgs)
+        MyBase.OnShown(e)
+        If _initializationStarted Then Return
+        _initializationStarted = True
+        SynchronizeEditorLayout()
+        InitializeWebViewAsync()
+    End Sub
+
+    Private Sub SynchronizeEditorLayout()
+        If Me.IsDisposed OrElse webView Is Nothing OrElse webView.IsDisposed Then Return
+        Using scope As System.IDisposable = Global.SharedLibrary.SharedLibrary.WebView2DpiHost.MatchWindow(Me)
+            Me.PerformLayout()
+            webView.Bounds = Me.ClientRectangle
+        End Using
+    End Sub
+
+    Protected Overrides Sub OnDpiChanged(e As System.Windows.Forms.DpiChangedEventArgs)
+        MyBase.OnDpiChanged(e)
+        Dim diagnostic As System.Threading.Tasks.Task = LogRenderingGeometryAsync("dpi_changed")
+    End Sub
+
+    Private Async Function LogRenderingGeometryAsync(reason As System.String) As System.Threading.Tasks.Task
+        Try
+            If Me.IsDisposed OrElse webView Is Nothing OrElse webView.IsDisposed OrElse webView.CoreWebView2 Is Nothing Then Return
+            Dim nativeDpi As System.UInt32 = 0
+            Dim managedGeometry As System.String
+            Using scope As System.IDisposable = Global.SharedLibrary.SharedLibrary.WebView2DpiHost.MatchWindow(Me)
+                Try
+                    nativeDpi = Global.SharedLibrary.SharedLibrary.WebView2DpiHost.GetWindowDpi(Me.Handle)
+                Catch ex As System.EntryPointNotFoundException
+                End Try
+                managedGeometry = "form=" & Me.ClientSize.ToString() & "; webview=" & webView.ClientSize.ToString() &
+                    "; formDpi=" & Me.DeviceDpi.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; webviewDpi=" & webView.DeviceDpi.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; windowDpi=" & nativeDpi.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; zoom=" & webView.ZoomFactor.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            End Using
+            Dim script As System.String = "JSON.stringify({viewportWidth:innerWidth,viewportHeight:innerHeight,devicePixelRatio:devicePixelRatio,frame:(function(){var f=document.getElementById('frame');if(!f)return null;var r=f.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};})()})"
+            Dim geometry As System.String = Await webView.CoreWebView2.ExecuteScriptAsync(script)
+            System.Diagnostics.Debug.WriteLine("[Drawio Geometry] " & reason & "; " & managedGeometry & "; browser=" & geometry)
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("[Drawio Geometry] Measurement unavailable: " & ex.GetType().Name & ": " & ex.Message)
+        End Try
+    End Function
+
     Private Async Sub InitializeWebViewAsync()
         Try
             Dim userDataFolder As String = SharedLibrary.SharedLibrary.SharedMethods.GetWebView2UserDataFolder()
@@ -102,7 +146,10 @@ Public Class DrawioEditorForm
             Dim env As CoreWebView2Environment =
                 Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
 
-            Await webView.EnsureCoreWebView2Async(env)
+            If Me.IsDisposed OrElse webView.IsDisposed Then Return
+            Await Global.SharedLibrary.SharedLibrary.WebView2DpiHost.EnsureInitializedAsync(webView, env)
+            If Me.IsDisposed OrElse webView.IsDisposed Then Return
+            SynchronizeEditorLayout()
 
             AddHandler webView.CoreWebView2.ProcessFailed,
                 Sub(s, e)
@@ -134,9 +181,12 @@ Public Class DrawioEditorForm
             Dim hostUri As New Uri(hostFilePath)
             webView.CoreWebView2.Navigate(hostUri.AbsoluteUri)
 
-        Catch ex As Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Could not initialize the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
-                $"Your diagram has been saved to:{vbCrLf}{_saveFilePath}", $"{AN} - Error")
+        Catch ex As System.Exception
+            If Me.IsDisposed Then Return
+            Using ownerScope As System.IDisposable = Global.SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(Me)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Could not initialize the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
+                    $"Your diagram has been saved to:{vbCrLf}{_saveFilePath}", $"{AN} - Error")
+            End Using
             Me.Close()
         End Try
     End Sub
@@ -300,8 +350,8 @@ Public Class DrawioEditorForm
   <meta charset=""utf-8"">
   <title>{AN} - draw.io</title>
   <style>
-    html, body {{ margin:0; padding:0; height:100%; overflow:hidden; }}
-    #frame {{ width:100%; height:100%; border:0; }}
+    html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; }}
+    #frame {{ display:block; position:absolute; inset:0; width:100%; height:100%; border:0; }}
   </style>
 </head>
 <body>
@@ -392,6 +442,8 @@ Public Class DrawioEditorForm
     ''' </summary>
     Private Sub OnNavigationCompleted(sender As Object, e As CoreWebView2NavigationCompletedEventArgs)
         If Not e.IsSuccess Then Return
+        SynchronizeEditorLayout()
+        Dim diagnostic As System.Threading.Tasks.Task = LogRenderingGeometryAsync("navigation_completed")
 
         If Not _navigationCompletedOnce Then
             _navigationCompletedOnce = True

@@ -3357,36 +3357,27 @@ SkipPromptWin:
 
         Dim clipOk As Boolean = Await SetClipboardRobustAsync(dataObj).ConfigureAwait(False)
 
-        Await SwitchToUi(
-            Sub()
-                If clipOk Then
-                    SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")
-                Else
-                    Dim edited As String = SLib.ShowCustomWindow(
-                        "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
-                        result,
-                        "If copying still fails, the text will be saved to a temporary file.",
-                        AN, False)
-
-                    If Not String.IsNullOrWhiteSpace(edited) Then
-                        Dim editedObj As New System.Windows.Forms.DataObject()
-                        editedObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, edited)
-                        editedObj.SetData(System.Windows.Forms.DataFormats.Text, edited)
-
-                        Dim editedOk As Boolean = SetClipboardRobustAsync(editedObj).GetAwaiter().GetResult()
-                        If Not editedOk Then
-                            Dim tmp As String = SaveTextToTempFile(edited)
-                            If Not String.IsNullOrWhiteSpace(tmp) Then
-                                SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                            Else
-                                SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
-                            End If
-                        Else
-                            SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
-                        End If
-                    End If
-                End If
-            End Sub).ConfigureAwait(False)
+        If clipOk Then
+            Await SwitchToUi(Sub() SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")).ConfigureAwait(False)
+            Return
+        End If
+        Dim edited As System.String = Await SwitchToUi(Of System.String)(
+            Function() SLib.ShowCustomWindow(
+                "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
+                result, "If copying still fails, the text will be saved to a temporary file.", AN, False)).ConfigureAwait(False)
+        If System.String.IsNullOrWhiteSpace(edited) Then Return
+        Dim editedObj As New System.Windows.Forms.DataObject()
+        editedObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, edited)
+        editedObj.SetData(System.Windows.Forms.DataFormats.Text, edited)
+        Dim editedOk As System.Boolean = Await SetClipboardRobustAsync(editedObj).ConfigureAwait(False)
+        Dim status As System.String
+        If editedOk Then
+            status = "Your edited text has been copied to the clipboard."
+        Else
+            Dim tmp As System.String = SaveTextToTempFile(edited)
+            status = If(System.String.IsNullOrWhiteSpace(tmp), "Clipboard is locked and saving failed.", "Clipboard is locked. The result was saved to: " & tmp)
+        End If
+        Await SwitchToUi(Sub() SLib.ShowCustomMessageBox(status)).ConfigureAwait(False)
     End Function
 
 
@@ -3400,20 +3391,16 @@ SkipPromptWin:
         Optional verificationText As String = Nothing
     ) As System.Threading.Tasks.Task(Of Boolean)
 
-        ' Try on current thread (if STA) with persistent copy.
-        For i As Integer = 1 To uiAttempts
-            If TrySetClipboardImmediate(dataObj, verificationText) Then
-                Return True
-            End If
-            Await System.Threading.Tasks.Task.Delay(50 * i).ConfigureAwait(False)
-        Next
-
-        ' STA thread attempts.
-        For i As Integer = 1 To staAttempts
-            If TrySetClipboardSta(dataObj, verificationText) Then
-                Return True
-            End If
-            Await System.Threading.Tasks.Task.Delay(80 * i).ConfigureAwait(False)
+        ' Never block Office's message pump on OLE clipboard work or a worker Join.
+        For i As System.Int32 = 1 To System.Math.Max(1, uiAttempts + staAttempts)
+            Try
+                If Await TrySetClipboardStaAsync(dataObj, verificationText).ConfigureAwait(False) Then Return True
+            Catch ex As System.TimeoutException
+                ' Do not launch competing writes after an in-flight OLE call timed out.
+                System.Diagnostics.Trace.TraceWarning("Red Ink clipboard worker timed out; Office UI remains responsive and the manual/file fallback is used.")
+                Return False
+            End Try
+            Await System.Threading.Tasks.Task.Delay(System.Math.Min(400, 50 * i)).ConfigureAwait(False)
         Next
 
         Return False
@@ -3442,22 +3429,23 @@ SkipPromptWin:
     ''' <summary>
     ''' Performs clipboard set on a dedicated STA background thread and verifies result.
     ''' </summary>
-    Private Function TrySetClipboardSta(dataObj As System.Windows.Forms.DataObject, verificationText As String) As Boolean
-        Dim success As Boolean = False
-        Dim t As New System.Threading.Thread(
+    Private Async Function TrySetClipboardStaAsync(dataObj As System.Windows.Forms.DataObject, verificationText As System.String) As System.Threading.Tasks.Task(Of System.Boolean)
+        Dim completion As New System.Threading.Tasks.TaskCompletionSource(Of System.Boolean)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim worker As New System.Threading.Thread(
             Sub()
                 Try
-                    System.Windows.Forms.Clipboard.SetDataObject(dataObj, True) ' persistent copy
-                    success = VerifyClipboard(verificationText)
-                Catch
-                    success = False
+                    System.Windows.Forms.Clipboard.SetDataObject(dataObj, True)
+                    completion.TrySetResult(VerifyClipboard(verificationText))
+                Catch ex As System.Exception
+                    completion.TrySetResult(False)
                 End Try
             End Sub)
-        t.SetApartmentState(System.Threading.ApartmentState.STA)
-        t.IsBackground = True
-        t.Start()
-        t.Join()
-        Return success
+        worker.SetApartmentState(System.Threading.ApartmentState.STA)
+        worker.IsBackground = True
+        worker.Start()
+        Dim finished As System.Threading.Tasks.Task = Await System.Threading.Tasks.Task.WhenAny(completion.Task, System.Threading.Tasks.Task.Delay(5000)).ConfigureAwait(False)
+        If finished IsNot completion.Task Then Throw New System.TimeoutException("The clipboard STA worker did not complete within five seconds.")
+        Return Await completion.Task.ConfigureAwait(False)
     End Function
 
     ''' <summary>

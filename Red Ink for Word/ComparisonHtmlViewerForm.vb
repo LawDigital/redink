@@ -29,9 +29,10 @@ Imports Microsoft.Web.WebView2.WinForms
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Public Class ComparisonHtmlViewerForm
-    Inherits Form
+    Inherits Global.SharedLibrary.SharedLibrary.WebView2HostForm
 
     Private WithEvents _webView As WebView2
+    Private _initializationStarted As System.Boolean
 
     Private ReadOnly _htmlContent As String
     Private ReadOnly _viewerHostFolder As String
@@ -54,11 +55,14 @@ Public Class ComparisonHtmlViewerForm
         _onClose = onClose
 
         InitializeComponent(header)
-        InitializeWebViewAsync()
     End Sub
 
     Protected Overrides Sub OnShown(e As EventArgs)
         MyBase.OnShown(e)
+        If Not _initializationStarted Then
+            _initializationStarted = True
+            InitializeWebViewAsync()
+        End If
 
         Try
             Me.TopMost = True
@@ -93,7 +97,7 @@ Public Class ComparisonHtmlViewerForm
         Me.ShowInTaskbar = True
         Me.TopMost = False
         Me.KeyPreview = True
-        Me.AutoScaleMode = AutoScaleMode.Font
+        Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
         Me.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
         Me.MinimumSize = New Size(800, 500)
         Me.Size = New Size(1100, 760)
@@ -127,7 +131,7 @@ Public Class ComparisonHtmlViewerForm
             .Margin = New Padding(0)
         }
 
-        _webView = New WebView2() With {
+        _webView = New Global.SharedLibrary.SharedLibrary.DpiAwareWebView2() With {
             .Dock = DockStyle.Fill,
             .Margin = New Padding(0)
         }
@@ -218,7 +222,9 @@ Public Class ComparisonHtmlViewerForm
             Dim env As CoreWebView2Environment =
                 Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
 
-            Await _webView.EnsureCoreWebView2Async(env)
+            If Me.IsDisposed OrElse _webView.IsDisposed Then Return
+            Await Global.SharedLibrary.SharedLibrary.WebView2DpiHost.EnsureInitializedAsync(_webView, env)
+            If Me.IsDisposed OrElse _webView.IsDisposed Then Return
 
             AddHandler _webView.CoreWebView2.ProcessFailed,
                 Sub(s, e)
@@ -240,8 +246,11 @@ Public Class ComparisonHtmlViewerForm
             Dim viewerUri As New Uri(_viewerFilePath)
             _webView.CoreWebView2.Navigate(viewerUri.AbsoluteUri)
 
-        Catch ex As Exception
-            ShowCustomMessageBox($"Could not initialize the comparison viewer: {ex.Message}", AN)
+        Catch ex As System.Exception
+            If Me.IsDisposed OrElse _webView.IsDisposed Then Return
+            Using Global.SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(Me)
+                ShowCustomMessageBox($"Could not initialize the comparison viewer: {ex.Message}", AN)
+            End Using
             Me.Close()
         End Try
     End Sub

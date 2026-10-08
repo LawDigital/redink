@@ -51,7 +51,10 @@ Partial Public Class ThisAddIn
                                            Optional OcrAdditionalInstruction As String = Nothing,
                                            Optional ShowOCRProgress As Boolean = False,
                                            Optional ReturnMarkdown As Boolean = False,
-                                           Optional CancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of FileReadResult)
+                                           Optional CancellationToken As System.Threading.CancellationToken = Nothing,
+                                         Optional OcrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None,
+                                         Optional OcrBatchPages As System.Int32 = -1,
+                                         Optional MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing) As System.Threading.Tasks.Task(Of FileReadResult)
 
         Dim result As New FileReadResult()
         Dim filePath As String = ""
@@ -120,7 +123,14 @@ Partial Public Class ThisAddIn
                             OcrAdditionalInstruction,
                             ShowOCRProgress,
                             ReturnMarkdown,
-                            CancellationToken:=CancellationToken)
+                            OcrBatchPages:=OcrBatchPages,
+                            CancellationToken:=CancellationToken,
+                            OcrCleanupMode:=OcrCleanupMode,
+                            MarkdownPreparation:=MarkdownPreparation)
+                        result.OcrCleanupRawContent = pdfResult.OcrCleanupRawContent
+                        result.OcrCleanupReport = pdfResult.OcrCleanupReport
+                        result.MarkdownPreparationSkipped = pdfResult.MarkdownPreparationSkipped
+                        result.ExtractionWarnings = Global.SharedLibrary.Agents.TextExtractionDiagnostics.CopyWarnings(pdfResult.ExtractionWarnings)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".eml"

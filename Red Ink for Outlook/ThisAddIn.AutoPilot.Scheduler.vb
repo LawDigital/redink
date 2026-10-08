@@ -839,6 +839,8 @@ Partial Public Class ThisAddIn
             End If
 
             Try
+                ' A real due task (including local interactive tasks) pre-empts diagnostics.
+                CancelAutoPilotLogDiagnosticsForForegroundWork()
                 If isLocalInteractiveTask Then
                     Await HandleDueLocalInteractiveTaskAsync(task, ct)
                     Continue For
@@ -1832,9 +1834,7 @@ Partial Public Class ThisAddIn
             Next
 
             ' Tag as AutoPilot reply for loop prevention
-            Try
-                newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
-            Catch : End Try
+            StampAutoPilotReplyHeaders(newMail, AP_LoopHeaderValue)
             Try : newMail.Categories = AP_CategoryName : Catch : End Try
 
             Dim cleanupGroupId As String = Nothing

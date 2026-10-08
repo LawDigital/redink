@@ -141,6 +141,20 @@ Partial Public Class ThisAddIn
         If homeLink IsNot Nothing Then homeLink = homeLink.Trim()
         If String.IsNullOrEmpty(homeLink) Then homeLink = Nothing
 
+        ' Keep the stylesheet designer online; the downloaded CSS uses the existing import.
+        Dim cssDesignerChoice As System.Int32 = ShowCustomYesNoBox(
+            "You can create a custom stylesheet with the online Red Ink CSS designer." & vbCrLf & vbCrLf &
+            "Download the resulting .css file there, then select it in the next dialog. You can also import an existing CSS file or cancel that dialog to use the default style.",
+            "Open online CSS designer", "Continue to CSS import", AN & " Draw.io Converter")
+        If cssDesignerChoice = 0 Then Exit Sub
+        If cssDesignerChoice = 1 Then
+            Try
+                System.Diagnostics.Process.Start(New System.Diagnostics.ProcessStartInfo("https://redink.ai/apps/customcss/index.html") With {.UseShellExecute = True})
+            Catch ex As System.Exception
+                ShowCustomMessageBox("Could not open the CSS designer: " & ex.Message, AN & " Draw.io Converter")
+            End Try
+        End If
+
         ' Ask user for an optional custom CSS file
         Dim customCss As String = Nothing
         Dim cssPath As String = ""

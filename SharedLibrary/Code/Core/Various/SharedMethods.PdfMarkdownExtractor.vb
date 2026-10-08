@@ -46,6 +46,7 @@ Namespace SharedLibrary
                     Me.RemoveWatermarks = True
                     Me.PreserveFootnotes = True
                     Me.EmitMarkdownFootnotes = True
+                    Me.CollectFootnotesAtEnd = True ' Preserve existing callers; explicit preparation may choose source order.
                     Me.PreserveBold = True
                     Me.PreserveItalic = True
                     Me.DetectCaptions = True
@@ -74,6 +75,7 @@ Namespace SharedLibrary
                 Public Property RemoveWatermarks As System.Boolean
                 Public Property PreserveFootnotes As System.Boolean
                 Public Property EmitMarkdownFootnotes As System.Boolean
+                Public Property CollectFootnotesAtEnd As System.Boolean
                 Public Property PreserveBold As System.Boolean
                 Public Property PreserveItalic As System.Boolean
                 Public Property DetectCaptions As System.Boolean
@@ -2045,7 +2047,13 @@ Namespace SharedLibrary
 
                         Case PdfSemanticKind.Footnote
                             If options.PreserveFootnotes Then
-                                footnotes.Add(element)
+                                If options.CollectFootnotesAtEnd Then
+                                    footnotes.Add(element)
+                                Else
+                                    AppendBlankLine(output)
+                                    AppendFootnote(output, element, options)
+                                    output.AppendLine()
+                                End If
                             End If
 
                         Case PdfSemanticKind.Paragraph
@@ -2058,19 +2066,23 @@ Namespace SharedLibrary
                 If options.PreserveFootnotes AndAlso footnotes.Count > 0 Then
                     AppendBlankLine(output)
                     For Each footnote As SemanticElement In footnotes
-                        Dim text As System.String = EscapeMarkdownInline(footnote.Text)
-                        If options.EmitMarkdownFootnotes AndAlso Not System.String.IsNullOrWhiteSpace(footnote.FootnoteId) Then
-                            output.AppendLine("[^" & footnote.FootnoteId & "]: " & text)
-                        Else
-                            Dim label As System.String = If(System.String.IsNullOrWhiteSpace(footnote.FootnoteMarker), "Footnote", footnote.FootnoteMarker)
-                            output.AppendLine("- " & EscapeMarkdownInline(label) & ": " & text)
-                        End If
+                        AppendFootnote(output, footnote, options)
                     Next
                     output.AppendLine()
                 End If
 
                 Return output.ToString()
             End Function
+
+            Private Shared Sub AppendFootnote(output As System.Text.StringBuilder, footnote As SemanticElement, options As PdfMarkdownOptions)
+                Dim text As System.String = EscapeMarkdownInline(footnote.Text)
+                If options.EmitMarkdownFootnotes AndAlso Not System.String.IsNullOrWhiteSpace(footnote.FootnoteId) Then
+                    output.AppendLine("[^" & footnote.FootnoteId & "]: " & text)
+                Else
+                    Dim label As System.String = If(System.String.IsNullOrWhiteSpace(footnote.FootnoteMarker), "Footnote", footnote.FootnoteMarker)
+                    output.AppendLine("- " & EscapeMarkdownInline(label) & ": " & text)
+                End If
+            End Sub
 
             Private Shared Function RenderElementText(
                 element As SemanticElement,
