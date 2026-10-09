@@ -11,6 +11,7 @@
     const answer = document.getElementById('answer');
     const send = document.getElementById('send-button');
     const copy = document.getElementById('copy-button');
+    const copySource = document.getElementById('copy-source-button');
     const settings = document.getElementById('settings-button');
     const historyOption = document.getElementById('history-option');
     const navigation = document.getElementById('answer-navigation');
@@ -29,6 +30,7 @@
         const disabled = !ready || busy || locked;
         source.disabled = question.disabled = send.disabled = settings.disabled = disabled;
         copy.disabled = disabled || !rawHtml;
+        copySource.disabled = disabled || !source.value;
         historyToggle.disabled = disabled;
         historyOption.hidden = turnCount === 0;
         navigation.hidden = false;
@@ -113,7 +115,8 @@
                 if (!busy && !locked) question.focus();
                 break;
             case 'preferences': preferences(message); break;
-            case 'selection': source.value = message.selectedText || ''; ui.status(message.status); break;
+            case 'ocrCapability': { const hint = document.getElementById('ocr-hint'); hint.hidden = !message.available; hint.textContent = message.available ? `OCR · ${message.shortcut || ''}` : ''; break; }
+            case 'selection': source.value = message.selectedText || ''; ui.status(message.status); state(); break;
             case 'newConversation': source.value = message.selectedText || ''; rawHtml = ''; question.value = ''; setTurn({ turnIndex: -1, turnCount: 0 }); historyToggle.checked = message.includeHistory !== false; render(); state(); break;
             case 'answer': rawHtml = message.html || ''; setTurn(message); answerScroll.scrollTop = 0; question.value = message.question || ''; historyToggle.checked = message.includeHistory !== false; ui.status(message.status); render(); state(); break;
             case 'busy': busy = !!message.busy; if (message.status !== undefined) ui.status(message.status); state(); break;
@@ -132,6 +135,7 @@
     send.addEventListener('click', submit);
     settings.addEventListener('click', () => { if (!settings.disabled) ui.post('settings'); });
     copy.addEventListener('click', () => { if (!copy.disabled) ui.post('copy'); });
+    copySource.addEventListener('click', () => { if (!copySource.disabled) ui.post('copySource'); });
     historyToggle.addEventListener('change', () => { if (!historyToggle.disabled) ui.post('historyChanged', { includeHistory: historyToggle.checked }); });
     function navigate(direction) {
         if (busy || locked || !ready) return;
@@ -154,7 +158,8 @@
         event.preventDefault();
         navigate(event.key === 'ArrowLeft' ? 'previous' : 'next');
     });
-    window.addEventListener('resize', requestSize);
+    // Native window resizing must not request a new height, or it creates a feedback loop.
+    // Content changes still schedule the desired height through requestSize().
     window.redInkAnswer = Object.freeze({ getCopyPayload: () => ({ ...payload }) });
     state();
     if (ui.connected) ui.post('ready');

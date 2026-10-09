@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -38,4 +38,32 @@
     <EmbeddedResource Include="Web\settings.html" LogicalName="AskInky.Web.settings.html" WithCulture="false" />
     <EmbeddedResource Include="Web\settings.js" LogicalName="AskInky.Web.settings.js" WithCulture="false" />
   </ItemGroup>
+    <!-- Authenticode signing of the published portable EXE -->
+    <PropertyGroup>
+        <AskInkySignTool>C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe</AskInkySignTool>
+        <AskInkyCertificateThumbprint>1EF41035D3AC9F8A9A678B845DA2F69C765D00E0</AskInkyCertificateThumbprint>
+    </PropertyGroup>
+
+    <Target Name="SignAskInky"
+            AfterTargets="Publish"
+            Condition="'$(Configuration)' == 'Release' and '$(PublishSingleFile)' == 'true' and '$(RuntimeIdentifier)' == 'win-x64'">
+
+        <PropertyGroup>
+            <AskInkyPublishedExe>$(PublishDir)AskInky.exe</AskInkyPublishedExe>
+        </PropertyGroup>
+
+        <Error Condition="!Exists('$(AskInkySignTool)')"
+               Text="Ask Inky: SignTool.exe not found." />
+
+        <Error Condition="!Exists('$(AskInkyPublishedExe)')"
+               Text="Ask Inky: Published EXE not found." />
+
+        <Exec Command="&quot;$(AskInkySignTool)&quot; sign /sha1 $(AskInkyCertificateThumbprint) /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d &quot;Ask Inky&quot; /du &quot;https://redink.ai&quot; &quot;$(AskInkyPublishedExe)&quot;" />
+
+        <Exec Command="&quot;$(AskInkySignTool)&quot; verify /pa /tw /v &quot;$(AskInkyPublishedExe)&quot;" />
+
+        <Message Importance="high"
+                 Text="Ask Inky: Authenticode signature verified successfully." />
+
+    </Target>
 </Project>

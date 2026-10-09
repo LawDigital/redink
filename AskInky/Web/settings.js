@@ -7,7 +7,7 @@
     'use strict';
     const ui = window.redInkUi;
     const $ = id => document.getElementById(id);
-    let ready = false, busy = false, recording = false, apiChanged = false, registered = false;
+    let ready = false, busy = false, recording = false, recordingOcr = false, apiChanged = false, registered = false;
     let registeredUser = '', savedOrigin = '', language = 'de', bundles = {}, probe = null;
     const editable = Array.from(document.querySelectorAll('input, textarea, select, button'));
     let savedModel = '';
@@ -15,7 +15,7 @@
     for (let k = 65; k <= 90; k++) keyOptions.push([k, String.fromCharCode(k)]);
     for (let k = 48; k <= 57; k++) keyOptions.push([k, String.fromCharCode(k)]);
     for (let n = 1; n <= 24; n++) if (n !== 12) keyOptions.push([111 + n, `F${n}`]);
-    for (const [key, text] of keyOptions) $('hotkey-key').add(new Option(text, String(key)));
+    for (const [key, text] of keyOptions) { $('hotkey-key').add(new Option(text, String(key))); $('ocr-hotkey-key').add(new Option(text, String(key))); }
     function rebuildModels(models, error) {
         const selector = $('settings-model');
         const wanted = modelValue();
@@ -42,6 +42,20 @@
     }
     function showCustomModel() {
         $('settings-model-custom').hidden = $('settings-model').value !== '__custom__';
+    }
+    function ocrShortcut() {
+        return { modifiers: ($('ocr-hotkey-ctrl').checked ? 2 : 0) | ($('ocr-hotkey-shift').checked ? 4 : 0) | ($('ocr-hotkey-alt').checked ? 1 : 0), key: Number($('ocr-hotkey-key').value) };
+    }
+    function ocrShortcutText() {
+        const {modifiers, key} = ocrShortcut();
+        return [(modifiers & 2) ? 'Ctrl' : '', (modifiers & 4) ? 'Shift' : '', (modifiers & 1) ? 'Alt' : '', keyOptions.find(x => x[0] === key)?.[1]].filter(Boolean).join(' + ');
+    }
+    function setOcrShortcut(modifiers, key) {
+        $('ocr-hotkey-ctrl').checked = !!(modifiers & 2);
+        $('ocr-hotkey-shift').checked = !!(modifiers & 4);
+        $('ocr-hotkey-alt').checked = !!(modifiers & 1);
+        $('ocr-hotkey-key').value = String(key);
+        $('ocr-hotkey-display').value = ocrShortcutText();
     }
     function origin(raw) {
         try {
@@ -79,7 +93,7 @@
         recording = active && ready && !busy;
         $('hotkey-display').classList.toggle('recording', recording);
         $('hotkey-display').value = recording ? ui.t('desktop.recording') : shortcutText();
-        ui.post('recording', { active: recording });
+        ui.post('recording', { active: recording, target: 'text' });
     }
     function state() {
         for (const el of editable) el.disabled = !ready || busy;
@@ -116,6 +130,7 @@
         $('temperature-value').textContent = (Number($('temperature').value) / 100).toLocaleString(language, { maximumFractionDigits: 2 });
         $('settings-llm-debug-panel').hidden = !$('settings-show-llm-debug').checked;
         $('hotkey-display').value = recording ? ui.t('desktop.recording') : shortcutText();
+        $('ocr-hotkey-display').value = recordingOcr ? ui.t('desktop.recording') : ocrShortcutText();
         connectionStatus(); registrationStatus();
         ui.post('preview', { language });
     }
@@ -126,7 +141,7 @@
             licenseUser: $('settings-license-user').value, language: $('language-select').value,
             darkMode: $('dark-mode-toggle').checked, fontSize: Number($('font-size').value), temperature: Number($('temperature').value) / 100,
             model: modelValue(), systemPrompt: $('system-prompt').value, showLlmDebug: $('settings-show-llm-debug').checked,
-            hotkeyModifiers: key.modifiers, hotkeyKey: key.key
+            hotkeyModifiers: key.modifiers, hotkeyKey: key.key, ocrHotkeyModifiers: ocrShortcut().modifiers, ocrHotkeyKey: ocrShortcut().key
         };
     }
     function commit(action) {
@@ -135,6 +150,7 @@
         if (!(candidate.hotkeyModifiers & 3) || !keyOptions.some(x => x[0] === candidate.hotkeyKey)) {
             ui.status(ui.t('desktop.invalidShortcut'), true); return;
         }
+        if (!(candidate.ocrHotkeyModifiers & 3) || !keyOptions.some(x => x[0] === candidate.ocrHotkeyKey) || (candidate.ocrHotkeyModifiers === candidate.hotkeyModifiers && candidate.ocrHotkeyKey === candidate.hotkeyKey)) { ui.status(ui.t('desktop.invalidShortcut'), true); return; }
         if (action === 'register' && !$('settings-registration-link').value.trim()) {
             ui.status(ui.t('settings.registrationLinkMissing'), true); return;
         }
@@ -167,6 +183,7 @@
                 registered = v.registered; registeredUser = v.userId; savedOrigin = origin(v.helperUrl);
                 apiChanged = false; recording = false; probe = null;
                 setShortcut(v.hotkeyModifiers, v.hotkeyKey);
+                setOcrShortcut(v.ocrHotkeyModifiers, v.ocrHotkeyKey);
                 ready = true; preview(); state();
                 ui.post('loadModels', { values: values() });
                 ui.status(message.feedback || '', !!message.failure);
@@ -177,7 +194,7 @@
             case 'probe': probe = message; connectionStatus(); ui.status(message.authorized ? ui.t('desktop.connected') : licenseText(), !message.authorized); break;
             case 'models': rebuildModels(message.models, !!message.error); break;
             case 'clearInvite': $('settings-registration-link').value = ''; state(); break;
-            case 'hotkey': setShortcut(message.modifiers, message.key); setRecording(false); $('hotkey-display').blur(); break;
+            case 'hotkey': if (message.ocr) { setOcrShortcut(message.modifiers, message.key); recordingOcr = false; $('ocr-hotkey-display').blur(); } else { setShortcut(message.modifiers, message.key); setRecording(false); $('hotkey-display').blur(); } break;
         }
     });
     $('hotkey-display').addEventListener('focus', () => setRecording(true));
@@ -197,7 +214,25 @@
         if (event.metaKey || !(modifiers & 3) || !keyOptions.some(x => x[0] === key)) { ui.status(ui.t('desktop.invalidShortcut'), true); return; }
         setShortcut(modifiers, key); setRecording(false); event.target.blur(); ui.status('');
     });
-    $('reset-hotkey').addEventListener('click', () => { setRecording(false); setShortcut(6, 75); ui.status(''); });
+    $('ocr-hotkey-display').addEventListener('focus', () => { recordingOcr = true; $('ocr-hotkey-display').value = ui.t('desktop.recording'); ui.post('recording', {active: true, target: 'ocr'}); });
+    $('ocr-hotkey-display').addEventListener('blur', () => { recordingOcr = false; $('ocr-hotkey-display').value = ocrShortcutText(); ui.post('recording', {active: false, target: 'ocr'}); });
+    $('ocr-hotkey-display').addEventListener('keydown', event => {
+        if (!recordingOcr) return;
+        if (event.key === 'Tab') return;
+        event.preventDefault();
+        if (event.key === 'Escape') { event.target.blur(); return; }
+        if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return;
+        let key = 0;
+        if (/^[a-z]$/i.test(event.key)) key = event.key.toUpperCase().charCodeAt(0);
+        else if (/^Digit[0-9]$/.test(event.code)) key = event.code.charCodeAt(5);
+        else if (/^F\d{1,2}$/.test(event.code)) key = 111 + Number(event.code.slice(1));
+        const modifiers = (event.ctrlKey ? 2 : 0) | (event.shiftKey ? 4 : 0) | (event.altKey ? 1 : 0);
+        if (event.metaKey || !(modifiers & 3) || !keyOptions.some(x => x[0] === key)) { ui.status(ui.t('desktop.invalidShortcut'), true); return; }
+        setOcrShortcut(modifiers, key); recordingOcr = false; event.target.blur();
+    });
+    $('reset-ocr-hotkey').addEventListener('click', () => setOcrShortcut(3, 79));
+    for (const id of ['ocr-hotkey-ctrl','ocr-hotkey-shift','ocr-hotkey-alt','ocr-hotkey-key']) $(id).addEventListener('change', () => { recordingOcr = false; $('ocr-hotkey-display').value = ocrShortcutText(); });
+    $('reset-hotkey').addEventListener('click', () => { setRecording(false); setShortcut(3, 75); ui.status(''); });
     for (const id of ['hotkey-ctrl', 'hotkey-shift', 'hotkey-alt', 'hotkey-key']) $(id).addEventListener('change', () => { setRecording(false); $('hotkey-display').value = shortcutText(); });
     for (const id of ['language-select', 'dark-mode-toggle', 'settings-show-llm-debug']) $(id).addEventListener('change', preview);
     for (const id of ['font-size', 'temperature']) $(id).addEventListener('input', preview);

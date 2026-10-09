@@ -16,6 +16,7 @@
 <main class="desktop-shell" aria-busy="false">
     <section class="desktop-card source-card">
         <textarea id="selected-text" class="desktop-field source-field" readonly spellcheck="false" data-title="desktop.selectedTip" data-placeholder="desktop.selectedPlaceholder"></textarea>
+
     </section>
     <section class="desktop-card question-card">
         <textarea id="question" class="desktop-field" maxlength="200000" spellcheck="true" data-title="desktop.questionTip" data-placeholder="desktop.questionPlaceholder" disabled></textarea>
@@ -28,6 +29,9 @@
             <div id="answer" class="answer-content result-text"></div>
         </div>
         <div id="answer-navigation" class="answer-navigation" hidden>
+            <button id="copy-source-button" type="button" class="quick-access-btn icon-button" data-title="desktop.copySourceTip" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 5V4a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h1"/></svg>
+            </button>
             <button type="button" id="previous-answer" class="quick-access-btn icon-button" data-title="desktop.previousAnswer" disabled aria-label="Previous answer">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
             </button>
@@ -54,6 +58,6 @@
             <span data-text="desktop.includeHistory">Include previous responses</span>
         </label>
     </section>
-    <footer class="desktop-footer"><span id="status" class="desktop-status" role="status" aria-live="polite"></span><span id="shortcut" class="shortcut-hint" data-title="desktop.shortcutHint"></span></footer>
+    <footer class="desktop-footer"><span id="status" class="desktop-status" role="status" aria-live="polite"></span><span id="ocr-hint" class="shortcut-hint" hidden></span><span id="shortcut" class="shortcut-hint" data-title="desktop.shortcutHint"></span></footer>
 </main>
 </body></html>

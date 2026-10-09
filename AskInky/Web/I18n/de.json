@@ -74,7 +74,7 @@
   "desktop.shortcutHelp": "Ins Feld klicken und Tasten drücken, oder unten auswählen. Esc bricht die Erfassung ab.",
   "desktop.shortcutKey": "Taste für die Tastenkombination",
   "desktop.default": "Standard",
-  "desktop.resetShortcut": "Ctrl + Shift + K einstellen",
+  "desktop.resetShortcut": "Ctrl + Alt + K einstellen",
   "desktop.hotkeyConflict": "Diese Tastenkombination ist nicht verfügbar. Die bisherige bleibt aktiv.",
   "desktop.invalidShortcut": "Ctrl oder Alt mit Buchstabe, Ziffer oder Funktionstaste verwenden; F12 ist reserviert.",
   "desktop.save": "Speichern",
@@ -133,5 +133,8 @@
   "desktop.customModel": "Anderes Modell eingeben…",
   "desktop.customModelHint": "Modellname eingeben",
   "desktop.modelsLoaded": "Verfügbare Modelle des Helpers geladen.",
-  "desktop.modelsUnavailable": "Modellliste nicht erreichbar; gespeichertes oder eigenes Modell verwenden."
+  "desktop.modelsUnavailable": "Modellliste nicht erreichbar; gespeichertes oder eigenes Modell verwenden.",
+  "desktop.ocrShortcut": "Screenshot-OCR-Tastenkombination",
+  "desktop.ocrMenu": "Screenshot-OCR",
+  "desktop.copySourceTip": "Markierten oder erkannten OCR-Text kopieren"
 }

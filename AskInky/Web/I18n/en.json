@@ -74,7 +74,7 @@
   "desktop.shortcutHelp": "Click the field and press keys, or choose below. Esc cancels recording.",
   "desktop.shortcutKey": "Shortcut key",
   "desktop.default": "Default",
-  "desktop.resetShortcut": "Set Ctrl + Shift + K",
+  "desktop.resetShortcut": "Set Ctrl + Alt + K",
   "desktop.hotkeyConflict": "This shortcut is unavailable. The previous shortcut remains active.",
   "desktop.invalidShortcut": "Use Ctrl or Alt with a letter, digit or function key; F12 is reserved.",
   "desktop.save": "Save",
@@ -133,5 +133,8 @@
   "desktop.customModel": "Enter another model…",
   "desktop.customModelHint": "Enter model name",
   "desktop.modelsLoaded": "Available Helper models loaded.",
-  "desktop.modelsUnavailable": "Model list unavailable; use saved or custom model."
+  "desktop.modelsUnavailable": "Model list unavailable; use saved or custom model.",
+  "desktop.ocrShortcut": "Screenshot OCR shortcut",
+  "desktop.ocrMenu": "Screenshot OCR",
+  "desktop.copySourceTip": "Copy selected or OCR-recognized text"
 }

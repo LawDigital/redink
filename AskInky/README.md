@@ -8,7 +8,7 @@ Die geänderten Dateien unter `AskInky/` über den bestehenden Projektordner kop
 
 ## Bedienung
 
-Text in einer anderen Anwendung markieren und **Ctrl + Shift + K** drücken. Der Desktop-Client wartet auf das Loslassen der Modifikatortasten und versucht anschließend, die Auswahl über Strg+C zu übernehmen. Bei einem Fokuswechsel wird die Erfassung abgebrochen statt an die falsche Anwendung zu senden. Nicht alle Anwendungen unterstützen diesen Zugriff; insbesondere geschützte Felder und höher privilegierte Anwendungen benötigen einen gesonderten Windows-Test.
+Text in einer anderen Anwendung markieren und **Ctrl + Alt + K** drücken. Der Desktop-Client wartet auf das Loslassen der Modifikatortasten und versucht anschließend, die Auswahl über Strg+C zu übernehmen. Bei einem Fokuswechsel wird die Erfassung abgebrochen statt an die falsche Anwendung zu senden. Nicht alle Anwendungen unterstützen diesen Zugriff; insbesondere geschützte Felder und höher privilegierte Anwendungen benötigen einen gesonderten Windows-Test.
 
 Das Hauptfenster enthält ausschließlich Auswahl, Frage und HTML-Antwort. Rechts stehen Einstellungen, Senden und Kopieren als SVG-Symbole mit lokalisierten Tooltips. Es gibt keine zusätzliche Titelzeile, kein Logo im Textbereich und keine Feldüberschriften. Titel und Original-Icon bleiben im nativen Fensterrahmen; das Icon bleibt auch im Tray.
 
@@ -22,7 +22,7 @@ Ein einfacher Klick auf das Tray-Symbol zeigt genau drei Einträge: Aufrufen, Ei
 
 Der **Helper-API-Schlüssel** ist der Zugangsschlüssel zum Red Ink Helper, nicht der API-Schlüssel des eigentlichen KI-Anbieters. Der KI-Anbieter bleibt auf dem Helper konfiguriert. Schlüssel werden im Passwortfeld erfasst und mit Windows DPAPI für den aktuellen Benutzer geschützt gespeichert. Beim Wechsel des Server-Ursprungs werden bestehende Gerätezugangsdaten und ein unverändert übernommener alter API-Schlüssel nicht an den neuen Server weitergegeben; einen neuen Schlüssel ausdrücklich eingeben.
 
-Für den Hotkey entweder in das Erfassungsfeld klicken und die Kombination drücken oder Modifikatoren und Taste auswählen. **Standard** setzt Ctrl+Shift+K. Speichern versucht zuerst, die neue Kombination global zu registrieren; erst nach erfolgreicher Speicherung wird die alte Registrierung freigegeben. Bei einem Konflikt bleibt die bisherige Kombination bestehen. Windows meldet globale Reservierungen; anwendungsinterne Belegungen lassen sich damit nicht vollständig erkennen. Eine bereits gespeicherte individuelle Kombination wird beim Update nicht überschrieben.
+Für den Hotkey entweder in das Erfassungsfeld klicken und die Kombination drücken oder Modifikatoren und Taste auswählen. **Standard** setzt Ctrl+Alt+K. Speichern versucht zuerst, die neue Kombination global zu registrieren; erst nach erfolgreicher Speicherung wird die alte Registrierung freigegeben. Bei einem Konflikt bleibt die bisherige Kombination bestehen. Windows meldet globale Reservierungen; anwendungsinterne Belegungen lassen sich damit nicht vollständig erkennen. Eine bereits gespeicherte individuelle Kombination wird beim Update nicht überschrieben.
 
 Die Office-spezifischen Optionen für Änderungsnachverfolgung, Kommentar-Präfix und Office-Schreibprotokoll sind nicht vorhanden. Ebenso ist der MCP-/Agenten-Quelleneditor nicht portiert: Dieses Desktopprojekt verwendet weiterhin `/llm/chat`, nicht den erweiterten Agenten-Chat. Es gibt keine wirkungslosen Platzhalter für diese Funktionen.
 
@@ -51,3 +51,23 @@ Benutzerdaten liegen unter `%LOCALAPPDATA%\RedInk\AskInky`: `config.json`, `diag
 Die Single-EXE-Konfiguration bleibt erhalten; siehe `PUBLISH.md`. Eine separate Microsoft Edge WebView2 Runtime ist weiterhin erforderlich. Bei fehlender oder ausgefallener WebView2-Oberfläche erscheint eine verständliche native Fehlermeldung statt einer stillen Rückkehr zum alten Design.
 
 Prüfumfang und noch nötige Windows-Abnahme: siehe `QA.md`. Externe Prüfberichte und Diffs sind nicht Bestandteil des Produktquellbaums.
+
+## VDI / Remote Desktop – Hotkey troubleshooting (V091026)
+
+On startup, Ask Inky registers the configured global shortcut. If registration fails, it logs the Win32 error and retries every 15 seconds while the app is running. A session unlock or remote reconnect also triggers a UI-thread re-registration. If the host rejects `MOD_NOREPEAT` (error 87), Ask Inky tries the same combination without this flag. A genuine hotkey conflict is **not** bypassed.
+
+If the shortcut does nothing, click the Ask Inky tray icon and choose **Open** (localized). Check `%LOCALAPPDATA%\RedInk\AskInky\diagnostics.log`:
+
+- `hotkey.registered.*` = Windows accepted registration.
+- `hotkey.registration.failed.win32.1409` = another app has registered the shortcut; choose another in Settings.
+- `hotkey.message.received` = Windows delivered the shortcut to Ask Inky.
+- If registration succeeded but no `hotkey.message.received` appears after a keypress, investigate VDI client's keyboard redirection, keyboard layout/AltGr, or shortcuts intercepted before reaching the guest.
+- `assistant.open.failed` / `assistant.foreground.topmost-fallback` = inspect foreground/window activation or WebView2 behavior.
+
+The tray command is the reliable fallback when the VDI client captures the shortcut. The hotkey remains configurable; previously saved choices are not overwritten. Clipboard-based text selection still requires a foreground application that accepts Ctrl+C.
+
+## macOS
+
+The supplied Windows EXE does not run natively on macOS. A Mac edition would need a separate native host for global shortcuts, Accessibility-based selection, Keychain storage, clipboard, WKWebView, tray/menu bar, and macOS signing/notarization. The existing web UI and Red Ink Helper API can be reused. A VDI session accessed **from a Mac** can still run the Windows edition **inside the Windows VDI** if keyboard shortcuts are forwarded.
+
+Screenshot OCR: configurable second hotkey (default Ctrl+Alt+O), drag to select, Escape to cancel, uses existing Office Web Helper /files/upload; no Helper modifications.

@@ -11,8 +11,13 @@ Public NotInheritable Class ClientConfig
     Public Property HelperUrl As String = "http://localhost"
     Public Property UserId As String = ""
     Public Property LicenseUser As String = ""
-    Public Property HotkeyModifiers As UInteger = 6UI
+    Public Property HotkeyModifiers As UInteger = 3UI
     Public Property HotkeyKey As Integer = CInt(System.Windows.Forms.Keys.K)
+    Public Property OcrHotkeyModifiers As UInteger = 3UI
+    Public Property OcrHotkeyKey As Integer = CInt(System.Windows.Forms.Keys.O)
+    ' Optional persisted assistant position; Nothing means centered on the active screen.
+    Public Property AssistantLeft As Integer? = Nothing
+    Public Property AssistantTop As Integer? = Nothing
     Public Property DarkMode As Boolean = False
     Public Property UiLanguage As String = "de"
     Public Property FontSize As Integer = 12
@@ -41,6 +46,22 @@ Public NotInheritable Class ConfigStore
                 result.UiLanguage = UiStrings.NormalizeLanguage(result.UiLanguage)
                 If result.FontSize < 6 OrElse result.FontSize > 16 Then result.FontSize = 12
                 If System.Double.IsNaN(result.Temperature) OrElse result.Temperature < 0 OrElse result.Temperature > 1 Then result.Temperature = 0.7
+                ' Upgrade only the exact historical pair of unmodified defaults. A custom
+                ' primary or OCR shortcut must never be rewritten on upgrade.
+                ' Legacy: Ctrl+Shift+K (6/75) and Ctrl+Alt+Shift+K (7/75).
+                If result.HotkeyModifiers = 6UI AndAlso result.HotkeyKey = 75 AndAlso
+                   result.OcrHotkeyModifiers = 7UI AndAlso result.OcrHotkeyKey = 75 Then
+                    result.HotkeyModifiers = 3UI
+                    result.HotkeyKey = 75
+                    result.OcrHotkeyModifiers = 3UI
+                    result.OcrHotkeyKey = 79
+                    Try
+                        Save(result)
+                        ClientLog.Write("hotkey.defaults.legacy-pair-upgraded")
+                    Catch migrationError As System.Exception
+                        ClientLog.Write("hotkey.defaults.migration-save-failed", migrationError)
+                    End Try
+                End If
                 ' Bind legacy credentials to the server already saved with them, never to a new target.
                 If String.IsNullOrEmpty(result.CredentialOrigin) Then result.CredentialOrigin = HelperClient.GetOrigin(result.HelperUrl)
                 Return result

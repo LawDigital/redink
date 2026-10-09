@@ -3,6 +3,7 @@
 ' =============================================================================
 ' File: Program.vb
 ' Purpose: Main Windows entry point and application initialization.
+' Version: V091026 (9 October 2026). Update on each dated delivery.
 ' Architecture: Windows native host with embedded Office Web-based interface.
 ' Notes: Red Ink License and Ask Inky third-party attributions are embedded in LICENSE.txt.
 ' =============================================================================
@@ -12,6 +13,7 @@
 '
 ' Part of Red Ink (AskInky). Standalone WinForms message loop, not a VSTO add-in.
 Friend Module Program
+    Public Const Version As String = "V091026"
     <System.STAThread>
     Public Sub Main()
         System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2)

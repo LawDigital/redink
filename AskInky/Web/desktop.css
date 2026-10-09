@@ -161,3 +161,14 @@ body.is-busy .settings-actions button, body.is-busy .settings-scroll button { po
     text-align: center; font-size: .85em; }
 .settings-copyright a { color: var(--accent-color); text-decoration: none; }
 .settings-copyright a:hover { text-decoration: underline; }
+
+/* Source/OCR text copy is the first action in the persistent bottom row, immediately before navigation. */
+.source-card { grid-template-columns: minmax(0, 1fr); }
+.source-card .desktop-field { min-width: 0; padding-right: 12px; }
+.answer-navigation #copy-source-button { margin-right: 3px; }
+
+/* Separate the OCR shortcut from the regular hotkey help text.
+   Keep the spacing local to this setting, independently of Office Web CSS. */
+.settings-group label.section-label[for="ocr-hotkey-display"] {
+    margin-top: 19px;
+}

@@ -74,7 +74,7 @@
   "desktop.shortcutHelp": "Cliquez dans le champ et appuyez sur les touches, ou choisissez ci-dessous. Échap annule.",
   "desktop.shortcutKey": "Touche du raccourci",
   "desktop.default": "Par défaut",
-  "desktop.resetShortcut": "Définir Ctrl + Maj + K",
+  "desktop.resetShortcut": "Définir Ctrl + Alt + K",
   "desktop.hotkeyConflict": "Ce raccourci est indisponible. Le précédent reste actif.",
   "desktop.invalidShortcut": "Utilisez Ctrl ou Alt avec une lettre, un chiffre ou une touche de fonction ; F12 est réservé.",
   "desktop.save": "Enregistrer",
@@ -133,5 +133,8 @@
   "desktop.customModel": "Saisir un autre modèle…",
   "desktop.customModelHint": "Saisir le nom du modèle",
   "desktop.modelsLoaded": "Modèles du Helper chargés.",
-  "desktop.modelsUnavailable": "Liste indisponible ; utiliser le modèle enregistré ou personnalisé."
+  "desktop.modelsUnavailable": "Liste indisponible ; utiliser le modèle enregistré ou personnalisé.",
+  "desktop.ocrShortcut": "Raccourci OCR de capture",
+  "desktop.ocrMenu": "OCR de capture",
+  "desktop.copySourceTip": "Copier le texte sélectionné ou reconnu par OCR"
 }

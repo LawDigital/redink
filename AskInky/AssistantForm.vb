@@ -24,6 +24,26 @@ Friend NotInheritable Class AssistantForm
     End Class
     Private settingsOpen As Boolean
     Private exiting As Boolean
+    Private manualResizeInProgress As Boolean
+    Private suppressAutomaticGrowth As Boolean
+    Private resizeStartClientHeight As Integer
+
+    Protected Overrides Sub OnResizeBegin(e As System.EventArgs)
+        manualResizeInProgress = True
+        resizeStartClientHeight = Me.ClientSize.Height
+        MyBase.OnResizeBegin(e)
+    End Sub
+
+    Protected Overrides Sub OnResizeEnd(e As System.EventArgs)
+        MyBase.OnResizeEnd(e)
+        If manualResizeInProgress AndAlso Me.ClientSize.Height < resizeStartClientHeight Then
+            suppressAutomaticGrowth = True
+        End If
+        manualResizeInProgress = False
+        If Me.Visible AndAlso Me.WindowState = System.Windows.Forms.FormWindowState.Normal Then
+            context.RememberAssistantPosition(Me.Location)
+        End If
+    End Sub
 
     Public Sub New(parent As AssistantContext)
         MyBase.New("assistant.html", "Ask Inky", New System.Drawing.Size(540, 710))
@@ -34,6 +54,7 @@ Friend NotInheritable Class AssistantForm
         Dim minimumClientHeight As Integer = System.Math.Min(550, maximumClientHeight)
         Me.MinimumSize = New System.Drawing.Size(470, minimumClientHeight + estimatedNonClientHeight)
         Me.ClientSize = New System.Drawing.Size(540, System.Math.Min(710, maximumClientHeight))
+        WindowPlacement.RestoreAssistant(Me, parent.Settings())
     End Sub
 
     Protected Overrides ReadOnly Property Language As String
@@ -42,7 +63,7 @@ Friend NotInheritable Class AssistantForm
         End Get
     End Property
 
-    Protected Overrides Sub PageReady()
+    Protected Overrides Async Sub PageReady()
         SendView(New With {.[type] = "init", .strings = UiStrings.GetBundle(Language), .language = Language,
                            .darkMode = context.Settings().DarkMode, .fontSize = context.Settings().FontSize,
                            .selectedText = selection, .question = question, .html = ResponseClipboard.Render(response),
@@ -50,13 +71,26 @@ Friend NotInheritable Class AssistantForm
                            .includeHistory = includeHistory, .hasAnswer = response.Length > 0,
                            .busy = sending, .locked = settingsOpen, .status = UiStrings.GetText(statusKey, Language),
                            .shortcut = HotkeyService.Format(context.Settings().HotkeyModifiers, context.Settings().HotkeyKey)})
+        Try
+            Dim available As Boolean = Await HelperClient.SupportsOcrAsync(context.Settings(), Lifetime.Token)
+            SendView(New With {.[type] = "ocrCapability", .available = available, .shortcut = HotkeyService.Format(context.Settings().OcrHotkeyModifiers, context.Settings().OcrHotkeyKey)})
+        Catch ex As System.Exception
+            ClientLog.Write("ocr.capability.probe.failed", ex)
+            SendView(New With {.[type] = "ocrCapability", .available = False})
+        End Try
     End Sub
 
-    Friend Sub ApplySettings()
+    Friend Async Sub ApplySettings()
         SendView(New With {.[type] = "preferences", .strings = UiStrings.GetBundle(Language), .language = Language,
                            .darkMode = context.Settings().DarkMode, .fontSize = context.Settings().FontSize,
                            .shortcut = HotkeyService.Format(context.Settings().HotkeyModifiers, context.Settings().HotkeyKey),
                            .status = UiStrings.GetText(statusKey, Language)})
+        Try
+            Dim available As Boolean = Await HelperClient.SupportsOcrAsync(context.Settings(), Lifetime.Token)
+            SendView(New With {.[type] = "ocrCapability", .available = available, .shortcut = HotkeyService.Format(context.Settings().OcrHotkeyModifiers, context.Settings().OcrHotkeyKey)})
+        Catch ex As System.Exception
+            ClientLog.Write("ocr.capability.probe.failed", ex)
+        End Try
     End Sub
 
     Friend Sub LoadSelection(value As String)
@@ -64,6 +98,7 @@ Friend NotInheritable Class AssistantForm
         Dim incoming As String = If(value, "")
         If Not String.Equals(selection, incoming, System.StringComparison.Ordinal) Then
             selection = incoming
+            suppressAutomaticGrowth = False
             turns.Clear()
             displayedTurnIndex = -1
             includeHistory = True
@@ -95,7 +130,7 @@ Friend NotInheritable Class AssistantForm
                         Dim nonClientHeight As Integer = Me.Height - Me.ClientSize.Height
                         Dim maximumClientHeight As Integer = System.Math.Max(Me.MinimumSize.Height - nonClientHeight, workArea.Height - nonClientHeight - 24)
                         Dim targetHeight As Integer = System.Math.Min(System.Math.Max(Me.MinimumSize.Height - nonClientHeight, desiredHeight), maximumClientHeight)
-                        If targetHeight > Me.ClientSize.Height Then
+                        If Not manualResizeInProgress AndAlso Not suppressAutomaticGrowth AndAlso targetHeight > Me.ClientSize.Height Then
                             Dim newTop As Integer = System.Math.Min(Me.Top, workArea.Bottom - nonClientHeight - targetHeight - 12)
                             Me.ClientSize = New System.Drawing.Size(Me.ClientSize.Width, targetHeight)
                             Me.Top = System.Math.Max(workArea.Top + 6, newTop)
@@ -136,6 +171,16 @@ Friend NotInheritable Class AssistantForm
                 End If
             Case "send"
                 Await SendAsync(HelperClient.TextValue(message, "question"))
+            Case "copySource"
+                If sending OrElse settingsOpen OrElse System.String.IsNullOrEmpty(selection) Then Return
+                Try
+                    System.Windows.Forms.Clipboard.SetText(selection, System.Windows.Forms.TextDataFormat.UnicodeText)
+                    statusKey = "desktop.copied"
+                    SendView(New With {.[type] = "status", .status = UiStrings.GetText(statusKey, Language)})
+                Catch ex As System.Exception
+                    ClientLog.Write("clipboard.copy-source.failed", ex)
+                    SendView(New With {.[type] = "error", .message = UiStrings.GetText("desktop.copyFailed", Language)})
+                End Try
             Case "copy"
                 If sending OrElse settingsOpen OrElse response.Length = 0 Then Return
                 Try
@@ -237,6 +282,7 @@ Friend NotInheritable Class AssistantForm
     Protected Overrides Sub OnFormClosing(e As System.Windows.Forms.FormClosingEventArgs)
         If Not exiting AndAlso e.CloseReason = System.Windows.Forms.CloseReason.UserClosing Then
             e.Cancel = True
+            context.RememberAssistantPosition(Me.Location)
             Hide() ' Keep question and answer; closing the panel does not quit the tray application.
         End If
         MyBase.OnFormClosing(e)

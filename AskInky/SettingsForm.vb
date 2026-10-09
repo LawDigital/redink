@@ -16,6 +16,7 @@ Friend NotInheritable Class SettingsForm
     Private pendingCredentialSave As Boolean
     Private Shared ReadOnly UsedInvites As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.Ordinal)
     Public Property IsRecordingHotkey As Boolean
+    Public Property RecordingOcrHotkey As Boolean
 
     Public Sub New(parent As AssistantContext, config As ClientConfig)
         MyBase.New("settings.html", "Ask Inky – " & UiStrings.GetText("settings", config.UiLanguage), New System.Drawing.Size(480, 620))
@@ -52,6 +53,7 @@ Friend NotInheritable Class SettingsForm
                                .licenseUser = draft.LicenseUser, .language = previewLanguage, .darkMode = draft.DarkMode,
                                .fontSize = draft.FontSize, .temperature = draft.Temperature, .model = draft.Model, .systemPrompt = draft.SystemPrompt,
                                .showLlmDebug = draft.ShowLlmDebug, .hotkeyModifiers = draft.HotkeyModifiers, .hotkeyKey = draft.HotkeyKey,
+                               .ocrHotkeyModifiers = draft.OcrHotkeyModifiers, .ocrHotkeyKey = draft.OcrHotkeyKey,
                                .registered = Not String.IsNullOrEmpty(draft.UserId) AndAlso Not String.IsNullOrEmpty(draft.DeviceTokenProtected), .userId = draft.UserId},
                            .debugSent = HelperClient.LastRequest, .debugReceived = HelperClient.LastResponse, .feedback = feedback, .failure = failure})
     End Sub
@@ -60,7 +62,7 @@ Friend NotInheritable Class SettingsForm
         Dim values As System.Text.Json.JsonElement
         If Not message.TryGetProperty("values", values) OrElse values.ValueKind <> System.Text.Json.JsonValueKind.Object Then Throw New HelperFailure("desktop.invalidSettings")
         Dim input As SettingsValues = System.Text.Json.JsonSerializer.Deserialize(Of SettingsValues)(values.GetRawText(), New System.Text.Json.JsonSerializerOptions With {.PropertyNameCaseInsensitive = True})
-        If input Is Nothing OrElse Not UiStrings.IsSupported(input.Language) OrElse Not HotkeyService.IsValid(input.HotkeyModifiers, input.HotkeyKey) Then Throw New HelperFailure("desktop.invalidSettings")
+        If input Is Nothing OrElse Not UiStrings.IsSupported(input.Language) OrElse Not HotkeyService.IsValid(input.HotkeyModifiers, input.HotkeyKey) OrElse Not HotkeyService.IsValid(input.OcrHotkeyModifiers, input.OcrHotkeyKey) Then Throw New HelperFailure("desktop.invalidSettings")
         If input.FontSize < 6 OrElse input.FontSize > 16 OrElse System.Double.IsNaN(input.Temperature) OrElse input.Temperature < 0 OrElse input.Temperature > 1 Then Throw New HelperFailure("desktop.invalidSettings")
         If input.ApiKey Is Nothing OrElse input.ApiKey.Length > 16384 OrElse input.ApiKey.Contains(vbCr) OrElse input.ApiKey.Contains(vbLf) Then Throw New HelperFailure("desktop.invalidSettings")
         If input.LicenseUser Is Nothing OrElse input.LicenseUser.Length > 1024 OrElse input.LicenseUser.Contains(vbCr) OrElse input.LicenseUser.Contains(vbLf) Then Throw New HelperFailure("desktop.invalidSettings")
@@ -87,6 +89,9 @@ Friend NotInheritable Class SettingsForm
         result.ShowLlmDebug = input.ShowLlmDebug
         result.HotkeyModifiers = input.HotkeyModifiers
         result.HotkeyKey = input.HotkeyKey
+        result.OcrHotkeyModifiers = input.OcrHotkeyModifiers
+        result.OcrHotkeyKey = input.OcrHotkeyKey
+        If result.HotkeyModifiers = result.OcrHotkeyModifiers AndAlso result.HotkeyKey = result.OcrHotkeyKey Then Throw New HelperFailure("desktop.hotkeyConflict")
         Return result
     End Function
 
@@ -128,6 +133,7 @@ Friend NotInheritable Class SettingsForm
         If action = "recording" Then
             Dim active As System.Text.Json.JsonElement
             IsRecordingHotkey = Not working AndAlso message.TryGetProperty("active", active) AndAlso active.ValueKind = System.Text.Json.JsonValueKind.True
+            RecordingOcrHotkey = IsRecordingHotkey AndAlso HelperClient.TextValue(message, "target") = "ocr"
             Return
         End If
         If working Then Return
@@ -193,10 +199,10 @@ Friend NotInheritable Class SettingsForm
         End Try
     End Function
 
-    Friend Sub RecordCurrentHotkey(modifiers As UInteger, key As Integer)
+    Friend Sub RecordCurrentHotkey(modifiers As UInteger, key As Integer, isOcr As Boolean)
         If Not IsRecordingHotkey Then Return
         IsRecordingHotkey = False
-        SendView(New With {.[type] = "hotkey", .modifiers = modifiers, .key = key})
+        SendView(New With {.[type] = "hotkey", .modifiers = modifiers, .key = key, .ocr = isOcr})
     End Sub
 
     Protected Overrides Sub OnFormClosing(e As System.Windows.Forms.FormClosingEventArgs)
@@ -222,7 +228,9 @@ Friend NotInheritable Class SettingsForm
         Public Property Model As String = ""
         Public Property SystemPrompt As String = ""
         Public Property ShowLlmDebug As Boolean
-        Public Property HotkeyModifiers As UInteger = 6UI
+        Public Property HotkeyModifiers As UInteger = 3UI
         Public Property HotkeyKey As Integer = 75
+        Public Property OcrHotkeyModifiers As UInteger = 3UI
+        Public Property OcrHotkeyKey As Integer = 79
     End Class
 End Class

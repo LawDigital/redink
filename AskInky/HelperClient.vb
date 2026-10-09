@@ -213,6 +213,51 @@ Public NotInheritable Class HelperClient
         Return result
     End Function
 
+    ' Office Web already uses POST /files/upload for image-to-text. No Helper modifications.
+    Public Shared Async Function OcrImageAsync(config As ClientConfig, imageBytes As Byte(), cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of String)
+        If imageBytes Is Nothing OrElse imageBytes.Length = 0 OrElse imageBytes.Length > 16000000 Then Throw New System.InvalidOperationException("Screenshot size is unsupported (maximum 16 MB PNG).")
+        Using timeout As System.Threading.CancellationTokenSource = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellation)
+            timeout.CancelAfter(System.TimeSpan.FromMinutes(5))
+            Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Post, "files/upload")
+                Using form As New System.Net.Http.MultipartFormDataContent()
+                    Dim image As New System.Net.Http.ByteArrayContent(imageBytes)
+                    image.Headers.ContentType = New System.Net.Http.Headers.MediaTypeHeaderValue("image/png")
+                    form.Add(image, "file", "selection.png")
+                    form.Add(New System.Net.Http.StringContent("true"), "allow_ocr")
+                    req.Content = form
+                    Using res As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, timeout.Token)
+                        If Not res.IsSuccessStatusCode Then Throw StatusFailure(res.StatusCode)
+                        Dim content As String = Await res.Content.ReadAsStringAsync(timeout.Token)
+                        Using doc As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(content)
+                            Dim payload As System.Text.Json.JsonElement = doc.RootElement
+                            Dim text As String = TextValue(payload, "content")
+                            Dim success As System.Text.Json.JsonElement
+                            If payload.TryGetProperty("success", success) AndAlso success.ValueKind = System.Text.Json.JsonValueKind.False Then Throw New System.InvalidOperationException(If(TextValue(payload, "error"), "OCR failed"))
+                            If System.String.IsNullOrWhiteSpace(text) OrElse text.StartsWith("[LLM vision", System.StringComparison.OrdinalIgnoreCase) OrElse text.StartsWith("[Image files require", System.StringComparison.OrdinalIgnoreCase) Then Throw New System.InvalidOperationException("OCR returned no usable text: " & text)
+                            Return text
+                        End Using
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Function
+
+    ' Advisory capability, not a substitute for server validation. Unknown => false.
+    Public Shared Async Function SupportsOcrAsync(config As ClientConfig, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of Boolean)
+        Using timeout As System.Threading.CancellationTokenSource = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellation)
+            timeout.CancelAfter(System.TimeSpan.FromSeconds(10))
+            Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Get, "config")
+                Using res As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, timeout.Token)
+                    If Not res.IsSuccessStatusCode Then Return False
+                    Using doc As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(Await res.Content.ReadAsStringAsync(timeout.Token))
+                        Dim cfg As System.Text.Json.JsonElement
+                        Return doc.RootElement.TryGetProperty("config", cfg) AndAlso cfg.ValueKind = System.Text.Json.JsonValueKind.Object AndAlso IsTrue(cfg, "object_capable")
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Function
+
     Public Shared Async Function AskAsync(config As ClientConfig, prompt As String, text As String, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of String)
         ' Helper decides whether device registration/licensing is necessary; no local prompt.
         Dim userContent As String = If(String.IsNullOrWhiteSpace(text), prompt, "Ausgewählter Text:" & vbLf & text & vbLf & vbLf & "Frage:" & vbLf & prompt)

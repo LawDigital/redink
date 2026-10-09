@@ -74,7 +74,7 @@
   "desktop.shortcutHelp": "Fai clic nel campo e premi i tasti, oppure scegli sotto. Esc annulla.",
   "desktop.shortcutKey": "Tasto della scorciatoia",
   "desktop.default": "Predefinita",
-  "desktop.resetShortcut": "Imposta Ctrl + Maiusc + K",
+  "desktop.resetShortcut": "Imposta Ctrl + Alt + K",
   "desktop.hotkeyConflict": "Questa scorciatoia non è disponibile. La precedente rimane attiva.",
   "desktop.invalidShortcut": "Usa Ctrl o Alt con una lettera, cifra o tasto funzione; F12 è riservato.",
   "desktop.save": "Salva",
@@ -133,5 +133,8 @@
   "desktop.customModel": "Inserisci un altro modello…",
   "desktop.customModelHint": "Inserisci nome modello",
   "desktop.modelsLoaded": "Modelli dell’Helper caricati.",
-  "desktop.modelsUnavailable": "Elenco non disponibile; usa il modello salvato o personalizzato."
+  "desktop.modelsUnavailable": "Elenco non disponibile; usa il modello salvato o personalizzato.",
+  "desktop.ocrShortcut": "Scorciatoia OCR screenshot",
+  "desktop.ocrMenu": "OCR schermata",
+  "desktop.copySourceTip": "Copia il testo selezionato o riconosciuto con OCR"
 }

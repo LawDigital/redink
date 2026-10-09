@@ -9,6 +9,7 @@
 ' Part of Red Ink (AskInky). No keyboard/mouse hook and no text-insertion API.
 Friend Module Native
     Public Const WM_HOTKEY As Integer = &H312
+    Public Const WM_ASKINKY_REBIND As Integer = &H8000 + &H15A
     Public Const VK_CONTROL As Integer = &H11
     Public Const VK_MENU As Integer = &H12
     Public Const VK_SHIFT As Integer = &H10
@@ -21,7 +22,13 @@ Friend Module Native
     Public Function RegisterHotKey(hWnd As System.IntPtr, id As Integer, modifiers As UInteger, key As UInteger) As Boolean
     End Function
     <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
+    Public Function PostMessage(hWnd As System.IntPtr, msg As Integer, wParam As System.IntPtr, lParam As System.IntPtr) As Boolean
+    End Function
+    <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
     Public Function UnregisterHotKey(hWnd As System.IntPtr, id As Integer) As Boolean
+    End Function
+    <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
+    Public Function SetForegroundWindow(hWnd As System.IntPtr) As Boolean
     End Function
     <System.Runtime.InteropServices.DllImport("user32.dll")>
     Public Function GetClipboardSequenceNumber() As UInteger
