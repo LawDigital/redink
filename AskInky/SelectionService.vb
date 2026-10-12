@@ -28,7 +28,11 @@ Public NotInheritable Class SelectionService
             before = System.Windows.Forms.Clipboard.GetDataObject()
             Dim sequenceBefore As UInteger = Native.GetClipboardSequenceNumber()
             If Native.GetForegroundWindow() <> expectedWindow Then Return ""
-            System.Windows.Forms.SendKeys.SendWait("^c")
+            ' SendWait can synchronously block the WinForms message pump if the target
+            ' window does not process synthetic input (e.g. after an RDP reconnect).
+            ' Send posts the keystroke; the existing bounded clipboard polling below
+            ' observes completion without waiting for the foreign window on this thread.
+            System.Windows.Forms.SendKeys.Send("^c")
             Dim value As String = ""
             Dim sequenceAfter As UInteger = sequenceBefore
             For i As Integer = 0 To 11

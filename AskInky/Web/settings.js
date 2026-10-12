@@ -8,7 +8,7 @@
     const ui = window.redInkUi;
     const $ = id => document.getElementById(id);
     let ready = false, busy = false, recording = false, recordingOcr = false, apiChanged = false, registered = false;
-    let registeredUser = '', savedOrigin = '', language = 'de', bundles = {}, probe = null;
+    let registeredUser = '', savedOrigin = '', language = 'de', bundles = {}, probe = null, registryManaged = false;
     const editable = Array.from(document.querySelectorAll('input, textarea, select, button'));
     let savedModel = '';
     const keyOptions = [];
@@ -97,8 +97,11 @@
     }
     function state() {
         for (const el of editable) el.disabled = !ready || busy;
-        $('btn-register-device').disabled = !ready || busy || !$('settings-registration-link').value.trim();
-        $('btn-unregister-device').disabled = !ready || busy || !registered;
+        const locked = registryManaged && !$('settings-ignore-registry-link').checked;
+        for (const id of ['settings-helper-url', 'settings-helper-apikey', 'settings-license-user', 'settings-registration-link']) $(id).disabled = !ready || busy || locked;
+        $('btn-register-device').disabled = !ready || busy || locked || !$('settings-registration-link').value.trim();
+        $('btn-unregister-device').disabled = !ready || busy || locked || !registered;
+        $('settings-registry-managed-hint').hidden = !locked;
         document.body.classList.toggle('is-busy', busy);
         document.querySelector('main').setAttribute('aria-busy', String(busy));
     }
@@ -139,6 +142,7 @@
         return {
             helperUrl: $('settings-helper-url').value, apiKey: $('settings-helper-apikey').value, apiKeyChanged: apiChanged,
             licenseUser: $('settings-license-user').value, language: $('language-select').value,
+            ignoreRegistryHelperLink: $('settings-ignore-registry-link').checked,
             darkMode: $('dark-mode-toggle').checked, fontSize: Number($('font-size').value), temperature: Number($('temperature').value) / 100,
             model: modelValue(), systemPrompt: $('system-prompt').value, showLlmDebug: $('settings-show-llm-debug').checked,
             hotkeyModifiers: key.modifiers, hotkeyKey: key.key, ocrHotkeyModifiers: ocrShortcut().modifiers, ocrHotkeyKey: ocrShortcut().key
@@ -178,6 +182,8 @@
                 rebuildModels([], false);
                 if (savedModel) { $('settings-model').value = '__custom__'; $('settings-model-custom').value = savedModel; showCustomModel(); }
                 $('settings-show-llm-debug').checked = v.showLlmDebug;
+                $('settings-ignore-registry-link').checked = !!v.ignoreRegistryHelperLink;
+                registryManaged = !!v.registryManaged;
                 $('debug-sent').textContent = message.debugSent || '';
                 $('debug-received').textContent = message.debugReceived || '';
                 registered = v.registered; registeredUser = v.userId; savedOrigin = origin(v.helperUrl);
@@ -185,8 +191,14 @@
                 setShortcut(v.hotkeyModifiers, v.hotkeyKey);
                 setOcrShortcut(v.ocrHotkeyModifiers, v.ocrHotkeyKey);
                 ready = true; preview(); state();
-                ui.post('loadModels', { values: values() });
-                ui.status(message.feedback || '', !!message.failure);
+                $('registration-setup-help').hidden = !message.needsRegistration;
+                $('settings-registration-link').classList.toggle('registration-needs-input', !!message.needsRegistration);
+                if (message.needsRegistration) {
+                    const linkField = $('settings-registration-link');
+                    linkField.scrollIntoView({ block: 'center' });
+                    linkField.focus({ preventScroll: true });
+                } else ui.post('loadModels', { values: values() });
+                ui.status(message.feedback || (message.needsRegistration ? ui.t('settings.initialSetupInstruction') : ''), !!message.failure);
                 break;
             }
             case 'busy': busy = !!message.busy; state(); break;
@@ -240,6 +252,7 @@
     $('settings-helper-apikey').addEventListener('input', () => { apiChanged = true; probe = null; connectionStatus(); });
     $('settings-helper-url').addEventListener('input', () => { probe = null; connectionStatus(); registrationStatus(); });
     $('settings-registration-link').addEventListener('input', state);
+    $('settings-ignore-registry-link').addEventListener('change', () => { state(); connectionStatus(); registrationStatus(); });
     $('settings-helper-url').addEventListener('change', () => { if (ready && !busy) ui.post('loadModels', { values: values() }); });
     $('save-settings').addEventListener('click', () => commit('save'));
     $('btn-test-connection').addEventListener('click', () => commit('test'));

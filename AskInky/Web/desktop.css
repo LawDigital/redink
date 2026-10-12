@@ -55,7 +55,8 @@ button { touch-action: manipulation; }
 body.is-busy .question-card { border-color: var(--border-color); box-shadow: var(--shadow-soft); }
 body.is-busy .desktop-field { opacity: .65; }
 body.is-busy .desktop-status::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px;
-    border: 1.5px solid var(--border-color); border-top-color: var(--accent-color); border-radius: 50%; animation: rotate .8s linear infinite; }
+    border: 1.5px solid var(--border-color); border-top-color: var(--accent-color); border-radius: 50%;
+    animation: rotate .8s linear infinite; will-change: transform; transform-origin: center; vertical-align: -1px; }
 @keyframes rotate { to { transform: rotate(360deg); } }
 
 /* Settings reuse Office Web's cards, labels, fields, sliders, switches and button classes. */
@@ -105,6 +106,9 @@ body.is-busy .settings-actions button, body.is-busy .settings-scroll button { po
 }
 @media (prefers-reduced-motion: reduce) {
     *, *::before { animation: none !important; transition: none !important; }
+    /* The busy indicator communicates an ongoing request, not decoration.
+       Keep it moving even when decorative effects are disabled. */
+    body.is-busy .desktop-status::before { animation: rotate .8s linear infinite !important; }
 }
 
 /* Follow-up context switch: small, unobtrusive row beneath the rendered answer. */
@@ -172,3 +176,7 @@ body.is-busy .settings-actions button, body.is-busy .settings-scroll button { po
 .settings-group label.section-label[for="ocr-hotkey-display"] {
     margin-top: 19px;
 }
+
+/* First-run registration guidance, without altering the Office Web stylesheet. */
+.registration-setup-help { padding: 9px 10px; border-left: 3px solid var(--accent-color); background: var(--surface-subtle); }
+.settings-group .registration-needs-input { border-color: var(--accent-color); box-shadow: 0 0 0 2px var(--focus-ring); }

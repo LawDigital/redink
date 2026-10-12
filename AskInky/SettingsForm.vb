@@ -14,15 +14,24 @@ Friend NotInheritable Class SettingsForm
     Private previewLanguage As String
     Private working As Boolean
     Private pendingCredentialSave As Boolean
+    Private showRegistrationHelp As Boolean
+    Private ReadOnly registryManaged As Boolean
+    Private ReadOnly initialFeedback As String
     Private Shared ReadOnly UsedInvites As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.Ordinal)
     Public Property IsRecordingHotkey As Boolean
     Public Property RecordingOcrHotkey As Boolean
 
-    Public Sub New(parent As AssistantContext, config As ClientConfig)
+    Public Sub New(parent As AssistantContext, config As ClientConfig, Optional needsRegistration As Boolean = False, Optional startupFeedback As String = "", Optional mustSaveCredentials As Boolean = False)
         MyBase.New("settings.html", "Ask Inky – " & UiStrings.GetText("settings", config.UiLanguage), New System.Drawing.Size(480, 620))
         context = parent
         draft = ConfigStore.Clone(config)
+        registryManaged = RegistryRegistration.IsAppliedLinkPresent(draft.AppliedRegistryLinkFingerprint)
         previewLanguage = draft.UiLanguage
+        showRegistrationHelp = needsRegistration
+        initialFeedback = startupFeedback
+        ' The link has already been consumed: never let a window close discard
+        ' protected credentials that could not yet be saved to config.json.
+        pendingCredentialSave = mustSaveCredentials
         MinimizeBox = False
     End Sub
 
@@ -33,8 +42,13 @@ Friend NotInheritable Class SettingsForm
     End Property
 
     Protected Overrides Sub PageReady()
-        PublishSettings()
+        PublishSettings(initialFeedback)
     End Sub
+
+    Friend Shared Function TryReserveInvite(link As String) As Boolean
+        Dim fingerprint As String = System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(link)))
+        Return UsedInvites.Add(fingerprint)
+    End Function
 
     Private Sub PublishSettings(Optional feedback As String = "", Optional failure As Boolean = False)
         Dim key As String = ""
@@ -52,10 +66,12 @@ Friend NotInheritable Class SettingsForm
                            .values = New With {.helperUrl = draft.HelperUrl, .apiKey = key, .apiKeyReadable = keyReadable,
                                .licenseUser = draft.LicenseUser, .language = previewLanguage, .darkMode = draft.DarkMode,
                                .fontSize = draft.FontSize, .temperature = draft.Temperature, .model = draft.Model, .systemPrompt = draft.SystemPrompt,
-                               .showLlmDebug = draft.ShowLlmDebug, .hotkeyModifiers = draft.HotkeyModifiers, .hotkeyKey = draft.HotkeyKey,
+                               .showLlmDebug = draft.ShowLlmDebug, .ignoreRegistryHelperLink = draft.IgnoreRegistryHelperLink,
+                               .registryManaged = registryManaged, .hotkeyModifiers = draft.HotkeyModifiers, .hotkeyKey = draft.HotkeyKey,
                                .ocrHotkeyModifiers = draft.OcrHotkeyModifiers, .ocrHotkeyKey = draft.OcrHotkeyKey,
                                .registered = Not String.IsNullOrEmpty(draft.UserId) AndAlso Not String.IsNullOrEmpty(draft.DeviceTokenProtected), .userId = draft.UserId},
-                           .debugSent = HelperClient.LastRequest, .debugReceived = HelperClient.LastResponse, .feedback = feedback, .failure = failure})
+                           .debugSent = HelperClient.LastRequest, .debugReceived = HelperClient.LastResponse, .feedback = feedback, .failure = failure,
+                           .needsRegistration = showRegistrationHelp})
     End Sub
 
     Private Function ReadCandidate(message As System.Text.Json.JsonElement) As ClientConfig
@@ -69,17 +85,37 @@ Friend NotInheritable Class SettingsForm
         If input.Model Is Nothing OrElse input.Model.Length > 256 OrElse input.Model.Contains(vbCr) OrElse input.Model.Contains(vbLf) Then Throw New HelperFailure("desktop.invalidSettings")
         If input.SystemPrompt Is Nothing OrElse input.SystemPrompt.Length > 200000 Then Throw New HelperFailure("desktop.invalidSettings")
         Dim result As ClientConfig = ConfigStore.Clone(draft)
-        result.HelperUrl = HelperClient.NormalizeHelperUrl(input.HelperUrl)
-        Dim origin As String = HelperClient.GetOrigin(result.HelperUrl)
-        If Not String.Equals(origin, draft.CredentialOrigin, System.StringComparison.OrdinalIgnoreCase) Then
-            result.UserId = ""
-            result.DeviceTokenProtected = ""
-            result.ApiKeyProtected = ""
-            ClientLog.Write("settings.server.changed.old-credentials-not-forwarded")
+        result.IgnoreRegistryHelperLink = input.IgnoreRegistryHelperLink
+        If registryManaged AndAlso Not input.IgnoreRegistryHelperLink Then
+            ' Registry credentials are authoritative while the matching HelperLink is present.
+            ' Do not allow a stale or manipulated WebView draft to overwrite them.
+            result.HelperUrl = draft.HelperUrl
+            result.CredentialOrigin = draft.CredentialOrigin
+            result.UserId = draft.UserId
+            result.DeviceTokenProtected = draft.DeviceTokenProtected
+            result.ApiKeyProtected = draft.ApiKeyProtected
+            result.LicenseUser = draft.LicenseUser
+        Else
+            result.HelperUrl = HelperClient.NormalizeHelperUrl(input.HelperUrl)
+            Dim origin As String = HelperClient.GetOrigin(result.HelperUrl)
+            If Not String.Equals(origin, draft.CredentialOrigin, System.StringComparison.OrdinalIgnoreCase) Then
+                result.UserId = ""
+                result.DeviceTokenProtected = ""
+                result.ApiKeyProtected = ""
+                ClientLog.Write("settings.server.changed.old-credentials-not-forwarded")
+            End If
+            If input.ApiKeyChanged Then result.ApiKeyProtected = ConfigStore.Protect(input.ApiKey.Trim())
+            result.CredentialOrigin = origin
+            result.LicenseUser = input.LicenseUser.Trim()
+            ' If the user deliberately replaces managed credentials while opted out,
+            ' the old one-time registry link can no longer be claimed as applied.
+            If input.IgnoreRegistryHelperLink AndAlso registryManaged AndAlso
+               (Not System.String.Equals(result.HelperUrl, draft.HelperUrl, System.StringComparison.OrdinalIgnoreCase) OrElse
+                input.ApiKeyChanged OrElse
+                Not System.String.Equals(result.LicenseUser, draft.LicenseUser, System.StringComparison.Ordinal)) Then
+                result.AppliedRegistryLinkFingerprint = ""
+            End If
         End If
-        If input.ApiKeyChanged Then result.ApiKeyProtected = ConfigStore.Protect(input.ApiKey.Trim())
-        result.CredentialOrigin = origin
-        result.LicenseUser = input.LicenseUser.Trim()
         result.UiLanguage = UiStrings.NormalizeLanguage(input.Language)
         result.DarkMode = input.DarkMode
         result.FontSize = input.FontSize
@@ -148,6 +184,9 @@ Friend NotInheritable Class SettingsForm
         Dim receivedCredentials As Boolean = False
         Try
             Dim candidate As ClientConfig = ReadCandidate(message)
+            If registryManaged AndAlso Not candidate.IgnoreRegistryHelperLink AndAlso (action = "register" OrElse action = "unregister") Then
+                Throw New HelperFailure("settings.registryManagedHint")
+            End If
             Select Case action
                 Case "save"
                     If Not context.TryCommit(candidate) Then Throw New HelperFailure("desktop.hotkeyConflict")
@@ -166,19 +205,26 @@ Friend NotInheritable Class SettingsForm
                 Case "register"
                     Dim link As String = HelperClient.TextValue(message, "link").Trim()
                     If link.Length = 0 OrElse link.Length > 32768 Then Throw New HelperFailure("desktop.invalidInvite")
-                    Dim fingerprint As String = System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(link)))
-                    If Not UsedInvites.Add(fingerprint) Then Throw New HelperFailure("desktop.inviteAlreadyUsed")
-                    ' No network call is made while merely pasting a link or typing a key.
-                    draft = Await HelperClient.RegisterAsync(link, candidate, Lifetime.Token)
+                    Dim isInvite As Boolean = HelperClient.IsDeviceInvite(link)
+                    If isInvite AndAlso Not TryReserveInvite(link) Then Throw New HelperFailure("desktop.inviteAlreadyUsed")
+                    ' Configuration URLs only populate fields. Auth invites use the existing single-use GET.
+                    If isInvite Then
+                        draft = Await HelperClient.RegisterAsync(link, candidate, Lifetime.Token)
+                    Else
+                        draft = HelperClient.ApplyConnectionLink(link, candidate)
+                    End If
+                    draft.AppliedRegistryLinkFingerprint = ""
                     receivedCredentials = True
                     pendingCredentialSave = True
                     context.CommitCredentials(draft)
                     pendingCredentialSave = False
-                    PublishSettings(UiStrings.GetText("settings.registrationSuccess", draft.UiLanguage))
+                    showRegistrationHelp = False
+                    PublishSettings(UiStrings.GetText(If(isInvite, "settings.registrationSuccess", "settings.configurationLinkApplied"), draft.UiLanguage))
                     SendView(New With {.[type] = "clearInvite"})
                 Case "unregister"
                     candidate.UserId = ""
                     candidate.DeviceTokenProtected = ""
+                    candidate.AppliedRegistryLinkFingerprint = ""
                     context.CommitCredentials(candidate)
                     draft = candidate
                     pendingCredentialSave = False
@@ -228,6 +274,7 @@ Friend NotInheritable Class SettingsForm
         Public Property Model As String = ""
         Public Property SystemPrompt As String = ""
         Public Property ShowLlmDebug As Boolean
+        Public Property IgnoreRegistryHelperLink As Boolean
         Public Property HotkeyModifiers As UInteger = 3UI
         Public Property HotkeyKey As Integer = 75
         Public Property OcrHotkeyModifiers As UInteger = 3UI

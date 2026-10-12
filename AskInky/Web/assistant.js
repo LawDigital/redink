@@ -11,6 +11,7 @@
     const answer = document.getElementById('answer');
     const send = document.getElementById('send-button');
     const copy = document.getElementById('copy-button');
+    const copySelection = document.getElementById('copy-selection-button');
     const copySource = document.getElementById('copy-source-button');
     const settings = document.getElementById('settings-button');
     const historyOption = document.getElementById('history-option');
@@ -25,11 +26,33 @@
     const historyToggle = document.getElementById('include-history');
     let ready = false, busy = false, locked = false, fontSize = 12, rawHtml = '';
     let payload = { html: '', text: '' };
+    let selectedPayload = null;
+
+    function selectedAnswerPayload() {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+        const range = selection.getRangeAt(0);
+        if (!answer.contains(range.startContainer) || !answer.contains(range.endContainer)) return null;
+        const text = selection.toString();
+        if (!text.trim() || text.length > 16000000) return null;
+        const fragment = document.createElement('div');
+        fragment.appendChild(range.cloneContents());
+        const rendered = window.redInkRendering.prepare(fragment.innerHTML, fontSize, ui.t('desktop.imagePlaceholder'));
+        if (!rendered.copyHtml || rendered.copyHtml.length > 16000000) return null;
+        return { html: rendered.copyHtml, text };
+    }
+
+    function updateSelectedAnswer() {
+        selectedPayload = rawHtml && ready && !busy && !locked ? selectedAnswerPayload() : null;
+        copySelection.hidden = !selectedPayload;
+        copySelection.disabled = !selectedPayload;
+    }
     let turnIndex = -1, turnCount = 0;
     function state() {
         const disabled = !ready || busy || locked;
         source.disabled = question.disabled = send.disabled = settings.disabled = disabled;
         copy.disabled = disabled || !rawHtml;
+        updateSelectedAnswer();
         copySource.disabled = disabled || !source.value;
         historyToggle.disabled = disabled;
         historyOption.hidden = turnCount === 0;
@@ -57,6 +80,9 @@
         });
     }
     function render() {
+        selectedPayload = null;
+        copySelection.hidden = true;
+        copySelection.disabled = true;
         if (!rawHtml) {
             answer.replaceChildren();
             const placeholder = document.createElement('p');
@@ -135,6 +161,10 @@
     send.addEventListener('click', submit);
     settings.addEventListener('click', () => { if (!settings.disabled) ui.post('settings'); });
     copy.addEventListener('click', () => { if (!copy.disabled) ui.post('copy'); });
+    // Preserve an answer selection when clicking the copy icon (browser focus changes).
+    copySelection.addEventListener('pointerdown', event => { if (!copySelection.disabled) event.preventDefault(); });
+    copySelection.addEventListener('click', () => { if (!copySelection.disabled && selectedPayload) ui.post('copySelection'); });
+    document.addEventListener('selectionchange', updateSelectedAnswer);
     copySource.addEventListener('click', () => { if (!copySource.disabled) ui.post('copySource'); });
     historyToggle.addEventListener('change', () => { if (!historyToggle.disabled) ui.post('historyChanged', { includeHistory: historyToggle.checked }); });
     function navigate(direction) {
@@ -160,7 +190,8 @@
     });
     // Native window resizing must not request a new height, or it creates a feedback loop.
     // Content changes still schedule the desired height through requestSize().
-    window.redInkAnswer = Object.freeze({ getCopyPayload: () => ({ ...payload }) });
+    window.redInkAnswer = Object.freeze({ getCopyPayload: () => ({ ...payload }),
+        getSelectedCopyPayload: () => selectedPayload ? { ...selectedPayload } : null });
     state();
     if (ui.connected) ui.post('ready');
     else ui.status('This page is hosted by the Windows desktop application.', true);

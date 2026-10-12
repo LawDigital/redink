@@ -24,25 +24,40 @@ Public NotInheritable Class ClientConfig
     Public Property Temperature As Double = 0.7
     Public Property Model As String = ""
     Public Property ShowLlmDebug As Boolean = False
-    Public Property SystemPrompt As String = "Du bist Inky, ein hilfreicher Schreibassistent. Antworte in Markdown."
+    Public Property SystemPrompt As String = "Antworte direkt, sachlich und knapp auf die Frage. Keine Begrüssung, Selbstvorstellung, Höflichkeitsfloskeln oder einleitende Ankündigung. Nur auf ausdrücklichen Wunsch ausführlich antworten. Verwende Markdown, wenn es der Lesbarkeit dient."
     Public Property ApiKeyProtected As String = ""
     Public Property DeviceTokenProtected As String = ""
     Public Property CredentialOrigin As String = ""
+    ' Registry policy is opt-out; remember only a SHA-256 of the successful one-time link.
+    Public Property IgnoreRegistryHelperLink As Boolean = False
+    Public Property AppliedRegistryLinkFingerprint As String = ""
     ' Obsolete UseRightClick/ConfirmSend keys in older JSON are deliberately ignored.
 End Class
 
 Public NotInheritable Class ConfigStore
-    Private Shared ReadOnly ConfigPath As String = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "RedInk", "AskInky", "config.json")
+    Private Shared ReadOnly ConfigPath As String = System.IO.Path.Combine(StoragePaths.Root, "config.json")
     ' Keep the original entropy: previously registered devices must continue to decrypt.
     Private Shared ReadOnly Entropy As Byte() = System.Text.Encoding.UTF8.GetBytes("RedInk.AskInky.DeviceAuth.v1")
     Public Shared Property LoadFailed As Boolean
+    Public Shared Property HasSavedHelperHost As Boolean
 
     Public Shared Function Load() As ClientConfig
         LoadFailed = False
+        HasSavedHelperHost = False
         Try
             If System.IO.File.Exists(ConfigPath) Then
-                Dim result As ClientConfig = System.Text.Json.JsonSerializer.Deserialize(Of ClientConfig)(System.IO.File.ReadAllText(ConfigPath, System.Text.Encoding.UTF8))
+                Dim json As String = System.IO.File.ReadAllText(ConfigPath, System.Text.Encoding.UTF8)
+                Dim result As ClientConfig = System.Text.Json.JsonSerializer.Deserialize(Of ClientConfig)(json)
                 If result Is Nothing Then Throw New System.IO.InvalidDataException("Empty configuration")
+                ' Property initializers supply localhost even when the JSON has no HelperUrl.
+                ' Only an explicitly persisted nonempty host counts as user configuration.
+                Using document As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(json)
+                    Dim savedUrl As System.Text.Json.JsonElement
+                    HasSavedHelperHost = document.RootElement.ValueKind = System.Text.Json.JsonValueKind.Object AndAlso
+                        document.RootElement.TryGetProperty("HelperUrl", savedUrl) AndAlso
+                        savedUrl.ValueKind = System.Text.Json.JsonValueKind.String AndAlso
+                        Not String.IsNullOrWhiteSpace(savedUrl.GetString())
+                End Using
                 result.UiLanguage = UiStrings.NormalizeLanguage(result.UiLanguage)
                 If result.FontSize < 6 OrElse result.FontSize > 16 Then result.FontSize = 12
                 If System.Double.IsNaN(result.Temperature) OrElse result.Temperature < 0 OrElse result.Temperature > 1 Then result.Temperature = 0.7
@@ -68,6 +83,7 @@ Public NotInheritable Class ConfigStore
             End If
         Catch ex As System.Exception
             LoadFailed = True
+            HasSavedHelperHost = False
             ClientLog.Write("config.load.failed.original-file-retained", ex)
         End Try
         Return New ClientConfig()

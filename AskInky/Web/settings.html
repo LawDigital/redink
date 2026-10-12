@@ -39,6 +39,7 @@
     <section class="settings-group">
         <label for="settings-registration-link" class="ms-font-s section-label" data-text="settings.deviceRegistration"></label>
         <p id="registration-state" class="ms-font-xs status-text"></p>
+        <p id="registration-setup-help" class="ms-font-s status-text registration-setup-help" data-text="settings.initialSetupInstruction" hidden></p>
         <input type="text" id="settings-registration-link" class="text-input" maxlength="32768" spellcheck="false" autocomplete="off" data-placeholder="settings.registrationLinkPlaceholder">
         <div class="registration-actions"><button id="btn-register-device" class="action-btn-link" type="button" data-text="settings.registerDevice"></button><button id="btn-unregister-device" class="action-btn-link" type="button" data-text="settings.unregisterDevice"></button></div>
         <p class="ms-font-xs status-text" data-text="settings.deviceRegistrationHint"></p>
@@ -50,6 +51,9 @@
     </section>
     <details class="settings-group settings-disclosure"><summary data-text="desktop.moreSettings"></summary>
         <div class="disclosure-body">
+            <div class="settings-control"><label class="settings-toggle-row" for="settings-ignore-registry-link"><span class="settings-toggle-label" data-text="settings.ignoreRegistryHelperLink"></span><span class="settings-toggle-switch"><input type="checkbox" id="settings-ignore-registry-link"><span class="settings-toggle-slider" aria-hidden="true"></span></span></label>
+            <p class="ms-font-xs status-text" data-text="settings.ignoreRegistryHelperLinkHint"></p>
+            <p id="settings-registry-managed-hint" class="ms-font-xs status-text" data-text="settings.registryManagedHint" hidden></p></div>
             <div class="settings-control"><label for="font-size" class="ms-font-s section-label" data-text="settings.fontSize"></label><div class="slider-row"><input type="range" id="font-size" min="6" max="16" value="12"><span id="font-size-value">12 px</span></div></div>
 
             <div class="settings-control"><label for="temperature" class="ms-font-s section-label" data-text="settings.temperature"></label><div class="slider-row"><input type="range" id="temperature" min="0" max="100" value="70"><span id="temperature-value">0.7</span></div></div>

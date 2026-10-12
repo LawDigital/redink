@@ -15,6 +15,10 @@ Public NotInheritable Class AssistantContext
     Private ReadOnly tray As System.Windows.Forms.NotifyIcon
     Private ReadOnly menu As System.Windows.Forms.ContextMenuStrip
     Private ReadOnly hotkeyRecoveryTimer As System.Windows.Forms.Timer
+    Private ReadOnly uiHeartbeatTimer As System.Windows.Forms.Timer
+    Private ReadOnly uiStallMonitor As System.Threading.Timer
+    Private lastUiPulse As Long
+    Private lastStallReported As Long
     Private reconnectPending As Integer
     Private sessionEventsSubscribed As Boolean
     Private lastHotkeyWarning As System.DateTime = System.DateTime.MinValue
@@ -24,9 +28,21 @@ Public NotInheritable Class AssistantContext
     Private capturing As Boolean
     Private busy As Boolean
     Private exiting As Boolean
+    Private initialConfigurationNeeded As Boolean
+    Private startupRegistrationPending As Boolean
+    Private startupRegistryCheckNeeded As Boolean
+    Private deferredUserAction As Integer ' 1 = Inky, 2 = OCR, 3 = Settings
+    Private deferredCaptureSelection As Boolean
+    Private startupInitializationStarted As Boolean
+    Private startupRegistrationFeedback As String = ""
+    Private pendingAutoRegistered As ClientConfig
 
     Public Sub New()
         config = ConfigStore.Load()
+        initialConfigurationNeeded = Not ConfigStore.LoadFailed AndAlso Not ConfigStore.HasSavedHelperHost AndAlso
+            String.IsNullOrEmpty(config.ApiKeyProtected) AndAlso String.IsNullOrEmpty(config.DeviceTokenProtected)
+        ' A new HelperLink outranks saved credentials; an applied one-time link is never fetched again.
+        startupRegistryCheckNeeded = Not ConfigStore.LoadFailed AndAlso Not config.IgnoreRegistryHelperLink
         host = New HotkeyWindow(Me)
         hotkeys = New HotkeyService(host.Handle)
         ocrHotkeys = New HotkeyService(host.Handle, 2)
@@ -35,7 +51,7 @@ Public NotInheritable Class AssistantContext
         menu.Items.Add("", Nothing, Sub(sender As Object, e As System.EventArgs) StartOcrCapture())
         menu.Items.Add("", Nothing, Sub(sender As Object, e As System.EventArgs) ShowSettings())
         menu.Items.Add("", Nothing, Sub(sender As Object, e As System.EventArgs) ExitThread())
-        tray = New System.Windows.Forms.NotifyIcon With {.Text = "Red Ink", .ContextMenuStrip = menu, .Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath), .Visible = True}
+        tray = New System.Windows.Forms.NotifyIcon With {.Text = "Ask Inky", .ContextMenuStrip = menu, .Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath), .Visible = True}
         AddHandler tray.MouseClick, Sub(sender As Object, e As System.Windows.Forms.MouseEventArgs)
                                         If e.Button = System.Windows.Forms.MouseButtons.Left Then menu.Show(System.Windows.Forms.Cursor.Position)
                                     End Sub
@@ -49,9 +65,93 @@ Public NotInheritable Class AssistantContext
             ClientLog.Write("hotkey.session-events.unavailable", ex)
         End Try
         hotkeyRecoveryTimer.Start()
+        System.Threading.Interlocked.Exchange(lastUiPulse, System.Environment.TickCount64)
+        uiHeartbeatTimer = New System.Windows.Forms.Timer With {.Interval = 2000}
+        AddHandler uiHeartbeatTimer.Tick, AddressOf PulseUi
+        uiHeartbeatTimer.Start()
+        uiStallMonitor = New System.Threading.Timer(AddressOf CheckUiHeartbeat, Nothing, 10000, 5000)
         If Not hotkeys.TryApply(config, False) Then WarnHotkeyUnavailable()
         If Not ocrHotkeys.TryApply(OcrShortcutConfig(config), False) Then WarnHotkeyUnavailable()
-        If ConfigStore.LoadFailed Then tray.ShowBalloonTip(6000, "Red Ink", UiStrings.GetText("desktop.configLoadFailed", config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
+        If ConfigStore.LoadFailed Then tray.ShowBalloonTip(6000, "Ask Inky", UiStrings.GetText("desktop.configLoadFailed", config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
+        If initialConfigurationNeeded OrElse startupRegistryCheckNeeded Then AddHandler System.Windows.Forms.Application.Idle, AddressOf InitializeFirstRun
+    End Sub
+
+    Private Async Sub InitializeFirstRun(sender As Object, e As System.EventArgs)
+        RemoveHandler System.Windows.Forms.Application.Idle, AddressOf InitializeFirstRun
+        If exiting OrElse Not (initialConfigurationNeeded OrElse startupRegistryCheckNeeded) OrElse startupInitializationStarted Then Return
+        startupInitializationStarted = True
+        startupRegistrationPending = True
+        Try
+            Dim link As String = If(config.IgnoreRegistryHelperLink, "", RegistryRegistration.FindLink())
+            If link.Length > 0 AndAlso
+               Not System.String.Equals(RegistryRegistration.Fingerprint(link), config.AppliedRegistryLinkFingerprint, System.StringComparison.Ordinal) Then
+                Try
+                    Dim isInvite As Boolean = HelperClient.IsDeviceInvite(link)
+                    If Not isInvite OrElse (RegistryRegistration.TryMarkAttempt(link) AndAlso SettingsForm.TryReserveInvite(link)) Then
+                        Using deadline As New System.Threading.CancellationTokenSource(System.TimeSpan.FromSeconds(20))
+                            Dim registered As ClientConfig
+                            If isInvite Then
+                                registered = Await HelperClient.RegisterAsync(link, ConfigStore.Clone(config), deadline.Token)
+                            Else
+                                registered = HelperClient.ApplyConnectionLink(link, ConfigStore.Clone(config))
+                            End If
+                                registered.AppliedRegistryLinkFingerprint = RegistryRegistration.Fingerprint(link)
+                            If exiting Then Return
+                            Try
+                                CommitCredentials(registered)
+                                initialConfigurationNeeded = False
+                                ClientLog.Write(If(isInvite, "registry.registration.completed", "registry.configuration.applied"))
+                            Catch saveError As System.Exception
+                                ' Retain protected connection data for a subsequent manual save.
+                                pendingAutoRegistered = registered
+                                startupRegistrationFeedback = UiStrings.GetText("desktop.registrationPendingSave", config.UiLanguage)
+                                ClientLog.Write("registry.registration.credentials-save-failed", saveError)
+                            End Try
+                        End Using
+                    End If
+                Catch ex As System.Exception
+                    ClientLog.Write("registry.registration.failed", ex)
+                    startupRegistrationFeedback = UiStrings.GetText("desktop.registryRegistrationFailed", config.UiLanguage)
+                End Try
+            End If
+        Catch ex As System.Exception
+            ClientLog.Write("registry.registration.startup.failed", ex)
+            startupRegistrationFeedback = UiStrings.GetText("desktop.registryRegistrationFailed", config.UiLanguage)
+        Finally
+            startupRegistrationPending = False
+            startupRegistryCheckNeeded = False
+            If Not exiting Then
+                Try
+                    Dim nextAction As Integer = deferredUserAction
+                    deferredUserAction = 0
+                    If initialConfigurationNeeded OrElse pendingAutoRegistered IsNot Nothing OrElse nextAction = 3 Then
+                        ShowSettings()
+                    ElseIf nextAction = 1 Then
+                        ShowInky(deferredCaptureSelection)
+                    ElseIf nextAction = 2 Then
+                        StartOcrCapture()
+                    End If
+                Catch ex As System.Exception
+                    ClientLog.Write("registry.registration.deferred-action.failed", ex)
+                End Try
+            End If
+        End Try
+    End Sub
+
+    Private Sub PulseUi(sender As Object, e As System.EventArgs)
+        System.Threading.Interlocked.Exchange(lastUiPulse, System.Environment.TickCount64)
+        System.Threading.Interlocked.Exchange(lastStallReported, 0)
+    End Sub
+
+    Private Sub CheckUiHeartbeat(state As Object)
+        If exiting Then Return
+        Dim last As Long = System.Threading.Interlocked.Read(lastUiPulse)
+        Dim elapsed As Long = System.Environment.TickCount64 - last
+        ' Avoid claiming a crash on sleep/hibernation; this is a diagnostic
+        ' indicator only. The native UI timer stops ticking when the pump blocks.
+        If elapsed >= 15000 AndAlso System.Threading.Interlocked.CompareExchange(lastStallReported, 1, 0) = 0 Then
+            ClientLog.Write("ui.message-pump.unresponsive.over-15s")
+        End If
     End Sub
 
     Private Sub WarnHotkeyUnavailable()
@@ -59,7 +159,7 @@ Public NotInheritable Class AssistantContext
         If System.DateTime.UtcNow - lastHotkeyWarning < System.TimeSpan.FromMinutes(10) Then Return
         lastHotkeyWarning = System.DateTime.UtcNow
         ClientLog.Write("hotkey.unavailable.tray-menu-remains-available")
-        tray.ShowBalloonTip(6000, "Red Ink", UiStrings.GetText("desktop.hotkeyConflict", config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
+        tray.ShowBalloonTip(6000, "Ask Inky", UiStrings.GetText("desktop.hotkeyConflict", config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
     End Sub
 
     Private Sub SessionSwitched(sender As Object, e As Microsoft.Win32.SessionSwitchEventArgs)
@@ -115,13 +215,25 @@ Public NotInheritable Class AssistantContext
 
     Friend Async Sub ShowInky(captureSelection As Boolean)
         If exiting OrElse capturing Then Return
-        If settingsForm IsNot Nothing AndAlso Not settingsForm.IsDisposed Then
-            settingsForm.BringToFront()
-            settingsForm.Activate()
-            Return
-        End If
-        capturing = True
         Try
+            If startupRegistrationPending OrElse (startupRegistryCheckNeeded AndAlso Not startupInitializationStarted) Then
+                deferredUserAction = 1
+                deferredCaptureSelection = captureSelection
+                If Not startupInitializationStarted Then InitializeFirstRun(Me, System.EventArgs.Empty)
+                Return
+            End If
+            ' Keep settings activation inside the exception boundary: a window may be
+            ' disposed between IsDisposed and Activate during repeated hotkey presses.
+            If initialConfigurationNeeded Then
+                ShowSettings()
+                Return
+            End If
+            If settingsForm IsNot Nothing AndAlso Not settingsForm.IsDisposed Then
+                settingsForm.BringToFront()
+                settingsForm.Activate()
+                Return
+            End If
+            capturing = True
             Dim source As System.IntPtr = Native.GetForegroundWindow()
             Dim process As UInteger
             Native.GetWindowThreadProcessId(source, process)
@@ -151,7 +263,7 @@ Public NotInheritable Class AssistantContext
             form.FocusQuestion()
         Catch ex As System.Exception
             ClientLog.Write("assistant.open.failed", ex)
-            tray.ShowBalloonTip(5000, "Red Ink", HelperClient.Describe(ex, config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
+            tray.ShowBalloonTip(5000, "Ask Inky", HelperClient.Describe(ex, config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
         Finally
             capturing = False
         End Try
@@ -159,9 +271,18 @@ Public NotInheritable Class AssistantContext
 
     Friend Async Sub StartOcrCapture()
         If exiting OrElse capturing OrElse busy Then Return
-        If settingsForm IsNot Nothing AndAlso Not settingsForm.IsDisposed Then Return
-        capturing = True
         Try
+            If startupRegistrationPending OrElse (startupRegistryCheckNeeded AndAlso Not startupInitializationStarted) Then
+                deferredUserAction = 2
+                If Not startupInitializationStarted Then InitializeFirstRun(Me, System.EventArgs.Empty)
+                Return
+            End If
+            If initialConfigurationNeeded Then
+                ShowSettings()
+                Return
+            End If
+            If settingsForm IsNot Nothing AndAlso Not settingsForm.IsDisposed Then Return
+            capturing = True
             Dim png As Byte() = Nothing
             Dim restoreForm As Boolean = form IsNot Nothing AndAlso Not form.IsDisposed AndAlso form.Visible
             If restoreForm Then form.Hide()
@@ -198,7 +319,7 @@ Public NotInheritable Class AssistantContext
             ClientLog.Write("ocr.capture.completed")
         Catch ex As System.Exception
             ClientLog.Write("ocr.capture.failed", ex)
-            tray.ShowBalloonTip(6000, "Red Ink", HelperClient.Describe(ex, config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
+            tray.ShowBalloonTip(6000, "Ask Inky", HelperClient.Describe(ex, config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
             If form IsNot Nothing AndAlso Not form.IsDisposed Then form.Show()
         Finally
             capturing = False
@@ -223,11 +344,22 @@ Public NotInheritable Class AssistantContext
 
     Friend Sub ShowSettings()
         If exiting OrElse busy Then Return
+        ' A tray or shortcut event can arrive before the first Application.Idle.
+        ' Complete the very same startup attempt first, so a Settings save cannot
+        ' overwrite registration credentials committed by a pending startup task.
+        If startupRegistrationPending OrElse ((initialConfigurationNeeded OrElse startupRegistryCheckNeeded) AndAlso Not startupInitializationStarted) Then
+            deferredUserAction = 3
+            If Not startupInitializationStarted Then InitializeFirstRun(Me, System.EventArgs.Empty)
+            Return
+        End If
         If settingsForm IsNot Nothing AndAlso Not settingsForm.IsDisposed Then
             settingsForm.Activate()
             Return
         End If
-        settingsForm = New SettingsForm(Me, config)
+        settingsForm = New SettingsForm(Me, If(pendingAutoRegistered, config),
+                                        initialConfigurationNeeded AndAlso pendingAutoRegistered Is Nothing,
+                                        startupRegistrationFeedback, pendingAutoRegistered IsNot Nothing)
+        startupRegistrationFeedback = ""
         AddHandler settingsForm.FormClosed, Sub(sender As Object, e As System.Windows.Forms.FormClosedEventArgs)
                                                 settingsForm = Nothing
                                                 If form IsNot Nothing AndAlso Not form.IsDisposed Then form.SetSettingsOpen(False)
@@ -274,6 +406,9 @@ Public NotInheritable Class AssistantContext
             Throw
         End Try
         config = candidate
+        ApplyMenuLanguage()
+        initialConfigurationNeeded = False
+        pendingAutoRegistered = Nothing
         If Not config.ShowLlmDebug Then
             HelperClient.LastRequest = ""
             HelperClient.LastResponse = ""
@@ -290,10 +425,15 @@ Public NotInheritable Class AssistantContext
         candidate.CredentialOrigin = registered.CredentialOrigin
         candidate.UserId = registered.UserId
         candidate.LicenseUser = registered.LicenseUser
+        candidate.UiLanguage = UiStrings.NormalizeLanguage(registered.UiLanguage)
         candidate.ApiKeyProtected = registered.ApiKeyProtected
         candidate.DeviceTokenProtected = registered.DeviceTokenProtected
+        candidate.AppliedRegistryLinkFingerprint = registered.AppliedRegistryLinkFingerprint
         ConfigStore.Save(candidate)
         config = candidate
+        ApplyMenuLanguage()
+        initialConfigurationNeeded = False
+        pendingAutoRegistered = Nothing
     End Sub
 
     Friend Function Settings() As ClientConfig
@@ -319,6 +459,7 @@ Public NotInheritable Class AssistantContext
     Protected Overrides Sub ExitThreadCore()
         If exiting Then Return
         exiting = True
+        RemoveHandler System.Windows.Forms.Application.Idle, AddressOf InitializeFirstRun
         If sessionEventsSubscribed Then
             Try
                 RemoveHandler Microsoft.Win32.SystemEvents.SessionSwitch, AddressOf SessionSwitched
@@ -326,6 +467,9 @@ Public NotInheritable Class AssistantContext
                 ClientLog.Write("hotkey.session-events.cleanup.failed", ex)
             End Try
         End If
+        uiStallMonitor.Dispose()
+        uiHeartbeatTimer.Stop()
+        uiHeartbeatTimer.Dispose()
         hotkeyRecoveryTimer.Stop()
         hotkeyRecoveryTimer.Dispose()
         If settingsForm IsNot Nothing AndAlso Not settingsForm.IsDisposed Then settingsForm.Dispose()
@@ -348,11 +492,16 @@ Public NotInheritable Class AssistantContext
             CreateHandle(New System.Windows.Forms.CreateParams With {.Parent = New System.IntPtr(-3)})
         End Sub
         Protected Overrides Sub WndProc(ByRef message As System.Windows.Forms.Message)
-            If message.Msg = Native.WM_HOTKEY Then
-                owner.HotkeyPressed(message.WParam.ToInt32())
-            ElseIf message.Msg = Native.WM_ASKINKY_REBIND Then
-                owner.RecoverHotkeyOnUiThread(Me, System.EventArgs.Empty)
-            End If
+            Try
+                If message.Msg = Native.WM_HOTKEY Then
+                    owner.HotkeyPressed(message.WParam.ToInt32())
+                ElseIf message.Msg = Native.WM_ASKINKY_REBIND Then
+                    owner.RecoverHotkeyOnUiThread(Me, System.EventArgs.Empty)
+                End If
+            Catch ex As System.Exception
+                ' A recoverable UI race must not escape the native window callback.
+                ClientLog.Write("hotkey.dispatch.failed", ex)
+            End Try
             MyBase.WndProc(message)
         End Sub
         Public Sub Dispose() Implements System.IDisposable.Dispose

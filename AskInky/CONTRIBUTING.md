@@ -2,7 +2,7 @@
 
 ## Release and versioning
 
-- Source of truth: `Program.vb`, `Program.Version` (`VDDMMYY`); currently **V091026** (9 October 2026). Update the date-derived version on **every new dated release/delivery**; propagate it to release notes and any displayed program version as appropriate. Do not modify stored user settings merely to update the version.
+- Source of truth: `Program.vb`, `Program.Version` (`VDDMMYY`); currently **V121026** (12 October 2026). Update the date-derived version on **every new dated release/delivery**; propagate it to release notes and any displayed program version as appropriate. Do not modify stored user settings merely to update the version.
 - Create changed-only ZIP preserving `AskInky/` relative paths and maintain a cumulative latest source baseline between iterations. Never replace earlier fixes with older versions. Track changed-only list, cumulative diff, static tests and unverified Windows tests. Only claim a Visual Studio / Windows build when actually run.
 - Preserve the currently supported standalone **win-x64, self-contained, single-file** publish settings, and embedded Office Web assets/licensing. WebView2 Runtime is still a machine prerequisite.
 
@@ -25,7 +25,7 @@
 ## VDI and remote desktop resilience (9 October 2026, V091026)
 
 - The current hotkey uses Windows `RegisterHotKey` on a message-only window. Never introduce a system-wide keyboard hook or keyboard polling to bypass VDI policy. An RDP/Citrix/VMware client can consume a shortcut **before Windows receives it**; no client-side registration can guarantee delivery in that case. Users must be able to change the shortcut and use the localized tray **Open** command as a fallback.
-- Keep registration errors in `%LOCALAPPDATA%\RedInk\AskInky\diagnostics.log` (Win32 codes), success markers and `hotkey.message.received` without logging user text, credentials or window titles. Compare the log after an attempted shortcut to distinguish registration failures from shortcuts not delivered to the guest. The recovery timer retries only when unregistered; session reconnect/unlock requests a rebind on the UI thread. Do not run synthetic keystrokes during registration recovery.
+- Keep registration errors in `%LOCALAPPDATA%\AskInky\diagnostics.log` (Win32 codes), success markers and `hotkey.message.received` without logging user text, credentials or window titles. Compare the log after an attempted shortcut to distinguish registration failures from shortcuts not delivered to the guest. The recovery timer retries only when unregistered; session reconnect/unlock requests a rebind on the UI thread. Do not run synthetic keystrokes during registration recovery.
 - On VDI reconnect, allow registration to recover without restarting. If `MOD_NOREPEAT` is unsupported (`ERROR_INVALID_PARAMETER=87`), retry the same shortcut without that flag. Do **not** fall back on a different shortcut automatically or steal a conflicting shortcut (`1409`).
 - Foreground activation after async clipboard capture can be rejected by Windows. Use the native activation path and only a transient topmost fallback, never a permanently topmost dialog.
 - VDI QA must include: initial registration, shortcut not forwarded by client, conflict (1409), remote disconnect/reconnect, session lock/unlock, hotkey change and restart, native tray fallback, repeated hotkey while dialog is open, clipboard capture and no unintended input in source application.
@@ -66,3 +66,47 @@
 - Keep the indicator non-blocking and dispose it on both successful and failed OCR requests. Regression-check no transparent/cutout pixels or off-center mark after reopening; do not change OCR transport or UI state transitions.
 
 - OCR progress popup uses a square white background with centered Red Ink logo and animated ring.
+
+## Initial configuration, registry bootstrap and answer selections (12 October 2026, V121026)
+
+- **Current policy (supersedes the first-run-only import rule of V121026-01):** At each application start, unless `IgnoreRegistryHelperLink=True` or config loading failed, inspect only `HKCU\Software\Red Ink`; use the explicit string `HelperLink` ahead of compatible legacy registration/invitation values. A new valid link can take precedence **even over an already persisted Helper host/API/registered device**. Do not expand registry values or query unknown host URLs; a named `HelperLink` may be `https://host/?api_key=...` with an empty registration path. A missing/invalid/already attempted registry link must never clear existing credentials or cause a server request.
+- Use the existing one-time Helper registration contract from Office Web with the exact original URL and JSON GET; `api_key`, `uid`, `lang` are parsed only by the shared registration path. Save the successful link SHA-256 fingerprint in `ClientConfig.AppliedRegistryLinkFingerprint` (no secret URL), in addition to recording an attempt fingerprint **before** GET. If the fingerprint matches, reuse previously stored credentials without replaying the one-use URL. A changed link may replace previously stored credentials **only after confirmed successful server registration and config persistence**; on failure preserve the prior configuration. Never claim a previous link succeeded just because its pre-request attempt marker exists.
+- The advanced Settings option `IgnoreRegistryHelperLink` defaults to `False` and is user-persisted. When `True`, registry import is skipped on the next launch, and connection/registration fields can be edited. With the successfully applied matching registry link present and opt-out unchecked, disable those fields and enforce their authoritative values in the native settings handler too (do not depend only on JS disabling). When manual opt-out replaces credentials, remove the obsolete applied-fingerprint marker; a consumed link cannot be replayed if the user enables registry import again without a **new** link. Manual registration/unregistration must not mislabel its credentials as belonging to an older registry link.
+- The unconfigured first launch still opens Settings with the registration field focused and localized guidance when no usable automatic import succeeded. Explicit tray/shortcut actions before Application.Idle must serialize behind the same registration attempt and preserve the requested action (including selection vs. tray open). If successful registration cannot be saved, retain protected credentials and open non-dismissible Settings for a save retry, including when prior credentials existed. No registry writes, server retries, secret-bearing diagnostics, or change to DPAPI entropy. Preserve hotkeys, placement, locale except an explicitly supplied `lang`, and other preferences.
+- Keep diagnostics in `%LOCALAPPDATA%\AskInky\diagnostics.log` (LocalAppData, without legacy migration) without URLs, API keys, user text or token values. Windows registry, WebView2 and helper integration require separate real-platform acceptance checks; source tests alone are insufficient.
+- Tray icon and notification titles identify **Ask Inky**; the branded Red Ink asset and copyright remain unchanged.
+- Whole-answer HTML/Unicode clipboard copying remains unchanged. Selection copy is separate, visible/enabled only for a nonempty DOM selection wholly within the **current rendered answer**. Reuse the existing sanitizer and CF_HTML/Unicode writer; reject missing/stale/oversized payloads, preserve selection on icon press, hide after answer replacement, busy state or Settings. Test code, lists, tables, keyboard/mouse selection and four localized tooltips.
+- Repeated-shortcut crashes require logs/event traces for a proven causal attribution. A source-level native exception risk exists during WebView2 response creation if the browser process ends; resource event errors must be contained and unhanded streams disposed. A code-level risk is not yet a demonstrated user crash. Guard the entire shortcut UI activation (including the unconfigured Settings path) against disposal races and contain managed dispatch failures in the Win32 callback; retain detailed no-secret diagnostics. Test repeated Ctrl+Alt+K/O, VDI reconnect, clipboard contention, WebView2 process loss on real Windows.
+- Release regressions: with/without registry entry, valid/invalid/consumed link, inaccessible Helper, explicit saved localhost/remote host, API-only config, damaged config file and registry denial. Never automatically re-run registration on routine restarts. VS2022/WinForms runtime acceptance remains an unexecuted separate gate.
+
+### HelperFailure diagnostic contract (2026-10-12)
+
+- `ClientLog.Write(operation, failure)` logs `ResourceKey` (only a bounded identifier matching `[a-zA-Z0-9_.-]`) and numeric `HttpStatus` for `HelperFailure` failures; `HttpStatus=0` indicates that there was no HTTP response status available, **not** HTTP 0. Do not serialize `Exception.Message`, response content, full `HelperLink`, user IDs, API keys or device credentials.
+- The destination remains `%LOCALAPPDATA%\AskInky\diagnostics.log`; no migration from legacy paths. Preserve existing rotation, stack-frame-only diagnostics and handling of all other exception types.
+- Validate a 403 failure and a non-HTTP response failure, plus generic-exception compatibility, before shipping. Actual registration endpoint behavior must be validated on Windows; never consume a one-time link just for a diagnostic test.
+
+## Default assistant window width (2026-10-12)
+
+- AssistantForm default client width is 600 pixels (previously 540) in both the WebDialog constructor and the post-working-area client-size assignment. Keep both widths equal; allow manual resize and retain the existing 470-pixel minimum width.
+- Preserve saved assistant *position*, active-monitor centering and off-screen clamping. The application does not persist an independent user-selected width, so do not add/reset a width setting.
+- Check copy-whole-answer and selection-copy icon visibility together with previous/next and other action buttons at 100%/150% DPI and smaller screens. Real Windows/WebView2 verification remains pending.
+
+## 2026-10-12 — Konfigurationslinks und einheitliches Datenverzeichnis (aktueller Vertrag)
+
+- Konfigurationslink `https://host/?api_key=...&uid=...&lang=de`: nur lokales Übernehmen von Helper-Host, API-Key, optionalem Lizenzbenutzer und unterstützter UI-Sprache; **kein Netzwerk-Registrierungs-GET**.
+- Auth-Einladungslink mit nicht leerem Query-Parameter `auth`: einmaliger, unveränderter HTTP-GET mit JSON-Antwort. Auth-Tokens nicht loggen. Derselbe Pfad wird für Registry `HKCU\Software\Red Ink\HelperLink` und manuelle Eingabe genutzt. Registry hat Vorrang außer bei aktivierter Opt-out-Checkbox.
+- Fehlt eine Verbindung und ein gültiger Registry-Link, Settings mit lokalisierter Anleitung und fokussierter Link-Eingabe.
+- Sämtliche Daten (config.json, Geräte-Link-Marker, WebView2-Profil, diagnostics.log und previous) ab jetzt unter `%LOCALAPPDATA%\AskInky`; keine Migration, keine Speicherung im früheren Roaming-/RedInk-Unterordner. DPAPI-Entropie bleibt erhalten.
+- Regression: Konfigurationslink darf keinen GET auslösen und darf nicht als Geräteanmeldung erscheinen; Einladung darf nicht doppelt abgerufen werden. Windows-/VSTO-Kompilierung und reale Registry-/WebView2-Tests stehen aus.
+
+## 2026-10-12 – Antwortstil, Verarbeitung, UI-Stall-Diagnose
+
+- Neuer Systemprompt: kurz, unmittelbar, ohne Floskeln; bestehende individuell gesetzte Systemprompts bleiben erhalten. Der exakt frühere Standardprompt erhält denselben neuen Standard bei Anfragen.
+- Selektions-Ctrl+C wird mit `SendKeys.Send` statt UI-blockierendem `SendWait` ausgelöst; die vorhandene begrenzte Zwischenablage-Abfrage und Wiederherstellung bleiben erhalten.
+- UI-Heartbeat (2 s) und Worker-Monitor (5 s) melden `ui.message-pump.unresponsive.over-15s` einmal je beobachtetem Stillstand; kein Nachweis der alleinigen Ursache, keine Nutzdaten im Log.
+- Busy-Spinner behält die CSS-Animation und bekommt eine Compositor-Transform-Optimierung. Windows-/RDP-WebView2-Abnahme erforderlich.
+
+## 2026-10-12 – Busy-Indikator bei reduzierten Animationen
+
+- Die CSS-Regel `prefers-reduced-motion: reduce` in `desktop.css` darf den funktionsrelevanten Kreis `body.is-busy .desktop-status::before` nicht abschalten. Die Rotation wird nur für diesen Indikator wieder aktiviert; andere Animationen bleiben deaktiviert.
+- Browser-/Windows-Abnahme mit eingeschalteter und ausgeschalteter Einstellung „Animationen reduzieren“ prüfen.

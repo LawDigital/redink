@@ -207,6 +207,7 @@ Partial Public Class ThisAddIn
 
         ' 4) Capture the host window’s HWND.
         Dim hwnd As IntPtr = New IntPtr(CInt(Me.Application.Hwnd))
+        SharedMethods.InitializeHostWindow("XLMAIN", hwnd)
         UpdateHandler.HostHandle = hwnd
 
         ' Other startup tasks

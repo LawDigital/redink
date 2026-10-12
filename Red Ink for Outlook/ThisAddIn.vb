@@ -297,8 +297,8 @@ Partial Public Class ThisAddIn
         UpdateHandler.MainControl = mainThreadControl
 
         ' 4) Capture the host window’s HWND.
-        Dim hwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
-        UpdateHandler.HostHandle = hwnd
+        SharedMethods.InitializeHostWindow("rctrl_renwnd32")
+        UpdateHandler.HostHandle = SharedMethods.GetHostWindowHandle()
 
         ' Other tasks that need to be done at startup
         mainThreadControl.CreateControl()

@@ -1,4 +1,4 @@
-' Part of "Red Ink" (Ask Inky)
+﻿' Part of "Red Ink" (Ask Inky)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: AssistantForm.vb
@@ -46,14 +46,14 @@ Friend NotInheritable Class AssistantForm
     End Sub
 
     Public Sub New(parent As AssistantContext)
-        MyBase.New("assistant.html", "Ask Inky", New System.Drawing.Size(540, 710))
+        MyBase.New("assistant.html", "Ask Inky", New System.Drawing.Size(600, 710))
         context = parent
         Dim available As System.Drawing.Rectangle = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea
         Dim estimatedNonClientHeight As Integer = Me.Height - Me.ClientSize.Height
         Dim maximumClientHeight As Integer = System.Math.Max(390, available.Height - estimatedNonClientHeight - 24)
         Dim minimumClientHeight As Integer = System.Math.Min(550, maximumClientHeight)
         Me.MinimumSize = New System.Drawing.Size(470, minimumClientHeight + estimatedNonClientHeight)
-        Me.ClientSize = New System.Drawing.Size(540, System.Math.Min(710, maximumClientHeight))
+        Me.ClientSize = New System.Drawing.Size(600, System.Math.Min(710, maximumClientHeight))
         WindowPlacement.RestoreAssistant(Me, parent.Settings())
     End Sub
 
@@ -181,15 +181,18 @@ Friend NotInheritable Class AssistantForm
                     ClientLog.Write("clipboard.copy-source.failed", ex)
                     SendView(New With {.[type] = "error", .message = UiStrings.GetText("desktop.copyFailed", Language)})
                 End Try
-            Case "copy"
+            Case "copy", "copySelection"
                 If sending OrElse settingsOpen OrElse response.Length = 0 Then Return
                 Try
-                    Dim json As String = Await ReadCopyPayloadAsync()
+                    Dim json As String = Await ReadCopyPayloadAsync(HelperClient.TextValue(message, "action") = "copySelection")
                     Using document As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(json)
                         Dim root As System.Text.Json.JsonElement = document.RootElement
                         Dim html As String = HelperClient.TextValue(root, "html")
                         Dim plain As String = HelperClient.TextValue(root, "text")
-                        If html.Length = 0 OrElse html.Length > 16000000 Then Throw New System.IO.InvalidDataException("Invalid clipboard payload")
+                        If html.Length = 0 OrElse html.Length > 16000000 OrElse plain.Length > 16000000 OrElse
+                           (HelperClient.TextValue(message, "action") = "copySelection" AndAlso String.IsNullOrWhiteSpace(plain)) Then
+                            Throw New System.IO.InvalidDataException("Invalid clipboard payload")
+                        End If
                         ResponseClipboard.CopyRendered(html, plain)
                     End Using
                     statusKey = "desktop.copied"

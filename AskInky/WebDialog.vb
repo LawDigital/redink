@@ -47,7 +47,7 @@ Friend MustInherit Class WebDialog
         initializing = True
         Try
             If View.CoreWebView2 Is Nothing Then
-                Dim profile As String = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "RedInk", "AskInky", "WebView2")
+                Dim profile As String = System.IO.Path.Combine(StoragePaths.Root, "WebView2")
                 Dim environment As Microsoft.Web.WebView2.Core.CoreWebView2Environment = Await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(Nothing, profile)
                 If IsDisposed Then Return
                 Await View.EnsureCoreWebView2Async(environment)
@@ -121,9 +121,17 @@ Friend MustInherit Class WebDialog
             ClientLog.Write("webview.resource.failed", ex)
             code = 500
         End Try
-        Dim stream As New System.IO.MemoryStream(bytes, False)
-        resourceStreams.Add(stream) ' Keep alive until the view has consumed the response.
-        args.Response = View.CoreWebView2.Environment.CreateWebResourceResponse(stream, code, If(code = 200, "OK", "Blocked"), "Content-Type: " & contentType & vbCrLf & "Cache-Control: no-store" & vbCrLf & "X-Content-Type-Options: nosniff")
+        ' Creating a response can fail if the browser process is gone while a request is
+        ' in flight. Keep only streams actually handed off; a native event must not throw.
+        Dim stream As System.IO.MemoryStream = Nothing
+        Try
+            stream = New System.IO.MemoryStream(bytes, False)
+            args.Response = View.CoreWebView2.Environment.CreateWebResourceResponse(stream, code, If(code = 200, "OK", "Blocked"), "Content-Type: " & contentType & vbCrLf & "Cache-Control: no-store" & vbCrLf & "X-Content-Type-Options: nosniff")
+            resourceStreams.Add(stream) ' WebView2 may still be reading after this callback.
+        Catch ex As System.Exception
+            If stream IsNot Nothing Then stream.Dispose()
+            ClientLog.Write("webview.resource.response-failed", ex)
+        End Try
     End Sub
 
     Protected Function IsTrustedPage() As Boolean
@@ -176,9 +184,10 @@ Friend MustInherit Class WebDialog
         End Try
     End Sub
 
-    Protected Async Function ReadCopyPayloadAsync() As System.Threading.Tasks.Task(Of String)
+    Protected Async Function ReadCopyPayloadAsync(Optional selectionOnly As Boolean = False) As System.Threading.Tasks.Task(Of String)
         If Not ViewReady OrElse Not IsTrustedPage() Then Throw New System.InvalidOperationException("View not ready")
-        Dim value As String = Await View.CoreWebView2.ExecuteScriptAsync("window.redInkAnswer.getCopyPayload()")
+        Dim script As String = If(selectionOnly, "window.redInkAnswer.getSelectedCopyPayload()", "window.redInkAnswer.getCopyPayload()")
+        Dim value As String = Await View.CoreWebView2.ExecuteScriptAsync(script)
         If Not IsTrustedPage() Then Throw New System.InvalidOperationException("View origin changed")
         Return value
     End Function

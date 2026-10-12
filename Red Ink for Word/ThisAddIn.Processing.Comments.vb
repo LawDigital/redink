@@ -97,6 +97,7 @@ Partial Public Class ThisAddIn
         Dim win As Microsoft.Office.Interop.Word.Window = app.ActiveWindow
         Dim hwnd As System.IntPtr = System.IntPtr.Zero
         Dim winWasEnabled As System.Boolean = True
+        Dim windowDisabledByUs As System.Boolean = False
         Dim prevShowRevs As System.Boolean = False
         Dim prevScreenUpdating As System.Boolean = True
 
@@ -121,11 +122,11 @@ Partial Public Class ThisAddIn
             Catch ex As System.Exception
             End Try
 
-            If hwnd <> System.IntPtr.Zero Then
+            If Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) Then
                 Try
                     winWasEnabled = IsWindowEnabled(hwnd)
                 Catch ex As System.Exception
-                    winWasEnabled = True
+                    winWasEnabled = False ' Unknown state must not be disabled/re-enabled by us.
                 End Try
                 Try
                     SharedLibrary.SharedLibrary.OfficeWindowWatchdog.InspectCachedHwndUse(
@@ -134,7 +135,10 @@ Partial Public Class ThisAddIn
                 End Try
                 Try
                     ' Disable the Word window so clicks cannot move the live Selection while ranges are being created
-                    EnableWindow(hwnd, False)
+                    If winWasEnabled Then
+                        EnableWindow(hwnd, False)
+                        windowDisabledByUs = Not IsWindowEnabled(hwnd)
+                    End If
                 Catch ex As System.Exception
                 End Try
             End If
@@ -284,7 +288,10 @@ Partial Public Class ThisAddIn
             ' ─────────────────────────────────────────────────────────────────
             ' Restore Word window + UI
             Try
-                If hwnd <> System.IntPtr.Zero Then EnableWindow(hwnd, winWasEnabled)
+                If windowDisabledByUs AndAlso Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) AndAlso
+                    win IsNot Nothing AndAlso New System.IntPtr(win.Hwnd) = hwnd Then
+                    EnableWindow(hwnd, True)
+                End If
             Catch ex As System.Exception
             End Try
             Try
@@ -391,6 +398,7 @@ Partial Public Class ThisAddIn
 
         Dim prevScreenUpdating As Boolean = True
         Dim winWasEnabled As Boolean = True
+        Dim windowDisabledByUs As System.Boolean = False
 
         ' Split into individual reply items
         Dim items As String() = LLMResult.Split(New String() {"§§§"}, StringSplitOptions.RemoveEmptyEntries)
@@ -455,7 +463,10 @@ Partial Public Class ThisAddIn
                             hwnd, "EnableWindow(False) in AddReplies (comment replies)")
                     Catch
                     End Try
-                    EnableWindow(hwnd, False)
+                    If Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) AndAlso winWasEnabled Then
+                        EnableWindow(hwnd, False)
+                        windowDisabledByUs = Not IsWindowEnabled(hwnd)
+                    End If
                 Catch
                 End Try
             End If
@@ -563,8 +574,9 @@ Partial Public Class ThisAddIn
         Finally
             ' Restore UI and selection
             Try
-                If win IsNot Nothing AndAlso hwnd <> IntPtr.Zero Then
-                    EnableWindow(hwnd, winWasEnabled)
+                If windowDisabledByUs AndAlso Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) AndAlso
+                    win IsNot Nothing AndAlso New System.IntPtr(win.Hwnd) = hwnd Then
+                    EnableWindow(hwnd, True)
                 End If
             Catch
             End Try

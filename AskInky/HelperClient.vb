@@ -126,6 +126,66 @@ Public NotInheritable Class HelperClient
         Return New HelperFailure(key, CInt(status))
     End Function
 
+    ' Office Web-compatible connection link: host, api_key, uid and lang are independent
+    ' of device registration. Only an explicit auth/invite token consumes a GET.
+    Friend Shared Function IsDeviceInvite(link As String) As Boolean
+        Dim uri As System.Uri = ValidateConnectionLink(link)
+        For Each pair As System.Collections.Generic.KeyValuePair(Of String, String) In ConnectionParameters(uri)
+            If String.Equals(pair.Key, "auth", System.StringComparison.OrdinalIgnoreCase) AndAlso pair.Value.Trim().Length > 0 Then Return True
+        Next
+        Return False
+    End Function
+
+    Private Shared Function ValidateConnectionLink(link As String) As System.Uri
+        Dim uri As System.Uri = Nothing
+        If String.IsNullOrWhiteSpace(link) OrElse link.Length > 32768 OrElse
+           Not System.Uri.TryCreate(link.Trim(), System.UriKind.Absolute, uri) OrElse
+           uri.UserInfo.Length <> 0 OrElse uri.Fragment.Length <> 0 OrElse
+           (uri.Scheme <> System.Uri.UriSchemeHttps AndAlso Not (uri.Scheme = System.Uri.UriSchemeHttp AndAlso uri.IsLoopback)) Then
+            Throw New HelperFailure("desktop.invalidInvite")
+        End If
+        Return uri
+    End Function
+
+    Private Shared Function ConnectionParameters(uri As System.Uri) As System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of String, String))
+        Dim pairs As New System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of String, String))()
+        For Each item As String In uri.Query.TrimStart("?"c).Split("&"c, System.StringSplitOptions.RemoveEmptyEntries)
+            Dim parts As String() = item.Split("="c, 2)
+            Try
+                Dim name As String = System.Net.WebUtility.UrlDecode(parts(0))
+                Dim value As String = System.Net.WebUtility.UrlDecode(If(parts.Length = 2, parts(1), ""))
+                pairs.Add(New System.Collections.Generic.KeyValuePair(Of String, String)(name, value))
+            Catch ex As System.ArgumentException
+                Throw New HelperFailure("desktop.invalidInvite")
+            End Try
+        Next
+        Return pairs
+    End Function
+
+    Friend Shared Function ApplyConnectionLink(link As String, current As ClientConfig) As ClientConfig
+        Dim uri As System.Uri = ValidateConnectionLink(link)
+        Dim result As ClientConfig = ConfigStore.Clone(current)
+        Dim origin As String = uri.GetLeftPart(System.UriPartial.Authority)
+        If Not String.Equals(current.CredentialOrigin, origin, System.StringComparison.OrdinalIgnoreCase) Then
+            result.UserId = ""
+            result.DeviceTokenProtected = ""
+            result.ApiKeyProtected = ""
+        End If
+        result.HelperUrl = origin
+        result.CredentialOrigin = origin
+        For Each pair As System.Collections.Generic.KeyValuePair(Of String, String) In ConnectionParameters(uri)
+            Select Case pair.Key.ToLowerInvariant()
+                Case "api_key"
+                    If pair.Value.Trim().Length > 0 Then result.ApiKeyProtected = ConfigStore.Protect(pair.Value.Trim())
+                Case "uid"
+                    If pair.Value.Trim().Length > 0 Then result.LicenseUser = pair.Value.Trim()
+                Case "lang"
+                    If UiStrings.IsSupported(pair.Value.Trim()) Then result.UiLanguage = UiStrings.NormalizeLanguage(pair.Value.Trim())
+            End Select
+        Next
+        Return result
+    End Function
+
     Public Shared Async Function RegisterAsync(link As String, current As ClientConfig, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of ClientConfig)
         Dim raw As String = If(link, "").Trim()
         Dim invite As System.Uri = Nothing
@@ -140,30 +200,13 @@ Public NotInheritable Class HelperClient
                 Dim json As String = Await response.Content.ReadAsStringAsync(cancellation)
                 Using document As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(json)
                     Dim payload As System.Text.Json.JsonElement = document.RootElement
-                    Dim user As String = TextValue(payload, "userId")
-                    Dim token As String = TextValue(payload, "deviceToken")
-                    If TextValue(payload, "status") <> "ok" OrElse Not IsTrue(payload, "registered") OrElse String.IsNullOrWhiteSpace(user) OrElse String.IsNullOrWhiteSpace(token) Then Throw New HelperFailure("desktop.registrationFailed")
-                    Dim result As ClientConfig = ConfigStore.Clone(current)
-                    Dim origin As String = invite.GetLeftPart(System.UriPartial.Authority)
-                    If Not String.Equals(current.CredentialOrigin, origin, System.StringComparison.OrdinalIgnoreCase) Then result.ApiKeyProtected = ""
-                    result.HelperUrl = origin
-                    result.CredentialOrigin = origin
+                    Dim user As String = TextValue(payload, "userId").Trim()
+                    Dim token As String = TextValue(payload, "deviceToken").Trim()
+                    If Not String.Equals(TextValue(payload, "status").Trim(), "ok", System.StringComparison.OrdinalIgnoreCase) OrElse Not IsTrue(payload, "registered") OrElse user.Length = 0 OrElse token.Length = 0 Then Throw New HelperFailure("desktop.registrationFailed")
+                    Dim result As ClientConfig = ApplyConnectionLink(link, current)
                     result.UserId = user
                     result.DeviceTokenProtected = ConfigStore.Protect(token)
-                    result.LicenseUser = user
-                    For Each item As String In invite.Query.TrimStart("?"c).Split("&"c, System.StringSplitOptions.RemoveEmptyEntries)
-                        Dim pair As String() = item.Split("="c, 2)
-                        Dim name As String = System.Uri.UnescapeDataString(pair(0).Replace("+", " "))
-                        Dim value As String = If(pair.Length = 2, System.Uri.UnescapeDataString(pair(1).Replace("+", " ")), "")
-                        Select Case name.ToLowerInvariant()
-                            Case "api_key"
-                                If value.Trim().Length > 0 Then result.ApiKeyProtected = ConfigStore.Protect(value.Trim())
-                            Case "uid"
-                                If value.Trim().Length > 0 Then result.LicenseUser = value.Trim()
-                            Case "lang"
-                                If UiStrings.IsSupported(value) Then result.UiLanguage = UiStrings.NormalizeLanguage(value)
-                        End Select
-                    Next
+                    If String.IsNullOrEmpty(result.LicenseUser) Then result.LicenseUser = user
                     Return result
                 End Using
             End Using
@@ -261,7 +304,8 @@ Public NotInheritable Class HelperClient
     Public Shared Async Function AskAsync(config As ClientConfig, prompt As String, text As String, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of String)
         ' Helper decides whether device registration/licensing is necessary; no local prompt.
         Dim userContent As String = If(String.IsNullOrWhiteSpace(text), prompt, "Ausgewählter Text:" & vbLf & text & vbLf & vbLf & "Frage:" & vbLf & prompt)
-        Dim body As String = System.Text.Json.JsonSerializer.Serialize(New With {.prompt_system = config.SystemPrompt, .prompt_user = userContent, .temperature = config.Temperature, .model = If(System.String.IsNullOrWhiteSpace(config.Model), Nothing, config.Model.Trim())})
+        Dim effectiveSystemPrompt As String = If(System.String.Equals(config.SystemPrompt, "Du bist Inky, ein hilfreicher Schreibassistent. Antworte in Markdown.", System.StringComparison.Ordinal), New ClientConfig().SystemPrompt, config.SystemPrompt)
+        Dim body As String = System.Text.Json.JsonSerializer.Serialize(New With {.prompt_system = effectiveSystemPrompt, .prompt_user = userContent, .temperature = config.Temperature, .model = If(System.String.IsNullOrWhiteSpace(config.Model), Nothing, config.Model.Trim())})
         LastRequest = If(config.ShowLlmDebug, body, "")
         LastResponse = ""
         Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Post, "llm/chat")

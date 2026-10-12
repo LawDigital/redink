@@ -64,6 +64,7 @@ Namespace SharedLibrary
         Private Shared DisabledSinceUtc As System.DateTime
         Private Shared LongDisabledReported As System.Boolean
         Private Shared MainHwndInvalidLatched As System.Boolean
+        Private Shared ObservedMainHwnd As System.IntPtr
         Private Shared UnresponsiveSinceUtc As System.DateTime
         Private Shared UnresponsiveReported As System.Boolean
 
@@ -71,7 +72,7 @@ Namespace SharedLibrary
         Private Shared Function ObserveResponsiveness(mainHwnd As System.IntPtr) As System.Boolean
             Dim pid As System.Int32 = 0
             Dim threadId As System.Int32 = GetWindowThreadProcessId(mainHwnd, pid)
-            If pid <> GetCurrentProcessIdSafe() Then Return True
+            If pid <> GetCurrentProcessIdSafe() Then Return False
             Dim response As System.UIntPtr = System.UIntPtr.Zero
             Dim responsive As System.Boolean = SendMessageTimeout(mainHwnd, 0UI, System.UIntPtr.Zero, System.IntPtr.Zero,
                 &H23UI, 500UI, response) <> System.IntPtr.Zero
@@ -92,7 +93,7 @@ Namespace SharedLibrary
                     "; MainHWND=" & FormatHandle(mainHwnd) &
                     "; Enabled=" & IsWindowEnabled(mainHwnd).ToString() &
                     "; SinceUtc=" & UnresponsiveSinceUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture) &
-                    "; WM_NULL probe timed out repeatedly. This records an unresponsive UI, not its cause. Capture an Outlook process dump while it is still frozen.")
+                    "; WM_NULL probe timed out repeatedly. This records an unresponsive UI, not its cause. Capture a host process dump while it is still frozen.")
             End If
             Return False
         End Function
@@ -181,6 +182,15 @@ Namespace SharedLibrary
 
                 Dim mainHwnd As System.IntPtr = UpdateHandler.HostHandle
 
+                If mainHwnd <> ObservedMainHwnd Then
+                    ObservedMainHwnd = mainHwnd
+                    DisabledLatched = False
+                    LongDisabledReported = False
+                    MainHwndInvalidLatched = False
+                    UnresponsiveSinceUtc = System.DateTime.MinValue
+                    UnresponsiveReported = False
+                End If
+
                 ' Handle not captured yet: nothing to observe. No logging.
                 If mainHwnd = System.IntPtr.Zero Then
                     Return
@@ -205,6 +215,8 @@ Namespace SharedLibrary
 
                 End If
 
+                ' Recheck identity even after the shared resolver (window lifetime race).
+                If Not SharedMethods.IsWindowInCurrentProcess(mainHwnd) Then Return
                 MainHwndInvalidLatched = False
                 If Not ObserveResponsiveness(mainHwnd) Then Return
 
@@ -291,6 +303,9 @@ Namespace SharedLibrary
 
             Try
 
+                Dim control As System.Windows.Forms.Control = TryCast(owner, System.Windows.Forms.Control)
+                If control IsNot Nothing AndAlso (control.IsDisposed OrElse control.Disposing OrElse
+                    Not control.IsHandleCreated OrElse control.InvokeRequired) Then Return
                 Dim ownerHwnd As System.IntPtr
 
                 Try
@@ -429,6 +444,7 @@ Namespace SharedLibrary
                 result.AppendLine("MainHWND=" & FormatHandle(mainHwnd))
                 result.AppendLine("MainClass=" & GetWindowClass(mainHwnd))
                 result.AppendLine("MainTitle=" & GetWindowTitle(mainHwnd))
+                result.AppendLine("Interpretation=Window state only; disabled does not prove a hang or identify its cause.")
                 result.AppendLine("MainEnabled=" & IsWindowEnabled(mainHwnd).ToString(
                     System.Globalization.CultureInfo.InvariantCulture))
                 result.AppendLine("MainVisible=" & IsWindowVisible(mainHwnd).ToString(
@@ -606,7 +622,10 @@ Namespace SharedLibrary
                         Continue For
                     End If
 
-                    ' Cross-process owner/popup of an Office main window: high priority.
+                    ' Hidden/disabled infrastructure windows are not interactive blockers.
+                    If Not IsWindowVisible(candidate) OrElse Not IsWindowEnabled(candidate) Then Continue For
+
+                    ' Record ownership as evidence, never as proof of a modal deadlock.
                     Dim details As New System.Text.StringBuilder()
 
                     details.AppendLine("CurrentProcess=" & GetProcessNameById(currentPid))
@@ -615,6 +634,7 @@ Namespace SharedLibrary
                     details.AppendLine("MainHWND=" & FormatHandle(mainHwnd))
                     details.AppendLine("MainClass=" & GetWindowClass(mainHwnd))
                     details.AppendLine("MainTitle=" & GetWindowTitle(mainHwnd))
+                    details.AppendLine("Interpretation=Visible enabled foreign owned window; causation not established.")
                     details.AppendLine("BlockingHWND=" & FormatHandle(candidate))
                     details.AppendLine("BlockingPID=" & candidatePid.ToString(
                         System.Globalization.CultureInfo.InvariantCulture))

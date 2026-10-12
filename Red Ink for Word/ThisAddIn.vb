@@ -454,9 +454,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function GetWordMainWindowHandle() As IntPtr
-        ' Word’s top-level windows all have the class name "OpusApp" (Office 2013+)
-        Dim hwnd = FindWindow("OpusApp", Nothing)
-        Return hwnd
+        SharedMethods.InitializeHostWindow("OpusApp")
+        Return SharedMethods.GetHostWindowHandle()
     End Function
 
     Private mainThreadControl As New System.Windows.Forms.Control()
