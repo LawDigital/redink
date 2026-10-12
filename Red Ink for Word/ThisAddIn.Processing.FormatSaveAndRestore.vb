@@ -1017,6 +1017,11 @@ Partial Public Class ThisAddIn
             Dim foundEnd As System.Int32 = searchRange.End
             Dim foundText As System.String = If(searchRange.Text, System.String.Empty)
 
+            ' Validate native match boundaries before generated markers grow the range.
+            If foundStart < currentPosition OrElse foundEnd > allowedEnd Then
+                Throw New System.InvalidOperationException("Formatting match escaped its source range.")
+            End If
+
             If foundEnd <= foundStart Then
                 currentPosition = System.Math.Min(System.Math.Max(foundStart, currentPosition) + 1, allowedEnd)
                 GoTo ContinueLoop
@@ -1054,8 +1059,6 @@ Partial Public Class ThisAddIn
                 Dim groupEnd As System.Int32 = foundStart + coreLen
 
                 Dim endsWithParaCr As System.Boolean = (trailingTrim > 0)
-                Dim projectedEnd As System.Int32 = foundEnd + prefixLen + suffixLen
-                If projectedEnd > allowedEnd Then Exit Do
 
                 If tweakReplacement IsNot Nothing AndAlso groupEnd > foundStart Then
                     Dim contentRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
@@ -1063,7 +1066,7 @@ Partial Public Class ThisAddIn
                 End If
                 If tweakReplacement IsNot Nothing AndAlso endsWithParaCr Then
                     Dim trailingLen As System.Int32 = If(endsWithCellMark, 2, 1)
-                    Dim paraRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=groupEnd, [End]:=groupEnd + trailingLen)
+                    Dim paraRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundEnd - trailingLen, [End]:=foundEnd)
                     tweakReplacement(paraRange.Font)
                 End If
 
@@ -1072,7 +1075,8 @@ Partial Public Class ThisAddIn
                     groupRange.InsertBefore(prefix)
                 End If
                 If suffixLen > 0 AndAlso groupEnd >= foundStart Then
-                    Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
+                    ' InsertBefore moved the original content end by prefixLen.
+                    Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd + prefixLen)
                     groupRange.InsertAfter(suffix)
                 End If
 
@@ -1133,8 +1137,6 @@ Partial Public Class ThisAddIn
                     GoTo ContinueLoop
                 End If
 
-                Dim projectedEnd As System.Int32 = foundEnd + prefixLen + suffixLen
-                If projectedEnd > allowedEnd Then Exit Do
 
                 If tweakReplacement IsNot Nothing Then
                     Dim contentRangeUF As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentStart, [End]:=contentEnd)

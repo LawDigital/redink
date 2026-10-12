@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 8.10.2026
+' 12.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -77,7 +77,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.081026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.121026" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -297,8 +297,8 @@ Partial Public Class ThisAddIn
         UpdateHandler.MainControl = mainThreadControl
 
         ' 4) Capture the host window’s HWND.
-        Dim hwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
-        UpdateHandler.HostHandle = hwnd
+        SharedMethods.InitializeHostWindow("rctrl_renwnd32")
+        UpdateHandler.HostHandle = SharedMethods.GetHostWindowHandle()
 
         ' Other tasks that need to be done at startup
         mainThreadControl.CreateControl()

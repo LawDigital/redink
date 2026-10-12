@@ -1043,7 +1043,7 @@ Partial Public Class ThisAddIn
 
             ' Try to bring Outlook forward
             Try
-                Dim hwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
+                Dim hwnd As System.IntPtr = UpdateHandler.HostHandle
                 If hwnd <> IntPtr.Zero Then
                     NativeMethods.SetForegroundWindow(hwnd)
                 End If

@@ -54,6 +54,80 @@ Imports System.Windows.Forms
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
+        ' Host identity is configured by each host on its UI thread. No Office COM
+        ' is used here, so recovery is also safe from the diagnostic timer.
+        Private Shared ReadOnly _hostWindowLock As New System.Object()
+        Private Shared _hostWindowClass As System.String
+        Private Shared _hostWindowThread As System.Int32
+        Private Shared _hostWindowHandle As System.IntPtr
+
+        Public Shared Sub InitializeHostWindow(windowClass As System.String,
+                                               Optional candidate As System.IntPtr = Nothing)
+            SyncLock _hostWindowLock
+                _hostWindowClass = windowClass
+                _hostWindowThread = NativeMethods.GetCurrentThreadId()
+                _hostWindowHandle = If(IsHostWindowCandidate(candidate), candidate, System.IntPtr.Zero)
+            End SyncLock
+        End Sub
+
+        Public Shared Function IsWindowInCurrentProcess(hwnd As System.IntPtr) As System.Boolean
+            If hwnd = System.IntPtr.Zero OrElse Not NativeMethods.IsWindow(hwnd) Then Return False
+            Dim pid As System.Int32 = 0
+            If NativeMethods.GetWindowThreadProcessId(hwnd, pid) = 0 Then Return False
+            Using process As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
+                Return pid = process.Id
+            End Using
+        End Function
+
+        Public Shared Function IsWindowOnCurrentThread(hwnd As System.IntPtr) As System.Boolean
+            If Not IsWindowInCurrentProcess(hwnd) Then Return False
+            Dim pid As System.Int32 = 0
+            Return NativeMethods.GetWindowThreadProcessId(hwnd, pid) = NativeMethods.GetCurrentThreadId()
+        End Function
+
+        Private Shared Function IsHostWindowCandidate(hwnd As System.IntPtr) As System.Boolean
+            If System.String.IsNullOrEmpty(_hostWindowClass) OrElse Not IsWindowInCurrentProcess(hwnd) Then Return False
+            Dim pid As System.Int32 = 0
+            If NativeMethods.GetWindowThreadProcessId(hwnd, pid) <> _hostWindowThread Then Return False
+            Dim name As New System.Text.StringBuilder(256)
+            NativeMethods.GetClassName(hwnd, name, name.Capacity)
+            Return System.String.Equals(name.ToString(), _hostWindowClass, System.StringComparison.Ordinal)
+        End Function
+
+        Public Shared Function GetHostWindowHandle() As System.IntPtr
+            SyncLock _hostWindowLock
+                If IsHostWindowCandidate(_hostWindowHandle) AndAlso NativeMethods.IsWindowVisible(_hostWindowHandle) Then
+                    Return _hostWindowHandle
+                End If
+                Dim previous As System.IntPtr = _hostWindowHandle
+                _hostWindowHandle = System.IntPtr.Zero
+                If Not System.String.IsNullOrEmpty(_hostWindowClass) Then
+                    ' Never search another process or guess another Office application.
+                    NativeMethods.EnumWindows(
+                        Function(hwnd As System.IntPtr, state As System.IntPtr) As System.Boolean
+                            If IsHostWindowCandidate(hwnd) AndAlso NativeMethods.IsWindowVisible(hwnd) Then
+                                _hostWindowHandle = hwnd
+                                Return False
+                            End If
+                            Return True
+                        End Function, System.IntPtr.Zero)
+                End If
+                If previous <> System.IntPtr.Zero AndAlso previous <> _hostWindowHandle Then
+                    RiCrashLogger.LogMarker("HOST_WINDOW_RESELECTED",
+                        "PreviousHWND=" & previous.ToString() & "; CurrentHWND=" & _hostWindowHandle.ToString() &
+                        "; Reason=previous window no longer eligible; same-process/UI-thread/class recovery only.")
+                End If
+                Return _hostWindowHandle
+            End SyncLock
+        End Function
+
+        Public Shared Sub SetHostWindowHandle(candidate As System.IntPtr)
+            SyncLock _hostWindowLock
+                ' Compatibility setter; startup must configure the class/thread first.
+                _hostWindowHandle = If(IsHostWindowCandidate(candidate), candidate, System.IntPtr.Zero)
+            End SyncLock
+        End Sub
+
         ''' <summary>
         ''' Thread-local stack of dialog owners. Each managed UI thread keeps its
         ''' own stack so background threads cannot accidentally inherit an owner.
@@ -289,7 +363,14 @@ Namespace SharedLibrary
         Public Shared Function IfOwnerOnCurrentThread(owner As IWin32Window) As IWin32Window
             If owner Is Nothing Then Return Nothing
 
-            Dim h As IntPtr
+            Dim control As System.Windows.Forms.Control = TryCast(owner, System.Windows.Forms.Control)
+            If control IsNot Nothing AndAlso (control.IsDisposed OrElse control.Disposing OrElse
+                Not control.IsHandleCreated OrElse control.InvokeRequired) Then
+                RiCrashLogger.LogMarker("DIALOG_OWNER_REJECTED",
+                    "Reason=disposed, uncreated or cross-thread control; using ownerless fallback.")
+                Return Nothing
+            End If
+            Dim h As System.IntPtr
             Try
                 h = owner.Handle
             Catch
@@ -297,14 +378,10 @@ Namespace SharedLibrary
             End Try
             If h = IntPtr.Zero Then Return Nothing
 
-            Dim pid As Integer = 0
-            Dim ownerThreadId As Integer = NativeMethods.GetWindowThreadProcessId(h, pid)
-            If ownerThreadId = 0 Then Return Nothing
-
-            If ownerThreadId = NativeMethods.GetCurrentThreadId() Then
-                Return owner
-            End If
-
+            If IsWindowOnCurrentThread(h) Then Return owner
+            OfficeWindowWatchdog.InspectDialogOwner(owner, "RejectedOwner", "IfOwnerOnCurrentThread")
+            RiCrashLogger.LogMarker("DIALOG_OWNER_REJECTED",
+                "OwnerHWND=" & h.ToString() & "; Reason=invalid, foreign-process or foreign-thread owner; using ownerless fallback.")
             Return Nothing
         End Function
 
