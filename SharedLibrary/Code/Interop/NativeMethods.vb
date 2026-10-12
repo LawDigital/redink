@@ -22,6 +22,25 @@ Namespace SharedLibrary
     ''' </summary>
     Public Class NativeMethods
 
+        <System.Runtime.InteropServices.DllImport("user32.dll")>
+        Public Shared Function IsWindow(hwnd As System.IntPtr) As System.Boolean
+        End Function
+
+        <System.Runtime.InteropServices.DllImport("user32.dll")>
+        Public Shared Function IsWindowVisible(hwnd As System.IntPtr) As System.Boolean
+        End Function
+
+        <System.Runtime.InteropServices.DllImport("user32.dll", CharSet:=System.Runtime.InteropServices.CharSet.Unicode)>
+        Public Shared Function GetClassName(hwnd As System.IntPtr, name As System.Text.StringBuilder, capacity As System.Int32) As System.Int32
+        End Function
+
+        Public Delegate Function EnumWindowsCallback(hwnd As System.IntPtr, state As System.IntPtr) As System.Boolean
+
+        <System.Runtime.InteropServices.DllImport("user32.dll")>
+        Public Shared Function EnumWindows(callback As EnumWindowsCallback, state As System.IntPtr) As System.Boolean
+        End Function
+
+
         <Runtime.InteropServices.DllImport("user32.dll")>
         Public Shared Function SetForegroundWindow(hWnd As IntPtr) As Boolean
         End Function

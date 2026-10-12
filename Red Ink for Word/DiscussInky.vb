@@ -1026,7 +1026,8 @@ Public Class DiscussInky
         SharedMethods.EnsureVisibleOnScreen(Me)
 
         If Not Me.Visible Then
-            If owner IsNot Nothing Then Me.Show(owner) Else Me.Show()
+            Dim safeOwner As System.Windows.Forms.IWin32Window = SharedMethods.IfOwnerOnCurrentThread(owner)
+            If safeOwner IsNot Nothing Then Me.Show(safeOwner) Else Me.Show()
         End If
 
         Me.Activate()

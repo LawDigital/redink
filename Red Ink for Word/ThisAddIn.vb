@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 8.10.2026
+' 12.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -69,7 +69,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.081026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.121026" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -454,9 +454,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function GetWordMainWindowHandle() As IntPtr
-        ' Word’s top-level windows all have the class name "OpusApp" (Office 2013+)
-        Dim hwnd = FindWindow("OpusApp", Nothing)
-        Return hwnd
+        SharedMethods.InitializeHostWindow("OpusApp")
+        Return SharedMethods.GetHostWindowHandle()
     End Function
 
     Private mainThreadControl As New System.Windows.Forms.Control()

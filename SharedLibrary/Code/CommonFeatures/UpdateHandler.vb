@@ -75,7 +75,14 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Host window handle used to request foreground focus for dialogs.
         ''' </summary>
-        Public Shared HostHandle As IntPtr
+        Public Shared Property HostHandle As System.IntPtr
+            Get
+                Return SharedMethods.GetHostWindowHandle()
+            End Get
+            Set(value As System.IntPtr)
+                SharedMethods.SetHostWindowHandle(value)
+            End Set
+        End Property
 
         ''' <summary>
         ''' Splash screen instance shown while checking/installing updates.

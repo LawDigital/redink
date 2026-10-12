@@ -48,7 +48,8 @@ Namespace SharedLibrary
 
         Private Shared SessionSentinelPathValue As System.String
         Private Shared SnapshotStateFilePathValue As System.String
-        Private Shared PreviousSessionSentinelContent As System.String
+        Private Shared SessionSentinelStream As System.IO.FileStream
+        Private Shared ReadOnly SessionSentinelLock As New System.Object()
         Private Shared LastExtendedSnapshotHash As System.String
 
         Private Const BreadcrumbCapacity As System.Int32 = 32
@@ -119,10 +120,8 @@ Namespace SharedLibrary
                         redInkDirectory,
                         "RI-CrashLog.txt")
 
-                SessionSentinelPathValue =
-                    System.IO.Path.Combine(
-                        redInkDirectory,
-                        "RI-CrashLog.session")
+                SessionSentinelPathValue = System.IO.Path.Combine(
+                    redInkDirectory, "CrashSessions", SessionId & ".session")
 
                 SnapshotStateFilePathValue =
                     System.IO.Path.Combine(
@@ -136,9 +135,6 @@ Namespace SharedLibrary
                     Return
                 End Try
 
-                PreviousSessionSentinelContent =
-                    ReadPreviousSessionSentinel()
-
                 WriteCollectorReadme(redInkDirectory)
 
                 RegisterExceptionHandlers()
@@ -149,9 +145,9 @@ Namespace SharedLibrary
                 "SESSION_START",
                 BuildStartupInformation())
 
-            ReportPreviousSessionOutcome()
-
             WriteSessionSentinel()
+
+            ReportPreviousSessionOutcome()
 
             Try
                 OfficeWindowWatchdog.StartWatchdog()
@@ -397,8 +393,9 @@ Namespace SharedLibrary
             End If
 
             AppendRecord(
-                "ASSEMBLY_RESOLVE_FAILED",
-                details.ToString())
+                "ASSEMBLY_RESOLVE_REQUESTED",
+                details.ToString() & System.Environment.NewLine &
+                "ResolutionOutcome=Unknown; this event may be followed by another resolver or resource fallback.")
 
             'Never load an arbitrary DLL from this diagnostic handler.
             Return Nothing
@@ -1673,18 +1670,18 @@ Namespace SharedLibrary
 
         End Function
 
-        Private Shared Sub AppendRecord(
+        Private Shared Function AppendRecord(
             ByVal eventName As System.String,
-            ByVal details As System.String)
+            ByVal details As System.String) As System.Boolean
 
             If Not DiagnosticsEnabled Then
-                Return
+                Return False
             End If
 
             If System.String.IsNullOrWhiteSpace(
                 LogFilePathValue) Then
 
-                Return
+                Return False
 
             End If
 
@@ -1767,13 +1764,13 @@ Namespace SharedLibrary
 
             End If
 
-            WriteTextToLogFile(
+            Return WriteTextToLogFile(
                 record.ToString())
 
-        End Sub
+        End Function
 
-        Private Shared Sub WriteTextToLogFile(
-            ByVal text As System.String)
+        Private Shared Function WriteTextToLogFile(
+            ByVal text As System.String) As System.Boolean
 
             Dim fileMutex As System.Threading.Mutex =
                 Nothing
@@ -1804,6 +1801,8 @@ Namespace SharedLibrary
 
                 End Try
 
+                If Not mutexOwned Then Return False
+
                 Try
 
                     System.IO.Directory.CreateDirectory(
@@ -1811,7 +1810,7 @@ Namespace SharedLibrary
                             LogFilePathValue))
 
                 Catch ex As System.Exception
-                    Return
+                    Return False
                 End Try
 
                 If mutexOwned Then
@@ -1835,10 +1834,12 @@ Namespace SharedLibrary
                     End Using
 
                 End Using
+                Return True
 
             Catch ex As System.Exception
 
                 'The logger must never interfere with Word or Outlook.
+                Return False
 
             Finally
 
@@ -1863,7 +1864,7 @@ Namespace SharedLibrary
 
             End Try
 
-        End Sub
+        End Function
 
         Private Shared Sub RotateLogFileIfRequired()
 
@@ -1912,140 +1913,114 @@ Namespace SharedLibrary
 
         End Sub
 
-        Private Shared Function ReadPreviousSessionSentinel() As System.String
+        Private Shared Function ReadSentinelField(content As System.String, key As System.String) As System.String
+            For Each line As System.String In content.Split(New System.String() {System.Environment.NewLine}, System.StringSplitOptions.None)
+                If line.StartsWith(key & "=", System.StringComparison.Ordinal) Then Return line.Substring(key.Length + 1)
+            Next
+            Return Nothing
+        End Function
 
+        Private Shared Function IsRecordedProcessDefinitelyGone(content As System.String) As System.Boolean
+            Dim pid As System.Int32
+            Dim startTicks As System.Int64
+            If Not System.Int32.TryParse(ReadSentinelField(content, "ProcessId"), pid) OrElse pid <= 0 Then Return False
+            If Not System.Int64.TryParse(ReadSentinelField(content, "ProcessStartTimeUtcTicks"), startTicks) OrElse startTicks <= 0 Then Return False
             Try
-
-                If System.String.IsNullOrWhiteSpace(
-                    SessionSentinelPathValue) Then
-
-                    Return Nothing
-
-                End If
-
-                If Not System.IO.File.Exists(
-                    SessionSentinelPathValue) Then
-
-                    Return Nothing
-
-                End If
-
-                Return System.IO.File.ReadAllText(
-                    SessionSentinelPathValue,
-                    New System.Text.UTF8Encoding(False))
-
+                Using process As System.Diagnostics.Process = System.Diagnostics.Process.GetProcessById(pid)
+                    Return process.HasExited OrElse process.StartTime.ToUniversalTime().Ticks <> startTicks
+                End Using
+            Catch ex As System.ArgumentException
+                Return True ' PID no longer exists.
             Catch ex As System.Exception
-                Return Nothing
+                Return False ' Access denied/race/unknown is not evidence of a crash.
             End Try
-
         End Function
 
         Private Shared Sub ReportPreviousSessionOutcome()
-
             Try
-
-                If System.String.IsNullOrWhiteSpace(
-                    PreviousSessionSentinelContent) Then
-
-                    'No leftover sentinel: the previous session either never ran or
-                    'ended cleanly (the sentinel is deleted on clean shutdown/exit).
-                    Return
-
-                End If
-
-                AppendRecord(
-                    "PREVIOUS_SESSION_TERMINATED_ABNORMALLY",
-                    "The previous diagnostics session left an active sentinel, which " &
-                    "means the host was not shut down cleanly (crash, forced " &
-                    "termination or power loss)." &
-                    System.Environment.NewLine &
-                    System.Environment.NewLine &
-                    PreviousSessionSentinelContent)
-
+                Dim folder As System.String = System.IO.Path.GetDirectoryName(SessionSentinelPathValue)
+                If Not System.IO.Directory.Exists(folder) Then Return
+                For Each path As System.String In System.IO.Directory.GetFiles(folder, "*.session")
+                    If System.String.Equals(path, SessionSentinelPathValue, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    Try
+                        ' Live sessions retain a read/write handle denying another writer.
+                        ' Exclusive open also serializes concurrent recovery by other hosts.
+                        Using stream As New System.IO.FileStream(path, System.IO.FileMode.Open,
+                            System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                            Dim content As System.String
+                            Using reader As New System.IO.StreamReader(stream, System.Text.Encoding.UTF8, True, 1024, True)
+                                content = reader.ReadToEnd()
+                            End Using
+                            If content.Length > 0 Then
+                                If Not IsRecordedProcessDefinitelyGone(content) Then Continue For
+                                If Not AppendRecord("PREVIOUS_SESSION_TERMINATED_ABNORMALLY",
+                                    "A previous diagnostics session ended without a clean shutdown marker and its process no longer exists. " &
+                                    "This does not distinguish a crash, forced termination or power loss." &
+                                    System.Environment.NewLine & System.Environment.NewLine & content) Then Continue For
+                                ' Consume once under the exclusive handle. Never clear a live session.
+                                stream.SetLength(0)
+                                stream.Flush()
+                            End If
+                        End Using
+                        System.IO.File.Delete(path)
+                    Catch ex As System.IO.IOException
+                        ' Active/claimed session or concurrent cleanup: leave it alone.
+                    Catch ex As System.Exception
+                        ' Inaccessible or malformed state must never be called a crash.
+                    End Try
+                Next
             Catch ex As System.Exception
-            Finally
-                PreviousSessionSentinelContent = Nothing
             End Try
-
         End Sub
 
         Private Shared Sub WriteSessionSentinel()
-
-            Try
-
-                If System.String.IsNullOrWhiteSpace(
-                    SessionSentinelPathValue) Then
-
-                    Return
-
-                End If
-
-                Dim content As New System.Text.StringBuilder()
-
-                content.AppendLine(
-                    "SessionId=" &
-                    If(SessionId, System.String.Empty))
-
-                content.AppendLine(
-                    "AddIn=" &
-                    If(AddInName, System.String.Empty))
-
-                content.AppendLine(
-                    "StartedUtc=" &
-                    System.DateTime.UtcNow.ToString(
-                        "o",
-                        System.Globalization.CultureInfo.InvariantCulture))
-
+            SyncLock SessionSentinelLock
                 Try
-
-                    Using currentProcess As System.Diagnostics.Process =
-                        System.Diagnostics.Process.GetCurrentProcess()
-
-                        content.AppendLine(
-                            "Host=" &
-                            currentProcess.ProcessName &
-                            " (PID " &
-                            currentProcess.Id.ToString(
-                                System.Globalization.CultureInfo.InvariantCulture) &
-                            ")")
-
+                    If SessionSentinelStream IsNot Nothing OrElse System.String.IsNullOrWhiteSpace(SessionSentinelPathValue) Then Return
+                    System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SessionSentinelPathValue))
+                    Dim content As New System.Text.StringBuilder()
+                    content.AppendLine("SessionId=" & SessionId)
+                    content.AppendLine("AddIn=" & AddInName)
+                    content.AppendLine("StartedUtc=" & System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture))
+                    Using process As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
+                        content.AppendLine("Host=" & process.ProcessName)
+                        content.AppendLine("ProcessId=" & process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                        content.AppendLine("ProcessStartTimeUtcTicks=" & process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture))
                     End Using
-
+                    SessionSentinelStream = New System.IO.FileStream(SessionSentinelPathValue,
+                        System.IO.FileMode.CreateNew, System.IO.FileAccess.ReadWrite, System.IO.FileShare.Read)
+                    Dim bytes As System.Byte() = New System.Text.UTF8Encoding(False).GetBytes(content.ToString())
+                    SessionSentinelStream.Write(bytes, 0, bytes.Length)
+                    SessionSentinelStream.Flush()
                 Catch ex As System.Exception
+                    Try
+                        If SessionSentinelStream IsNot Nothing Then SessionSentinelStream.Dispose()
+                    Catch cleanupException As System.Exception
+                    End Try
+                    SessionSentinelStream = Nothing
                 End Try
-
-                System.IO.File.WriteAllText(
-                    SessionSentinelPathValue,
-                    content.ToString(),
-                    New System.Text.UTF8Encoding(False))
-
-            Catch ex As System.Exception
-            End Try
-
+            End SyncLock
         End Sub
 
         Private Shared Sub DeleteSessionSentinel()
-
-            Try
-
-                If System.String.IsNullOrWhiteSpace(
-                    SessionSentinelPathValue) Then
-
-                    Return
-
-                End If
-
-                If System.IO.File.Exists(
-                    SessionSentinelPathValue) Then
-
-                    System.IO.File.Delete(
-                        SessionSentinelPathValue)
-
-                End If
-
-            Catch ex As System.Exception
-            End Try
-
+            SyncLock SessionSentinelLock
+                Try
+                    If SessionSentinelStream Is Nothing Then Return
+                    ' Clear our own marker before releasing the lock so another host can
+                    ' never report the close/delete interval as an abnormal termination.
+                    SessionSentinelStream.SetLength(0)
+                    SessionSentinelStream.Flush()
+                    SessionSentinelStream.Dispose()
+                    SessionSentinelStream = Nothing
+                    System.IO.File.Delete(SessionSentinelPathValue)
+                Catch ex As System.Exception
+                    Try
+                        If SessionSentinelStream IsNot Nothing Then SessionSentinelStream.Dispose()
+                    Catch cleanupException As System.Exception
+                    End Try
+                    SessionSentinelStream = Nothing
+                End Try
+            End SyncLock
         End Sub
 
         Private Shared Function BuildProcessMetrics() As System.String

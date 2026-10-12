@@ -1,0 +1,66 @@
+<!doctype html>
+<!-- Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+     File: assistant.html; Purpose: offline WebView2 user interface.
+     License: Red Ink License; notices in bundled LICENSE.txt. -->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'none'; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<title>Red Ink</title>
+<link rel="stylesheet" href="office-web.css">
+<link rel="stylesheet" href="desktop.css">
+<script src="common.js" defer></script><script src="rendering.js" defer></script><script src="assistant.js" defer></script>
+</head>
+<body>
+<main class="desktop-shell" aria-busy="false">
+    <section class="desktop-card source-card">
+        <textarea id="selected-text" class="desktop-field source-field" readonly spellcheck="false" data-title="desktop.selectedTip" data-placeholder="desktop.selectedPlaceholder"></textarea>
+
+    </section>
+    <section class="desktop-card question-card">
+        <textarea id="question" class="desktop-field" maxlength="200000" spellcheck="true" data-title="desktop.questionTip" data-placeholder="desktop.questionPlaceholder" disabled></textarea>
+        <div class="action-rail"><button id="send-button" type="button" class="action-btn-primary icon-button" data-title="desktop.sendTip" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 3-6.8 18-3.6-7.6L3 9.8 21 3Z"/><path d="M21 3 10.6 13.4"/></svg>
+        </button></div>
+    </section>
+    <section class="desktop-card answer-card">
+        <div id="answer-scroll" class="answer-scroll" tabindex="0" data-title="desktop.answerTip">
+            <div id="answer" class="answer-content result-text"></div>
+        </div>
+        <div id="answer-navigation" class="answer-navigation" hidden>
+            <button id="copy-source-button" type="button" class="quick-access-btn icon-button" data-title="desktop.copySourceTip" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 5V4a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h1"/></svg>
+            </button>
+            <button type="button" id="previous-answer" class="quick-access-btn icon-button" data-title="desktop.previousAnswer" disabled aria-label="Previous answer">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <span id="answer-count" class="answer-count" aria-live="polite"></span>
+            <button type="button" id="next-answer" class="quick-access-btn icon-button" data-title="desktop.nextAnswer" disabled aria-label="Next answer">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button type="button" id="delete-answer" class="quick-access-btn icon-button" data-title="desktop.deleteAnswer" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 4h4M6 7l1 14h10l1-14M10 11v6M14 11v6"/></svg>
+            </button>
+            <button id="copy-button" type="button" class="quick-access-btn icon-button" data-title="desktop.copyTip" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 5V4a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h1"/></svg>
+        </button>
+            <button id="copy-selection-button" type="button" class="quick-access-btn icon-button" data-title="desktop.copySelectionTip" disabled hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 5V4a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h1"/><path d="M10 12h6M10 15h4"/></svg>
+            </button>
+            <button type="button" id="clear-answers" class="quick-access-btn icon-button" data-title="desktop.clearAnswers" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 4h4M6 7l1 14h10l1-14M10 11v6M14 11v6"/><path d="M3 3l18 18"/></svg>
+            </button>
+            <button id="settings-button" type="button" class="quick-access-btn icon-button" data-title="settings" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.3 3.5.6-1h4.2l.6 1 .4 1.7 1.4.8 1.7-.5 1.2.1 2.1 3.6-.5 1.1-1.3 1.2v1.6l1.3 1.2.5 1.1-2.1 3.6-1.2.1-1.7-.5-1.4.8-.4 1.7-.6 1H9.9l-.6-1-.4-1.7-1.4-.8-1.7.5-1.2-.1-2.1-3.6.5-1.1 1.3-1.2v-1.6L3 10.3l-.5-1.1L4.6 5.6l1.2-.1 1.7.5 1.4-.8z"/><circle cx="12" cy="12" r="3.1"/></svg>
+            </button>
+        </div>
+        <div id="turn-question" class="turn-question" hidden></div>
+        <label id="history-option" class="conversation-option" hidden>
+            <input id="include-history" type="checkbox" checked>
+            <span data-text="desktop.includeHistory">Include previous responses</span>
+        </label>
+    </section>
+    <footer class="desktop-footer"><span id="status" class="desktop-status" role="status" aria-live="polite"></span><span id="ocr-hint" class="shortcut-hint" hidden></span><span id="shortcut" class="shortcut-hint" data-title="desktop.shortcutHint"></span></footer>
+</main>
+</body></html>
