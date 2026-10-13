@@ -598,6 +598,14 @@ Partial Public Class ThisAddIn
 
                 Dim origSel As Word.Range = app.Selection.Range.Duplicate
 
+                ' Native field codes are instructions, not prose. Capture before any
+                ' formatting pass; retain the field objects so their live positions move.
+                extractionStage = "original field-code capture"
+                Dim originalFieldCodes As New System.Collections.Generic.Dictionary(Of Microsoft.Office.Interop.Word.Field, System.String)()
+                For Each sourceField As Microsoft.Office.Interop.Word.Field In rng.Fields
+                    originalFieldCodes.Add(sourceField, sourceField.Code.Text)
+                Next
+
                 If DoMarkdown Then
                     extractionStage = "Markdown formatting"
                     ' 1) Bold + Italic  (paragraph)
@@ -780,9 +788,7 @@ Partial Public Class ThisAddIn
                 ' Use native positions to associate top-level fields with the mapped
                 ' marker stream; nested fields remain represented by their outer field.
                 Dim allFields As New List(Of Word.Field)()
-                For Each fld As Word.Field In rng.Fields
-                    allFields.Add(fld)
-                Next
+                allFields.AddRange(originalFieldCodes.Keys)
                 Dim topLevelFields As New List(Of Word.Field)()
                 For Each fld As Word.Field In allFields
                     Dim isNested As Boolean = False
@@ -823,15 +829,9 @@ Partial Public Class ThisAddIn
                                 Throw New System.IO.InvalidDataException("Cannot associate a field marker with its physical source position; extraction stopped.")
                             End If
 
-                            Dim codeText As String = String.Empty
-                            If fld IsNot Nothing Then
-                                Try
-                                    Dim raw As String = fld.Code.Text
-                                    If raw IsNot Nothing Then codeText = raw.Trim()
-                                Catch
-                                    codeText = String.Empty
-                                End Try
-                            End If
+                            ' Only the pre-formatting snapshot may supply native instructions.
+                            ' Encode and checksum it across model/Markdown/HTML transport.
+                            Dim codeText As System.String = EncodeProtectedWordFieldCode(originalFieldCodes(fld))
 
                             Dim token As String
                             If fld IsNot Nothing AndAlso fld.Type = Word.WdFieldType.wdFieldHyperlink Then
@@ -2368,7 +2368,8 @@ ContinueLoop:
             If EndOfDocument Then workingrange.End = doc.Content.End
 
         Catch ex As System.Exception
-            ' Error is handled by the caller's custom-dialog path.
+            System.Diagnostics.Trace.TraceError("RestoreSpecialTextElements failed: " & ex.ToString())
+            Throw
         End Try
 
     End Sub
@@ -2408,6 +2409,12 @@ ContinueLoop:
                 placeholderText.Substring(
                     placeholderPrefix.Length + 2,
                     placeholderText.Length - (placeholderPrefix.Length + 4))
+
+                ' Validate the opaque field payload before deleting its placeholder.
+                If placeholderPrefix = "WFLD:" Then
+                    Dim fieldParts As System.String() = noteText.Split(New System.String() {"|||"}, 2, System.StringSplitOptions.None)
+                    DecodeProtectedWordFieldCode(fieldParts(0).Trim())
+                End If
 
                 workingrange.Text = ""
 
@@ -2457,6 +2464,39 @@ ContinueLoop:
         doc.Endnotes.Add(Range:=insertionRange, Text:=noteText)
     End Sub
 
+    Private Const ProtectedWordFieldCodePrefix As System.String = "RI64V1:"
+
+    ''' <summary>Preserves native instructions as a checked, opaque transport payload.</summary>
+    Private Shared Function EncodeProtectedWordFieldCode(ByVal code As System.String) As System.String
+        If code Is Nothing Then Throw New System.IO.InvalidDataException("A native field code could not be read.")
+        Dim encoding As New System.Text.UTF8Encoding(False, True)
+        Dim bytes As System.Byte() = encoding.GetBytes(code)
+        Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+            Dim digest As System.String = System.BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", System.String.Empty)
+            Return ProtectedWordFieldCodePrefix & System.Convert.ToBase64String(bytes) & ":" & digest
+        End Using
+    End Function
+
+    ''' <summary>Checks encoded codes before insertion; existing literal placeholders remain supported.</summary>
+    Private Shared Function DecodeProtectedWordFieldCode(ByVal payload As System.String) As System.String
+        If payload Is Nothing OrElse Not payload.StartsWith(ProtectedWordFieldCodePrefix, System.StringComparison.Ordinal) Then Return payload
+        Try
+            Dim parts As System.String() = payload.Substring(ProtectedWordFieldCodePrefix.Length).Split(":"c)
+            If parts.Length <> 2 Then Throw New System.FormatException("Invalid field-code envelope.")
+            Dim bytes As System.Byte() = System.Convert.FromBase64String(parts(0))
+            Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Dim digest As System.String = System.BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", System.String.Empty)
+                If Not System.String.Equals(digest, parts(1), System.StringComparison.Ordinal) Then
+                    Throw New System.FormatException("The field-code checksum does not match.")
+                End If
+            End Using
+            Dim encoding As New System.Text.UTF8Encoding(False, True)
+            Return encoding.GetString(bytes)
+        Catch ex As System.Exception
+            Throw New System.IO.InvalidDataException("A protected Word field code was altered; field restoration stopped.", ex)
+        End Try
+    End Function
+
     ''' <summary>
     ''' Inserts a Word field and restores its code plus optional display text.
     ''' </summary>
@@ -2478,6 +2518,8 @@ ContinueLoop:
                 displayText = parts(1)
             End Try
         End If
+
+        fieldCode = DecodeProtectedWordFieldCode(fieldCode)
 
         Try
             Dim fieldRange As Word.Range = insertionRange.Duplicate
@@ -2505,7 +2547,8 @@ ContinueLoop:
             End If
 
         Catch ex As System.Exception
-            Debug.WriteLine("AddField failed: " & ex.ToString())
+            System.Diagnostics.Trace.TraceError("AddField failed: " & ex.ToString())
+            Throw
         End Try
     End Sub
 
