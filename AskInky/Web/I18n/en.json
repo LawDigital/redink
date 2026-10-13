@@ -94,6 +94,7 @@
   "desktop.serverChanged": "Server changed: existing device credentials and an unchanged API key will not be transferred.",
   "desktop.httpError": "The helper rejected the request.",
   "desktop.authRequired": "Access denied. Check the API key and, when required, device registration in Settings.",
+  "desktop.localServerDenied": "The local helper rejected the request. An API key is not inherently required for localhost; check the server configuration.",
   "desktop.licenseRequired": "The helper requires a valid license. Check the license username.",
   "desktop.rateLimited": "Too many requests. Try again later.",
   "desktop.invalidInvite": "Paste the complete valid registration link.",

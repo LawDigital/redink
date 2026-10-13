@@ -94,6 +94,7 @@
   "desktop.serverChanged": "Server geändert: Alte Geräte-Zugangsdaten und ein unveränderter API-Key werden nicht übertragen.",
   "desktop.httpError": "Der Helper hat die Anfrage abgelehnt.",
   "desktop.authRequired": "Zugriff abgelehnt. API-Key und gegebenenfalls die Geräteregistrierung in den Einstellungen prüfen.",
+  "desktop.localServerDenied": "Der lokale Helper hat die Anfrage abgelehnt. Ein API-Key ist für Localhost nicht grundsätzlich erforderlich; bitte die Serverkonfiguration prüfen.",
   "desktop.licenseRequired": "Der Helper verlangt eine gültige Lizenz. Bitte den Lizenz-Benutzernamen prüfen.",
   "desktop.rateLimited": "Zu viele Anfragen. Bitte später erneut versuchen.",
   "desktop.invalidInvite": "Bitte den vollständigen gültigen Registrierungslink einfügen.",

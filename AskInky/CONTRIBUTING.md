@@ -110,3 +110,9 @@
 
 - Die CSS-Regel `prefers-reduced-motion: reduce` in `desktop.css` darf den funktionsrelevanten Kreis `body.is-busy .desktop-status::before` nicht abschalten. Die Rotation wird nur für diesen Indikator wieder aktiviert; andere Animationen bleiben deaktiviert.
 - Browser-/Windows-Abnahme mit eingeschalteter und ausgeschalteter Einstellung „Animationen reduzieren“ prüfen.
+
+## Projektdateien und lokale Helper
+
+- Die Ask-Inky-spezifischen Vorgaben und Aufgaben werden unter `AskInky/CONTRIBUTING.md` und `AskInky/Tasks.md` geführt; keine neue Ask-Inky-Aufgabe in `Tasks.md` im Repository-Stamm anlegen.
+- Der lokale Helper (`localhost`, `127.0.0.1`, `::1`) benötigt nicht grundsätzlich API-Key, Benutzername oder Geräte-Registrierung. HTTP-401/403 sind Serverantworten und dürfen nicht ohne Weiteres als fehlende lokale Zugangsdaten ausgegeben werden.
+- Bei fehlendem API-Key keinen Authorization-Header setzen; tatsächliche Server-Ablehnungen nicht als Erfolg tarnen.

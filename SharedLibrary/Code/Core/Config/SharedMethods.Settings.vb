@@ -1731,7 +1731,7 @@ Namespace SharedLibrary
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "PlayWrightUseLocalCache", "EnablePrivacyForSearch",
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ToolResponseCompactOnlyAfterEmpty", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "PlayWrightUseLocalCache", "EnablePrivacyForSearch",
         "DictionarySegmentPrompt", "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing", "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing", "SemanticArchivePermissionMaintenanceEnabled"
             }
             Return booleanSettings.Contains(settingKey)
@@ -2107,6 +2107,38 @@ Namespace SharedLibrary
                     Return context.INI_ToolingDryRun.ToString()
                 Case "ToolingMaximumIterations"
                     Return context.INI_ToolingMaximumIterations.ToString()
+                Case "AutoPilotLogDiagnosticsMaxInputChars"
+                    Return context.INI_AutoPilotLogDiagnosticsMaxInputChars.ToString()
+                Case "TextAnalyzeMaxSourceChars"
+                    Return context.INI_TextAnalyzeMaxSourceChars.ToString()
+                Case "TextAnalyzeMaxInstructionChars"
+                    Return context.INI_TextAnalyzeMaxInstructionChars.ToString()
+                Case "TextAnalyzeMaxAdditionalContextChars"
+                    Return context.INI_TextAnalyzeMaxAdditionalContextChars.ToString()
+                Case "ToolResponseRecoveryBudgetChars"
+                    Return context.INI_ToolResponseRecoveryBudgetChars.ToString()
+                Case "ToolResponseCompactOnlyAfterEmpty"
+                    Return context.INI_ToolResponseCompactOnlyAfterEmpty.ToString()
+                Case "ToolResponseKeepRecentFullCount"
+                    Return context.INI_ToolResponseKeepRecentFullCount.ToString()
+                Case "ToolResultReferenceThresholdChars"
+                    Return context.INI_ToolResultReferenceThresholdChars.ToString()
+                Case "ToolResultReferencePreviewChars"
+                    Return context.INI_ToolResultReferencePreviewChars.ToString()
+                Case "SubAgentLargeToolResponseThresholdChars"
+                    Return context.INI_SubAgentLargeToolResponseThresholdChars.ToString()
+                Case "SubAgentLargeToolResponseExcerptChars"
+                    Return context.INI_SubAgentLargeToolResponseExcerptChars.ToString()
+                Case "ContextExpandDefaultChars"
+                    Return context.INI_ContextExpandDefaultChars.ToString()
+                Case "ContextExpandMaxChars"
+                    Return context.INI_ContextExpandMaxChars.ToString()
+                Case "EvidenceReplayCoreMaxChars"
+                    Return context.INI_EvidenceReplayCoreMaxChars.ToString()
+                Case "EvidenceReplayMaxExactStringChars"
+                    Return context.INI_EvidenceReplayMaxExactStringChars.ToString()
+                Case "EvidenceReplayPreferredArrayItemProperties"
+                    Return context.INI_EvidenceReplayPreferredArrayItemProperties.ToString()
                 Case "ToolResponsePayloadBudgetChars"
                     Return context.INI_ToolResponsePayloadBudgetChars.ToString()
                 Case "BudgetMediumCompactionThresholdChars"
@@ -2420,6 +2452,38 @@ Namespace SharedLibrary
                     context.INI_M365TenantId = value
                 Case "M365Scopes"
                     context.INI_M365Scopes = value
+                Case "AutoPilotLogDiagnosticsMaxInputChars"
+                    context.INI_AutoPilotLogDiagnosticsMaxInputChars = ParseAgentContextInteger(value, "AutoPilotLogDiagnosticsMaxInputChars", DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS, 10000, True)
+                Case "TextAnalyzeMaxSourceChars"
+                    context.INI_TextAnalyzeMaxSourceChars = ParseAgentContextInteger(value, "TextAnalyzeMaxSourceChars", DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS, 1)
+                Case "TextAnalyzeMaxInstructionChars"
+                    context.INI_TextAnalyzeMaxInstructionChars = ParseAgentContextInteger(value, "TextAnalyzeMaxInstructionChars", DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS, 1)
+                Case "TextAnalyzeMaxAdditionalContextChars"
+                    context.INI_TextAnalyzeMaxAdditionalContextChars = ParseAgentContextInteger(value, "TextAnalyzeMaxAdditionalContextChars", DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS, 0)
+                Case "ToolResponseRecoveryBudgetChars"
+                    context.INI_ToolResponseRecoveryBudgetChars = ParseAgentContextInteger(value, "ToolResponseRecoveryBudgetChars", DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS, 1)
+                Case "ToolResponseCompactOnlyAfterEmpty"
+                    context.INI_ToolResponseCompactOnlyAfterEmpty = ParseAgentContextBoolean(value, "ToolResponseCompactOnlyAfterEmpty", DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY)
+                Case "ToolResponseKeepRecentFullCount"
+                    context.INI_ToolResponseKeepRecentFullCount = ParseAgentContextInteger(value, "ToolResponseKeepRecentFullCount", DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT, 0)
+                Case "ToolResultReferenceThresholdChars"
+                    context.INI_ToolResultReferenceThresholdChars = ParseAgentContextInteger(value, "ToolResultReferenceThresholdChars", DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS, 0)
+                Case "ToolResultReferencePreviewChars"
+                    context.INI_ToolResultReferencePreviewChars = ParseAgentContextInteger(value, "ToolResultReferencePreviewChars", DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS, 0)
+                Case "SubAgentLargeToolResponseThresholdChars"
+                    context.INI_SubAgentLargeToolResponseThresholdChars = ParseAgentContextInteger(value, "SubAgentLargeToolResponseThresholdChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS, 1)
+                Case "SubAgentLargeToolResponseExcerptChars"
+                    context.INI_SubAgentLargeToolResponseExcerptChars = ParseAgentContextInteger(value, "SubAgentLargeToolResponseExcerptChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS, 0)
+                Case "ContextExpandDefaultChars"
+                    context.INI_ContextExpandDefaultChars = ParseAgentContextInteger(value, "ContextExpandDefaultChars", DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS, 1)
+                Case "ContextExpandMaxChars"
+                    context.INI_ContextExpandMaxChars = ParseAgentContextInteger(value, "ContextExpandMaxChars", DEFAULT_CONTEXT_EXPAND_MAX_CHARS, 1)
+                Case "EvidenceReplayCoreMaxChars"
+                    context.INI_EvidenceReplayCoreMaxChars = ParseAgentContextInteger(value, "EvidenceReplayCoreMaxChars", DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS, 1)
+                Case "EvidenceReplayMaxExactStringChars"
+                    context.INI_EvidenceReplayMaxExactStringChars = ParseAgentContextInteger(value, "EvidenceReplayMaxExactStringChars", DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS, 0)
+                Case "EvidenceReplayPreferredArrayItemProperties"
+                    context.INI_EvidenceReplayPreferredArrayItemProperties = ParseAgentContextInteger(value, "EvidenceReplayPreferredArrayItemProperties", DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES, 1)
                 Case "ToolResponsePayloadBudgetChars"
                     context.INI_ToolResponsePayloadBudgetChars = Integer.Parse(value)
                 Case "BudgetMediumCompactionThresholdChars"
@@ -3053,6 +3117,22 @@ Namespace SharedLibrary
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
+                    {"AutoPilotLogDiagnosticsMaxInputChars", context.INI_AutoPilotLogDiagnosticsMaxInputChars.ToString()},
+                    {"TextAnalyzeMaxSourceChars", context.INI_TextAnalyzeMaxSourceChars.ToString()},
+                    {"TextAnalyzeMaxInstructionChars", context.INI_TextAnalyzeMaxInstructionChars.ToString()},
+                    {"TextAnalyzeMaxAdditionalContextChars", context.INI_TextAnalyzeMaxAdditionalContextChars.ToString()},
+                    {"ToolResponseRecoveryBudgetChars", context.INI_ToolResponseRecoveryBudgetChars.ToString()},
+                    {"ToolResponseCompactOnlyAfterEmpty", context.INI_ToolResponseCompactOnlyAfterEmpty.ToString()},
+                    {"ToolResponseKeepRecentFullCount", context.INI_ToolResponseKeepRecentFullCount.ToString()},
+                    {"ToolResultReferenceThresholdChars", context.INI_ToolResultReferenceThresholdChars.ToString()},
+                    {"ToolResultReferencePreviewChars", context.INI_ToolResultReferencePreviewChars.ToString()},
+                    {"SubAgentLargeToolResponseThresholdChars", context.INI_SubAgentLargeToolResponseThresholdChars.ToString()},
+                    {"SubAgentLargeToolResponseExcerptChars", context.INI_SubAgentLargeToolResponseExcerptChars.ToString()},
+                    {"ContextExpandDefaultChars", context.INI_ContextExpandDefaultChars.ToString()},
+                    {"ContextExpandMaxChars", context.INI_ContextExpandMaxChars.ToString()},
+                    {"EvidenceReplayCoreMaxChars", context.INI_EvidenceReplayCoreMaxChars.ToString()},
+                    {"EvidenceReplayMaxExactStringChars", context.INI_EvidenceReplayMaxExactStringChars.ToString()},
+                    {"EvidenceReplayPreferredArrayItemProperties", context.INI_EvidenceReplayPreferredArrayItemProperties.ToString()},
                     {"ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars.ToString()},
                     {"BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars.ToString()},
                     {"BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars.ToString()},
@@ -3380,6 +3460,22 @@ Namespace SharedLibrary
                 {"ISearch", DEFAULT_BOOL_ISEARCH_ENABLED},
                 {"ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW},
                 {"ToolingMaximumIterations", DEFAULT_TOOLING_MAXIMUMITERATIONS},
+                {"AutoPilotLogDiagnosticsMaxInputChars", DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS},
+                {"TextAnalyzeMaxSourceChars", DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS},
+                {"TextAnalyzeMaxInstructionChars", DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS},
+                {"TextAnalyzeMaxAdditionalContextChars", DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS},
+                {"ToolResponseRecoveryBudgetChars", DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS},
+                {"ToolResponseCompactOnlyAfterEmpty", DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY},
+                {"ToolResponseKeepRecentFullCount", DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT},
+                {"ToolResultReferenceThresholdChars", DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS},
+                {"ToolResultReferencePreviewChars", DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS},
+                {"SubAgentLargeToolResponseThresholdChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS},
+                {"SubAgentLargeToolResponseExcerptChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS},
+                {"ContextExpandDefaultChars", DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS},
+                {"ContextExpandMaxChars", DEFAULT_CONTEXT_EXPAND_MAX_CHARS},
+                {"EvidenceReplayCoreMaxChars", DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS},
+                {"EvidenceReplayMaxExactStringChars", DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS},
+                {"EvidenceReplayPreferredArrayItemProperties", DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES},
                 {"ToolResponsePayloadBudgetChars", DEFAULT_TOOL_RESPONSE_PAYLOAD_BUDGET_CHARS},
                 {"BudgetMediumCompactionThresholdChars", DEFAULT_BUDGET_MEDIUM_COMPACTION_THRESHOLD_CHARS},
                 {"BudgetAggressiveCompactionThresholdChars", DEFAULT_BUDGET_AGGRESSIVE_COMPACTION_THRESHOLD_CHARS},
@@ -3647,6 +3743,26 @@ Namespace SharedLibrary
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
+                    {"ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars.ToString()},
+                    {"BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars.ToString()},
+                    {"BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars.ToString()},
+                    {"BudgetCompactionPreviewChars", context.INI_BudgetCompactionPreviewChars.ToString()},
+                    {"AutoPilotLogDiagnosticsMaxInputChars", context.INI_AutoPilotLogDiagnosticsMaxInputChars.ToString()},
+                    {"TextAnalyzeMaxSourceChars", context.INI_TextAnalyzeMaxSourceChars.ToString()},
+                    {"TextAnalyzeMaxInstructionChars", context.INI_TextAnalyzeMaxInstructionChars.ToString()},
+                    {"TextAnalyzeMaxAdditionalContextChars", context.INI_TextAnalyzeMaxAdditionalContextChars.ToString()},
+                    {"ToolResponseRecoveryBudgetChars", context.INI_ToolResponseRecoveryBudgetChars.ToString()},
+                    {"ToolResponseCompactOnlyAfterEmpty", context.INI_ToolResponseCompactOnlyAfterEmpty.ToString()},
+                    {"ToolResponseKeepRecentFullCount", context.INI_ToolResponseKeepRecentFullCount.ToString()},
+                    {"ToolResultReferenceThresholdChars", context.INI_ToolResultReferenceThresholdChars.ToString()},
+                    {"ToolResultReferencePreviewChars", context.INI_ToolResultReferencePreviewChars.ToString()},
+                    {"SubAgentLargeToolResponseThresholdChars", context.INI_SubAgentLargeToolResponseThresholdChars.ToString()},
+                    {"SubAgentLargeToolResponseExcerptChars", context.INI_SubAgentLargeToolResponseExcerptChars.ToString()},
+                    {"ContextExpandDefaultChars", context.INI_ContextExpandDefaultChars.ToString()},
+                    {"ContextExpandMaxChars", context.INI_ContextExpandMaxChars.ToString()},
+                    {"EvidenceReplayCoreMaxChars", context.INI_EvidenceReplayCoreMaxChars.ToString()},
+                    {"EvidenceReplayMaxExactStringChars", context.INI_EvidenceReplayMaxExactStringChars.ToString()},
+                    {"EvidenceReplayPreferredArrayItemProperties", context.INI_EvidenceReplayPreferredArrayItemProperties.ToString()},
                     {"UpdateIni", context.INI_UpdateIni.ToString()},
                     {"UpdateIniAllowRemote", context.INI_UpdateIniAllowRemote.ToString()},
                     {"UpdateIniNoSignature", context.INI_UpdateIniNoSignature.ToString()},
@@ -4672,6 +4788,22 @@ Namespace SharedLibrary
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
             variableValues.Add("ToolingDryRun", context.INI_ToolingDryRun)
             variableValues.Add("ToolingMaximumIterations", context.INI_ToolingMaximumIterations)
+            variableValues.Add("AutoPilotLogDiagnosticsMaxInputChars", context.INI_AutoPilotLogDiagnosticsMaxInputChars)
+            variableValues.Add("TextAnalyzeMaxSourceChars", context.INI_TextAnalyzeMaxSourceChars)
+            variableValues.Add("TextAnalyzeMaxInstructionChars", context.INI_TextAnalyzeMaxInstructionChars)
+            variableValues.Add("TextAnalyzeMaxAdditionalContextChars", context.INI_TextAnalyzeMaxAdditionalContextChars)
+            variableValues.Add("ToolResponseRecoveryBudgetChars", context.INI_ToolResponseRecoveryBudgetChars)
+            variableValues.Add("ToolResponseCompactOnlyAfterEmpty", context.INI_ToolResponseCompactOnlyAfterEmpty)
+            variableValues.Add("ToolResponseKeepRecentFullCount", context.INI_ToolResponseKeepRecentFullCount)
+            variableValues.Add("ToolResultReferenceThresholdChars", context.INI_ToolResultReferenceThresholdChars)
+            variableValues.Add("ToolResultReferencePreviewChars", context.INI_ToolResultReferencePreviewChars)
+            variableValues.Add("SubAgentLargeToolResponseThresholdChars", context.INI_SubAgentLargeToolResponseThresholdChars)
+            variableValues.Add("SubAgentLargeToolResponseExcerptChars", context.INI_SubAgentLargeToolResponseExcerptChars)
+            variableValues.Add("ContextExpandDefaultChars", context.INI_ContextExpandDefaultChars)
+            variableValues.Add("ContextExpandMaxChars", context.INI_ContextExpandMaxChars)
+            variableValues.Add("EvidenceReplayCoreMaxChars", context.INI_EvidenceReplayCoreMaxChars)
+            variableValues.Add("EvidenceReplayMaxExactStringChars", context.INI_EvidenceReplayMaxExactStringChars)
+            variableValues.Add("EvidenceReplayPreferredArrayItemProperties", context.INI_EvidenceReplayPreferredArrayItemProperties)
             variableValues.Add("ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars)
             variableValues.Add("BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars)
             variableValues.Add("BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars)
@@ -4974,6 +5106,22 @@ Namespace SharedLibrary
                     If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
                     If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
                     If updatedValues.ContainsKey("ToolingMaximumIterations") Then context.INI_ToolingMaximumIterations = CInt(updatedValues("ToolingMaximumIterations"))
+                    If updatedValues.ContainsKey("AutoPilotLogDiagnosticsMaxInputChars") Then context.INI_AutoPilotLogDiagnosticsMaxInputChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("AutoPilotLogDiagnosticsMaxInputChars"), System.Globalization.CultureInfo.InvariantCulture), "AutoPilotLogDiagnosticsMaxInputChars", DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS, 10000, True)
+                    If updatedValues.ContainsKey("TextAnalyzeMaxSourceChars") Then context.INI_TextAnalyzeMaxSourceChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("TextAnalyzeMaxSourceChars"), System.Globalization.CultureInfo.InvariantCulture), "TextAnalyzeMaxSourceChars", DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS, 1)
+                    If updatedValues.ContainsKey("TextAnalyzeMaxInstructionChars") Then context.INI_TextAnalyzeMaxInstructionChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("TextAnalyzeMaxInstructionChars"), System.Globalization.CultureInfo.InvariantCulture), "TextAnalyzeMaxInstructionChars", DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS, 1)
+                    If updatedValues.ContainsKey("TextAnalyzeMaxAdditionalContextChars") Then context.INI_TextAnalyzeMaxAdditionalContextChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("TextAnalyzeMaxAdditionalContextChars"), System.Globalization.CultureInfo.InvariantCulture), "TextAnalyzeMaxAdditionalContextChars", DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS, 0)
+                    If updatedValues.ContainsKey("ToolResponseRecoveryBudgetChars") Then context.INI_ToolResponseRecoveryBudgetChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResponseRecoveryBudgetChars"), System.Globalization.CultureInfo.InvariantCulture), "ToolResponseRecoveryBudgetChars", DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS, 1)
+                    If updatedValues.ContainsKey("ToolResponseCompactOnlyAfterEmpty") Then context.INI_ToolResponseCompactOnlyAfterEmpty = ParseAgentContextBoolean(System.Convert.ToString(updatedValues("ToolResponseCompactOnlyAfterEmpty"), System.Globalization.CultureInfo.InvariantCulture), "ToolResponseCompactOnlyAfterEmpty", DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY)
+                    If updatedValues.ContainsKey("ToolResponseKeepRecentFullCount") Then context.INI_ToolResponseKeepRecentFullCount = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResponseKeepRecentFullCount"), System.Globalization.CultureInfo.InvariantCulture), "ToolResponseKeepRecentFullCount", DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT, 0)
+                    If updatedValues.ContainsKey("ToolResultReferenceThresholdChars") Then context.INI_ToolResultReferenceThresholdChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResultReferenceThresholdChars"), System.Globalization.CultureInfo.InvariantCulture), "ToolResultReferenceThresholdChars", DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS, 0)
+                    If updatedValues.ContainsKey("ToolResultReferencePreviewChars") Then context.INI_ToolResultReferencePreviewChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResultReferencePreviewChars"), System.Globalization.CultureInfo.InvariantCulture), "ToolResultReferencePreviewChars", DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS, 0)
+                    If updatedValues.ContainsKey("SubAgentLargeToolResponseThresholdChars") Then context.INI_SubAgentLargeToolResponseThresholdChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("SubAgentLargeToolResponseThresholdChars"), System.Globalization.CultureInfo.InvariantCulture), "SubAgentLargeToolResponseThresholdChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS, 1)
+                    If updatedValues.ContainsKey("SubAgentLargeToolResponseExcerptChars") Then context.INI_SubAgentLargeToolResponseExcerptChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("SubAgentLargeToolResponseExcerptChars"), System.Globalization.CultureInfo.InvariantCulture), "SubAgentLargeToolResponseExcerptChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS, 0)
+                    If updatedValues.ContainsKey("ContextExpandDefaultChars") Then context.INI_ContextExpandDefaultChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ContextExpandDefaultChars"), System.Globalization.CultureInfo.InvariantCulture), "ContextExpandDefaultChars", DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS, 1)
+                    If updatedValues.ContainsKey("ContextExpandMaxChars") Then context.INI_ContextExpandMaxChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ContextExpandMaxChars"), System.Globalization.CultureInfo.InvariantCulture), "ContextExpandMaxChars", DEFAULT_CONTEXT_EXPAND_MAX_CHARS, 1)
+                    If updatedValues.ContainsKey("EvidenceReplayCoreMaxChars") Then context.INI_EvidenceReplayCoreMaxChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("EvidenceReplayCoreMaxChars"), System.Globalization.CultureInfo.InvariantCulture), "EvidenceReplayCoreMaxChars", DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS, 1)
+                    If updatedValues.ContainsKey("EvidenceReplayMaxExactStringChars") Then context.INI_EvidenceReplayMaxExactStringChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("EvidenceReplayMaxExactStringChars"), System.Globalization.CultureInfo.InvariantCulture), "EvidenceReplayMaxExactStringChars", DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS, 0)
+                    If updatedValues.ContainsKey("EvidenceReplayPreferredArrayItemProperties") Then context.INI_EvidenceReplayPreferredArrayItemProperties = ParseAgentContextInteger(System.Convert.ToString(updatedValues("EvidenceReplayPreferredArrayItemProperties"), System.Globalization.CultureInfo.InvariantCulture), "EvidenceReplayPreferredArrayItemProperties", DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES, 1)
                     If updatedValues.ContainsKey("ToolResponsePayloadBudgetChars") Then context.INI_ToolResponsePayloadBudgetChars = CInt(updatedValues("ToolResponsePayloadBudgetChars"))
                     If updatedValues.ContainsKey("BudgetMediumCompactionThresholdChars") Then context.INI_BudgetMediumCompactionThresholdChars = CInt(updatedValues("BudgetMediumCompactionThresholdChars"))
                     If updatedValues.ContainsKey("BudgetAggressiveCompactionThresholdChars") Then context.INI_BudgetAggressiveCompactionThresholdChars = CInt(updatedValues("BudgetAggressiveCompactionThresholdChars"))

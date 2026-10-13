@@ -65,7 +65,7 @@ Namespace Agents
                 New JProperty("ok", True),
                 New JProperty("tool", ToolName),
                 New JProperty("keep_recent", keepRecent),
-                New JProperty("note", "Older tool results will be moved out of the active context on the next turn. Use context_expand with a result_ref to read any of them again.")
+                New JProperty("note", "Compaction was requested, not proof that it succeeded. The host replaces content only when the complete stored result is retrievable; on storage failure it keeps the full body. Every resulting stub is incomplete: retrieve all task-required ranges with context_expand, or use an exposed isolated analyzer accepting input_result_ref, before relying on omitted content.")
             ).ToString(Newtonsoft.Json.Formatting.None)
         End Function
 

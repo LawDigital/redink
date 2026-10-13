@@ -12699,9 +12699,8 @@ Partial Public Class ThisAddIn
                 att.TempFilePath, includeComments, includeHeadersFooters,
                 includeFootnotesEndnotes, includeTrackedChanges, trackedChangesOnly, filterAuthors, filterSince, filterUntil))
 
-            If result.Length > 300000 Then
-                result = result.Substring(0, 300000) & vbCrLf & "[... content truncated at 300,000 characters (use read_attachment for more) ...]"
-            End If
+            ' Keep all requested document details, including metadata absent from plain-text extraction.
+            ' The shared replay layer can store the complete result by reference.
 
             response.Success = True
             response.Response = result
@@ -13267,10 +13266,6 @@ Partial Public Class ThisAddIn
                     Dim nextSheet = text.IndexOf("[Sheet: ", idx + sheetMarker.Length, StringComparison.OrdinalIgnoreCase)
                     text = If(nextSheet >= 0, text.Substring(idx, nextSheet - idx).TrimEnd(), text.Substring(idx).TrimEnd())
                 End If
-            End If
-
-            If text.Length > 50000 Then
-                text = text.Substring(0, 50000) & vbCrLf & "[... content truncated at 50,000 characters ...]"
             End If
 
             response.Success = True

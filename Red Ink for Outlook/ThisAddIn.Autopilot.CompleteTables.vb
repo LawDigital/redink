@@ -171,8 +171,6 @@ Partial Public Class ThisAddIn
         Private ReadOnly _context As ToolExecutionContext
         Private ReadOnly _ct As CancellationToken
 
-        Private Const TableCompleteMaxContextChars As Integer = 12000
-        Private Const TableCompleteMaxConsistencySummaryChars As Integer = 4000
         Private Const W14Ns As String = "http://schemas.microsoft.com/office/word/2010/wordml"
         Private Const WNs As String = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -1030,41 +1028,6 @@ Partial Public Class ThisAddIn
             End Select
         End Sub
 
-        Private Function TruncateContextAtLineBoundaries(text As String, maxChars As Integer) As String
-            If String.IsNullOrEmpty(text) OrElse text.Length <= maxChars Then Return text
-
-            Dim normalized As String = text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
-            Dim lines As List(Of String) = normalized.Split({vbLf}, StringSplitOptions.None).ToList()
-
-            Dim separator As String = vbCrLf
-            Dim marker As String = "[... document content truncated ...]"
-            Dim halfBudget As Integer = Math.Max(1, (maxChars - marker.Length - (separator.Length * 2)) \ 2)
-
-            Dim head As New List(Of String)()
-            Dim tail As New List(Of String)()
-
-            Dim currentHeadLength As Integer = 0
-            For Each line In lines
-                Dim addLen As Integer = If(head.Count = 0, 0, separator.Length) + line.Length
-                If currentHeadLength + addLen > halfBudget Then Exit For
-                head.Add(line)
-                currentHeadLength += addLen
-            Next
-
-            Dim currentTailLength As Integer = 0
-            For i As Integer = lines.Count - 1 To 0 Step -1
-                Dim line As String = lines(i)
-                Dim addLen As Integer = If(tail.Count = 0, 0, separator.Length) + line.Length
-                If currentTailLength + addLen > halfBudget Then Exit For
-                tail.Insert(0, line)
-                currentTailLength += addLen
-            Next
-
-            Return String.Join(separator, head) &
-                   separator & marker & separator &
-                   String.Join(separator, tail)
-        End Function
-
         Private Function GetRowStructureSignature(row As TableRowInfo) As String
             If row Is Nothing OrElse row.Cells Is Nothing Then Return ""
 
@@ -1222,10 +1185,10 @@ Partial Public Class ThisAddIn
                 If child.NodeType <> XmlNodeType.Element Then Continue For
                 AppendBodyContextNode(child, nsMgr, sb, tableIndexMap)
 
-                If sb.Length > TableCompleteMaxContextChars * 2 Then Exit For
             Next
 
-            Return TruncateContextAtLineBoundaries(sb.ToString(), TableCompleteMaxContextChars)
+            ' This isolated file worker needs the full source; never discard middle/end sections.
+            Return sb.ToString()
         End Function
 
         Private Function ExtractTablesFromXml(xmlDoc As XmlDocument,
@@ -2455,7 +2418,9 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Function NormalizeConsistencySummaryJson(response As String) As String
-            If String.IsNullOrWhiteSpace(response) Then Return "{}"
+            If System.String.IsNullOrWhiteSpace(response) Then
+                Throw New System.InvalidOperationException("The consistency analysis returned no JSON object; the document was not changed.")
+            End If
 
             Try
                 Dim normalized As String = response.Trim()
@@ -2470,31 +2435,10 @@ Partial Public Class ThisAddIn
                 Dim parsed As JObject = JObject.Parse(normalized)
                 Dim compactJson As String = parsed.ToString(Newtonsoft.Json.Formatting.None)
 
-                If compactJson.Length > TableCompleteMaxConsistencySummaryChars Then
-                    Dim trimmed As New JObject()
-
-                    If parsed("documentType") IsNot Nothing Then trimmed("documentType") = parsed("documentType")
-                    If parsed("theme") IsNot Nothing Then trimmed("theme") = parsed("theme")
-                    If parsed("terminology") IsNot Nothing Then trimmed("terminology") = parsed("terminology")
-                    If parsed("entities") IsNot Nothing Then trimmed("entities") = parsed("entities")
-                    If parsed("styleRules") IsNot Nothing Then trimmed("styleRules") = parsed("styleRules")
-                    If parsed("crossTableRules") IsNot Nothing Then trimmed("crossTableRules") = parsed("crossTableRules")
-                    If parsed("dropdownConventions") IsNot Nothing Then trimmed("dropdownConventions") = parsed("dropdownConventions")
-                    If parsed("dateConventions") IsNot Nothing Then trimmed("dateConventions") = parsed("dateConventions")
-                    If parsed("numericConventions") IsNot Nothing Then trimmed("numericConventions") = parsed("numericConventions")
-                    If parsed("warnings") IsNot Nothing Then trimmed("warnings") = parsed("warnings")
-
-                    compactJson = trimmed.ToString(Newtonsoft.Json.Formatting.None)
-
-                    If compactJson.Length > TableCompleteMaxConsistencySummaryChars Then
-                        compactJson = compactJson.Substring(0, TableCompleteMaxConsistencySummaryChars)
-                    End If
-                End If
-
                 Return compactJson
-            Catch ex As Exception
+            Catch ex As System.Exception
                 WriteTableCompletionDebug("NormalizeConsistencySummaryJson error", ex.ToString() & vbCrLf & vbCrLf & response)
-                Return "{}"
+                Throw New System.InvalidOperationException("The consistency analysis returned invalid JSON; the document was not changed.", ex)
             End Try
         End Function
 

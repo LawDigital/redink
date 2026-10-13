@@ -1108,6 +1108,30 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
+        Public Property AP_LogDiagnosticsReportIntervalDays() As Global.System.Int32
+            Get
+                Return CType(Me("AP_LogDiagnosticsReportIntervalDays"), Global.System.Int32)
+            End Get
+            Set
+                Me("AP_LogDiagnosticsReportIntervalDays") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_LogDiagnosticsMaxInputChars() As Global.System.Int32
+            Get
+                Return CType(Me("AP_LogDiagnosticsMaxInputChars"), Global.System.Int32)
+            End Get
+            Set
+                Me("AP_LogDiagnosticsMaxInputChars") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _
         Public Property LocalHttpAuthMasterKey() As String
             Get
