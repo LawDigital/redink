@@ -177,6 +177,12 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property LogDiagnosticsReportEmail As String = ""
 
+        ''' <summary>Periodic status report interval in days (1-365); security alerts do not wait for it.</summary>
+        Public Property LogDiagnosticsReportIntervalDays As System.Int32 = 3
+
+        ''' <summary>Optional input character cap per analysis call; 0 analyses the complete log.</summary>
+        Public Property LogDiagnosticsMaxInputChars As System.Int32 = 0
+
 
     End Class
 
@@ -420,6 +426,16 @@ Partial Public Class ThisAddIn
             .Value = If(saved.LogDiagnosticsReportEmail, "")
         }
 
+        Dim pLogDiagnosticsReportIntervalDays As New InputParameter() With {
+            .Name = "Engineering diagnostics report interval in days (1-365; security alerts are immediate after detection)",
+            .Value = saved.LogDiagnosticsReportIntervalDays.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        }
+
+        Dim pLogDiagnosticsMaxInputChars As New InputParameter() With {
+            .Name = "Engineering diagnostics maximum log characters per call (0 = complete log; otherwise at least 10000; reserve model space for prompt and response)",
+            .Value = saved.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        }
+
         Dim paramsList As New List(Of InputParameter) From {
             pCooldown,
             pMaxReplies,
@@ -433,7 +449,9 @@ Partial Public Class ThisAddIn
             pEnablePrivacyProtection,
             pIncludeSourcesFooter,
             pThreadRetentionDays,
-            pLogDiagnosticsReportEmail
+            pLogDiagnosticsReportEmail,
+            pLogDiagnosticsReportIntervalDays,
+            pLogDiagnosticsMaxInputChars
         }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -504,6 +522,20 @@ Partial Public Class ThisAddIn
         If Integer.TryParse(pThreadRetentionDays.Value?.ToString(), threadRetentionDays) AndAlso threadRetentionDays >= 0 Then
             config.ThreadRetentionDays = threadRetentionDays
         End If
+
+        Dim diagnosticsIntervalDays As System.Int32
+        If Not System.Int32.TryParse(pLogDiagnosticsReportIntervalDays.Value?.ToString(), diagnosticsIntervalDays) OrElse diagnosticsIntervalDays < 1 OrElse diagnosticsIntervalDays > 365 Then
+            ShowCustomMessageBox("The engineering diagnostics report interval must be a whole number from 1 to 365 days.", AN)
+            Return Nothing
+        End If
+        config.LogDiagnosticsReportIntervalDays = diagnosticsIntervalDays
+
+        Dim diagnosticsMaxInputChars As System.Int32
+        If Not System.Int32.TryParse(pLogDiagnosticsMaxInputChars.Value?.ToString(), diagnosticsMaxInputChars) OrElse diagnosticsMaxInputChars < 0 OrElse (diagnosticsMaxInputChars > 0 AndAlso diagnosticsMaxInputChars < 10000) Then
+            ShowCustomMessageBox("The diagnostics input limit must be 0 (complete log) or a whole number of at least 10000 characters.", AN)
+            Return Nothing
+        End If
+        config.LogDiagnosticsMaxInputChars = diagnosticsMaxInputChars
 
         Dim diagnosticsRecipientInput As System.String = If(pLogDiagnosticsReportEmail.Value?.ToString(), System.String.Empty).Trim()
         If diagnosticsRecipientInput.Length > 0 Then
@@ -631,6 +663,8 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
         summaryBuilder.AppendLine($"Sender tool policy: {If(String.IsNullOrWhiteSpace(config.SenderToolPolicyPath), "disabled", config.SenderToolPolicyPath)}")
         summaryBuilder.AppendLine($"Engineering diagnostics: {If(String.IsNullOrWhiteSpace(config.LogDiagnosticsReportEmail), "disabled", "enabled → " & config.LogDiagnosticsReportEmail)}")
+        summaryBuilder.AppendLine($"Engineering diagnostics interval: {config.LogDiagnosticsReportIntervalDays} day(s); evidence-qualified security findings are sent immediately after detection.")
+        summaryBuilder.AppendLine("Engineering diagnostics input: " & If(config.LogDiagnosticsMaxInputChars = 0, "complete log in one call", config.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture) & " characters per part") & "; at most two failed analyses per run.")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -813,6 +847,8 @@ Partial Public Class ThisAddIn
         My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
         My.Settings.AP_SenderToolPolicyPath = If(config.SenderToolPolicyPath, "")
         My.Settings.AP_ThreadRetentionDays = config.ThreadRetentionDays
+        My.Settings.AP_LogDiagnosticsMaxInputChars = config.LogDiagnosticsMaxInputChars
+        My.Settings.AP_LogDiagnosticsReportIntervalDays = config.LogDiagnosticsReportIntervalDays
         My.Settings.AP_LogDiagnosticsReportEmail = If(config.LogDiagnosticsReportEmail, "")
 
         ' Persist the explicit user selection exactly as before. In addition, persist the
@@ -864,6 +900,8 @@ Partial Public Class ThisAddIn
         config.SenderToolPolicyPath = If(My.Settings.AP_SenderToolPolicyPath, "")
         config.ThreadRetentionDays = If(My.Settings.AP_ThreadRetentionDays >= 0, My.Settings.AP_ThreadRetentionDays, 0)
         config.LogDiagnosticsReportEmail = If(My.Settings.AP_LogDiagnosticsReportEmail, "")
+        config.LogDiagnosticsMaxInputChars = If(My.Settings.AP_LogDiagnosticsMaxInputChars >= 10000, My.Settings.AP_LogDiagnosticsMaxInputChars, 0)
+        config.LogDiagnosticsReportIntervalDays = System.Math.Max(1, System.Math.Min(365, My.Settings.AP_LogDiagnosticsReportIntervalDays))
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

@@ -73,6 +73,8 @@ Partial Public Class ThisAddIn
                 {"AP_DashboardWindowH", My.Settings.AP_DashboardWindowH},
                 {"AP_SenderToolPolicyPath", If(My.Settings.AP_SenderToolPolicyPath, "")},
                 {"AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays},
+                {"AP_LogDiagnosticsMaxInputChars", My.Settings.AP_LogDiagnosticsMaxInputChars},
+                {"AP_LogDiagnosticsReportIntervalDays", My.Settings.AP_LogDiagnosticsReportIntervalDays},
                 {"AP_LogDiagnosticsReportEmail", If(My.Settings.AP_LogDiagnosticsReportEmail, "")},
                 {"D", Date.UtcNow.ToString("o")}
             }
@@ -172,6 +174,8 @@ Partial Public Class ThisAddIn
             My.Settings.AP_SenderToolPolicyPath = GetJsonString(json, "AP_SenderToolPolicyPath")
             My.Settings.AP_ThreadRetentionDays = GetJsonInteger(json, "AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays)
             My.Settings.AP_LogDiagnosticsReportEmail = GetJsonString(json, "AP_LogDiagnosticsReportEmail")
+            My.Settings.AP_LogDiagnosticsMaxInputChars = GetJsonInteger(json, "AP_LogDiagnosticsMaxInputChars", My.Settings.AP_LogDiagnosticsMaxInputChars)
+            My.Settings.AP_LogDiagnosticsReportIntervalDays = System.Math.Max(1, System.Math.Min(365, GetJsonInteger(json, "AP_LogDiagnosticsReportIntervalDays", My.Settings.AP_LogDiagnosticsReportIntervalDays)))
 
             My.Settings.Save()
 
