@@ -2694,6 +2694,150 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_AutoPilotLogDiagnosticsMaxInputChars As System.Int32
+        Get
+            Return _context.INI_AutoPilotLogDiagnosticsMaxInputChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_AutoPilotLogDiagnosticsMaxInputChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_TextAnalyzeMaxSourceChars As System.Int32
+        Get
+            Return _context.INI_TextAnalyzeMaxSourceChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_TextAnalyzeMaxSourceChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_TextAnalyzeMaxInstructionChars As System.Int32
+        Get
+            Return _context.INI_TextAnalyzeMaxInstructionChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_TextAnalyzeMaxInstructionChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_TextAnalyzeMaxAdditionalContextChars As System.Int32
+        Get
+            Return _context.INI_TextAnalyzeMaxAdditionalContextChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_TextAnalyzeMaxAdditionalContextChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolResponseRecoveryBudgetChars As System.Int32
+        Get
+            Return _context.INI_ToolResponseRecoveryBudgetChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_ToolResponseRecoveryBudgetChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolResponseCompactOnlyAfterEmpty As System.Boolean
+        Get
+            Return _context.INI_ToolResponseCompactOnlyAfterEmpty
+        End Get
+        Set(value As System.Boolean)
+            _context.INI_ToolResponseCompactOnlyAfterEmpty = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolResponseKeepRecentFullCount As System.Int32
+        Get
+            Return _context.INI_ToolResponseKeepRecentFullCount
+        End Get
+        Set(value As System.Int32)
+            _context.INI_ToolResponseKeepRecentFullCount = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolResultReferenceThresholdChars As System.Int32
+        Get
+            Return _context.INI_ToolResultReferenceThresholdChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_ToolResultReferenceThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolResultReferencePreviewChars As System.Int32
+        Get
+            Return _context.INI_ToolResultReferencePreviewChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_ToolResultReferencePreviewChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SubAgentLargeToolResponseThresholdChars As System.Int32
+        Get
+            Return _context.INI_SubAgentLargeToolResponseThresholdChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_SubAgentLargeToolResponseThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SubAgentLargeToolResponseExcerptChars As System.Int32
+        Get
+            Return _context.INI_SubAgentLargeToolResponseExcerptChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_SubAgentLargeToolResponseExcerptChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ContextExpandDefaultChars As System.Int32
+        Get
+            Return _context.INI_ContextExpandDefaultChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_ContextExpandDefaultChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ContextExpandMaxChars As System.Int32
+        Get
+            Return _context.INI_ContextExpandMaxChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_ContextExpandMaxChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_EvidenceReplayCoreMaxChars As System.Int32
+        Get
+            Return _context.INI_EvidenceReplayCoreMaxChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_EvidenceReplayCoreMaxChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_EvidenceReplayMaxExactStringChars As System.Int32
+        Get
+            Return _context.INI_EvidenceReplayMaxExactStringChars
+        End Get
+        Set(value As System.Int32)
+            _context.INI_EvidenceReplayMaxExactStringChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_EvidenceReplayPreferredArrayItemProperties As System.Int32
+        Get
+            Return _context.INI_EvidenceReplayPreferredArrayItemProperties
+        End Get
+        Set(value As System.Int32)
+            _context.INI_EvidenceReplayPreferredArrayItemProperties = value
+        End Set
+    End Property
+
     Public Shared Property INI_ToolingMaximumIterations As Integer
         Get
             Return _context.INI_ToolingMaximumIterations

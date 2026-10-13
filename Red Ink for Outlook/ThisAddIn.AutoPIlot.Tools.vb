@@ -186,7 +186,7 @@ Partial Public Class ThisAddIn
 
         ' Shared helper tools used by the tooling runtime.
         tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
-        tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+        tools.Add(SharedLibrary.Agents.ContextExpandTool.Build(_context))
         tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
 
         Dim translationDictionarySegmentCatalog As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionarySegmentCatalog(_context)

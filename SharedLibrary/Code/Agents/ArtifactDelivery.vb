@@ -333,6 +333,9 @@ Namespace Agents
                             New Newtonsoft.Json.Linq.JProperty("properties", New Newtonsoft.Json.Linq.JObject(
                                 New Newtonsoft.Json.Linq.JProperty("logical_deliverable_id", New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))),
                                 New Newtonsoft.Json.Linq.JProperty("output_slot_id", New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))),
+                                New Newtonsoft.Json.Linq.JProperty("delivery_group_id", New Newtonsoft.Json.Linq.JObject(
+                                    New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                                    New Newtonsoft.Json.Linq.JProperty("description", "Optional stable atomic delivery group. Supply on EVERY expected slot only when groups are explicitly independent. Same group delivers together; omitted group keeps the whole output contract atomic. Never invent independence to bypass an error."))),
                                 New Newtonsoft.Json.Linq.JProperty("required_effects", New Newtonsoft.Json.Linq.JObject(
                                     New Newtonsoft.Json.Linq.JProperty("type", "array"),
                                     New Newtonsoft.Json.Linq.JProperty("items", New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))),
@@ -761,6 +764,39 @@ Namespace Agents
                 End If
             End If
 
+            Dim finalHash As System.String = System.String.Empty
+            Dim preservedRevisionPath As System.String = System.String.Empty
+            If registration.LifecycleState = ArtifactLifecycleState.Final Then
+                Try
+                    finalHash = ComputeFileSha256(fullPath)
+                    If existing IsNot Nothing AndAlso existing.LifecycleState = ArtifactLifecycleState.Final AndAlso
+                       existing.VerifiedContentSha256 <> "" AndAlso
+                       Not System.String.Equals(existing.VerifiedContentSha256, finalHash, System.StringComparison.Ordinal) Then Return Nothing
+                    If existing IsNot Nothing AndAlso existing.PreservedRevisionPath <> "" AndAlso
+                       System.IO.File.Exists(existing.PreservedRevisionPath) AndAlso
+                       System.String.Equals(ComputeFileSha256(existing.PreservedRevisionPath), finalHash, System.StringComparison.Ordinal) Then
+                        preservedRevisionPath = existing.PreservedRevisionPath
+                    Else
+                        Dim workflowId As System.String = WorkflowContinuity.CurrentWorkflowId
+                        If Not System.String.IsNullOrWhiteSpace(workflowId) Then
+                            Dim checkpoint As System.String = WorkflowContinuity.GetCheckpointPath(workflowId)
+                            Dim revisionDirectory As System.String = System.IO.Path.Combine(
+                                System.IO.Path.GetDirectoryName(checkpoint), System.IO.Path.GetFileNameWithoutExtension(checkpoint) & "_artifacts",
+                                "verified_revisions", System.Guid.NewGuid().ToString("N"))
+                            System.IO.Directory.CreateDirectory(revisionDirectory)
+                            preservedRevisionPath = System.IO.Path.Combine(revisionDirectory, System.IO.Path.GetFileName(fullPath))
+                            System.IO.File.Copy(fullPath, preservedRevisionPath, overwrite:=False)
+                            System.IO.Directory.SetLastWriteTimeUtc(
+                                System.IO.Directory.GetParent(System.IO.Directory.GetParent(revisionDirectory).FullName).FullName,
+                                System.DateTime.UtcNow)
+                            If Not System.String.Equals(ComputeFileSha256(preservedRevisionPath), finalHash, System.StringComparison.Ordinal) Then Return Nothing
+                        End If
+                    End If
+                Catch ex As System.Exception
+                    Return Nothing
+                End Try
+            End If
+
             Dim supersededArtifact As ToolCallSequencing.DeliverableArtifact = Nothing
             If supersedesId <> "" Then
                 supersededArtifact = runState.RegisteredDeliverableArtifacts.FirstOrDefault(
@@ -834,6 +870,11 @@ Namespace Agents
             existing.LogicalDeliverableId = logicalId
             existing.OutputSlotId = slotId
             existing.SessionPath = fullPath
+            If finalHash <> "" Then
+                existing.VerifiedContentSha256 = finalHash
+                existing.PreservedRevisionPath = preservedRevisionPath
+                existing.VerifiedAfterFailureSequence = runState.FailureSequence
+            End If
             existing.LifecycleState = registration.LifecycleState
             existing.DeliveryIntent = registration.DeliveryIntent
 
@@ -1098,6 +1139,38 @@ Namespace Agents
             Optional legacyCandidates As IEnumerable(Of String) = Nothing,
             Optional allowIncompleteExpectedContract As Boolean = False) As List(Of String)
 
+            ' Keep allowIncompleteExpectedContract for existing callers; it must never
+            ' weaken an explicit atomic contract or infer independent delivery groups.
+            ' Independent groups remain atomic during abort/recovery as well as normal delivery.
+            If runState IsNot Nothing AndAlso
+               runState.HasExpectedDeliverableContract AndAlso runState.ExpectedDeliverableSlots IsNot Nothing AndAlso
+               runState.ExpectedDeliverableSlots.Count > 0 AndAlso
+               runState.ExpectedDeliverableSlots.All(Function(slot) slot IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(slot.DeliveryGroupId)) Then
+                Dim independentPaths As New List(Of System.String)()
+                Dim groups = runState.ExpectedDeliverableSlots.GroupBy(Function(slot) slot.DeliveryGroupId, System.StringComparer.Ordinal)
+                For Each group In groups
+                    Dim groupState As New ToolCallSequencing.ToolingRunState() With {
+                        .ExpectedDeliverableContractDeclared = True,
+                        .UnresolvedToolFailures = runState.UnresolvedToolFailures,
+                        .ExpectedDeliverableSlots = group.Select(Function(slot) New ToolCallSequencing.ExpectedDeliverableSlot With {
+                            .LogicalDeliverableId = slot.LogicalDeliverableId,
+                            .OutputSlotId = slot.OutputSlotId,
+                            .RequiredEffects = slot.RequiredEffects
+                        }).ToList(),
+                        .RegisteredDeliverableArtifacts = runState.RegisteredDeliverableArtifacts.Where(
+                            Function(item) item IsNot Nothing AndAlso group.Any(
+                                Function(slot) System.String.Equals(item.LogicalDeliverableId, slot.LogicalDeliverableId, System.StringComparison.Ordinal) AndAlso
+                                               System.String.Equals(item.OutputSlotId, slot.OutputSlotId, System.StringComparison.Ordinal))).ToList()
+                    }
+                    Try
+                        independentPaths.AddRange(ResolvePathsForDelivery(groupState))
+                    Catch ex As System.IO.IOException
+                        System.Diagnostics.Trace.TraceWarning("Delivery group '" & group.Key & "' retained but not deliverable: " & ex.Message)
+                    End Try
+                Next
+                Return independentPaths
+            End If
+
             ' Preserve one transport entry per explicit current Final. Distinct sibling
             ' artifacts are never collapsed merely because they currently point at the
             ' same physical path.
@@ -1114,8 +1187,8 @@ Namespace Agents
             ' Expected-artifact completeness is authoritative even when the artifact
             ' registry itself is missing. A missing registry must never turn an
             ' incomplete requested sibling set into an empty-but-successful delivery.
-            If Not allowIncompleteExpectedContract AndAlso
-               hasExpectedContract AndAlso
+            ' An ungrouped expected contract is one atomic set. Recovery cannot infer independence.
+            If hasExpectedContract AndAlso
                runState.ExpectedDeliverableSlots IsNot Nothing AndAlso
                runState.ExpectedDeliverableSlots.Count > 0 AndAlso
                Not runState.HasAllExpectedDeliverableSlots Then
@@ -1243,6 +1316,10 @@ Namespace Agents
                         Continue For
                     End If
 
+                    If Not IsVerifiedArtifactRevisionCurrent(artifact) Then
+                        resolutionErrors.Add("Final artifact '" & artifactId & "' changed since verification; retained state requires revalidation.")
+                        Continue For
+                    End If
                     resolvedPaths.Add(fullPath)
                 Catch ex As System.Exception
                     resolutionErrors.Add(
@@ -1996,6 +2073,18 @@ Namespace Agents
             End Using
         End Function
 
+        Public Shared Function IsVerifiedArtifactRevisionCurrent(artifact As ToolCallSequencing.DeliverableArtifact) As System.Boolean
+            If artifact Is Nothing OrElse System.String.IsNullOrWhiteSpace(artifact.SessionPath) Then Return False
+            Try
+                If Not System.IO.File.Exists(artifact.SessionPath) Then Return False
+                ' Old continuation snapshots have no hash; retain their established compatibility behavior.
+                If System.String.IsNullOrWhiteSpace(artifact.VerifiedContentSha256) Then Return True
+                Return System.String.Equals(artifact.VerifiedContentSha256, ComputeFileSha256(artifact.SessionPath), System.StringComparison.Ordinal)
+            Catch ex As System.Exception
+                Return False
+            End Try
+        End Function
+
         Public Shared Function HasValidatedFinalDeliverable(runState As ToolCallSequencing.ToolingRunState) As Boolean
             If runState Is Nothing OrElse runState.RegisteredDeliverableArtifacts Is Nothing Then Return False
 
@@ -2012,7 +2101,7 @@ Namespace Agents
                 If runState.HasExpectedDeliverableContract AndAlso
                    Not runState.IsQualifiedFinalArtifactForDelivery(artifact) Then Continue For
                 Try
-                    If Not String.IsNullOrWhiteSpace(artifact.SessionPath) AndAlso File.Exists(artifact.SessionPath) Then Return True
+                    If IsVerifiedArtifactRevisionCurrent(artifact) Then Return True
                 Catch
                 End Try
             Next
@@ -2040,6 +2129,9 @@ Namespace Agents
                 .SupersedesArtifactId = If(source.SupersedesArtifactId, ""),
                 .IsExplicitContract = source.IsExplicitContract,
                 .RegisteredUtc = source.RegisteredUtc,
+                .VerifiedContentSha256 = source.VerifiedContentSha256,
+                .PreservedRevisionPath = source.PreservedRevisionPath,
+                .VerifiedAfterFailureSequence = source.VerifiedAfterFailureSequence,
                 .VerifiedEffects = New System.Collections.Generic.HashSet(Of System.String)(
                     If(source.VerifiedEffects, New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)),
                     System.StringComparer.OrdinalIgnoreCase)

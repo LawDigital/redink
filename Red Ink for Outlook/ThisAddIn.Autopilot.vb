@@ -759,6 +759,7 @@ Partial Public Class ThisAddIn
         End Try
 
         PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
+        InitializeAutoPilotLogDiagnosticTopicPolicy()
 
         StopLocalSchedulerRuntime()
         SetAutoPilotQueueJournalPersistenceEnabled(True)
@@ -5090,7 +5091,6 @@ Partial Public Class ThisAddIn
                 sb.AppendLine("[FORMATTING-AWARE MARKDOWN EMBEDDED EMAIL BODY]")
             End If
 
-            If body.Length > 50000 Then body = body.Substring(0, 50000) & vbCrLf & "[... body truncated at 50,000 characters ...]"
             sb.Append(body)
         Catch : End Try
 
@@ -5162,7 +5162,6 @@ Partial Public Class ThisAddIn
             End Try
         End If
 
-        If cleanBody.Length > 50000 Then cleanBody = cleanBody.Substring(0, 50000) & vbCrLf & "[... body truncated at 50,000 characters ...]"
         sb.Append(cleanBody.Trim())
 
         Return sb.ToString()
@@ -6125,10 +6124,6 @@ Partial Public Class ThisAddIn
         End If
 
         If authoritativeBodyOverride IsNot Nothing Then body = authoritativeBodyOverride
-
-        If body.Length > 25000 Then
-            body = body.Substring(0, 25000) & vbCrLf & "[... truncated ...]"
-        End If
 
         If hasFormattingMap Then
             sb.AppendLine("[EMAIL BODY - FORMATTING AWARE MARKDOWN]")

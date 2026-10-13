@@ -61,46 +61,34 @@ Namespace Agents
         ' =====================================================================
         ' Tool-response payload budget (context "drawer") defaults.
         '
-        ' These are the DEFAULTS (medium-context models, roughly 128k-200k tokens).
-        ' They can be overridden per install via the INI keys:
-        '   ToolResponsePayloadBudgetChars
-        '   BudgetMediumCompactionThresholdChars
-        '   BudgetAggressiveCompactionThresholdChars
-        '   BudgetCompactionPreviewChars
-        '
-        ' Proposed profiles (character counts, not tokens; ~4 chars per token):
-        '
-        '   STRONG models (very large context, e.g. 1,000,000 tokens):
-        '     ToolResponsePayloadBudgetChars           = 800000
-        '     BudgetMediumCompactionThresholdChars     = 20000
-        '     BudgetAggressiveCompactionThresholdChars = 10000
-        '     BudgetCompactionPreviewChars             = 2000
-        '     Rationale: keep far more history fully visible; only shelve very large
-        '     results, and keep bigger previews so the model rarely needs context_expand.
-        '
-        '   MEDIUM models (default, ~128k-200k tokens):
-        '     ToolResponsePayloadBudgetChars           = 60000
-        '     BudgetMediumCompactionThresholdChars     = 6000
-        '     BudgetAggressiveCompactionThresholdChars = 2000
-        '     BudgetCompactionPreviewChars             = 600
-        '
-        '   SMALL models (tight context, e.g. 32k-64k tokens):
-        '     ToolResponsePayloadBudgetChars           = 40000
-        '     BudgetMediumCompactionThresholdChars     = 3000
-        '     BudgetAggressiveCompactionThresholdChars = 1200
-        '     BudgetCompactionPreviewChars             = 300
-        '     Rationale: compact aggressively and early; keep only small previews so the
-        '     active window stays within a limited context. The model relies more on
-        '     context_expand to page back into shelved results on demand.
+        ' Values are characters, not tokens or a complete model-request budget.
+        ' Defaults do not proactively compact history. An empty response enables
+        ' recovery; context_compact is an explicit shelf request. Weaker models may
+        ' opt into a positive proactive budget with ToolResponseCompactOnlyAfterEmpty=False.
+        ' Large-source reference replay is separate from history compaction and keeps
+        ' verified full originals; a preview/evidence core is never a semantic summary.
         ' =====================================================================
 
         ''' <summary>
         ''' Overall character budget for the serialized tool-response payload injected each
         ''' iteration. When exceeded, the host progressively compacts older results by reference
         ''' (still retrievable via context_expand). 0 disables budget-driven compaction.
-        ''' Default for medium-context models; override via INI ToolResponsePayloadBudgetChars.
+        ''' No automatic replay budget until an empty response; positive INI values opt into a budget.
         ''' </summary>
-        Public Const ToolResponsePayloadBudgetChars As Integer = 60000
+        Public Const ToolResponsePayloadBudgetChars As Integer = 0
+
+        ' Configurable context contracts. Defaults keep full history until real recovery pressure.
+        Public Const AutoPilotLogDiagnosticsMaxInputChars As System.Int32 = 0
+        Public Const TextAnalyzeMaxSourceChars As System.Int32 = 400000
+        Public Const TextAnalyzeMaxInstructionChars As System.Int32 = 20000
+        Public Const TextAnalyzeMaxAdditionalContextChars As System.Int32 = 120000
+        Public Const ToolResponseRecoveryBudgetChars As System.Int32 = 400000
+        Public Const ToolResponseCompactOnlyAfterEmpty As System.Boolean = True
+        Public Const ToolResponseKeepRecentFullCount As System.Int32 = 2
+        Public Const ToolResultReferenceThresholdChars As System.Int32 = 100000
+        Public Const ToolResultReferencePreviewChars As System.Int32 = 2000
+        Public Const ContextExpandDefaultChars As System.Int32 = 8000
+        Public Const ContextExpandMaxChars As System.Int32 = 100000
         ''' <summary>
         ''' Results carrying deliverable/reference identity larger than this are replayed
         ''' to the model through a compact lossless envelope plus result_ref. The full

@@ -202,7 +202,7 @@ Partial Public Class ThisAddIn
 
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
-            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build(_context))
             tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
             tools.Add(SharedLibrary.Agents.AskUserTool.Build())
 

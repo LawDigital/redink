@@ -33,6 +33,40 @@ Namespace Agents
         Private Sub New()
         End Sub
 
+        ''' <summary>
+        ''' Renders replay placeholders once; inserted source evidence remains literal.
+        ''' </summary>
+        Public Shared Function RenderReplayTemplate(template As System.String,
+                                                      replacements As System.Collections.Generic.IDictionary(Of System.String, System.String)) As System.String
+            Dim source As System.String = If(template, System.String.Empty)
+            If replacements Is Nothing OrElse replacements.Count = 0 Then Return source
+            Dim alternatives As New System.Collections.Generic.List(Of System.String)()
+            For Each key As System.String In replacements.Keys
+                If key.Length = 0 Then Throw New System.ArgumentException("A replay template placeholder cannot be empty.", NameOf(replacements))
+                alternatives.Add(System.Text.RegularExpressions.Regex.Escape(key))
+            Next
+            ' One pass over the template: literal placeholder text in inserted evidence is never re-expanded.
+            Return System.Text.RegularExpressions.Regex.Replace(
+                source, System.String.Join("|", alternatives),
+                Function(matched As System.Text.RegularExpressions.Match) If(replacements(matched.Value), System.String.Empty))
+        End Function
+
+        ''' <summary>Repairs template separators only outside JSON strings.</summary>
+        Public Shared Function NormalizeReplayJsonSeparators(payload As System.String) As System.String
+            If System.String.IsNullOrEmpty(payload) Then Return If(payload, System.String.Empty)
+            Dim segments As System.String() = System.Text.RegularExpressions.Regex.Split(
+                payload, "(""(?:\\.|[^""\\])*"")")
+            For index As System.Int32 = 0 To segments.Length - 1 Step 2
+                Dim structural As System.String = segments(index)
+                structural = System.Text.RegularExpressions.Regex.Replace(structural, "\[\s*\]", "[]")
+                structural = System.Text.RegularExpressions.Regex.Replace(structural, ",\s*,", ",")
+                structural = System.Text.RegularExpressions.Regex.Replace(structural, "\[\s*,", "[")
+                structural = System.Text.RegularExpressions.Regex.Replace(structural, ",\s*\]", "]")
+                segments(index) = structural
+            Next
+            Return System.String.Concat(segments)
+        End Function
+
         Public Shared Function IsRequiredRuntimePrimitive(toolName As System.String) As System.Boolean
             Return ContextExpandTool.IsContextExpandTool(toolName)
         End Function
@@ -58,7 +92,9 @@ Namespace Agents
                                                     ByRef evidenceCoreJson As System.String,
                                                     ByRef omittedPropertyCount As System.Int32,
                                                     ByRef exactScalarCount As System.Int32,
-                                                    ByRef arrayItemPropertyLimit As System.Int32) As System.Boolean
+                                                    ByRef arrayItemPropertyLimit As System.Int32,
+                                                    Optional preferredArrayItemProperties As System.Int32 = ToolingConstants.EvidenceReplayPreferredArrayItemProperties,
+                                                    Optional maxExactStringChars As System.Int32 = ToolingConstants.EvidenceReplayMaxExactStringChars) As System.Boolean
             evidenceCoreJson = System.String.Empty
             omittedPropertyCount = 0
             exactScalarCount = 0
@@ -79,22 +115,28 @@ Namespace Agents
             End If
 
             Dim limits As System.Int32() = New System.Int32() {
-                ToolingConstants.EvidenceReplayPreferredArrayItemProperties,
-                10,
-                8,
-                6,
-                4
+                System.Math.Max(1, preferredArrayItemProperties),
+                System.Math.Min(System.Math.Max(1, preferredArrayItemProperties), 10),
+                System.Math.Min(System.Math.Max(1, preferredArrayItemProperties), 8),
+                System.Math.Min(System.Math.Max(1, preferredArrayItemProperties), 6),
+                System.Math.Min(System.Math.Max(1, preferredArrayItemProperties), 4)
             }
 
             For Each propertyLimit As System.Int32 In limits
                 Dim omitted As System.Int32 = 0
                 Dim exactScalars As System.Int32 = 0
-                Dim projected As JToken = BuildEvidenceCoreToken(
-                    source,
-                    propertyLimit,
-                    False,
-                    omitted,
-                    exactScalars)
+                Dim projected As JToken
+                Try
+                    projected = BuildEvidenceCoreToken(
+                        source,
+                        propertyLimit,
+                        False,
+                        omitted,
+                        exactScalars,
+                        maxExactStringChars)
+                Catch ex As System.InvalidOperationException
+                    Return False
+                End Try
 
                 If projected Is Nothing Then Continue For
 
@@ -113,41 +155,57 @@ Namespace Agents
 
         ''' <summary>
         ''' True when replay content represents evidence that was compacted by reference.
-        ''' Control-plane and deliverable-only envelopes are deliberately excluded so the
-        ''' final evidence review applies to source evidence rather than bookkeeping.
+        ''' Includes source-produced and nested previews, even if the replay layer did
+        ''' not shorten them again. Only verified pinned control blocks are excluded.
         ''' </summary>
         Public Shared Function IsEvidenceCompactedReplay(modelReplayContent As System.String) As System.Boolean
-            Dim raw As System.String = If(modelReplayContent, System.String.Empty).Trim()
-            If raw = System.String.Empty Then Return False
-
+            If System.String.IsNullOrWhiteSpace(modelReplayContent) Then Return False
             Try
-                Dim obj As JObject = JObject.Parse(raw)
-                Dim controlPinned As JToken = obj("control_plane_pinned")
-                If controlPinned IsNot Nothing AndAlso
-                   controlPinned.Type = JTokenType.Boolean AndAlso
-                   controlPinned.Value(Of System.Boolean)() Then
-                    Return False
-                End If
-
-                If System.String.IsNullOrWhiteSpace(obj.Value(Of System.String)("result_ref")) Then
-                    Return False
-                End If
-
-                If obj("evidence_core") IsNot Nothing Then Return True
-                If obj("preview") IsNot Nothing Then Return True
-                If obj("omitted_window_chars") IsNot Nothing Then Return True
-
-                Return False
+                Return ContainsIncompleteReference(JToken.Parse(modelReplayContent))
             Catch ex As System.Exception
                 Return False
             End Try
+        End Function
+
+        Private Shared Function ContainsIncompleteReference(token As JToken) As System.Boolean
+            If token Is Nothing Then Return False
+            Dim obj As JObject = TryCast(token, JObject)
+            If obj IsNot Nothing Then
+                Dim pinned As JToken = obj("control_plane_pinned")
+                If pinned IsNot Nothing AndAlso pinned.Type = JTokenType.Boolean AndAlso pinned.Value(Of System.Boolean)() Then Return False
+                Dim reference As JToken = obj("result_ref")
+                Dim filePath As JToken = obj("path")
+                Dim fileHash As JToken = obj("snapshot_sha256")
+                Dim hasStoredReference As System.Boolean = reference IsNot Nothing AndAlso reference.Type = JTokenType.String AndAlso
+                    Not System.String.IsNullOrWhiteSpace(reference.Value(Of System.String)())
+                Dim hasFileReference As System.Boolean = filePath IsNot Nothing AndAlso filePath.Type = JTokenType.String AndAlso
+                    Not System.String.IsNullOrWhiteSpace(filePath.Value(Of System.String)()) AndAlso
+                    fileHash IsNot Nothing AndAlso fileHash.Type = JTokenType.String AndAlso
+                    Not System.String.IsNullOrWhiteSpace(fileHash.Value(Of System.String)())
+                If hasStoredReference OrElse hasFileReference Then
+                    Dim complete As JToken = obj("content_complete")
+                    Dim truncated As JToken = obj("truncated")
+                    If (complete IsNot Nothing AndAlso complete.Type = JTokenType.Boolean AndAlso Not complete.Value(Of System.Boolean)()) OrElse
+                       (truncated IsNot Nothing AndAlso truncated.Type = JTokenType.Boolean AndAlso truncated.Value(Of System.Boolean)()) OrElse
+                       obj("evidence_core") IsNot Nothing OrElse obj("preview") IsNot Nothing OrElse obj("omitted_window_chars") IsNot Nothing Then Return True
+                End If
+                For Each prop As JProperty In obj.Properties()
+                    If ContainsIncompleteReference(prop.Value) Then Return True
+                Next
+            ElseIf token.Type = JTokenType.Array Then
+                For Each child As JToken In DirectCast(token, JArray)
+                    If ContainsIncompleteReference(child) Then Return True
+                Next
+            End If
+            Return False
         End Function
 
         Private Shared Function BuildEvidenceCoreToken(source As JToken,
                                                        arrayItemPropertyLimit As System.Int32,
                                                        inArrayItem As System.Boolean,
                                                        ByRef omittedPropertyCount As System.Int32,
-                                                       ByRef exactScalarCount As System.Int32) As JToken
+                                                       ByRef exactScalarCount As System.Int32,
+                                                       maxExactStringChars As System.Int32) As JToken
             If source Is Nothing Then Return Nothing
 
             Select Case source.Type
@@ -162,7 +220,8 @@ Namespace Agents
                             arrayItemPropertyLimit,
                             False,
                             omittedPropertyCount,
-                            exactScalarCount)
+                            exactScalarCount,
+                            maxExactStringChars)
 
                         If child IsNot Nothing Then
                             candidates.Add(New EvidencePropertyCandidate() With {
@@ -215,19 +274,21 @@ Namespace Agents
                             arrayItemPropertyLimit,
                             item IsNot Nothing AndAlso item.Type = JTokenType.Object,
                             omittedPropertyCount,
-                            exactScalarCount)
+                            exactScalarCount,
+                            maxExactStringChars)
                         If child IsNot Nothing Then
                             resultArray.Add(child)
                         Else
-                            ' Preserve array cardinality even when a large scalar item is omitted.
-                            resultArray.Add(JValue.CreateNull())
+                            ' A synthetic null would be mistaken for exact source evidence.
+                            ' Reject this projection; callers keep the full body or a verified reference.
+                            Throw New System.InvalidOperationException("An evidence-core array item cannot be represented exactly.")
                         End If
                     Next
                     Return resultArray
 
                 Case JTokenType.String
                     Dim value As System.String = source.Value(Of System.String)()
-                    If ShouldOmitEvidenceString(value) Then
+                    If ShouldOmitEvidenceString(value, maxExactStringChars) Then
                         omittedPropertyCount += 1
                         Return Nothing
                     End If
@@ -240,9 +301,9 @@ Namespace Agents
             End Select
         End Function
 
-        Private Shared Function ShouldOmitEvidenceString(value As System.String) As System.Boolean
+        Private Shared Function ShouldOmitEvidenceString(value As System.String, maxExactStringChars As System.Int32) As System.Boolean
             Dim normalized As System.String = If(value, System.String.Empty)
-            If normalized.Length > ToolingConstants.EvidenceReplayMaxExactStringChars Then Return True
+            If normalized.Length > System.Math.Max(0, maxExactStringChars) Then Return True
 
             Dim lower As System.String = normalized.TrimStart().ToLowerInvariant()
             If lower.StartsWith("http://", System.StringComparison.Ordinal) OrElse

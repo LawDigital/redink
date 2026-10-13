@@ -1140,16 +1140,143 @@
                     "label": "Tooling Maximum Iterations",
                     "type": "integer",
                     "validation": ">0",
-                    "default": "50",
+                    "default": "100",
                     "description": "Maximum number of tool-execution iterations Red Ink may perform in one tooling or agent session before it aborts the loop. Increase this only for complex workflows because each iteration can add cost and runtime. Example: 50. [ToolingMaximumIterations]"
+                },
+                {
+                    "key": "AutoPilotLogDiagnosticsMaxInputChars",
+                    "label": "AutoPilot diagnostic log input override (chars)",
+                    "type": "integer",
+                    "validation": "0|10000-2147483647",
+                    "default": "0",
+                    "description": "Optional INI override for AutoPilot diagnostic log analysis. 0 keeps the AutoPilot dialog preference (whose default 0 analyses the complete log). A positive value of at least 10000 splits the entire log into lossless parts; nothing is truncated. Does not change reporting thresholds. [AutoPilotLogDiagnosticsMaxInputChars]"
+                },
+                {
+                    "key": "TextAnalyzeMaxSourceChars",
+                    "label": "Text Analyze Max Source Chars",
+                    "type": "integer",
+                    "default": "400000",
+                    "description": "Full file analysis source limit (UTF-16 characters). Oversized sources are refused intact; use complete range analyses and synthesis, never a prefix. This is not the total model request/token limit. [TextAnalyzeMaxSourceChars]",
+                    "validation": "1-2147483647"
+                },
+                {
+                    "key": "TextAnalyzeMaxInstructionChars",
+                    "label": "Text Analyze Max Instruction Chars",
+                    "type": "integer",
+                    "default": "20000",
+                    "description": "Maximum caller instruction length for isolated file analysis. Oversized input is refused, never truncated. [TextAnalyzeMaxInstructionChars]",
+                    "validation": "1-2147483647"
+                },
+                {
+                    "key": "TextAnalyzeMaxAdditionalContextChars",
+                    "label": "Text Analyze Max Additional Context Chars",
+                    "type": "integer",
+                    "default": "120000",
+                    "description": "Maximum additional caller context for isolated file analysis. 0 permits no additional context; oversized input is refused intact. [TextAnalyzeMaxAdditionalContextChars]",
+                    "validation": "0-2147483647"
+                },
+                {
+                    "key": "ToolResponseRecoveryBudgetChars",
+                    "label": "Tool Response Recovery Budget Chars",
+                    "type": "integer",
+                    "default": "400000",
+                    "description": "Fallback serialized tool-result replay budget after an empty model response or explicit context_compact when ToolResponsePayloadBudgetChars=0. Character budget, not a total request/token guarantee. Protected expansions and mandatory state may exceed it. [ToolResponseRecoveryBudgetChars]",
+                    "validation": "1-2147483647"
+                },
+                {
+                    "key": "ToolResponseCompactOnlyAfterEmpty",
+                    "label": "Tool Response Compact Only After Empty",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Default True: no automatic history compaction until an empty response. Explicit context_compact remains honoured. False opts into proactive compaction only when a positive ToolResponsePayloadBudgetChars is exceeded; the first pass stays full. [ToolResponseCompactOnlyAfterEmpty]"
+                },
+                {
+                    "key": "ToolResponseKeepRecentFullCount",
+                    "label": "Tool Response Keep Recent Full Count",
+                    "type": "integer",
+                    "default": "2",
+                    "description": "Number of recent historical results initially kept full during budget recovery. Current-turn context_expand remains lossless at least once. Protected history is reduced only if actual budget pressure persists. [ToolResponseKeepRecentFullCount]",
+                    "validation": "0-2147483647"
+                },
+                {
+                    "key": "ToolResultReferenceThresholdChars",
+                    "label": "Tool Result Reference Threshold Chars",
+                    "type": "integer",
+                    "default": "100000",
+                    "description": "Above this length, a large ordinary result may be replayed by a verified complete reference instead of dumping a long source into the orchestration context. 0 disables automatic large-result reference replay. Producing/delivery contracts and current expansion windows retain their safeguards. [ToolResultReferenceThresholdChars]",
+                    "validation": "0-2147483647"
+                },
+                {
+                    "key": "ToolResultReferencePreviewChars",
+                    "label": "Tool Result Reference Preview Chars",
+                    "type": "integer",
+                    "default": "2000",
+                    "description": "Leading characters shown with an automatically referenced large result. 0 means no preview. A preview is explicitly incomplete, never a semantic summary; task-required source ranges must be loaded. [ToolResultReferencePreviewChars]",
+                    "validation": "0-2147483647"
+                },
+                {
+                    "key": "SubAgentLargeToolResponseThresholdChars",
+                    "label": "Sub Agent Large Tool Response Threshold Chars",
+                    "type": "integer",
+                    "default": "30000",
+                    "description": "Large-result threshold used by reference recovery/explicit compaction in both hosts. This does not trigger eager subagent history compaction. [SubAgentLargeToolResponseThresholdChars]",
+                    "validation": "1-2147483647"
+                },
+                {
+                    "key": "SubAgentLargeToolResponseExcerptChars",
+                    "label": "Sub Agent Large Tool Response Excerpt Chars",
+                    "type": "integer",
+                    "default": "8000",
+                    "description": "Preview characters used by reference recovery/explicit compaction. 0 means no preview. Full originals remain in verified workflow snapshots. [SubAgentLargeToolResponseExcerptChars]",
+                    "validation": "0-2147483647"
+                },
+                {
+                    "key": "ContextExpandDefaultChars",
+                    "label": "Context Expand Default Chars",
+                    "type": "integer",
+                    "default": "8000",
+                    "description": "Default character window for context_expand. Clamped to ContextExpandMaxChars. The host reports exact ranges, total length, completeness and next offset. [ContextExpandDefaultChars]",
+                    "validation": "1-2147483647"
+                },
+                {
+                    "key": "ContextExpandMaxChars",
+                    "label": "Context Expand Max Chars",
+                    "type": "integer",
+                    "default": "100000",
+                    "description": "Maximum requested context_expand window. Larger requests are clamped with explicit range metadata; no source content is deleted. Reduce for weaker models. [ContextExpandMaxChars]",
+                    "validation": "1-2147483647"
+                },
+                {
+                    "key": "EvidenceReplayCoreMaxChars",
+                    "label": "Evidence Replay Core Max Chars",
+                    "type": "integer",
+                    "default": "12000",
+                    "description": "Maximum size of a structured evidence-core projection during budget recovery. Retained scalar values are exact, omissions are explicit, full original remains retrievable. Not a semantic summary. [EvidenceReplayCoreMaxChars]",
+                    "validation": "1-2147483647"
+                },
+                {
+                    "key": "EvidenceReplayMaxExactStringChars",
+                    "label": "Evidence Replay Max Exact String Chars",
+                    "type": "integer",
+                    "default": "320",
+                    "description": "Maximum exact string length retained in an evidence core. Longer strings remain in the original snapshot; 0 retains no non-empty strings in the projection. [EvidenceReplayMaxExactStringChars]",
+                    "validation": "0-2147483647"
+                },
+                {
+                    "key": "EvidenceReplayPreferredArrayItemProperties",
+                    "label": "Evidence Replay Preferred Array Item Properties",
+                    "type": "integer",
+                    "default": "12",
+                    "description": "Initial maximum property count per array object in an evidence core; later attempts can only tighten this. Array cardinality is preserved. Originals remain retrievable. [EvidenceReplayPreferredArrayItemProperties]",
+                    "validation": "1-2147483647"
                 },
                 {
                     "key": "ToolResponsePayloadBudgetChars",
                     "label": "Tool Response Payload Budget (chars)",
                     "type": "integer",
-                    "validation": ">0",
-                    "default": "120000",
-                    "description": "Maximum total character budget for the serialized tool-response payload that is replayed into the next tooling turn. When the accumulated tool history grows beyond this budget, older results are progressively compacted by reference and remain readable via context_expand. Example: 120000. [ToolResponsePayloadBudgetChars]"
+                    "validation": "0-2147483647",
+                    "default": "0",
+                    "description": "Configured serialized tool-result replay budget. 0 keeps automatic history compaction disabled until empty-response recovery uses ToolResponseRecoveryBudgetChars. A positive value is used for recovery and is proactive only if ToolResponseCompactOnlyAfterEmpty=False. Character budget, not the total request/token limit; protected expansions and mandatory state can exceed it. [ToolResponsePayloadBudgetChars]"
                 },
                 {
                     "key": "BudgetMediumCompactionThresholdChars",
@@ -1157,7 +1284,7 @@
                     "type": "integer",
                     "validation": ">0",
                     "default": "6000",
-                    "description": "First threshold used under budget pressure for older stale tool results. Older responses whose body is at least this large may be replaced by a short preview plus result_ref, which saves context while preserving retrievability. Example: 6000. [BudgetMediumCompactionThresholdChars]"
+                    "description": "First threshold used only under actual configured budget pressure for older stale tool results. Older responses whose body is at least this large may be replaced by a short preview plus result_ref, which saves context while preserving retrievability. Example: 6000. [BudgetMediumCompactionThresholdChars]"
                 },
                 {
                     "key": "BudgetAggressiveCompactionThresholdChars",
@@ -1165,7 +1292,7 @@
                     "type": "integer",
                     "validation": ">0",
                     "default": "2000",
-                    "description": "Second and more aggressive threshold used if the payload is still above budget after the milder pass. Lower values compact more older medium-sized results, which is useful for smaller-context models but increases reliance on context_expand. Example: 2000. [BudgetAggressiveCompactionThresholdChars]"
+                    "description": "Second and more aggressive threshold used only if the payload is still above budget after the milder pass. Lower values compact more older medium-sized results, which is useful for smaller-context models but increases reliance on context_expand. Example: 2000. [BudgetAggressiveCompactionThresholdChars]"
                 },
                 {
                     "key": "BudgetCompactionPreviewChars",
@@ -1173,7 +1300,7 @@
                     "type": "integer",
                     "validation": ">0",
                     "default": "600",
-                    "description": "How many leading characters are kept inline when an older result is compacted by reference under budget pressure. Larger previews help strong models continue without re-expanding, while smaller previews save more context for smaller models. Example: 600. [BudgetCompactionPreviewChars]"
+                    "description": "How many leading characters are kept inline when an older result is compacted by reference under budget pressure. Previews are incomplete, not semantic summaries; required omitted facts must be retrieved. Larger previews can show more exact values, while smaller previews save more context for smaller models. Example: 600. [BudgetCompactionPreviewChars]"
                 },
                 {
                     "key": "LogPath",

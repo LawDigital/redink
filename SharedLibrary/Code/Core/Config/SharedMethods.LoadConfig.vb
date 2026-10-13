@@ -365,6 +365,22 @@ Namespace SharedLibrary
                 context.INI_ToolingLogWindow = ParseBoolean(configDict, "ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW)
                 context.INI_ToolingDryRun = ParseBoolean(configDict, "ToolingDryRun")
                 context.INI_ToolingMaximumIterations = If(configDict.ContainsKey("ToolingMaximumIterations"), CInt(configDict("ToolingMaximumIterations")), DEFAULT_TOOLING_MAXIMUMITERATIONS)
+                context.INI_AutoPilotLogDiagnosticsMaxInputChars = ParseAgentContextInteger(If(configDict.ContainsKey("AutoPilotLogDiagnosticsMaxInputChars"), configDict("AutoPilotLogDiagnosticsMaxInputChars"), ""), "AutoPilotLogDiagnosticsMaxInputChars", DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS, 10000, True)
+                context.INI_TextAnalyzeMaxSourceChars = ParseAgentContextInteger(If(configDict.ContainsKey("TextAnalyzeMaxSourceChars"), configDict("TextAnalyzeMaxSourceChars"), ""), "TextAnalyzeMaxSourceChars", DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS, 1)
+                context.INI_TextAnalyzeMaxInstructionChars = ParseAgentContextInteger(If(configDict.ContainsKey("TextAnalyzeMaxInstructionChars"), configDict("TextAnalyzeMaxInstructionChars"), ""), "TextAnalyzeMaxInstructionChars", DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS, 1)
+                context.INI_TextAnalyzeMaxAdditionalContextChars = ParseAgentContextInteger(If(configDict.ContainsKey("TextAnalyzeMaxAdditionalContextChars"), configDict("TextAnalyzeMaxAdditionalContextChars"), ""), "TextAnalyzeMaxAdditionalContextChars", DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS, 0)
+                context.INI_ToolResponseRecoveryBudgetChars = ParseAgentContextInteger(If(configDict.ContainsKey("ToolResponseRecoveryBudgetChars"), configDict("ToolResponseRecoveryBudgetChars"), ""), "ToolResponseRecoveryBudgetChars", DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS, 1)
+                context.INI_ToolResponseCompactOnlyAfterEmpty = ParseAgentContextBoolean(If(configDict.ContainsKey("ToolResponseCompactOnlyAfterEmpty"), configDict("ToolResponseCompactOnlyAfterEmpty"), ""), "ToolResponseCompactOnlyAfterEmpty", DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY)
+                context.INI_ToolResponseKeepRecentFullCount = ParseAgentContextInteger(If(configDict.ContainsKey("ToolResponseKeepRecentFullCount"), configDict("ToolResponseKeepRecentFullCount"), ""), "ToolResponseKeepRecentFullCount", DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT, 0)
+                context.INI_ToolResultReferenceThresholdChars = ParseAgentContextInteger(If(configDict.ContainsKey("ToolResultReferenceThresholdChars"), configDict("ToolResultReferenceThresholdChars"), ""), "ToolResultReferenceThresholdChars", DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS, 0)
+                context.INI_ToolResultReferencePreviewChars = ParseAgentContextInteger(If(configDict.ContainsKey("ToolResultReferencePreviewChars"), configDict("ToolResultReferencePreviewChars"), ""), "ToolResultReferencePreviewChars", DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS, 0)
+                context.INI_SubAgentLargeToolResponseThresholdChars = ParseAgentContextInteger(If(configDict.ContainsKey("SubAgentLargeToolResponseThresholdChars"), configDict("SubAgentLargeToolResponseThresholdChars"), ""), "SubAgentLargeToolResponseThresholdChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS, 1)
+                context.INI_SubAgentLargeToolResponseExcerptChars = ParseAgentContextInteger(If(configDict.ContainsKey("SubAgentLargeToolResponseExcerptChars"), configDict("SubAgentLargeToolResponseExcerptChars"), ""), "SubAgentLargeToolResponseExcerptChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS, 0)
+                context.INI_ContextExpandDefaultChars = ParseAgentContextInteger(If(configDict.ContainsKey("ContextExpandDefaultChars"), configDict("ContextExpandDefaultChars"), ""), "ContextExpandDefaultChars", DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS, 1)
+                context.INI_ContextExpandMaxChars = ParseAgentContextInteger(If(configDict.ContainsKey("ContextExpandMaxChars"), configDict("ContextExpandMaxChars"), ""), "ContextExpandMaxChars", DEFAULT_CONTEXT_EXPAND_MAX_CHARS, 1)
+                context.INI_EvidenceReplayCoreMaxChars = ParseAgentContextInteger(If(configDict.ContainsKey("EvidenceReplayCoreMaxChars"), configDict("EvidenceReplayCoreMaxChars"), ""), "EvidenceReplayCoreMaxChars", DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS, 1)
+                context.INI_EvidenceReplayMaxExactStringChars = ParseAgentContextInteger(If(configDict.ContainsKey("EvidenceReplayMaxExactStringChars"), configDict("EvidenceReplayMaxExactStringChars"), ""), "EvidenceReplayMaxExactStringChars", DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS, 0)
+                context.INI_EvidenceReplayPreferredArrayItemProperties = ParseAgentContextInteger(If(configDict.ContainsKey("EvidenceReplayPreferredArrayItemProperties"), configDict("EvidenceReplayPreferredArrayItemProperties"), ""), "EvidenceReplayPreferredArrayItemProperties", DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES, 1)
                 context.INI_ToolResponsePayloadBudgetChars = If(configDict.ContainsKey("ToolResponsePayloadBudgetChars"), CInt(configDict("ToolResponsePayloadBudgetChars")), DEFAULT_TOOL_RESPONSE_PAYLOAD_BUDGET_CHARS)
                 context.INI_BudgetMediumCompactionThresholdChars = If(configDict.ContainsKey("BudgetMediumCompactionThresholdChars"), CInt(configDict("BudgetMediumCompactionThresholdChars")), DEFAULT_BUDGET_MEDIUM_COMPACTION_THRESHOLD_CHARS)
                 context.INI_BudgetAggressiveCompactionThresholdChars = If(configDict.ContainsKey("BudgetAggressiveCompactionThresholdChars"), CInt(configDict("BudgetAggressiveCompactionThresholdChars")), DEFAULT_BUDGET_AGGRESSIVE_COMPACTION_THRESHOLD_CHARS)
@@ -1090,6 +1106,28 @@ Namespace SharedLibrary
             Return Result
         End Function
 
+
+        Public Shared Function ParseAgentContextInteger(value As System.String, settingKey As System.String,
+                                                        defaultValue As System.Int32, minimum As System.Int32,
+                                                        Optional allowZero As System.Boolean = False) As System.Int32
+            If System.String.IsNullOrWhiteSpace(value) Then Return defaultValue
+            Dim parsed As System.Int32
+            If Not System.Int32.TryParse(value.Trim(), System.Globalization.NumberStyles.Integer,
+                                         System.Globalization.CultureInfo.InvariantCulture, parsed) OrElse (parsed < minimum AndAlso Not (allowZero AndAlso parsed = 0)) Then
+                Throw New System.ArgumentOutOfRangeException(settingKey, "Expected an integer of at least " & minimum.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+            End If
+            Return parsed
+        End Function
+
+        Public Shared Function ParseAgentContextBoolean(value As System.String, settingKey As System.String,
+                                                        defaultValue As System.Boolean) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(value) Then Return defaultValue
+            Select Case value.Trim().ToLowerInvariant()
+                Case "true", "yes", "1" : Return True
+                Case "false", "no", "0" : Return False
+                Case Else : Throw New System.ArgumentException("Expected True or False.", settingKey)
+            End Select
+        End Function
 
     End Class
 End Namespace

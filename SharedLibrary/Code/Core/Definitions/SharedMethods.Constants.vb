@@ -589,6 +589,22 @@ Namespace SharedLibrary
 
         Public Const DEFAULT_TOOLING_MAXIMUMITERATIONS As Integer = Agents.DefaultMaxToolIterations
         Public Const DEFAULT_BOOL_TOOLINGLOGWINDOW As Boolean = False
+        Public Const DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS As System.Int32 = Agents.ToolingConstants.AutoPilotLogDiagnosticsMaxInputChars
+        Public Const DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS As System.Int32 = Agents.ToolingConstants.TextAnalyzeMaxSourceChars
+        Public Const DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS As System.Int32 = Agents.ToolingConstants.TextAnalyzeMaxInstructionChars
+        Public Const DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS As System.Int32 = Agents.ToolingConstants.TextAnalyzeMaxAdditionalContextChars
+        Public Const DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS As System.Int32 = Agents.ToolingConstants.ToolResponseRecoveryBudgetChars
+        Public Const DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY As System.Boolean = Agents.ToolingConstants.ToolResponseCompactOnlyAfterEmpty
+        Public Const DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT As System.Int32 = Agents.ToolingConstants.ToolResponseKeepRecentFullCount
+        Public Const DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS As System.Int32 = Agents.ToolingConstants.ToolResultReferenceThresholdChars
+        Public Const DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS As System.Int32 = Agents.ToolingConstants.ToolResultReferencePreviewChars
+        Public Const DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS As System.Int32 = Agents.ToolingConstants.SubAgentLargeToolResponseThresholdChars
+        Public Const DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS As System.Int32 = Agents.ToolingConstants.SubAgentLargeToolResponseExcerptChars
+        Public Const DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS As System.Int32 = Agents.ToolingConstants.ContextExpandDefaultChars
+        Public Const DEFAULT_CONTEXT_EXPAND_MAX_CHARS As System.Int32 = Agents.ToolingConstants.ContextExpandMaxChars
+        Public Const DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS As System.Int32 = Agents.ToolingConstants.EvidenceReplayCoreMaxChars
+        Public Const DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS As System.Int32 = Agents.ToolingConstants.EvidenceReplayMaxExactStringChars
+        Public Const DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES As System.Int32 = Agents.ToolingConstants.EvidenceReplayPreferredArrayItemProperties
         Public Const DEFAULT_TOOL_RESPONSE_PAYLOAD_BUDGET_CHARS As Integer = Agents.ToolingConstants.ToolResponsePayloadBudgetChars
         Public Const DEFAULT_BUDGET_MEDIUM_COMPACTION_THRESHOLD_CHARS As Integer = Agents.ToolingConstants.BudgetMediumCompactionThresholdChars
         Public Const DEFAULT_BUDGET_AGGRESSIVE_COMPACTION_THRESHOLD_CHARS As Integer = Agents.ToolingConstants.BudgetAggressiveCompactionThresholdChars

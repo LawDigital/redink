@@ -85,7 +85,7 @@ Public NotInheritable Class HelperClient
             timeout.CancelAfter(System.TimeSpan.FromSeconds(15))
             Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Get, "llm/models")
                 Using response As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, timeout.Token)
-                    If Not response.IsSuccessStatusCode Then Throw StatusFailure(response.StatusCode)
+                    If Not response.IsSuccessStatusCode Then Throw StatusFailure(response.StatusCode, config)
                     Dim content As String = Await response.Content.ReadAsStringAsync(timeout.Token)
                     Using doc As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(content)
                         Dim records As System.Text.Json.JsonElement
@@ -116,10 +116,14 @@ Public NotInheritable Class HelperClient
         Return root.ValueKind = System.Text.Json.JsonValueKind.Object AndAlso root.TryGetProperty(name, value) AndAlso value.ValueKind = System.Text.Json.JsonValueKind.True
     End Function
 
-    Private Shared Function StatusFailure(status As System.Net.HttpStatusCode) As HelperFailure
+    Private Shared Function IsLoopbackHelper(config As ClientConfig) As Boolean
+        Return New System.Uri(NormalizeHelperUrl(config.HelperUrl)).IsLoopback
+    End Function
+
+    Private Shared Function StatusFailure(status As System.Net.HttpStatusCode, config As ClientConfig) As HelperFailure
         Dim key As String = "desktop.httpError"
         Select Case CInt(status)
-            Case 401, 403 : key = "desktop.authRequired"
+            Case 401, 403 : key = If(IsLoopbackHelper(config), "desktop.localServerDenied", "desktop.authRequired")
             Case 402 : key = "desktop.licenseRequired"
             Case 429 : key = "desktop.rateLimited"
         End Select
@@ -219,7 +223,7 @@ Public NotInheritable Class HelperClient
             timeout.CancelAfter(System.TimeSpan.FromSeconds(15))
             Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Get, "health")
                 Using res As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, timeout.Token)
-                    If Not res.IsSuccessStatusCode Then Throw StatusFailure(res.StatusCode)
+                    If Not res.IsSuccessStatusCode Then Throw StatusFailure(res.StatusCode, config)
                     Dim json As String = Await res.Content.ReadAsStringAsync(timeout.Token)
                     Using doc As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(json)
                         If TextValue(doc.RootElement, "status") <> "ok" Then Throw New HelperFailure("desktop.invalidResponse")
@@ -232,7 +236,7 @@ Public NotInheritable Class HelperClient
                 Using res As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, timeout.Token)
                     result.HttpStatus = CInt(res.StatusCode)
                     If Not res.IsSuccessStatusCode Then
-                        result.LicenseKey = If(CInt(res.StatusCode) = 402, "desktop.licenseRequired", If(CInt(res.StatusCode) = 401 OrElse CInt(res.StatusCode) = 403, "desktop.authRequired", "desktop.configUnavailable"))
+                        result.LicenseKey = If(CInt(res.StatusCode) = 402, "desktop.licenseRequired", If(CInt(res.StatusCode) = 401 OrElse CInt(res.StatusCode) = 403, If(IsLoopbackHelper(config), "desktop.localServerDenied", "desktop.authRequired"), "desktop.configUnavailable"))
                         Return result
                     End If
                     Dim json As String = Await res.Content.ReadAsStringAsync(timeout.Token)
@@ -269,7 +273,7 @@ Public NotInheritable Class HelperClient
                     form.Add(New System.Net.Http.StringContent("true"), "allow_ocr")
                     req.Content = form
                     Using res As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, timeout.Token)
-                        If Not res.IsSuccessStatusCode Then Throw StatusFailure(res.StatusCode)
+                        If Not res.IsSuccessStatusCode Then Throw StatusFailure(res.StatusCode, config)
                         Dim content As String = Await res.Content.ReadAsStringAsync(timeout.Token)
                         Using doc As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(content)
                             Dim payload As System.Text.Json.JsonElement = doc.RootElement
@@ -311,7 +315,7 @@ Public NotInheritable Class HelperClient
         Using req As System.Net.Http.HttpRequestMessage = CreateRequest(config, System.Net.Http.HttpMethod.Post, "llm/chat")
             req.Content = New System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json")
             Using res As System.Net.Http.HttpResponseMessage = Await Http.SendAsync(req, cancellation)
-                If Not res.IsSuccessStatusCode Then Throw StatusFailure(res.StatusCode)
+                If Not res.IsSuccessStatusCode Then Throw StatusFailure(res.StatusCode, config)
                 Dim response As String = Await res.Content.ReadAsStringAsync(cancellation)
                 If config.ShowLlmDebug Then LastResponse = response
                 Using doc As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(response)

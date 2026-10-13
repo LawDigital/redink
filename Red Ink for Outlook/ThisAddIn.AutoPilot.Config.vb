@@ -177,6 +177,12 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property LogDiagnosticsReportEmail As String = ""
 
+        ''' <summary>Retained compatibility field; normal diagnostics are now one daily digest at 20:00 local time.</summary>
+        Public Property LogDiagnosticsReportIntervalDays As System.Int32 = 1
+
+        ''' <summary>Optional input character cap per analysis call; 0 analyses the complete log.</summary>
+        Public Property LogDiagnosticsMaxInputChars As System.Int32 = 0
+
 
     End Class
 
@@ -416,8 +422,13 @@ Partial Public Class ThisAddIn
             .Value = saved.ThreadRetentionDays.ToString()
         }
         Dim pLogDiagnosticsReportEmail As New InputParameter() With {
-            .Name = "Engineering diagnostics report recipient (email; empty = disabled)",
+            .Name = "Engineering diagnostics recipient (confirmed High/Critical only; daily digest at 20:00 local time; new security issues immediately; empty = disabled)",
             .Value = If(saved.LogDiagnosticsReportEmail, "")
+        }
+
+        Dim pLogDiagnosticsMaxInputChars As New InputParameter() With {
+            .Name = "Engineering diagnostics maximum log characters per call (0 = complete log; otherwise at least 10000; positive AutoPilotLogDiagnosticsMaxInputChars in redink.ini overrides this preference)",
+            .Value = saved.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture)
         }
 
         Dim paramsList As New List(Of InputParameter) From {
@@ -433,7 +444,8 @@ Partial Public Class ThisAddIn
             pEnablePrivacyProtection,
             pIncludeSourcesFooter,
             pThreadRetentionDays,
-            pLogDiagnosticsReportEmail
+            pLogDiagnosticsReportEmail,
+            pLogDiagnosticsMaxInputChars
         }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -504,6 +516,15 @@ Partial Public Class ThisAddIn
         If Integer.TryParse(pThreadRetentionDays.Value?.ToString(), threadRetentionDays) AndAlso threadRetentionDays >= 0 Then
             config.ThreadRetentionDays = threadRetentionDays
         End If
+
+        config.LogDiagnosticsReportIntervalDays = 1
+
+        Dim diagnosticsMaxInputChars As System.Int32
+        If Not System.Int32.TryParse(pLogDiagnosticsMaxInputChars.Value?.ToString(), diagnosticsMaxInputChars) OrElse diagnosticsMaxInputChars < 0 OrElse (diagnosticsMaxInputChars > 0 AndAlso diagnosticsMaxInputChars < 10000) Then
+            ShowCustomMessageBox("The diagnostics input limit must be 0 (complete log) or a whole number of at least 10000 characters.", AN)
+            Return Nothing
+        End If
+        config.LogDiagnosticsMaxInputChars = diagnosticsMaxInputChars
 
         Dim diagnosticsRecipientInput As System.String = If(pLogDiagnosticsReportEmail.Value?.ToString(), System.String.Empty).Trim()
         If diagnosticsRecipientInput.Length > 0 Then
@@ -596,7 +617,7 @@ Partial Public Class ThisAddIn
             "  person@example.com = ONLY skill_example || Always answer through this skill." & vbCrLf & vbCrLf &
             "Combined example:" & vbCrLf &
             "  *@vischer.com = *, designs=block, design_sets=block, disclaimer=""Confidential.\nFor the intended recipient only.""" & vbCrLf & vbCrLf &
-            "The policy is re-read for each new AutoPilot mail. It does not change intake filters or the auto-send whitelist. Leave empty to disable per-sender policy restrictions.",
+            "The policy is re-read for each new AutoPilot mail. It does not change intake filters or the auto-send whitelist. AutoPilotLogTopics.txt is automatically created beside this file for diagnostics exclusions and WATCH topics. Leave empty to disable per-sender policy restrictions.",
             $"{AN6} AutoPilot — Per-Sender Rules", True, defaultPolicyPath)
         If policyInput Is Nothing Then Return Nothing
         config.SenderToolPolicyPath = If(String.IsNullOrWhiteSpace(policyInput), "", policyInput.Trim())
@@ -631,6 +652,8 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
         summaryBuilder.AppendLine($"Sender tool policy: {If(String.IsNullOrWhiteSpace(config.SenderToolPolicyPath), "disabled", config.SenderToolPolicyPath)}")
         summaryBuilder.AppendLine($"Engineering diagnostics: {If(String.IsNullOrWhiteSpace(config.LogDiagnosticsReportEmail), "disabled", "enabled → " & config.LogDiagnosticsReportEmail)}")
+        summaryBuilder.AppendLine("Engineering diagnostics: one collected High/Critical report at 20:00 local time; no empty report; confirmed new security findings immediately. Topics: AutoPilotLogTopics.txt beside the per-sender rules (otherwise %APPDATA%\RedInk).")
+        summaryBuilder.AppendLine("Engineering diagnostics input: " & If(config.LogDiagnosticsMaxInputChars = 0, "complete log in one call", config.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture) & " characters per part") & "; at most two failed analyses per run.")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -813,6 +836,8 @@ Partial Public Class ThisAddIn
         My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
         My.Settings.AP_SenderToolPolicyPath = If(config.SenderToolPolicyPath, "")
         My.Settings.AP_ThreadRetentionDays = config.ThreadRetentionDays
+        My.Settings.AP_LogDiagnosticsMaxInputChars = config.LogDiagnosticsMaxInputChars
+        My.Settings.AP_LogDiagnosticsReportIntervalDays = 1
         My.Settings.AP_LogDiagnosticsReportEmail = If(config.LogDiagnosticsReportEmail, "")
 
         ' Persist the explicit user selection exactly as before. In addition, persist the
@@ -864,6 +889,8 @@ Partial Public Class ThisAddIn
         config.SenderToolPolicyPath = If(My.Settings.AP_SenderToolPolicyPath, "")
         config.ThreadRetentionDays = If(My.Settings.AP_ThreadRetentionDays >= 0, My.Settings.AP_ThreadRetentionDays, 0)
         config.LogDiagnosticsReportEmail = If(My.Settings.AP_LogDiagnosticsReportEmail, "")
+        config.LogDiagnosticsMaxInputChars = If(My.Settings.AP_LogDiagnosticsMaxInputChars >= 10000, My.Settings.AP_LogDiagnosticsMaxInputChars, 0)
+        config.LogDiagnosticsReportIntervalDays = 1
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

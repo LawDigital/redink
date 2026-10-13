@@ -94,6 +94,7 @@
   "desktop.serverChanged": "Serveur modifié : les identifiants existants et une clé API inchangée ne seront pas transférés.",
   "desktop.httpError": "Le helper a refusé la demande.",
   "desktop.authRequired": "Accès refusé. Vérifiez la clé API et, si nécessaire, l’enregistrement de l’appareil.",
+  "desktop.localServerDenied": "Le Helper local a refusé la requête. Une clé API n’est pas obligatoire par principe sur localhost ; vérifiez la configuration du serveur.",
   "desktop.licenseRequired": "Le helper exige une licence valide. Vérifiez le nom d’utilisateur de licence.",
   "desktop.rateLimited": "Trop de demandes. Réessayez plus tard.",
   "desktop.invalidInvite": "Collez le lien d’enregistrement valide et complet.",
