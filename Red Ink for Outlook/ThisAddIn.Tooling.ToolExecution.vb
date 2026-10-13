@@ -263,6 +263,7 @@ Partial Public Class ThisAddIn
                             If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
                                 response.Success = False
                                 response.ErrorMessage = toolErrorMessage
+                                ApplyStructuredAgentResult(response, context)
                                 ToolingFileLogger.LogWarn(
                                     "SSE tool service returned a logical error.",
                                     details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -351,6 +352,7 @@ Partial Public Class ThisAddIn
                             If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
                                 response.Success = False
                                 response.ErrorMessage = toolErrorMessage
+                                ApplyStructuredAgentResult(response, context)
                                 ToolingFileLogger.LogWarn(
                                     "MCP Streamable HTTP tool service returned a logical error.",
                                     details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -449,6 +451,7 @@ Partial Public Class ThisAddIn
                     If TryExtractToolServiceErrorMessage(result, toolErrorMessage) Then
                         response.Success = False
                         response.ErrorMessage = toolErrorMessage
+                        ApplyStructuredAgentResult(response, context)
                         ToolingFileLogger.LogWarn(
                             "Tool service returned a logical error.",
                             details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -481,66 +484,42 @@ Partial Public Class ThisAddIn
 
 
 
-    Private Function TryExtractToolServiceErrorMessage(rawResponse As String, ByRef errorMessage As String) As Boolean
-        errorMessage = ""
-
-        If String.IsNullOrWhiteSpace(rawResponse) Then
-            Return False
+    Private Function TryExtractToolServiceErrorMessage(rawResponse As System.String, ByRef errorMessage As System.String) As System.Boolean
+        errorMessage = System.String.Empty
+        If System.String.IsNullOrWhiteSpace(rawResponse) Then Return False
+        Dim errorCode As System.String = System.String.Empty
+        Dim resultKind As System.String = System.String.Empty
+        If SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(rawResponse, errorCode, resultKind) Then
+            If Not SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorMessage(rawResponse, errorMessage) Then
+                errorMessage = "Tool service reported failure: " & errorCode
+            End If
+            Return True
         End If
-
         Try
-            Dim root As JObject = JObject.Parse(rawResponse)
-
-            Dim errorToken As JToken = root("error")
-            If errorToken IsNot Nothing Then
-                Dim message As String = If(errorToken("message"), "").ToString().Trim()
-                Dim code As String = If(errorToken("code"), "").ToString().Trim()
-
-                If message = "" Then
-                    message = errorToken.ToString(Formatting.None)
-                End If
-
-                errorMessage = If(code <> "", $"{code}: {message}", message)
-                Return True
-            End If
-
-            Dim isErrorToken As JToken = root.SelectToken("result.isError")
-            Dim isError As Boolean = False
-
-            If isErrorToken IsNot Nothing Then
-                If isErrorToken.Type = JTokenType.Boolean Then
-                    isError = isErrorToken.Value(Of Boolean)()
-                Else
-                    Boolean.TryParse(isErrorToken.ToString(), isError)
-                End If
-            End If
-
-            If Not isError Then
-                Return False
-            End If
-
-            Dim messages As New List(Of String)()
-            Dim contentArray As JArray = TryCast(root.SelectToken("result.content"), JArray)
-
-            If contentArray IsNot Nothing Then
-                For Each item As JToken In contentArray
-                    Dim text As String = If(item("text"), "").ToString().Trim()
-                    If text <> "" Then
-                        messages.Add(text)
+            Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(rawResponse)
+            Dim result As Newtonsoft.Json.Linq.JObject = TryCast(root("result"), Newtonsoft.Json.Linq.JObject)
+            If root("isError") IsNot Nothing OrElse result Is Nothing Then result = root
+            Dim isError As System.Boolean = False
+            Dim isErrorToken As Newtonsoft.Json.Linq.JToken = result("isError")
+            If isErrorToken Is Nothing OrElse Not System.Boolean.TryParse(isErrorToken.ToString().Trim(), isError) OrElse Not isError Then Return False
+            ' Recognition is authoritative even when the optional human-readable content is malformed.
+            errorMessage = "Tool service returned an error."
+            Dim messages As New System.Collections.Generic.List(Of System.String)()
+            Dim content As Newtonsoft.Json.Linq.JArray = TryCast(result("content"), Newtonsoft.Json.Linq.JArray)
+            If content IsNot Nothing Then
+                For Each item As Newtonsoft.Json.Linq.JToken In content
+                    Dim entry As Newtonsoft.Json.Linq.JObject = TryCast(item, Newtonsoft.Json.Linq.JObject)
+                    Dim textToken As Newtonsoft.Json.Linq.JToken = If(entry Is Nothing, Nothing, entry("text"))
+                    If textToken IsNot Nothing AndAlso textToken.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                        Dim message As System.String = textToken.Value(Of System.String)().Trim()
+                        If message <> System.String.Empty Then messages.Add(message)
                     End If
                 Next
             End If
-
-            If messages.Count > 0 Then
-                errorMessage = String.Join(" ", messages)
-            Else
-                Dim resultToken As JToken = root("result")
-                errorMessage = If(resultToken Is Nothing, "Tool service returned an error.", resultToken.ToString(Formatting.None))
-            End If
-
+            If messages.Count > 0 Then errorMessage = System.String.Join(" ", messages)
             Return True
-        Catch
-            Return False
+        Catch ex As System.Exception
+            Return errorMessage <> System.String.Empty
         End Try
     End Function
 

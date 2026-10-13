@@ -32,7 +32,8 @@ Namespace Agents
         ''' end-of-content normalization intentionally match Execute().
         ''' </summary>
         Public Shared Function TryBuildCanonicalWindowKey(arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
-                                                          ByRef windowKey As System.String) As System.Boolean
+                                                          ByRef windowKey As System.String,
+                                                          Optional context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext = Nothing) As System.Boolean
             windowKey = System.String.Empty
 
             Dim ref As System.String = GetString(arguments, "result_ref")
@@ -46,12 +47,11 @@ Namespace Agents
 
             Dim body As System.String = If(stored.FullContent, System.String.Empty)
             Dim requestedStart As System.Int32 = GetInt(arguments, "start_char", 0)
-            Dim requestedMax As System.Int32 = NormalizeMaxChars(GetInt(arguments, "max_chars", 8000))
-            Dim normalizedStart As System.Int32 =
-                System.Math.Max(0, System.Math.Min(requestedStart, body.Length))
-            Dim returnedChars As System.Int32 =
-                System.Math.Min(requestedMax, body.Length - normalizedStart)
-            Dim nextOffset As System.Int32 = normalizedStart + returnedChars
+            Dim requestedMax As System.Int32 = NormalizeMaxChars(GetInt(arguments, "max_chars", GetDefaultWindowChars(context)), context)
+            Dim normalizedStart As System.Int32
+            Dim returnedChars As System.Int32
+            Dim nextOffset As System.Int32
+            If Not TryNormalizeWindow(body, requestedStart, requestedMax, normalizedStart, returnedChars, nextOffset) Then Return False
 
             windowKey = BuildCanonicalWindowKey(ref, normalizedStart, nextOffset)
             Return True
@@ -105,8 +105,35 @@ Namespace Agents
                    nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture)
         End Function
 
-        Private Shared Function NormalizeMaxChars(value As System.Int32) As System.Int32
-            Return System.Math.Min(System.Math.Max(value, 500), 100000)
+        Private Shared Function GetMaximumWindowChars(context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext) As System.Int32
+            Return System.Math.Max(1, If(context Is Nothing, ToolingConstants.ContextExpandMaxChars, context.INI_ContextExpandMaxChars))
+        End Function
+
+        Private Shared Function GetDefaultWindowChars(context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext) As System.Int32
+            Return NormalizeMaxChars(If(context Is Nothing, ToolingConstants.ContextExpandDefaultChars, context.INI_ContextExpandDefaultChars), context)
+        End Function
+
+        Private Shared Function NormalizeMaxChars(value As System.Int32, context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext) As System.Int32
+            Return System.Math.Min(System.Math.Max(value, 1), GetMaximumWindowChars(context))
+        End Function
+
+        Public Shared Function TryNormalizeWindow(body As System.String, requestedStart As System.Int32,
+                                                   maximumChars As System.Int32, ByRef normalizedStart As System.Int32,
+                                                   ByRef returnedChars As System.Int32, ByRef nextOffset As System.Int32) As System.Boolean
+            normalizedStart = System.Math.Max(0, System.Math.Min(requestedStart, body.Length))
+            If normalizedStart > 0 AndAlso normalizedStart < body.Length AndAlso
+               System.Char.IsLowSurrogate(body(normalizedStart)) AndAlso System.Char.IsHighSurrogate(body(normalizedStart - 1)) Then
+                normalizedStart -= 1
+            End If
+            returnedChars = System.Math.Min(maximumChars, body.Length - normalizedStart)
+            nextOffset = normalizedStart + returnedChars
+            If nextOffset > normalizedStart AndAlso nextOffset < body.Length AndAlso
+               System.Char.IsHighSurrogate(body(nextOffset - 1)) AndAlso System.Char.IsLowSurrogate(body(nextOffset)) Then
+                If returnedChars = 1 Then Return False
+                returnedChars -= 1
+                nextOffset -= 1
+            End If
+            Return True
         End Function
 
         Private Shared Function TryParseInt32Token(token As Newtonsoft.Json.Linq.JToken,
@@ -121,14 +148,16 @@ Namespace Agents
                 value)
         End Function
 
-        Public Shared Function Build() As SharedLibrary.ModelConfig
+        Public Shared Function Build(Optional context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext = Nothing) As SharedLibrary.ModelConfig
+            Dim maxWindow As System.Int32 = GetMaximumWindowChars(context)
+            Dim defaultWindow As System.Int32 = GetDefaultWindowChars(context)
             Dim def As String =
                 "{""name"":""" & ToolName & """," &
                 """description"":""Retrieve a character window from a large tool result that was stored by reference. Large results are replaced in context by a short 'result_ref' plus a preview; call this to read more of that stored content on demand.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """result_ref"":{""type"":""string"",""description"":""The result_ref returned in a prior tool result envelope.""}," &
-                """start_char"":{""type"":""integer"",""description"":""Zero-based character offset to start reading from. Defaults to 0.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Maximum number of characters to return (500-100000). Defaults to 8000.""}" &
+                """start_char"":{""type"":""integer"",""description"":""Zero-based UTF-16 character-unit offset to start reading from. Defaults to 0; the host keeps surrogate pairs intact and reports normalized ranges.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Maximum number of UTF-16 character units to return (1-" & maxWindow.ToString(System.Globalization.CultureInfo.InvariantCulture) & "). Defaults to " & defaultWindow.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".""}" &
                 "},""required"":[""result_ref""],""additionalProperties"":false}}"
 
             Return New SharedLibrary.ModelConfig() With {
@@ -142,10 +171,10 @@ Namespace Agents
             }
         End Function
 
-        Public Shared Function Execute(arguments As Dictionary(Of String, Object)) As String
+        Public Shared Function Execute(arguments As Dictionary(Of String, Object), Optional context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext = Nothing) As String
             Dim ref As String = GetString(arguments, "result_ref")
             Dim startChar As Integer = GetInt(arguments, "start_char", 0)
-            Dim maxChars As Integer = NormalizeMaxChars(GetInt(arguments, "max_chars", 8000))
+            Dim maxChars As Integer = NormalizeMaxChars(GetInt(arguments, "max_chars", GetDefaultWindowChars(context)), context)
 
             Dim stored As ToolResultStore.StoredResult = Nothing
             If Not ToolResultStore.TryGetForWorkflow(
@@ -164,21 +193,40 @@ Namespace Agents
             ' are derived from the same immutable snapshot of this stored result.
             Dim body As System.String = If(stored.FullContent, System.String.Empty)
             Dim totalChars As System.Int32 = body.Length
-            Dim normalizedStart As System.Int32 = System.Math.Max(0, System.Math.Min(startChar, totalChars))
-            Dim returnedChars As System.Int32 = System.Math.Min(maxChars, totalChars - normalizedStart)
+            Dim normalizedStart As System.Int32
+            Dim returnedChars As System.Int32
+            Dim nextOffset As System.Int32
+            If Not TryNormalizeWindow(body, startChar, maxChars, normalizedStart, returnedChars, nextOffset) Then
+                Return New JObject(
+                    New JProperty("ok", False),
+                    New JProperty("error", New JObject(
+                        New JProperty("code", "window_limit_too_small"),
+                        New JProperty("message", "This window would split a UTF-16 surrogate pair. Request at least two characters and configure ContextExpandMaxChars accordingly; the original is retained.")))
+                ).ToString(Newtonsoft.Json.Formatting.None)
+            End If
             Dim window As System.String = body.Substring(normalizedStart, returnedChars)
-            Dim nextOffset As System.Int32 = normalizedStart + returnedChars
 
             Return New JObject(
                 New JProperty("ok", True),
                 New JProperty("result_ref", ref),
                 New JProperty("tool", stored.ToolName),
+                New JProperty("content_complete", normalizedStart = 0 AndAlso nextOffset = totalChars),
+                New JProperty("window_complete", True),
+                New JProperty("is_semantic_summary", False),
+                New JProperty("sha256", stored.ContentHash),
+                New JProperty("hash_scope", "stored_tool_result"),
+                New JProperty("character_unit", "utf16_code_units"),
+                New JProperty("requested_start_char", startChar),
+                New JProperty("representation", "source_window"),
+                New JProperty("full_content_available", True),
+                New JProperty("expires_utc", stored.ExpiresUtc),
+                New JProperty("retrieval_required", "This is only the disclosed range. Whole-source tasks must inspect all required ranges; do not infer unread content. For long sources prefer complete file export and isolated file analysis rather than source dumps into the parent context."),
                 New JProperty("content_window", window),
                 New JProperty("start_char", normalizedStart),
                 New JProperty("returned_chars", returnedChars),
                 New JProperty("total_chars", totalChars),
                 New JProperty("next_offset", nextOffset),
-                New JProperty("truncated", nextOffset < totalChars)
+                New JProperty("truncated", normalizedStart > 0 OrElse nextOffset < totalChars)
             ).ToString(Newtonsoft.Json.Formatting.None)
         End Function
 

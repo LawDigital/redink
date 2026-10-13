@@ -540,8 +540,10 @@ Namespace Agents
             Dim maxChars = GetInt(args, "max_chars", 0)
             Dim truncated = False
             If maxChars > 0 AndAlso text.Length > maxChars Then
-                text = text.Substring(0, maxChars)
-                truncated = True
+                Dim preview As Newtonsoft.Json.Linq.JObject = ToolResultStore.BuildSourcePreview(
+                    WorkflowContinuity.CurrentWorkflowId, ToolRead, text, maxChars, p)
+                preview("size") = fi.Length
+                Return preview.ToString(Newtonsoft.Json.Formatting.None)
             End If
             Return JsonConvert.SerializeObject(New With {
                 Key .path = p, Key .size = fi.Length, Key .truncated = truncated, Key .text = text
@@ -588,8 +590,11 @@ Namespace Agents
                     Dim text = File.ReadAllText(p, Encoding.UTF8)
                     Dim truncated = False
                     If maxChars > 0 AndAlso text.Length > maxChars Then
-                        text = text.Substring(0, maxChars)
-                        truncated = True
+                        Dim preview As Newtonsoft.Json.Linq.JObject = ToolResultStore.BuildSourcePreview(
+                            WorkflowContinuity.CurrentWorkflowId, ToolReadMany, text, maxChars, p)
+                        preview("size") = fi.Length
+                        items.Add(preview)
+                        Continue For
                     End If
 
                     items.Add(New With {
@@ -981,7 +986,7 @@ Namespace Agents
                 """parameters"":{""type"":""object""," &
                 """properties"":{" &
                 """path"":{""type"":""string"",""description"":""Workspace-relative path.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length (0 = no cap).""}}," &
+                """max_chars"":{""type"":""integer"",""description"":""Optional inline-preview cap (0 = no cap). Omitted text is preserved under result_ref; retrieve required ranges with context_expand. Storage failure returns the full text.""}}," &
                 """required"":[""path""]}}"
 
             Return New ModelConfig() With {
@@ -1002,7 +1007,7 @@ Namespace Agents
                 """parameters"":{""type"":""object""," &
                 """properties"":{" &
                 """paths"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Workspace-relative paths to read.""}," &
-                """max_chars_per_file"":{""type"":""integer"",""description"":""Optional cap on returned text length for each file (0 = no cap).""}," &
+                """max_chars_per_file"":{""type"":""integer"",""description"":""Optional inline-preview cap per file (0 = no cap). Omitted text is preserved under result_ref; retrieve required ranges with context_expand. Storage failure returns the full text.""}," &
                 """max_files"":{""type"":""integer"",""description"":""Maximum files to process from 'paths' (default 20, capped 100).""}}," &
                 """required"":[""paths""]}}"
 

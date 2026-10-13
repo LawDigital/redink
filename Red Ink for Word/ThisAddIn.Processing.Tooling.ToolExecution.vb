@@ -188,7 +188,7 @@ Partial Public Class ThisAddIn
                     Dim cachedResult As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
                     If context.WorkspaceExtractionRefs IsNot Nothing AndAlso
                        context.WorkspaceExtractionRefs.TryGetValue(fullPath, cachedRef) AndAlso
-                       SharedLibrary.Agents.ToolResultStore.TryGet(cachedRef, cachedResult) Then
+                       SharedLibrary.Agents.ToolResultStore.TryGetForWorkflow(cachedRef, context.WorkflowId, cachedResult) Then
                         fullText = If(cachedResult.FullContent, "")
                         extractionRef = cachedRef
                     Else
@@ -208,6 +208,10 @@ Partial Public Class ThisAddIn
 
                         Dim stored = SharedLibrary.Agents.ToolResultStore.Put(context.WorkflowId, toolCall.ToolName, fullText)
                         extractionRef = stored.Ref
+                        If Not stored.IsDurable Then
+                            startChar = 0
+                            maxChars = fullText.Length
+                        End If
                         If context.WorkspaceExtractionRefs IsNot Nothing Then
                             context.WorkspaceExtractionRefs(fullPath) = extractionRef
                         End If
@@ -220,26 +224,37 @@ Partial Public Class ThisAddIn
                     GoTo __AfterDispatch
                 End Try
 
+                Dim extractionSnapshot As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+                If SharedLibrary.Agents.ToolResultStore.TryGetForWorkflow(extractionRef, context.WorkflowId, extractionSnapshot) AndAlso Not extractionSnapshot.IsDurable Then
+                    startChar = 0
+                    maxChars = fullText.Length
+                End If
                 Dim totalChars As Integer = fullText.Length
-                Dim safeStart As Integer = Math.Min(startChar, totalChars)
-                Dim remaining As Integer = Math.Max(totalChars - safeStart, 0)
-                Dim takeChars As Integer = Math.Min(maxChars, remaining)
-                Dim chunk As String = If(takeChars > 0, fullText.Substring(safeStart, takeChars), "")
-                Dim truncated As Boolean = (safeStart + takeChars) < totalChars
-                Dim nextOffset As Integer = safeStart + takeChars
+                Dim safeStart As System.Int32
+                Dim takeChars As System.Int32
+                Dim nextOffset As System.Int32
+                If Not SharedLibrary.Agents.ContextExpandTool.TryNormalizeWindow(
+                    fullText, startChar, maxChars, safeStart, takeChars, nextOffset) Then
+                    Throw New System.InvalidOperationException("The extraction window cannot represent a complete Unicode character.")
+                End If
+                Dim chunk As System.String = fullText.Substring(safeStart, takeChars)
+                Dim truncated As System.Boolean = safeStart > 0 OrElse nextOffset < totalChars
 
                 Dim payload As New JObject(
         New JProperty("path", If(relPath, "")),
         New JProperty("result_ref", extractionRef),
+        New JProperty("content_complete", safeStart = 0 AndAlso Not truncated),
+        New JProperty("is_semantic_summary", False),
+        New JProperty("durable_snapshot", extractionSnapshot IsNot Nothing AndAlso extractionSnapshot.IsDurable),
         New JProperty("text", chunk),
         New JProperty("excerpt", BuildResultExcerpt(chunk, 800)),
         New JProperty("total_chars", totalChars),
         New JProperty("start_char", safeStart),
         New JProperty("returned_chars", takeChars),
         New JProperty("truncated", truncated),
-        New JProperty("continuation", "The full extraction is cached for this run. If more content is needed, call context_expand with result_ref and a suitable start_char/max_chars window; do not re-extract the file."))
+        New JProperty("continuation", "This is only the disclosed extraction range, not a semantic summary. Use context_expand with result_ref for all task-required ranges before relying on omitted content. A verified durable snapshot survives continuation until expiry; if persistence failed, this response contains the full extraction."))
 
-                If truncated Then
+                If nextOffset < totalChars Then
                     payload("next_offset") = nextOffset
                 End If
 
@@ -323,7 +338,7 @@ Partial Public Class ThisAddIn
 
                         If context.WorkspaceExtractionRefs IsNot Nothing AndAlso
                            context.WorkspaceExtractionRefs.TryGetValue(manyFullPath, cachedManyRef) AndAlso
-                           SharedLibrary.Agents.ToolResultStore.TryGet(cachedManyRef, cachedManyResult) Then
+                           SharedLibrary.Agents.ToolResultStore.TryGetForWorkflow(cachedManyRef, context.WorkflowId, cachedManyResult) Then
                             manyFullText = If(cachedManyResult.FullContent, "")
                             manyRef = cachedManyRef
                         Else
@@ -347,17 +362,22 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        Dim manyReturnedChars As System.Int32 = System.Math.Min(manyMaxCharsPerFile, manyFullText.Length)
+                        Dim manySnapshot As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+                        Dim manyDurable As System.Boolean = SharedLibrary.Agents.ToolResultStore.TryGetForWorkflow(manyRef, context.WorkflowId, manySnapshot) AndAlso manySnapshot.IsDurable
+                        Dim manyReturnedChars As System.Int32 = If(manyDurable, SharedLibrary.Agents.ToolResultStore.GetUnicodeSafePrefixLength(manyFullText, manyMaxCharsPerFile), manyFullText.Length)
                         Dim manyPreview As System.String = If(manyReturnedChars > 0, manyFullText.Substring(0, manyReturnedChars), "")
                         Dim manyTruncated As Boolean = manyReturnedChars < manyFullText.Length
                         manyItems.Add(New With {
                             Key .path = manyFullPath,
                             Key .result_ref = manyRef,
+                            Key .durable_snapshot = manyDurable,
+                            Key .content_complete = Not manyTruncated,
+                            Key .is_semantic_summary = False,
                             Key .total_chars = manyFullText.Length,
                             Key .returned_chars = manyReturnedChars,
                             Key .truncated = manyTruncated,
                             Key .text = manyPreview,
-                            Key .continuation = "Full extraction cached. Use context_expand with result_ref for additional ranges; do not re-extract this file."
+                            Key .continuation = "This may be an incomplete preview, not a semantic summary. Use context_expand with result_ref for every task-required range. If durable_snapshot=false, the full extraction is included here."
                         })
                     Catch ex As System.OperationCanceledException
                         Throw
@@ -416,7 +436,7 @@ Partial Public Class ThisAddIn
             End If
 
             If SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(toolCall.ToolName) Then
-                response.Response = SharedLibrary.Agents.ContextExpandTool.Execute(toolCall.Arguments)
+                response.Response = SharedLibrary.Agents.ContextExpandTool.Execute(toolCall.Arguments, _context)
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
@@ -545,7 +565,7 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
             Else
-                response = Await ExecuteExternalTool(toolCall, toolConfig, context)
+                response = Await ExecuteExternalTool(toolCall, toolConfig, context, cancellationToken)
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
             End If
 
@@ -590,13 +610,14 @@ __AfterDispatch:
     ''' <param name="toolConfig">Tool configuration to apply for this call.</param>
     ''' <param name="context">Tool execution context for logging and diagnostics.</param>
     ''' <returns>Tool response containing the tool service result or an error.</returns>
-    Private Async Function ExecuteExternalTool(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext) As Task(Of ToolResponse)
+    Private Async Function ExecuteExternalTool(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of ToolResponse)
         Dim response As New ToolResponse() With {
             .CallId = toolCall.CallId,
             .ToolName = toolCall.ToolName
         }
 
         Try
+            cancellationToken.ThrowIfCancellationRequested()
             Dim apiCallTemplate = toolConfig.ToolAPICall
             If String.IsNullOrWhiteSpace(apiCallTemplate) Then
                 apiCallTemplate = toolConfig.APICall
@@ -748,6 +769,7 @@ __AfterDispatch:
                     resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
 
                     Try
+                        cancellationToken.ThrowIfCancellationRequested()
                         Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
                             _context,
                             sseBase, apiCall,
@@ -763,6 +785,7 @@ __AfterDispatch:
                             If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
                                 response.Success = False
                                 response.ErrorMessage = toolErrorMessage
+                                ApplyStructuredAgentResult(response, context)
                                 ToolingFileLogger.LogWarn(
                                     "SSE tool service returned a logical error.",
                                     details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -790,6 +813,7 @@ __AfterDispatch:
                         "SSE tool call returned Unauthorized. Forcing MCP OAuth refresh and retrying once.",
                         details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'")
 
+                    cancellationToken.ThrowIfCancellationRequested()
                     Dim sseRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
                     If Not sseRefreshOk Then Exit Do
                 Loop
@@ -825,6 +849,7 @@ __AfterDispatch:
                     resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
 
                     Try
+                        cancellationToken.ThrowIfCancellationRequested()
                         Dim rawResult = Await SharedMethods.ExecuteMCPStreamableToolCall(
                             mcpUrl,
                             apiCall,
@@ -841,6 +866,7 @@ __AfterDispatch:
                             If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
                                 response.Success = False
                                 response.ErrorMessage = toolErrorMessage
+                                ApplyStructuredAgentResult(response, context)
                                 ToolingFileLogger.LogWarn(
                                     "MCP Streamable HTTP tool service returned a logical error.",
                                     details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -870,6 +896,7 @@ __AfterDispatch:
                         "MCP Streamable HTTP tool call returned Unauthorized. Forcing MCP OAuth refresh and retrying once.",
                         details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'")
 
+                    cancellationToken.ThrowIfCancellationRequested()
                     Dim streamRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
                     If Not streamRefreshOk Then Exit Do
                 Loop
@@ -917,7 +944,7 @@ __AfterDispatch:
                     context.Log($"[PERF] Tool LLM timeout elevated: tool={toolCall.ToolName}; baseMs={configuredToolTimeoutMs}; effectiveMs={perCallToolTimeoutMs}.", "diag")
                 End If
 
-                Dim result = Await LLM("", "", "", "", perCallToolTimeoutMs, True, True)
+                Dim result = Await LLM("", "", "", "", perCallToolTimeoutMs, True, True, cancellationToken:=cancellationToken, EnsureUI:=False)
 
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() result ({toolCall.ToolName})", result)
 
@@ -931,6 +958,7 @@ __AfterDispatch:
                     If TryExtractToolServiceErrorMessage(result, toolErrorMessage) Then
                         response.Success = False
                         response.ErrorMessage = toolErrorMessage
+                        ApplyStructuredAgentResult(response, context)
                         ToolingFileLogger.LogWarn(
                             "Tool service returned a logical error.",
                             details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")

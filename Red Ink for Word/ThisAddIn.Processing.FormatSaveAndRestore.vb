@@ -583,14 +583,12 @@ Partial Public Class ThisAddIn
                     Return BuildRevisionAwareInlineText(r, sourceCharacters, phs)
                 End Function
 
+            Dim extractionStage As System.String = "range preparation"
             Try
                 '──────────── 0)  Preparation (range clone, settings) ───────────────
-                Dim rng As Word.Range = workingrange.Duplicate
-                Dim expandedEnd As Boolean = False
-                If rng.End < rng.Document.Content.End - 1 Then
-                    rng.End = rng.End + 1
-                    expandedEnd = True
-                End If
+                ' The supplied end is exclusive. Never borrow a source character from
+                ' outside the selection; marker insertions extend the range explicitly.
+                Dim rng As Microsoft.Office.Interop.Word.Range = workingrange.Duplicate
 
                 ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Prepping selection …")
                 If Cancelled() Then Return rng.Text
@@ -601,6 +599,7 @@ Partial Public Class ThisAddIn
                 Dim origSel As Word.Range = app.Selection.Range.Duplicate
 
                 If DoMarkdown Then
+                    extractionStage = "Markdown formatting"
                     ' 1) Bold + Italic  (paragraph)
                     ReplaceWithinRange(rng,
                             Sub(f)
@@ -733,18 +732,17 @@ Partial Public Class ThisAddIn
                     ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: strike (inline) …")
                     If Cancelled() Then Return rng.Text
 
-                    ReplaceWithinRange_Highlight(Application.Selection.Range, keepParagraphBreakOutside:=True, includeColorInTag:=True)
+                    extractionStage = "highlight formatting"
+                    ReplaceWithinRange_Highlight(rng, keepParagraphBreakOutside:=True, includeColorInTag:=True)
                     ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: highlight (para-like) …")
                     If Cancelled() Then Return rng.Text
 
-                    ReplaceWithinRange_Highlight(Application.Selection.Range, includeColorInTag:=True)
+                    ReplaceWithinRange_Highlight(rng, includeColorInTag:=True)
                     ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: highlight (inline) …")
                     If Cancelled() Then Return rng.Text
                 End If
 
-                If expandedEnd Then
-                    rng.End = rng.End - 1
-                End If
+                extractionStage = "selection and protected-element mapping"
                 rng.Select()
 
                 '──────────── Prepare placeholders ────────────────────────────
@@ -877,6 +875,7 @@ Partial Public Class ThisAddIn
                 If Cancelled() Then Return BuildPartial(rng, placeholders)
 
                 '──────────── Paragraph placeholders (cached COM accessors) (#4)
+                extractionStage = "paragraph format capture"
                 If PreserveParagraphFormatInline AndAlso rng.Paragraphs.Count > 0 Then
                     Dim paraCountLocal As Integer = rng.Paragraphs.Count
                     ReDim paragraphFormat(paraCountLocal - 1)
@@ -939,6 +938,7 @@ Partial Public Class ThisAddIn
                 ProgressScope.Report(current, max:=newMax, label:="Building result …")
 
                 ' ───── Insert placeholders ────────────────────────────────                
+                extractionStage = "protected-element serialization"
                 Dim inlineText As System.String = BuildRevisionAwareInlineText(rng, sourceCharacters, placeholders)
                 ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Done")
                 Return inlineText
@@ -946,8 +946,11 @@ Partial Public Class ThisAddIn
             Catch ex As System.IO.InvalidDataException
                 Throw
             Catch ex As System.Exception
-                Debug.WriteLine("Error in GetTextWithSpecialElementsInline: " & ex.Message)
-                Throw New System.IO.InvalidDataException("Could not safely serialize the selected text and its protected elements; extraction stopped.", ex)
+                System.Diagnostics.Trace.TraceError(
+                    "Error in GetTextWithSpecialElementsInline (" & extractionStage & "): " & ex.ToString())
+                Throw New System.IO.InvalidDataException(
+                    "Could not safely serialize the selected text and its protected elements; extraction stopped. Stage: " &
+                    extractionStage & ". Cause: " & ex.Message, ex)
             Finally
                 app.Options.CheckSpellingAsYouType = oldSpell
                 app.Options.CheckGrammarAsYouType = oldGrammar
@@ -958,8 +961,32 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Generic helper that finds formatted fragments inside a range and wraps them with the provided markers.
+    ''' Restricts a native formatting-search candidate to the still-admitted selection.
     ''' </summary>
+    Private Shared Function TryRestrictFormattingMatch(
+        ByVal matchRange As Microsoft.Office.Interop.Word.Range,
+        ByVal allowedStart As System.Int32,
+        ByVal allowedEnd As System.Int32) As System.Boolean
+
+        If matchRange Is Nothing OrElse allowedEnd <= allowedStart Then Return False
+        Dim matchStart As System.Int32 = matchRange.Start
+        Dim matchEnd As System.Int32 = matchRange.End
+        Dim boundedStart As System.Int32 = System.Math.Max(allowedStart, matchStart)
+        Dim boundedEnd As System.Int32 = System.Math.Min(allowedEnd, matchEnd)
+        If boundedEnd <= boundedStart Then
+            System.Diagnostics.Trace.TraceWarning(
+                $"Word formatting Find returned no selected content: match=[{matchStart},{matchEnd}), allowed=[{allowedStart},{allowedEnd}).")
+            Return False
+        End If
+        If boundedStart <> matchStart OrElse boundedEnd <> matchEnd Then
+            System.Diagnostics.Trace.TraceWarning(
+                $"Word formatting Find restricted to selected content: match=[{matchStart},{matchEnd}), admitted=[{boundedStart},{boundedEnd}).")
+            matchRange.SetRange(Start:=boundedStart, [End]:=boundedEnd)
+        End If
+        Return True
+    End Function
+
+    ''' <summary>Wraps selected formatted fragments with the provided markers.</summary>
     Private Sub ReplaceWithinRange(
     ByVal rng As Microsoft.Office.Interop.Word.Range,
     ByVal configureFind As System.Action(Of Microsoft.Office.Interop.Word.Find),
@@ -1015,22 +1042,23 @@ Partial Public Class ThisAddIn
 
             Dim foundStart As System.Int32 = searchRange.Start
             Dim foundEnd As System.Int32 = searchRange.End
-            Dim foundText As System.String = If(searchRange.Text, System.String.Empty)
-
-            ' Validate native match boundaries before generated markers grow the range.
-            If foundStart < currentPosition OrElse foundEnd > allowedEnd Then
-                Throw New System.InvalidOperationException("Formatting match escaped its source range.")
-            End If
-
             If foundEnd <= foundStart Then
                 currentPosition = System.Math.Min(System.Math.Max(foundStart, currentPosition) + 1, allowedEnd)
                 GoTo ContinueLoop
             End If
 
+            ' Find redefines its range. A returned formatting run is only a candidate:
+            ' admit its intersection before reading text or changing any font/content.
+            If Not TryRestrictFormattingMatch(searchRange, currentPosition, allowedEnd) Then Exit Do
+            foundStart = searchRange.Start
+            foundEnd = searchRange.End
+            Dim foundText As System.String = If(searchRange.Text, System.String.Empty)
+
             Dim endsWithCellMark As System.Boolean = foundText.EndsWith(vbCr & ChrW(7), System.StringComparison.Ordinal)
             Dim isCellMarkOnly As System.Boolean = (foundText = ChrW(7))
             Dim isCrOrCellBoundary As System.Boolean = (foundText = vbCr) OrElse (foundText = vbCr & ChrW(7)) OrElse isCellMarkOnly
 
+            Dim insertedMarkerChars As System.Int32 = 0
             If isWildcard Then
                 Dim rep As System.String = replacementText
                 Dim parts = rep.Replace("^13", System.String.Empty).Split(New System.String() {"\1"}, 2, System.StringSplitOptions.None)
@@ -1073,11 +1101,13 @@ Partial Public Class ThisAddIn
                 If prefixLen > 0 AndAlso groupEnd >= foundStart Then
                     Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
                     groupRange.InsertBefore(prefix)
+                    insertedMarkerChars += prefixLen
                 End If
                 If suffixLen > 0 AndAlso groupEnd >= foundStart Then
                     ' InsertBefore moved the original content end by prefixLen.
                     Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd + prefixLen)
                     groupRange.InsertAfter(suffix)
+                    insertedMarkerChars += suffixLen
                 End If
 
                 If tweakReplacement IsNot Nothing Then
@@ -1146,6 +1176,7 @@ Partial Public Class ThisAddIn
                 If prefixLen > 0 Then
                     Dim openTokPos As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentStart, [End]:=contentStart)
                     openTokPos.InsertBefore(prefix)
+                    insertedMarkerChars += prefixLen
                     contentStart += prefixLen
                     contentEnd += prefixLen
                 End If
@@ -1153,6 +1184,7 @@ Partial Public Class ThisAddIn
                 If suffixLen > 0 Then
                     Dim closeTokPos As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentEnd, [End]:=contentEnd)
                     closeTokPos.InsertAfter(suffix)
+                    insertedMarkerChars += suffixLen
                 End If
 
                 If tweakReplacement IsNot Nothing Then
@@ -1169,7 +1201,11 @@ Partial Public Class ThisAddIn
                 currentPosition = foundEnd + prefixLen + suffixLen
             End If
 
-            allowedEnd = rng.End
+            ' Count only markers actually inserted inside the admitted source span.
+            ' Insertion through a separate range at the exact end must not depend on
+            ' whether Word automatically includes that insertion in this range.
+            allowedEnd += insertedMarkerChars
+            rng.SetRange(Start:=originalStart, [End]:=allowedEnd)
 
 ContinueLoop:
             If currentPosition <= prevPosition Then
@@ -2175,6 +2211,7 @@ ContinueLoop:
                 found = searchRng.Duplicate
             End If
 
+            If Not TryRestrictFormattingMatch(found, currentPos, currentDocEnd) Then Exit While
             Dim foundStart As Integer = found.Start
             Dim foundEnd As Integer = found.End
 

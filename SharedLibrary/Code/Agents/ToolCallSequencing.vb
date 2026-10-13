@@ -89,7 +89,7 @@ Namespace Agents
         ''' one of those tools is advertised.
         ''' </summary>
         Public Const ContextDrawerInstruction As String =
-            "CONTEXT MANAGEMENT: Large tool results may be compacted by reference. The full original stays available through result_ref/context_expand." & vbCrLf &
+            "CONTEXT MANAGEMENT: Every reference_stub/preview/evidence_core is INCOMPLETE, not a semantic summary or proof of unread contents. Retrieve all task-required ranges through context_expand before using omitted information. Prefer exposed file-export and file-analysis capabilities for long documents: keep the complete extract in a file, analyze from that file and return findings, provenance and coverage, rather than routing source dumps through the main loop. Whole-document tasks require complete coverage, not just an opening window or a retrieved reference index. When text_analyze_file is exposed, use input_path for a complete text export or input_result_ref for the complete stored result; neither needs source text copied through the parent context. File-byte hashes and stored-result hashes have different scopes. The full original stays available through result_ref/context_expand until the disclosed expiry; unavailable references must be reported, never reconstructed." & vbCrLf &
             "A compacted result may include an evidence_core. Every scalar value present in evidence_core is copied verbatim from the original result and is authoritative for that value; omitted properties or text are NOT evidence." & vbCrLf &
             "Never reconstruct, interpolate, relocalize, rename, or otherwise alter exact identifiers, numbers, dates, times, statuses, or other factual values that are present in tool evidence. Copy exact values when the task depends on them." & vbCrLf &
             "If a fact required for the answer is not visible exactly in the active replay/evidence_core, you MUST call context_expand with result_ref before relying on that fact. Do not fill missing evidence from plausibility or surrounding context." & vbCrLf &
@@ -99,7 +99,7 @@ Namespace Agents
             "HOST EVIDENCE FINALIZATION REVIEW: One or more source/tool results were compacted during this run. Re-check the draft against the exact values currently visible in tool results/evidence_core. " &
             "Every factual assertion attributed to tool/source evidence must be supported by the visible evidence, including the association between an entity/item and its values; the mere presence of the same value elsewhere is not sufficient. " &
             "Do not invent entries, infer omitted facts, merge neighboring records, or alter exact factual values. If any fact needed by the draft is omitted from the visible evidence, call context_expand for the corresponding result_ref now and verify it before finalizing. " &
-            "If the visible evidence is sufficient, return a corrected final answer now. Do not discuss this review step with the user."
+            "If the task requires whole-source coverage, first establish complete coverage through full file/reference analysis or all required ranges; a preview or reference wrapper is insufficient. If the visible evidence is sufficient for the requested scope, return a corrected final answer now. Do not discuss this review step with the user."
 
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
@@ -370,6 +370,9 @@ Namespace Agents
             Public Property SupersedesArtifactId As String = ""
             Public Property IsExplicitContract As Boolean
             Public Property RegisteredUtc As DateTime
+            Public Property VerifiedContentSha256 As System.String = System.String.Empty
+            Public Property PreservedRevisionPath As System.String = System.String.Empty
+            Public Property VerifiedAfterFailureSequence As System.Int64
             ' Trusted host/tool evidence about what happened to this physical artifact.
             ' "materialized" is added when an existing file is registered. Additional
             ' opaque effects are added only by host-authored tool capabilities after
@@ -384,6 +387,7 @@ Namespace Agents
         ''' inference participates in expected-output matching.
         ''' </summary>
         Public NotInheritable Class ExpectedDeliverableSlot
+            Public Property DeliveryGroupId As System.String = System.String.Empty
             Public Property LogicalDeliverableId As String = ""
             Public Property OutputSlotId As String = ""
             ' Opaque completion effects required in addition to physical existence.
@@ -402,6 +406,7 @@ Namespace Agents
             Public Property AttemptSequence As System.Int64
             Public Property SubstantiveProgressEpoch As System.Int64
             Public Property ArtifactRevisionSequence As System.Int64
+            Public Property ToolResultReferences As System.Collections.Generic.List(Of System.String) = New System.Collections.Generic.List(Of System.String)()
             Public Property OriginalUserRequestRaw As System.String = System.String.Empty
             Public Property LastUserFacingResponse As System.String = System.String.Empty
             Public Property ContinuationKey As System.String = System.String.Empty
@@ -432,6 +437,16 @@ Namespace Agents
             Public Property LastFailureToolErrorHandling As String = String.Empty
             Public Property UnresolvedToolFailures As New List(Of ToolFailureRecord)()
             Private _failureSequence As Long
+
+            ' Expose the authoritative counter without creating a second mutable state.
+            ' Continuation snapshots persist and restore the backing counter explicitly.
+            <Newtonsoft.Json.JsonIgnoreAttribute()>
+            Public ReadOnly Property FailureSequence As System.Int64
+                Get
+                    Return _failureSequence
+                End Get
+            End Property
+
             Private _attemptSequence As Long
             Private _substantiveProgressEpoch As Long
             Private _artifactRevisionSequence As Long
@@ -691,7 +706,8 @@ Namespace Agents
             Public Sub RegisterExpectedDeliverableSlot(
                 logicalDeliverableId As String,
                 outputSlotId As String,
-                Optional requiredEffects As System.Collections.Generic.IEnumerable(Of System.String) = Nothing)
+                Optional requiredEffects As System.Collections.Generic.IEnumerable(Of System.String) = Nothing,
+                Optional deliveryGroupId As System.String = "")
 
                 Dim logicalId As String = If(logicalDeliverableId, "").Trim()
                 Dim slotId As String = If(outputSlotId, "").Trim()
@@ -726,7 +742,8 @@ Namespace Agents
                     New ExpectedDeliverableSlot With {
                         .LogicalDeliverableId = logicalId,
                         .OutputSlotId = slotId,
-                        .RequiredEffects = normalizedEffects
+                        .RequiredEffects = normalizedEffects,
+                        .DeliveryGroupId = If(deliveryGroupId, "").Trim()
                     })
 
                 RequestRequiresCreatedDeliverable = True
@@ -855,6 +872,23 @@ Namespace Agents
                     End If
                 Next
 
+                Dim groups As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+                For Each item As JToken In DirectCast(token, JArray)
+                    Dim obj As JObject = DirectCast(item, JObject)
+                    Dim groupToken As JToken = obj("delivery_group_id")
+                    If groupToken IsNot Nothing AndAlso (groupToken.Type <> JTokenType.String OrElse System.String.IsNullOrWhiteSpace(groupToken.ToString())) Then
+                        failureMessage = "delivery_group_id must be a non-empty string when supplied."
+                        Return False
+                    End If
+                    Dim identity As System.String = New JArray(obj("logical_deliverable_id"), obj("output_slot_id")).ToString(Formatting.None)
+                    Dim groupId As System.String = If(obj.Value(Of System.String)("delivery_group_id"), "").Trim()
+                    Dim priorGroup As System.String = Nothing
+                    If groups.TryGetValue(identity, priorGroup) AndAlso Not System.String.Equals(priorGroup, groupId, System.StringComparison.Ordinal) Then
+                        failureMessage = "Duplicate expected slot declares conflicting delivery groups."
+                        Return False
+                    End If
+                    groups(identity) = groupId
+                Next
                 Return True
             End Function
 
@@ -908,6 +942,8 @@ Namespace Agents
 
                 If ExpectedDeliverableContractLocked Then Return
                 If arguments Is Nothing Then Return
+                Dim contractFailure As System.String = System.String.Empty
+                If Not ValidateExpectedArtifactArguments(arguments, contractFailure) Then Return
 
                 Dim raw As Object = Nothing
                 If Not arguments.TryGetValue("expected_artifacts", raw) OrElse
@@ -960,7 +996,8 @@ Namespace Agents
                             New ExpectedDeliverableSlot With {
                                 .LogicalDeliverableId = logicalId,
                                 .OutputSlotId = slotId,
-                                .RequiredEffects = ParseRequiredEffects(obj("required_effects"))
+                                .RequiredEffects = ParseRequiredEffects(obj("required_effects")),
+                                .DeliveryGroupId = If(obj.Value(Of System.String)("delivery_group_id"), "").Trim()
                             })
                     End If
                 Next
@@ -971,7 +1008,8 @@ Namespace Agents
                     RegisterExpectedDeliverableSlot(
                         pending.LogicalDeliverableId,
                         pending.OutputSlotId,
-                        pending.RequiredEffects)
+                        pending.RequiredEffects,
+                        pending.DeliveryGroupId)
                 Next
             End Sub
 
@@ -1133,7 +1171,8 @@ Namespace Agents
                             New ExpectedDeliverableSlot With {
                                 .LogicalDeliverableId = logicalId,
                                 .OutputSlotId = slotId,
-                                .RequiredEffects = ParseRequiredEffects(obj("required_effects"))
+                                .RequiredEffects = ParseRequiredEffects(obj("required_effects")),
+                                .DeliveryGroupId = If(obj.Value(Of System.String)("delivery_group_id"), "").Trim()
                             })
                     End If
                 Next
@@ -1163,7 +1202,8 @@ Namespace Agents
                                        String.Equals(
                                            If(supplied.OutputSlotId, ""),
                                            If(expected.OutputSlotId, ""),
-                                           StringComparison.Ordinal)
+                                           StringComparison.Ordinal) AndAlso
+                                       System.String.Equals(supplied.DeliveryGroupId, expected.DeliveryGroupId, System.StringComparison.Ordinal)
                             End Function)
 
                     If Not found Then
@@ -1563,6 +1603,17 @@ Namespace Agents
 
             Public Function IsQualifiedFinalArtifactForDelivery(artifact As DeliverableArtifact) As System.Boolean
                 If artifact Is Nothing Then Return False
+                If Not ArtifactDelivery.IsVerifiedArtifactRevisionCurrent(artifact) Then Return False
+                If artifact.VerifiedContentSha256 <> "" AndAlso UnresolvedToolFailures IsNot Nothing Then
+                    Dim affectedScope As System.String = "artifact:" & artifact.LogicalDeliverableId & "|" & artifact.OutputSlotId
+                    For Each failure As ToolFailureRecord In UnresolvedToolFailures
+                        If failure Is Nothing OrElse failure.RecoveryEvidenceObserved OrElse
+                           failure.ToolClassification = ToolCallClassification.ReadOnlyIndependent OrElse
+                           System.String.Equals(failure.ErrorCode, ToolNotExposedInCurrentTurnCode, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                        If failure.Sequence > artifact.VerifiedAfterFailureSequence AndAlso
+                           System.String.Equals(failure.RecoveryScopeKey, affectedScope, System.StringComparison.Ordinal) Then Return False
+                    Next
+                End If
                 If Not HasExpectedDeliverableContract Then Return True
 
                 Dim expected As ExpectedDeliverableSlot = GetExpectedDeliverableSlot(
@@ -1741,6 +1792,7 @@ Namespace Agents
 
                     If System.String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
                     If Not ArtifactSatisfiesExpectedEffects(artifact, expected) Then Continue For
+                    If Not IsQualifiedFinalArtifactForDelivery(artifact) Then Continue For
 
                     Try
                         If System.IO.File.Exists(artifact.SessionPath) Then
@@ -3474,7 +3526,9 @@ Namespace Agents
                                                          Optional lastToolName As String = "",
                                                          Optional lastToolErrorCode As String = "",
                                                          Optional lastToolErrorMessage As String = "",
-                                                         Optional retryable As System.Nullable(Of Boolean) = Nothing) As String
+                                                         Optional retryable As System.Nullable(Of Boolean) = Nothing,
+                                                         Optional completedResults As Newtonsoft.Json.Linq.JArray = Nothing,
+                                                         Optional runState As ToolingRunState = Nothing) As String
             Dim errorObject As New JObject(
                 New JProperty("code", If(errorCode, "")),
                 New JProperty("phase", If(phase, "")),
@@ -3510,6 +3564,29 @@ Namespace Agents
                 errorObject("lastToolFailure") = lastTool.DeepClone()
             End If
 
+            If completedResults IsNot Nothing AndAlso completedResults.Count > 0 Then
+                obj("result") = New JObject(
+                    New JProperty("overall_complete", False),
+                    New JProperty("completed_tool_results", completedResults.DeepClone()),
+                    New JProperty("contract", "Successful tool executions are preserved, not a claim that all deliverables are complete. Reuse successful operation identities, revalidate artifact revisions, and recover only unresolved work. Do not repeat committed side effects."))
+            End If
+            If runState IsNot Nothing AndAlso runState.RegisteredDeliverableArtifacts IsNot Nothing Then
+                Dim snapshots As New JArray()
+                For Each artifact As DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                    If artifact Is Nothing OrElse System.String.IsNullOrWhiteSpace(artifact.PreservedRevisionPath) Then Continue For
+                    snapshots.Add(New JObject(
+                        New JProperty("artifact_id", artifact.ArtifactId),
+                        New JProperty("logical_deliverable_id", artifact.LogicalDeliverableId),
+                        New JProperty("output_slot_id", artifact.OutputSlotId),
+                        New JProperty("preserved_revision_path", artifact.PreservedRevisionPath),
+                        New JProperty("sha256", artifact.VerifiedContentSha256),
+                        New JProperty("current_revision_valid", ArtifactDelivery.IsVerifiedArtifactRevisionCurrent(artifact))))
+                Next
+                If snapshots.Count > 0 Then
+                    If obj("result") Is Nothing Then obj("result") = New JObject(New JProperty("overall_complete", False))
+                    DirectCast(obj("result"), JObject)("revision_snapshots") = snapshots
+                End If
+            End If
             Return obj.ToString(Formatting.None)
         End Function
 
@@ -6493,7 +6570,8 @@ Namespace Agents
             Return System.String.Equals(
                 reason,
                 "complete_with_unresolved_tool_failure",
-                System.StringComparison.OrdinalIgnoreCase)
+                System.StringComparison.OrdinalIgnoreCase) OrElse System.String.Equals(
+                    reason, "unresolved_tool_failure", System.StringComparison.OrdinalIgnoreCase)
         End Function
 
         ''' <summary>

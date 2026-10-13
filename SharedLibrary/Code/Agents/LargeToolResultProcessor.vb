@@ -58,8 +58,9 @@ Namespace Agents
             End If
 
             Dim stored = ToolResultStore.Put(workflowId, toolName, body)
+            If Not stored.IsDurable Then Return body
 
-            Dim previewLength As Integer = Math.Min(Math.Max(previewChars, 0), body.Length)
+            Dim previewLength As System.Int32 = ToolResultStore.GetUnicodeSafePrefixLength(body, previewChars)
             Dim preview As String = body.Substring(0, previewLength)
 
             Dim summary As String = If(modelSummary, "").Trim()
@@ -81,7 +82,7 @@ Namespace Agents
                     "Full content stored by reference. To read more, call context_expand with result_ref='" &
                     stored.Ref & "' and a start_char/max_chars window."))
 
-            Return envelope.ToString(Newtonsoft.Json.Formatting.None)
+            Return ToolResultStore.AnnotateReferenceEnvelope(envelope).ToString(Newtonsoft.Json.Formatting.None)
         End Function
 
         Private Shared Function HasTopLevelReference(body As String) As Boolean

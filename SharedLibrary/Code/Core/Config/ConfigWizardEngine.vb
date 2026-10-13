@@ -633,9 +633,36 @@ Namespace SharedLibrary
         ''' <param name="value">Value to validate.</param>
         ''' <returns>Error message when invalid; otherwise an empty string.</returns>
         Public Shared Function ValidateField(field As WizardField, value As String) As String
+            If System.String.Equals(field.Type, "integer", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not System.String.IsNullOrWhiteSpace(value) Then
+                Dim wholeValue As System.Int32
+                If Not System.Int32.TryParse(value.Trim(), System.Globalization.NumberStyles.Integer,
+                                             System.Globalization.CultureInfo.InvariantCulture, wholeValue) Then
+                    Return "'" & field.Label & "' must be a whole 32-bit integer."
+                End If
+            End If
             If String.IsNullOrWhiteSpace(field.Validation) Then Return ""
 
             Dim rule = field.Validation.Trim()
+            If System.String.Equals(field.Type, "integer", System.StringComparison.OrdinalIgnoreCase) AndAlso rule.Contains("|") Then
+                If System.String.IsNullOrWhiteSpace(value) Then Return ""
+                Dim candidate As System.Int32 = System.Int32.Parse(value.Trim(), System.Globalization.CultureInfo.InvariantCulture)
+                For Each alternative As System.String In rule.Split("|"c)
+                    Dim exact As System.Int32
+                    If System.Int32.TryParse(alternative, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, exact) Then
+                        If candidate = exact Then Return ""
+                    Else
+                        Dim separator As System.Int32 = alternative.LastIndexOf("-"c)
+                        Dim lower As System.Int32
+                        Dim upper As System.Int32
+                        If separator > 0 AndAlso
+                           System.Int32.TryParse(alternative.Substring(0, separator), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, lower) AndAlso
+                           System.Int32.TryParse(alternative.Substring(separator + 1), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, upper) AndAlso
+                           candidate >= lower AndAlso candidate <= upper Then Return ""
+                    End If
+                Next
+                Return "'" & field.Label & "' must match one of these integer alternatives: " & rule & "."
+            End If
 
             If rule.Equals("ProcessingWindow", System.StringComparison.OrdinalIgnoreCase) AndAlso Not BackgroundProcessingWindow.IsValid(value) Then
                 Return $"'{field.Label}' must be empty or use allow:HH:mm-HH:mm / deny:HH:mm-HH:mm, with semicolons between ranges."

@@ -52,7 +52,7 @@ Notes:
 | `text_write` | Writes, replaces, or appends a UTF-8 text file. | Yes | Yes | Yes |
 | `text_search` | Searches text files for substring or regex matches. | Yes | Yes | Yes |
 | `text_export_to_text` | Silently extracts readable text from a supported file or from supported files in a directory and writes UTF-8 `.txt` outputs without host UI prompts. | Yes | Yes | Yes |
-| `text_analyze_file` | Reads one existing plain-text file completely inside the tool, sends the full text plus caller instructions to one isolated LLM call, and returns only the model response; no chunking or retrieval. Very good and memory efficient for analyzing text for certain criteria. For documents, have them first converted to a text file using `text_export_to_text`. | Yes | Yes | Yes |
+| `text_analyze_file` | Reads one complete plain-text file (`input_path`) or workflow-owned stored result (`input_result_ref`) inside one isolated LLM call and returns the analysis without the source dump. Supply exactly one source. Optional `expected_snapshot_sha256` checks file bytes with `input_path`. Convert documents with `text_export_to_text` first; do not page a complete stored source through the parent just to send it to this analyzer. Nested incomplete source wrappers still require source retrieval; full-wrapper analysis is not full-document coverage. | Yes | Yes | Yes |
 | `semantic_index_create_from_file` | Creates a self-indexed semantic-search text file from an existing text file. | Yes | Yes | Yes |
 | `semantic_index_create_from_text` | Creates a self-indexed semantic-search text file from supplied in-memory text. | Yes | Yes | Yes |
 | `semantic_index_validate` | Validates whether a file is a readable semantic-search index and returns basic counts. | Yes | Yes | Yes |

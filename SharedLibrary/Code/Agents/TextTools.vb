@@ -152,9 +152,9 @@ Namespace Agents
                 Dim maxChars As System.Int32 = GetInt(args, "max_chars", 0)
                 Dim count As System.Int32 = totalChars - startChar
                 If maxChars > 0 Then count = System.Math.Min(count, maxChars)
-                ' New paged calls never split a valid surrogate pair. A window may contain
-                ' max_chars + 1 code units for this purpose. Legacy prefix calls are unchanged.
-                If explicitWindow AndAlso count > 0 AndAlso startChar + count < totalChars AndAlso
+                ' Every returned window, including a legacy prefix, preserves surrogate pairs.
+                ' A window may contain max_chars + 1 code units for this purpose.
+                If count > 0 AndAlso startChar + count < totalChars AndAlso
                    System.Char.IsHighSurrogate(snapshot.Content(startChar + count - 1)) AndAlso
                    System.Char.IsLowSurrogate(snapshot.Content(startChar + count)) Then count += 1
 
@@ -166,6 +166,11 @@ Namespace Agents
                     Key .path = p,
                     Key .size = snapshot.SizeBytes,
                     Key .truncated = startChar > 0 OrElse hasMore,
+                    Key .content_complete = startChar = 0 AndAlso Not hasMore,
+                    Key .is_semantic_summary = False,
+                    Key .retrieval_required = If(startChar > 0 OrElse hasMore,
+                        "Incomplete file window. Retrieve every task-required range with text_read and expected_snapshot_sha256, or analyze the complete file with text_analyze_file(input_path). Whole-source tasks require complete coverage; reaching EOF alone does not cover the omitted prefix.",
+                        "The complete file text is present in this response."),
                     Key .text = snapshot.Content.Substring(startChar, count),
                     Key .total_chars = totalChars,
                     Key .returned_chars = count,
@@ -335,7 +340,7 @@ Namespace Agents
                 """start_char"":{""type"":""integer"",""minimum"":0,""description"":""Zero-based UTF-16 offset. Omit for legacy prefix behavior; use 0 to begin safe paging.""}," &
                 """offset"":{""type"":""integer"",""minimum"":0,""description"":""Alias of start_char. If both are supplied they must agree.""}," &
                 """expected_snapshot_sha256"":{""type"":""string"",""description"":""Optional SHA-256 from the previous window/export. A changed file is rejected rather than splicing different snapshots.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Optional cap (0 or negative = no cap, legacy behavior). Explicit offset windows may add one UTF-16 unit to avoid splitting a surrogate pair. next_offset is null at EOF.""}}," &
+                """max_chars"":{""type"":""integer"",""description"":""Optional cap (0 or negative = no cap, legacy behavior). Windows may add one UTF-16 unit to avoid splitting a surrogate pair. next_offset is null at EOF.""}}," &
                 """required"":[""path""]}}"
             Return New ModelConfig() With {
                 .ToolName = ToolRead,

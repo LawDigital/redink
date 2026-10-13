@@ -482,10 +482,6 @@ Partial Public Class ThisAddIn
                 Dim text = Await ReadSingleAttachmentText(att, context, readAsMarkdown)
 
                 If Not String.IsNullOrWhiteSpace(text) Then
-                    If text.Length > 50000 Then
-                        text = text.Substring(0, 50000) & vbCrLf & "[... content truncated at 50,000 characters ...]"
-                    End If
-
                     If fileNames.Count > 1 Then sb.AppendLine($"[{fileName}]")
                     sb.AppendLine(text)
 
@@ -815,11 +811,8 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(msg.DateStr) Then sb.AppendLine($"Date: {msg.DateStr}")
                 sb.AppendLine()
                 If Not String.IsNullOrWhiteSpace(msg.Body) Then
-                    Dim bodyText = msg.Body
-                    If bodyText.Length > 5000 Then
-                        bodyText = bodyText.Substring(0, 5000) & vbCrLf & "[... truncated ...]"
-                    End If
-                    sb.AppendLine(bodyText)
+                    ' Preserve the complete message; replay may archive it losslessly.
+                    sb.AppendLine(msg.Body)
                 Else
                     sb.AppendLine("(no body text)")
                 End If
@@ -1066,29 +1059,12 @@ Partial Public Class ThisAddIn
                     jResult("failed_files") = New JArray(result.FailedFileNames.ToArray())
                 End If
                 If result.Errors.Count > 0 Then
-                    jResult("errors") = New JArray(result.Errors.Take(10).ToArray())
+                    jResult("errors") = New JArray(result.Errors.ToArray())
                 End If
 
                 Dim jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
 
-                ' Truncate if extremely large to stay within LLM context limits
-                If jsonString.Length > 200000 Then
-                    ' Rebuild with fewer rows
-                    Dim maxRows = Math.Max(1, CInt(result.Rows.Count * (200000.0 / jsonString.Length)))
-                    Dim jRowsTruncated As New JArray()
-                    For i = 0 To Math.Min(maxRows - 1, result.Rows.Count - 1)
-                        Dim jRow As New JArray()
-                        For Each cellVal In result.Rows(i).Values
-                            jRow.Add(If(cellVal Is Nothing, "", cellVal.ToString()))
-                        Next
-                        jRowsTruncated.Add(jRow)
-                    Next
-                    jResult("rows") = jRowsTruncated
-                    jResult("total_rows") = result.Rows.Count
-                    jResult("rows_returned") = jRowsTruncated.Count
-                    jResult("truncated") = True
-                    jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
-                End If
+                ' Preserve every extracted row; replay storage handles large results.
 
                 response.Success = True
                 response.Response = jsonString

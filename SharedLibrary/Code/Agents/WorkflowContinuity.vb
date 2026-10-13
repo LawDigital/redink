@@ -688,7 +688,7 @@ Namespace Agents
                     Dim prior As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
                     _continuations.TryGetValue(workflowId, prior)
 
-                    Dim originalRequest As String = BoundedContinuationText(originalUserRequestRaw, 16000)
+                    Dim originalRequest As String = If(originalUserRequestRaw, "")
                     If prior IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(prior.OriginalUserRequestRaw) Then
                         originalRequest = prior.OriginalUserRequestRaw
                     End If
@@ -699,7 +699,8 @@ Namespace Agents
                     Dim snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot =
                         sequencingState.CreateContinuationSnapshot(
                             originalRequest,
-                            BoundedContinuationText(lastUserFacingResponse, 16000),
+                            If(System.String.IsNullOrWhiteSpace(lastUserFacingResponse) AndAlso prior IsNot Nothing,
+                               If(prior?.LastUserFacingResponse, ""), If(lastUserFacingResponse, "")),
                             effectiveKey)
 
                     If prior IsNot Nothing Then
@@ -707,6 +708,10 @@ Namespace Agents
                         snapshot.ResumeCount = prior.ResumeCount
                     End If
 
+                    snapshot.ToolResultReferences = ToolResultStore.ExportReferences(workflowId)
+                    If prior IsNot Nothing AndAlso prior.ToolResultReferences IsNot Nothing Then
+                        snapshot.ToolResultReferences = snapshot.ToolResultReferences.Concat(prior.ToolResultReferences).Distinct(System.StringComparer.Ordinal).ToList()
+                    End If
                     RefreshContinuationExpiryUnlocked(snapshot, continuationRetentionDays)
                     CacheContinuationArtifactsUnlocked(workflowId, snapshot)
                     _continuations(workflowId) = snapshot
@@ -754,7 +759,7 @@ Namespace Agents
 
             Dim sb As New StringBuilder()
             sb.AppendLine("[RUNTIME_CONTEXT]")
-            sb.AppendLine("Compact host-authored runtime context:")
+            sb.AppendLine("Compact host-authored runtime context. Every memory/source stub is incomplete; use memory_get for full content before relying on omitted facts:")
             sb.AppendLine("- workflowId: " & state.WorkflowId)
             sb.AppendLine("- hostPipeline: " & state.HostPipeline)
             sb.AppendLine("- authoritativeRuntimeState: true")
@@ -793,6 +798,24 @@ Namespace Agents
             If TryGetContinuationSnapshot(workflowId, continuation) AndAlso continuation IsNot Nothing AndAlso continuation.ResumeCount > 0 Then
                 sb.AppendLine("[CROSS_RUN_CONTINUATION]")
                 sb.AppendLine("This is an explicit continuation of a previously blocked workflow.")
+                If continuation.ToolResultReferences IsNot Nothing Then
+                    Dim referenceIndex As New Newtonsoft.Json.Linq.JArray()
+                    For Each resultRef As System.String In continuation.ToolResultReferences
+                        Dim stored As ToolResultStore.StoredResult = Nothing
+                        If ToolResultStore.TryGetForWorkflow(resultRef, workflowId, stored) Then
+                            Dim descriptor As JObject = ToolResultStore.DescribeReference(stored)
+                            descriptor("tool") = stored.ToolName
+                            referenceIndex.Add(descriptor)
+                        Else
+                            referenceIndex.Add(New Newtonsoft.Json.Linq.JObject(
+                                New Newtonsoft.Json.Linq.JProperty("result_ref", resultRef),
+                                New Newtonsoft.Json.Linq.JProperty("full_content_available", False),
+                                New Newtonsoft.Json.Linq.JProperty("recovery_required", "Stored evidence unavailable. Recover the authorized original; do not infer its contents.")))
+                        End If
+                    Next
+                    sb.AppendLine("Complete retained-result index (may itself be referenced). Retrieve this index and then its required source references; reading an index does not read its sources:")
+                    sb.AppendLine(BoundedContinuationText(referenceIndex.ToString(Formatting.None), 12000))
+                End If
                 sb.AppendLine("Reuse successful operations and registered artifacts from the restored host state. Do not repeat a successful mutating operation merely because this is a new mail/run. Revalidate existing outputs first and retry only unresolved or missing work.")
                 If Not String.IsNullOrWhiteSpace(continuation.OriginalUserRequestRaw) Then
                     sb.AppendLine("Original request from the blocked workflow:")
@@ -1125,50 +1148,9 @@ Namespace Agents
         Private Shared Function BuildContinuationPromptDetails(
             snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As String
 
-            If snapshot Is Nothing OrElse String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then Return ""
-            Try
-                Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(snapshot.SequencingStateJson)
-                Dim sb As New StringBuilder()
-
-                Dim successfulTools As Newtonsoft.Json.Linq.JArray = TryCast(root("SuccessfulToolsThisRun"), Newtonsoft.Json.Linq.JArray)
-                If successfulTools IsNot Nothing AndAlso successfulTools.Count > 0 Then
-                    Dim names As List(Of String) = successfulTools.
-                        Values(Of String)().
-                        Where(Function(x) Not String.IsNullOrWhiteSpace(x)).
-                        Distinct(StringComparer.OrdinalIgnoreCase).
-                        Take(12).
-                        ToList()
-                    If names.Count > 0 Then sb.AppendLine("Previously successful tools: " & String.Join(", ", names))
-                End If
-
-                Dim artifacts As Newtonsoft.Json.Linq.JArray = TryCast(root("RegisteredDeliverableArtifacts"), Newtonsoft.Json.Linq.JArray)
-                If artifacts IsNot Nothing AndAlso artifacts.Count > 0 Then
-                    sb.AppendLine("Restored registered artifacts:")
-                    For Each token As Newtonsoft.Json.Linq.JToken In artifacts.Take(12)
-                        Dim artifact As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
-                        If artifact Is Nothing Then Continue For
-                        Dim sessionPath As String = If(artifact.Value(Of String)("SessionPath"), "")
-                        Dim logicalId As String = If(artifact.Value(Of String)("LogicalDeliverableId"), "")
-                        Dim slotId As String = If(artifact.Value(Of String)("OutputSlotId"), "")
-                        Dim stateName As String = If(artifact.Value(Of String)("LifecycleState"), "")
-                        sb.AppendLine("- file=" & If(String.IsNullOrWhiteSpace(sessionPath), "(unavailable)", System.IO.Path.GetFileName(sessionPath)) &
-                                      "; logicalDeliverableId=" & logicalId &
-                                      "; outputSlotId=" & slotId &
-                                      "; lifecycle=" & stateName &
-                                      "; exists=" & If(Not String.IsNullOrWhiteSpace(sessionPath) AndAlso System.IO.File.Exists(sessionPath), "true", "false"))
-                    Next
-                End If
-
-                Dim lastResult As String = If(root.Value(Of String)("LastStructuredToolResult"), "")
-                If Not String.IsNullOrWhiteSpace(lastResult) Then
-                    sb.AppendLine("Last structured tool result excerpt:")
-                    sb.AppendLine(BoundedContinuationText(lastResult, 4000))
-                End If
-
-                Return sb.ToString().TrimEnd()
-            Catch
-                Return ""
-            End Try
+            If snapshot Is Nothing OrElse System.String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then Return ""
+            Return "Restored host state and COMPLETE operation/artifact inventory. If replaced by a reference, retrieve the relevant inventory before deciding what is complete or repeating prior work. Inventory metadata is not the underlying source evidence:" & vbCrLf &
+                BoundedContinuationText(snapshot.SequencingStateJson, 12000)
         End Function
 
         Private Shared Function CloneContinuationSnapshot(
@@ -1186,54 +1168,83 @@ Namespace Agents
         Private Shared Function BoundedContinuationText(value As String, maxChars As Integer) As String
             Dim text As String = If(value, "")
             If maxChars <= 0 OrElse text.Length <= maxChars Then Return text
-            Return text.Substring(0, maxChars) & Environment.NewLine & "[... continuation text truncated ...]"
+            Dim stored As ToolResultStore.StoredResult = ToolResultStore.Put(CurrentWorkflowId, "workflow_continuation", text)
+            If Not stored.IsDurable Then Return text
+            Return ToolResultStore.DescribeReference(stored).ToString(Newtonsoft.Json.Formatting.None)
         End Function
 
         Private Shared Sub CacheContinuationArtifactsUnlocked(
             workflowId As String,
             snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot)
 
-            If snapshot Is Nothing OrElse String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then Return
-
+            If snapshot Is Nothing OrElse System.String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then Return
             Try
                 Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(snapshot.SequencingStateJson)
                 Dim artifacts As Newtonsoft.Json.Linq.JArray = TryCast(root("RegisteredDeliverableArtifacts"), Newtonsoft.Json.Linq.JArray)
-                If artifacts Is Nothing OrElse artifacts.Count = 0 Then Return
-
-                Dim cacheRoot As String = GetContinuationArtifactDirectory(workflowId)
-                Directory.CreateDirectory(cacheRoot)
-                Dim totalBytes As Long = 0
-                Const MaxCachedBytes As Long = 100L * 1024L * 1024L
-
-                Dim index As Integer = 0
+                If artifacts Is Nothing Then Return
+                Dim cacheRoot As System.String = GetContinuationArtifactDirectory(workflowId)
+                System.IO.Directory.CreateDirectory(cacheRoot)
                 For Each token As Newtonsoft.Json.Linq.JToken In artifacts
                     Dim artifact As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
                     If artifact Is Nothing Then Continue For
-                    Dim sourcePath As String = If(artifact.Value(Of String)("SessionPath"), "").Trim()
-                    If sourcePath = "" OrElse Not File.Exists(sourcePath) Then Continue For
-
-                    Dim info As New FileInfo(sourcePath)
-                    If info.Length < 0 OrElse totalBytes + info.Length > MaxCachedBytes Then Continue For
-                    totalBytes += info.Length
-
-                    index += 1
-                    Dim artifactId As String = Regex.Replace(If(artifact.Value(Of String)("ArtifactId"), "").Trim(), "[^A-Za-z0-9_\-]", "_")
-                    If artifactId = "" Then artifactId = "artifact_" & index.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                    Dim artifactDir As String = Path.Combine(cacheRoot, artifactId)
-                    Directory.CreateDirectory(artifactDir)
-                    Dim targetPath As String = Path.Combine(artifactDir, Path.GetFileName(sourcePath))
-                    If Not String.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase) Then
-                        File.Copy(sourcePath, targetPath, overwrite:=True)
-                    End If
-                    artifact("SessionPath") = targetPath
+                    Try
+                        Dim sourcePath As System.String = If(artifact.Value(Of System.String)("SessionPath"), "").Trim()
+                        If sourcePath = "" OrElse Not System.IO.File.Exists(sourcePath) Then
+                            Throw New System.IO.IOException("The registered artifact file is unavailable; no replacement content was inferred.")
+                        End If
+                        Dim contentHash As System.String = ComputeContinuationFileHash(sourcePath)
+                        Dim expectedHash As System.String = If(artifact.Value(Of System.String)("VerifiedContentSha256"), "")
+                        If expectedHash <> "" AndAlso Not System.String.Equals(contentHash, expectedHash, System.StringComparison.Ordinal) Then
+                            Throw New System.IO.IOException("Artifact bytes changed since verification; the preserved revision requires explicit recovery.")
+                        End If
+                        Dim identity As System.String = New Newtonsoft.Json.Linq.JArray(
+                            If(artifact.Value(Of System.String)("ArtifactId"), ""),
+                            If(artifact.Value(Of System.String)("LogicalDeliverableId"), ""),
+                            If(artifact.Value(Of System.String)("OutputSlotId"), "")
+                        ).ToString(Formatting.None)
+                        Dim identityHash As System.String
+                        Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                            identityHash = System.BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(identity))).Replace("-", "").ToLowerInvariant()
+                        End Using
+                        Dim artifactDir As System.String = System.IO.Path.Combine(cacheRoot, identityHash, contentHash)
+                        System.IO.Directory.CreateDirectory(artifactDir)
+                        Dim targetPath As System.String = System.IO.Path.Combine(artifactDir, System.IO.Path.GetFileName(sourcePath))
+                        If Not System.IO.File.Exists(targetPath) Then
+                            Dim stagingPath As System.String = targetPath & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+                            Try
+                                System.IO.File.Copy(sourcePath, stagingPath, overwrite:=False)
+                                If Not System.String.Equals(ComputeContinuationFileHash(stagingPath), contentHash, System.StringComparison.Ordinal) Then
+                                    Throw New System.IO.IOException("Continuation artifact changed while being copied.")
+                                End If
+                                System.IO.File.Move(stagingPath, targetPath)
+                            Finally
+                                If System.IO.File.Exists(stagingPath) Then System.IO.File.Delete(stagingPath)
+                            End Try
+                        End If
+                        If Not System.String.Equals(ComputeContinuationFileHash(targetPath), contentHash, System.StringComparison.Ordinal) Then
+                            Throw New System.IO.IOException("Continuation artifact copy failed byte verification.")
+                        End If
+                        artifact("SessionPath") = targetPath
+                        artifact.Remove("continuation_cache_error")
+                    Catch ex As System.Exception
+                        ' Retain earlier successful siblings, and disclose this exact failure in the inventory.
+                        artifact("continuation_cache_error") = ex.Message
+                        System.Diagnostics.Trace.TraceWarning("Continuation artifact retained without a verified cache copy: " & ex.Message)
+                    End Try
                 Next
-
                 snapshot.SequencingStateJson = root.ToString(Formatting.None)
-            Catch
-                ' Continuation caching is best effort. The snapshot still preserves operation
-                ' state and will fail closed if a required physical artifact is unavailable.
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.TraceWarning("Continuation artifact caching failed; original state retained: " & ex.Message)
             End Try
         End Sub
+
+        Private Shared Function ComputeContinuationFileHash(path As System.String) As System.String
+            Using stream As New System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                    Return System.BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "")
+                End Using
+            End Using
+        End Function
 
         Private Shared Function GetContinuationArtifactDirectory(workflowId As String) As String
             Dim safeWorkflowId As String = Regex.Replace(If(workflowId, "").Trim(), "[^A-Za-z0-9_\-]", "_")
@@ -1359,6 +1370,16 @@ Namespace Agents
             End If
 
             Return System.IO.Path.Combine(root, ".session", "workflow_runtime")
+        End Function
+
+        Public Shared Function GetToolResultExpiryUtc(workflowId As System.String, fallback As System.DateTime) As System.DateTime
+            SyncLock _sync
+                Dim envelope As WorkflowCheckpointEnvelope = LoadCheckpointEnvelopeUnlocked(workflowId)
+                If envelope IsNot Nothing AndAlso envelope.ContinuationState IsNot Nothing Then
+                    Return GetContinuationExpiresUtc(envelope.ContinuationState)
+                End If
+            End SyncLock
+            Return fallback
         End Function
 
         Public Shared Function GetCheckpointPath(workflowId As String) As String

@@ -386,6 +386,22 @@ Namespace SharedLibrary
             Property INI_ToolingLogWindow As Boolean
             Property INI_ToolingDryRun As Boolean
             Property INI_ToolingMaximumIterations As Integer
+            Property INI_AutoPilotLogDiagnosticsMaxInputChars As System.Int32
+            Property INI_TextAnalyzeMaxSourceChars As System.Int32
+            Property INI_TextAnalyzeMaxInstructionChars As System.Int32
+            Property INI_TextAnalyzeMaxAdditionalContextChars As System.Int32
+            Property INI_ToolResponseRecoveryBudgetChars As System.Int32
+            Property INI_ToolResponseCompactOnlyAfterEmpty As System.Boolean
+            Property INI_ToolResponseKeepRecentFullCount As System.Int32
+            Property INI_ToolResultReferenceThresholdChars As System.Int32
+            Property INI_ToolResultReferencePreviewChars As System.Int32
+            Property INI_SubAgentLargeToolResponseThresholdChars As System.Int32
+            Property INI_SubAgentLargeToolResponseExcerptChars As System.Int32
+            Property INI_ContextExpandDefaultChars As System.Int32
+            Property INI_ContextExpandMaxChars As System.Int32
+            Property INI_EvidenceReplayCoreMaxChars As System.Int32
+            Property INI_EvidenceReplayMaxExactStringChars As System.Int32
+            Property INI_EvidenceReplayPreferredArrayItemProperties As System.Int32
             Property INI_ToolResponsePayloadBudgetChars As Integer
             Property INI_BudgetMediumCompactionThresholdChars As Integer
             Property INI_BudgetAggressiveCompactionThresholdChars As Integer
@@ -431,6 +447,22 @@ Namespace SharedLibrary
             ' Initialize the PromptTitles and PromptLibrary properties
             PromptTitles = New List(Of String)()
             PromptLibrary = New List(Of String)()
+            INI_AutoPilotLogDiagnosticsMaxInputChars = SharedMethods.DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS
+            INI_TextAnalyzeMaxSourceChars = SharedMethods.DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS
+            INI_TextAnalyzeMaxInstructionChars = SharedMethods.DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS
+            INI_TextAnalyzeMaxAdditionalContextChars = SharedMethods.DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS
+            INI_ToolResponseRecoveryBudgetChars = SharedMethods.DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS
+            INI_ToolResponseCompactOnlyAfterEmpty = SharedMethods.DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY
+            INI_ToolResponseKeepRecentFullCount = SharedMethods.DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT
+            INI_ToolResultReferenceThresholdChars = SharedMethods.DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS
+            INI_ToolResultReferencePreviewChars = SharedMethods.DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS
+            INI_SubAgentLargeToolResponseThresholdChars = SharedMethods.DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS
+            INI_SubAgentLargeToolResponseExcerptChars = SharedMethods.DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS
+            INI_ContextExpandDefaultChars = SharedMethods.DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS
+            INI_ContextExpandMaxChars = SharedMethods.DEFAULT_CONTEXT_EXPAND_MAX_CHARS
+            INI_EvidenceReplayCoreMaxChars = SharedMethods.DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS
+            INI_EvidenceReplayMaxExactStringChars = SharedMethods.DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS
+            INI_EvidenceReplayPreferredArrayItemProperties = SharedMethods.DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES
             INI_SemanticArchiveCatalogPathLocal = SharedMethods.DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL
             INI_SemanticArchiveCatalogLibraryPath = SharedMethods.DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH
             INI_SemanticArchiveBackgroundIndexing = SharedMethods.DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED
@@ -769,6 +801,22 @@ Namespace SharedLibrary
         Public Property INI_ToolingLogWindow As Boolean Implements ISharedContext.INI_ToolingLogWindow
         Public Property INI_ToolingDryRun As Boolean Implements ISharedContext.INI_ToolingDryRun
         Public Property INI_ToolingMaximumIterations As Integer Implements ISharedContext.INI_ToolingMaximumIterations
+        Public Property INI_AutoPilotLogDiagnosticsMaxInputChars As System.Int32 Implements ISharedContext.INI_AutoPilotLogDiagnosticsMaxInputChars
+        Public Property INI_TextAnalyzeMaxSourceChars As System.Int32 Implements ISharedContext.INI_TextAnalyzeMaxSourceChars
+        Public Property INI_TextAnalyzeMaxInstructionChars As System.Int32 Implements ISharedContext.INI_TextAnalyzeMaxInstructionChars
+        Public Property INI_TextAnalyzeMaxAdditionalContextChars As System.Int32 Implements ISharedContext.INI_TextAnalyzeMaxAdditionalContextChars
+        Public Property INI_ToolResponseRecoveryBudgetChars As System.Int32 Implements ISharedContext.INI_ToolResponseRecoveryBudgetChars
+        Public Property INI_ToolResponseCompactOnlyAfterEmpty As System.Boolean Implements ISharedContext.INI_ToolResponseCompactOnlyAfterEmpty
+        Public Property INI_ToolResponseKeepRecentFullCount As System.Int32 Implements ISharedContext.INI_ToolResponseKeepRecentFullCount
+        Public Property INI_ToolResultReferenceThresholdChars As System.Int32 Implements ISharedContext.INI_ToolResultReferenceThresholdChars
+        Public Property INI_ToolResultReferencePreviewChars As System.Int32 Implements ISharedContext.INI_ToolResultReferencePreviewChars
+        Public Property INI_SubAgentLargeToolResponseThresholdChars As System.Int32 Implements ISharedContext.INI_SubAgentLargeToolResponseThresholdChars
+        Public Property INI_SubAgentLargeToolResponseExcerptChars As System.Int32 Implements ISharedContext.INI_SubAgentLargeToolResponseExcerptChars
+        Public Property INI_ContextExpandDefaultChars As System.Int32 Implements ISharedContext.INI_ContextExpandDefaultChars
+        Public Property INI_ContextExpandMaxChars As System.Int32 Implements ISharedContext.INI_ContextExpandMaxChars
+        Public Property INI_EvidenceReplayCoreMaxChars As System.Int32 Implements ISharedContext.INI_EvidenceReplayCoreMaxChars
+        Public Property INI_EvidenceReplayMaxExactStringChars As System.Int32 Implements ISharedContext.INI_EvidenceReplayMaxExactStringChars
+        Public Property INI_EvidenceReplayPreferredArrayItemProperties As System.Int32 Implements ISharedContext.INI_EvidenceReplayPreferredArrayItemProperties
         Public Property INI_ToolResponsePayloadBudgetChars As Integer Implements ISharedContext.INI_ToolResponsePayloadBudgetChars
         Public Property INI_BudgetMediumCompactionThresholdChars As Integer Implements ISharedContext.INI_BudgetMediumCompactionThresholdChars
         Public Property INI_BudgetAggressiveCompactionThresholdChars As Integer Implements ISharedContext.INI_BudgetAggressiveCompactionThresholdChars

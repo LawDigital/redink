@@ -73,7 +73,7 @@ Partial Public Class ThisAddIn
                                            Optional staleCompactionPreviewChars As Integer = -1,
                                            Optional currentIteration As Integer = -1,
                                            Optional allowCurrentTurnStructuredCompaction As System.Boolean = False,
-                                           Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
+                                           Optional allowCurrentTurnReferenceCompaction As System.Boolean = False) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
             Return ""
@@ -156,11 +156,14 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' Build the call part, also support {call} placeholder for raw call JSON
-                Dim callPart As String = callPartTemplate _
-                    .Replace("{call_id}", If(resp.CallId, "")) _
-                    .Replace("{name}", If(resp.ToolName, "")) _
-                    .Replace("{arguments}", escapedArgsJson) _
-                    .Replace("{call}", resp.OriginalCallJson)
+                Dim callPart As System.String = SharedLibrary.Agents.ToolingRuntimePrimitives.RenderReplayTemplate(
+                    callPartTemplate,
+                    New System.Collections.Generic.Dictionary(Of System.String, System.String) From {
+                        {"{call_id}", If(resp.CallId, "")},
+                        {"{name}", If(resp.ToolName, "")},
+                        {"{arguments}", escapedArgsJson},
+                        {"{call}", resp.OriginalCallJson}
+                    })
 
                 If Not firstCall Then callParts.Append(",")
                 callParts.Append(callPart)
@@ -233,10 +236,13 @@ Partial Public Class ThisAddIn
                 finalResponseContent = EscapeJsonString(responseContent)
             End If
 
-            Dim respPart As String = responsePartTemplate _
-                .Replace("{call_id}", If(resp.CallId, "")) _
-                .Replace("{name}", If(resp.ToolName, "")) _
-                .Replace("{response}", finalResponseContent)
+            Dim respPart As System.String = SharedLibrary.Agents.ToolingRuntimePrimitives.RenderReplayTemplate(
+                responsePartTemplate,
+                New System.Collections.Generic.Dictionary(Of System.String, System.String) From {
+                    {"{call_id}", If(resp.CallId, "")},
+                    {"{name}", If(resp.ToolName, "")},
+                    {"{response}", finalResponseContent}
+                })
 
             If Not firstResp Then responseParts.Append(",")
             responseParts.Append(respPart)
@@ -248,18 +254,16 @@ Partial Public Class ThisAddIn
 
         ' Replace placeholders - NO comma manipulation by code
         ' Templates are responsible for their own structure
-        Dim result As String = toolingModel.APICall_ToolResponses
-
-        ' Simple replacement - if content exists, replace; if empty, remove placeholder
-        result = result.Replace("{functioncalls}", functionCallsOutput)
-        result = result.Replace("{responses}", responsesOutput)
+        Dim result As System.String = SharedLibrary.Agents.ToolingRuntimePrimitives.RenderReplayTemplate(
+            toolingModel.APICall_ToolResponses,
+            New System.Collections.Generic.Dictionary(Of System.String, System.String) From {
+                {"{functioncalls}", functionCallsOutput},
+                {"{responses}", responsesOutput}
+            })
 
         ' Clean up any empty structural remnants (empty arrays, double commas, etc.)
         ' This handles cases where one placeholder was empty
-        result = Regex.Replace(result, "\[\s*\]", "[]")           ' Normalize empty arrays
-        result = Regex.Replace(result, ",\s*,", ",")              ' Remove double commas
-        result = Regex.Replace(result, "\[\s*,", "[")             ' Remove leading comma in array
-        result = Regex.Replace(result, ",\s*\]", "]")             ' Remove trailing comma in array
+        result = SharedLibrary.Agents.ToolingRuntimePrimitives.NormalizeReplayJsonSeparators(result)
 
         Return result
     End Function
@@ -277,28 +281,49 @@ Partial Public Class ThisAddIn
                                                        toolingModel As ModelConfig,
                                                        Optional compactForSubAgent As Boolean = False,
                                                        Optional currentIteration As Integer = -1) As String
-        Dim keepRecentFullCount As Integer = 2
+        Dim keepRecentFullCount As System.Int32 = System.Math.Max(0, INI_ToolResponseKeepRecentFullCount)
 
         Dim requestedKeep As Integer
-        If SharedLibrary.Agents.ToolResultStore.TryGetRequestedKeepRecent(
-                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, requestedKeep) Then
-            keepRecentFullCount = Math.Min(keepRecentFullCount, requestedKeep)
+        Dim requestedCompaction As System.Boolean = SharedLibrary.Agents.ToolResultStore.TryGetRequestedKeepRecent(
+                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, requestedKeep)
+        If requestedCompaction Then
+            keepRecentFullCount = requestedKeep
         End If
+
+        ' A configured protection count is an upper bound, not a retry-loop count.
+        ' Clamp to actual historical responses before the progressive budget passes.
+        Dim historicalResponseCount As System.Int32 = 0
+        If responses IsNot Nothing Then
+            For Each historicalResponse As ToolResponse In responses
+                If historicalResponse IsNot Nothing AndAlso
+                   ResolveEffectiveReplayRetention(historicalResponse, currentIteration) =
+                   SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical Then historicalResponseCount += 1
+            Next
+        End If
+        keepRecentFullCount = System.Math.Min(keepRecentFullCount, historicalResponseCount)
+
+        Dim recoveryRequested As System.Boolean = SharedLibrary.Agents.ToolResultStore.IsContextRecoveryRequested(
+            SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId)
 
         Dim payload As String = BuildToolResponsesForModel(
             responses,
             toolingModel,
-            compactForSubAgent:=compactForSubAgent,
-            compactStaleLargeResponses:=True,
+            compactForSubAgent:=False,
+            compactStaleLargeResponses:=requestedCompaction,
             keepRecentFullCount:=keepRecentFullCount,
             currentIteration:=currentIteration,
             allowCurrentTurnStructuredCompaction:=False,
             allowCurrentTurnReferenceCompaction:=False)
 
         Dim budget As Integer =
-            If(ThisAddIn.INI_ToolResponsePayloadBudgetChars > 0,
+            If(ThisAddIn.INI_ToolResponsePayloadBudgetChars >= 0,
                ThisAddIn.INI_ToolResponsePayloadBudgetChars,
                SharedLibrary.Agents.ToolingConstants.ToolResponsePayloadBudgetChars)
+        Dim budgetPolicyActive As System.Boolean = requestedCompaction OrElse recoveryRequested OrElse
+            (Not INI_ToolResponseCompactOnlyAfterEmpty AndAlso budget > 0)
+        If budget <= 0 AndAlso (requestedCompaction OrElse recoveryRequested) Then
+            budget = INI_ToolResponseRecoveryBudgetChars
+        End If
         Dim mediumThreshold As Integer =
             If(ThisAddIn.INI_BudgetMediumCompactionThresholdChars > 0,
                ThisAddIn.INI_BudgetMediumCompactionThresholdChars,
@@ -312,7 +337,7 @@ Partial Public Class ThisAddIn
                ThisAddIn.INI_BudgetCompactionPreviewChars,
                SharedLibrary.Agents.ToolingConstants.BudgetCompactionPreviewChars)
 
-        If budget <= 0 OrElse String.IsNullOrEmpty(payload) OrElse payload.Length <= budget Then
+        If Not budgetPolicyActive OrElse budget <= 0 OrElse String.IsNullOrEmpty(payload) OrElse payload.Length <= budget Then
             LogToolReplayRetentionDiagnostics(responses, currentIteration, payload.Length, budget)
             Return payload
         End If
@@ -323,7 +348,7 @@ Partial Public Class ThisAddIn
         payload = BuildToolResponsesForModel(
             responses,
             toolingModel,
-            compactForSubAgent:=compactForSubAgent,
+            compactForSubAgent:=False,
             compactStaleLargeResponses:=True,
             keepRecentFullCount:=keepRecentFullCount,
             currentIteration:=currentIteration,
@@ -343,7 +368,7 @@ Partial Public Class ThisAddIn
             payload = BuildToolResponsesForModel(
                 responses,
                 toolingModel,
-                compactForSubAgent:=compactForSubAgent,
+                compactForSubAgent:=False,
                 compactStaleLargeResponses:=True,
                 keepRecentFullCount:=keepRecentFullCount,
                 currentIteration:=currentIteration,
@@ -362,7 +387,7 @@ Partial Public Class ThisAddIn
             payload = BuildToolResponsesForModel(
                 responses,
                 toolingModel,
-                compactForSubAgent:=compactForSubAgent,
+                compactForSubAgent:=False,
                 compactStaleLargeResponses:=True,
                 keepRecentFullCount:=0,
                 staleCompactionThresholdChars:=mediumThresholdChars,
@@ -380,7 +405,7 @@ Partial Public Class ThisAddIn
             payload = BuildToolResponsesForModel(
                 responses,
                 toolingModel,
-                compactForSubAgent:=compactForSubAgent,
+                compactForSubAgent:=False,
                 compactStaleLargeResponses:=True,
                 keepRecentFullCount:=0,
                 staleCompactionThresholdChars:=aggressiveThreshold,
@@ -459,7 +484,7 @@ Partial Public Class ThisAddIn
                                                   Optional overridePreviewChars As Integer = -1,
                                                   Optional replayRetention As SharedLibrary.Agents.ToolReplayRetentionKind = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical,
                                                   Optional allowCurrentTurnStructuredCompaction As System.Boolean = False,
-                                                  Optional allowCurrentTurnReferenceCompaction As System.Boolean = True) As String
+                                                  Optional allowCurrentTurnReferenceCompaction As System.Boolean = False) As String
         If resp Is Nothing Then Return ""
 
         Dim rawContent As String
@@ -468,6 +493,16 @@ Partial Public Class ThisAddIn
             rawContent = If(resp.Response, "")
         ElseIf IsStructuredErrorToolResponse(resp) Then
             rawContent = If(resp.Response, "")
+        ElseIf Not System.String.IsNullOrEmpty(resp.Response) Then
+            ' Failed tools may contain completed work or partial source evidence.
+            ' Keep the complete body and label the failed execution explicitly.
+            rawContent = New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("ok", False),
+                New Newtonsoft.Json.Linq.JProperty("execution_succeeded", False),
+                New Newtonsoft.Json.Linq.JProperty("error", If(resp.ErrorMessage, "Tool failed.")),
+                New Newtonsoft.Json.Linq.JProperty("raw_result", resp.Response),
+                New Newtonsoft.Json.Linq.JProperty("result_contract", "Unabridged output of a failed tool. Preserve useful evidence, but do not infer successful completion from this body.")
+            ).ToString(Newtonsoft.Json.Formatting.None)
         Else
             rawContent = $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
         End If
@@ -481,6 +516,18 @@ Partial Public Class ThisAddIn
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = False
             Return rawContent
+        End If
+
+        If resp.Success AndAlso
+           replayRetention <> SharedLibrary.Agents.ToolReplayRetentionKind.ControlPlanePinned AndAlso
+           INI_ToolResultReferenceThresholdChars > 0 AndAlso rawContent.Length > INI_ToolResultReferenceThresholdChars Then
+            Dim sourceReference As System.String = TryBuildLargeResultReferenceReplay(resp, rawContent)
+            If sourceReference IsNot Nothing Then
+                resp.ModelReplayContent = sourceReference
+                resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+                resp.WasCompactedForModelReplay = True
+                Return sourceReference
+            End If
         End If
 
         If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.CurrentTurnCritical AndAlso
@@ -527,19 +574,6 @@ Partial Public Class ThisAddIn
         End If
 
         If Not compactForSubAgent Then
-            ' Large deliverable/reference-bearing responses are expensive to echo on every
-            ' model turn. Replay a compact envelope proactively while retaining resp.Response
-            ' losslessly for artifact registration, promotion and verification.
-            If rawContent.Length > SharedLibrary.Agents.ToolingConstants.DeliverableSafeReplayEnvelopeThresholdChars Then
-                Dim safeEnvelope As String = TryBuildDeliverableSafeReplayEnvelope(resp, rawContent)
-                If safeEnvelope IsNot Nothing Then
-                    resp.ModelReplayContent = safeEnvelope
-                    resp.ModelReplaySummary = BuildToolReplaySummary(resp)
-                    resp.WasCompactedForModelReplay = True
-                    Return safeEnvelope
-                End If
-            End If
-
             ' Keep replay-state metadata synchronized with what the model actually receives.
             ' A response that is full again must not remain marked as compacted from an
             ' earlier budget pass, otherwise final evidence review would act on stale state.
@@ -567,11 +601,22 @@ Partial Public Class ThisAddIn
     Private Function TryBuildControlPlaneReplayEnvelope(resp As ToolResponse,
                                                         rawContent As String) As String
         If resp Is Nothing OrElse String.IsNullOrWhiteSpace(resp.ControlPlanePayloadKey) Then Return Nothing
+        Dim pinned As SharedLibrary.Agents.ToolingControlPlaneStore.PinnedPayload = Nothing
+        If Not SharedLibrary.Agents.ToolingControlPlaneStore.TryGetActiveSkillPayload(
+            SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, pinned) OrElse pinned Is Nothing OrElse
+           Not System.String.Equals(pinned.Key, resp.ControlPlanePayloadKey, System.StringComparison.Ordinal) OrElse
+           Not System.String.Equals(pinned.FullPayload, If(rawContent, ""), System.StringComparison.Ordinal) Then
+            Return Nothing
+        End If
 
         Dim envelope As New JObject(
             New JProperty("ok", resp.Success),
             New JProperty("tool", If(resp.ToolName, "")),
             New JProperty("control_plane_pinned", True),
+            New JProperty("content_complete", False),
+            New JProperty("representation", "control_plane_stub"),
+            New JProperty("is_semantic_summary", False),
+            New JProperty("retrieval_required", "This is an incomplete pointer. Use the full authoritative control payload replayed separately by the host on this turn; do not infer missing instructions from this stub."),
             New JProperty("control_plane_key", resp.ControlPlanePayloadKey),
             New JProperty("total_chars", If(rawContent, "").Length),
             New JProperty("summary", "The full authoritative control payload is pinned by the host and replayed separately on every parent turn."))
@@ -665,6 +710,11 @@ Partial Public Class ThisAddIn
         Dim refValue As String = refToken.ToString()
         If String.IsNullOrWhiteSpace(refValue) Then Return Nothing
 
+        Dim referenced As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+        If Not SharedLibrary.Agents.ToolResultStore.TryGetForWorkflow(
+            refValue, SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, referenced) OrElse
+           Not referenced.IsDurable Then Return Nothing
+
         Dim windowLength As Integer = windowToken.ToString().Length
         If windowLength <= 1024 Then Return Nothing
 
@@ -682,7 +732,7 @@ Partial Public Class ThisAddIn
             New JProperty("omitted_window_chars", windowLength),
             New JProperty("note", "A previously expanded window was omitted from context to save space. Call context_expand with this result_ref and the offsets to re-read it."))
 
-        Return stub.ToString(Formatting.None)
+        Return SharedLibrary.Agents.ToolResultStore.AnnotateReferenceEnvelope(stub).ToString(Formatting.None)
     End Function
 
 
@@ -717,7 +767,10 @@ Partial Public Class ThisAddIn
                    compactedToken.Type = JTokenType.Boolean AndAlso
                    compactedToken.Value(Of Boolean)() AndAlso
                    Not String.IsNullOrWhiteSpace(existing.Value(Of String)("result_ref")) Then
-                    Return resp.ModelReplayContent
+                    Dim reusable As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+                    If TryResolveReusableReplayStoredResult(resp, raw, reusable) AndAlso reusable.IsDurable Then
+                        Return SharedLibrary.Agents.ToolResultStore.AnnotateReferenceEnvelope(existing).ToString(Formatting.None)
+                    End If
                 End If
             Catch
             End Try
@@ -730,11 +783,13 @@ Partial Public Class ThisAddIn
             Return Nothing
         End Try
 
-        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult =
-            SharedLibrary.Agents.ToolResultStore.Put(
-                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
-                If(resp.ToolName, ""),
-                raw)
+        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+        If Not TryResolveReusableReplayStoredResult(resp, raw, stored) Then
+            stored = SharedLibrary.Agents.ToolResultStore.Put(
+                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, If(resp.ToolName, ""), raw)
+        End If
+        resp.PreservedResultRef = stored.Ref
+        If Not stored.IsDurable Then Return Nothing
 
         Dim compact As New JObject(
             New JProperty("ok", resp.Success),
@@ -745,6 +800,12 @@ Partial Public Class ThisAddIn
             New JProperty("compacted_for_model_replay", True))
 
         Dim replayFields As String() = {
+            "resource_id",
+            "extraction_complete",
+            "processed_ranges",
+            "coverage",
+            "source_hash",
+            "source_sha256",
             "artifact_id",
             "logical_deliverable_id",
             "output_slot_id",
@@ -788,6 +849,7 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
+        If source("result_ref") IsNot Nothing Then compact("source_result_ref") = source("result_ref").DeepClone()
         Dim issues As JArray = TryCast(source("issues"), JArray)
         If issues IsNot Nothing Then
             compact("issue_count") = issues.Count
@@ -813,9 +875,9 @@ Partial Public Class ThisAddIn
         End If
 
         compact("continuation") =
-            "The full tool result is stored losslessly. Use context_expand with result_ref only if additional detail is required."
+            "This envelope omits tool-result content. Retrieve every omitted part needed for the task through context_expand before using it; whole-source conclusions require complete coverage."
 
-        Return compact.ToString(Formatting.None)
+        Return SharedLibrary.Agents.ToolResultStore.AnnotateReferenceEnvelope(compact).ToString(Formatting.None)
     End Function
 
     ''' <summary>
@@ -836,11 +898,13 @@ Partial Public Class ThisAddIn
 
         If Not SharedLibrary.Agents.ToolingRuntimePrimitives.TryBuildEvidenceCore(
                 raw,
-                SharedLibrary.Agents.ToolingConstants.EvidenceReplayCoreMaxChars,
+                INI_EvidenceReplayCoreMaxChars,
                 evidenceCoreJson,
                 omittedPropertyCount,
                 exactScalarCount,
-                arrayItemPropertyLimit) Then
+                arrayItemPropertyLimit,
+                INI_EvidenceReplayPreferredArrayItemProperties,
+                INI_EvidenceReplayMaxExactStringChars) Then
             Return Nothing
         End If
 
@@ -851,6 +915,9 @@ Partial Public Class ThisAddIn
                 If(resp.ToolName, System.String.Empty),
                 raw)
         End If
+
+        resp.PreservedResultRef = stored.Ref
+        If Not stored.IsDurable Then Return Nothing
 
         Dim evidenceCore As JToken
         Try
@@ -876,15 +943,18 @@ Partial Public Class ThisAddIn
             New JProperty("continuation",
                 "The full original result is stored losslessly. Use context_expand with result_ref only for facts or text omitted from evidence_core."))
 
-        Return compact.ToString(Formatting.None)
+        Return SharedLibrary.Agents.ToolResultStore.AnnotateReferenceEnvelope(compact).ToString(Formatting.None)
     End Function
 
     Private Function TryResolveReusableReplayStoredResult(resp As ToolResponse,
                                                            rawContent As System.String,
                                                            ByRef stored As SharedLibrary.Agents.ToolResultStore.StoredResult) As System.Boolean
         stored = Nothing
-        If resp Is Nothing OrElse
-           Not resp.WasCompactedForModelReplay OrElse
+        If resp Is Nothing Then Return False
+        If SharedLibrary.Agents.ToolResultStore.TryReuseReference(
+            resp.PreservedResultRef, SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
+            If(resp.ToolName, System.String.Empty), If(rawContent, System.String.Empty), stored) Then Return True
+        If Not resp.WasCompactedForModelReplay OrElse
            System.String.IsNullOrWhiteSpace(resp.ModelReplayContent) Then
             Return False
         End If
@@ -908,6 +978,30 @@ Partial Public Class ThisAddIn
             stored)
     End Function
 
+    Private Function TryBuildLargeResultReferenceReplay(resp As ToolResponse, rawContent As System.String) As System.String
+        If MustPreserveFullResponseForReplay(resp, rawContent) Then
+            Dim safeEnvelope As System.String = TryBuildDeliverableSafeReplayEnvelope(resp, rawContent)
+            Return If(safeEnvelope IsNot Nothing AndAlso safeEnvelope.Length < rawContent.Length, safeEnvelope, Nothing)
+        End If
+        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+        If Not TryResolveReusableReplayStoredResult(resp, rawContent, stored) Then
+            stored = SharedLibrary.Agents.ToolResultStore.Put(
+                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, resp.ToolName, rawContent)
+        End If
+        resp.PreservedResultRef = stored.Ref
+        If Not stored.IsDurable Then Return Nothing
+        Dim previewLength As System.Int32 = SharedLibrary.Agents.ToolResultStore.GetUnicodeSafePrefixLength(rawContent, INI_ToolResultReferencePreviewChars)
+        Dim envelope As Newtonsoft.Json.Linq.JObject = SharedLibrary.Agents.ToolResultStore.DescribeReference(stored)
+        envelope("tool") = resp.ToolName
+        envelope("preview") = rawContent.Substring(0, previewLength)
+        envelope("returned_chars") = previewLength
+        envelope("next_offset") = previewLength
+        envelope("truncated") = previewLength < rawContent.Length
+        envelope("context_handling_reason") = "Large-result reference replay, not semantic compaction. Prefer a complete source file and isolated file analysis; otherwise load every task-required range through context_expand."
+        Dim serialized As System.String = envelope.ToString(Newtonsoft.Json.Formatting.None)
+        Return If(serialized.Length < rawContent.Length, serialized, Nothing)
+    End Function
+
     Private Function CompactToolResponseContentForSubAgent(resp As ToolResponse, rawContent As String,
                                                            Optional overrideThresholdChars As Integer = -1,
                                                            Optional overridePreviewChars As Integer = -1) As String
@@ -916,12 +1010,12 @@ Partial Public Class ThisAddIn
         Dim raw As String = If(rawContent, "")
 
         Dim thresholdChars As Integer =
-            If(overrideThresholdChars > 0, overrideThresholdChars, SubAgentLargeToolResponseThresholdChars)
+            If(overrideThresholdChars > 0, overrideThresholdChars, INI_SubAgentLargeToolResponseThresholdChars)
         Dim previewChars As Integer =
-            If(overridePreviewChars > 0, overridePreviewChars, SubAgentLargeToolResponseExcerptChars)
+            If(overridePreviewChars >= 0, overridePreviewChars, INI_SubAgentLargeToolResponseExcerptChars)
 
         Dim windowStub As String = TryBuildReferencedWindowStub(raw)
-        If windowStub IsNot Nothing Then
+        If windowStub IsNot Nothing AndAlso windowStub.Length < raw.Length Then
             resp.ModelReplayContent = windowStub
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = True
@@ -936,7 +1030,7 @@ Partial Public Class ThisAddIn
         End If
 
         Dim deliverableSafeEnvelope As String = TryBuildDeliverableSafeReplayEnvelope(resp, raw)
-        If deliverableSafeEnvelope IsNot Nothing Then
+        If deliverableSafeEnvelope IsNot Nothing AndAlso deliverableSafeEnvelope.Length < raw.Length Then
             resp.ModelReplayContent = deliverableSafeEnvelope
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = True
@@ -960,7 +1054,7 @@ Partial Public Class ThisAddIn
             Return evidenceEnvelope
         End If
 
-        Dim excerptLength As Integer = Math.Min(previewChars, raw.Length)
+        Dim excerptLength As System.Int32 = SharedLibrary.Agents.ToolResultStore.GetUnicodeSafePrefixLength(raw, previewChars)
         Dim excerpt As String = raw.Substring(0, excerptLength)
         Dim summary As String = BuildToolReplaySummary(resp)
 
@@ -970,6 +1064,13 @@ Partial Public Class ThisAddIn
                 SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
                 If(resp.ToolName, ""),
                 raw)
+        End If
+
+        resp.PreservedResultRef = stored.Ref
+        If Not stored.IsDurable Then
+            resp.ModelReplayContent = raw
+            resp.WasCompactedForModelReplay = False
+            Return raw
         End If
 
         Dim compactObj As New JObject(
@@ -984,7 +1085,13 @@ Partial Public Class ThisAddIn
         New JProperty("next_offset", excerptLength),
         New JProperty("continuation", "The full result is stored. To read more, call context_expand with this result_ref, using start_char and max_chars to page through the full content."))
 
-        resp.ModelReplayContent = compactObj.ToString(Formatting.None)
+        Dim serializedPreview As System.String = SharedLibrary.Agents.ToolResultStore.AnnotateReferenceEnvelope(compactObj).ToString(Formatting.None)
+        If serializedPreview.Length >= raw.Length Then
+            resp.ModelReplayContent = raw
+            resp.WasCompactedForModelReplay = False
+            Return raw
+        End If
+        resp.ModelReplayContent = serializedPreview
         resp.ModelReplaySummary = summary
         resp.WasCompactedForModelReplay = True
         Return resp.ModelReplayContent
@@ -1010,7 +1117,7 @@ Partial Public Class ThisAddIn
         End If
 
         If String.IsNullOrWhiteSpace(summary) Then
-            summary = $"{If(resp.ToolName, "tool")} succeeded. {BuildResultExcerpt(If(resp.Response, ""), 280)}"
+            summary = $"{If(resp.ToolName, "tool")} {If(resp.Success, "succeeded", "failed")}. Incomplete display excerpt: {BuildResultExcerpt(If(resp.Response, ""), 280)}"
         End If
 
         resp.ModelReplaySummary = summary
@@ -1096,8 +1203,9 @@ Partial Public Class ThisAddIn
 
         Dim compactedEvidenceCount As System.Int32 = 0
         For Each response As ToolResponse In context.AllToolResponses
-            If response Is Nothing OrElse Not response.Success OrElse Not response.WasCompactedForModelReplay Then Continue For
-            If SharedLibrary.Agents.ToolingRuntimePrimitives.IsEvidenceCompactedReplay(response.ModelReplayContent) Then
+            If response Is Nothing OrElse Not response.Success Then Continue For
+            Dim visibleResult As System.String = If(System.String.IsNullOrEmpty(response.ModelReplayContent), response.Response, response.ModelReplayContent)
+            If SharedLibrary.Agents.ToolingRuntimePrimitives.IsEvidenceCompactedReplay(visibleResult) Then
                 compactedEvidenceCount += 1
             End If
         Next
@@ -1114,6 +1222,41 @@ Partial Public Class ThisAddIn
             "Final response deferred for evidence-grounding review.",
             details:=$"compactedEvidenceResults={compactedEvidenceCount}; toolResponseCount={responseCount}")
         Return True
+    End Function
+
+    Private Function PreserveSuccessfulToolResults(context As ToolExecutionContext) As Newtonsoft.Json.Linq.JArray
+        Dim results As New Newtonsoft.Json.Linq.JArray()
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then Return results
+        For Each response As ToolResponse In context.AllToolResponses
+            If response Is Nothing Then Continue For
+            Dim retainedBody As System.String = If(response.Response, "")
+            If Not response.Success Then
+                retainedBody = New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("execution_succeeded", False),
+                    New Newtonsoft.Json.Linq.JProperty("raw_result", retainedBody),
+                    New Newtonsoft.Json.Linq.JProperty("error", If(response.ErrorMessage, "Tool failed."))
+                ).ToString(Newtonsoft.Json.Formatting.None)
+            End If
+            Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult = Nothing
+            If Not SharedLibrary.Agents.ToolResultStore.TryReuseReference(
+                response.PreservedResultRef, context.WorkflowId, response.ToolName, retainedBody, stored) OrElse Not stored.IsDurable Then
+                stored = SharedLibrary.Agents.ToolResultStore.Put(context.WorkflowId, response.ToolName, retainedBody)
+                response.PreservedResultRef = stored.Ref
+            End If
+            ' Failed outputs stay in the continuation archive, never in the success manifest.
+            If Not response.Success Then Continue For
+            Dim item As Newtonsoft.Json.Linq.JObject = SharedLibrary.Agents.ToolResultStore.DescribeReference(stored)
+            item("tool") = response.ToolName
+            item("call_id") = response.CallId
+            item("execution_succeeded") = True
+            If Not stored.IsDurable Then
+                item("content_complete") = True
+                item("representation") = "full_tool_result"
+                item("content") = response.Response
+            End If
+            results.Add(item)
+        Next
+        Return results
     End Function
 
     Private Function GetLastSuccessfulToolResponse(context As ToolExecutionContext) As ToolResponse

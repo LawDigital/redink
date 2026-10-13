@@ -65,7 +65,7 @@ Namespace Agents
 
             Public Function GetErrorCode() As String
                 If [Error] Is Nothing Then Return ""
-                Return If([Error].Value(Of String)("code"), "")
+                Return SubAgentRuntimeHardening.ReadScalarText([Error]("code"))
             End Function
 
             Public Function ToJObject() As JObject
@@ -223,7 +223,9 @@ Namespace Agents
         ''' </summary>
         Public Shared Function BuildTimeoutPayload(agentName As String,
                                                    Optional timeoutSeconds As System.Int32 = 0,
-                                                   Optional message As String = Nothing) As String
+                                                   Optional message As String = Nothing,
+                                                   Optional completedResults As Newtonsoft.Json.Linq.JArray = Nothing,
+                                                   Optional runState As ToolCallSequencing.ToolingRunState = Nothing) As String
             Dim effectiveMessage As String = If(message, "").Trim()
             If effectiveMessage = "" Then effectiveMessage = TimeoutMessage
 
@@ -242,6 +244,15 @@ Namespace Agents
                 New JProperty("result", JValue.CreateNull()),
                 New JProperty("resultKind", "error"),
                 New JProperty("error", err))
+
+            If completedResults IsNot Nothing OrElse runState IsNot Nothing Then
+                Dim preserved As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(
+                    ToolCallSequencing.BuildBlockedResultPayload(
+                        TimeoutCode, TimeoutPhase, effectiveMessage, retryable:=True,
+                        completedResults:=completedResults, runState:=runState))
+                Dim preservedResult As Newtonsoft.Json.Linq.JToken = preserved("result")
+                If preservedResult IsNot Nothing Then obj("result") = preservedResult.DeepClone()
+            End If
 
             Return obj.ToString(Formatting.None)
         End Function
@@ -363,102 +374,104 @@ Namespace Agents
 
             Return obj.ToString(Formatting.None)
         End Function
-        Public Shared Function TryGetEnvelopeErrorMessage(payload As String,
-                                                          ByRef errorMessage As String) As Boolean
-            errorMessage = ""
-            If String.IsNullOrWhiteSpace(payload) Then Return False
-
+        Public Shared Function TryGetEnvelopeErrorMessage(payload As System.String,
+                                                          ByRef errorMessage As System.String) As System.Boolean
+            errorMessage = System.String.Empty
+            If System.String.IsNullOrWhiteSpace(payload) Then Return False
             Try
-                Dim obj As JObject = JObject.Parse(payload)
-                Dim errObj As JObject = TryCast(obj("error"), JObject)
-                If errObj Is Nothing Then Return False
-
-                errorMessage = If(errObj.Value(Of String)("message"), "").Trim()
-                Return Not String.IsNullOrWhiteSpace(errorMessage)
+                Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(payload)
+                Dim errorToken As Newtonsoft.Json.Linq.JToken = obj("error")
+                If GetErrorTokenCode(errorToken) = System.String.Empty Then Return False
+                Dim errObj As Newtonsoft.Json.Linq.JObject = TryCast(errorToken, Newtonsoft.Json.Linq.JObject)
+                If errObj IsNot Nothing Then errorMessage = ReadScalarText(errObj("message"))
+                If errorMessage = System.String.Empty Then errorMessage = ReadScalarText(obj("message"))
+                If errorMessage = System.String.Empty Then
+                    errorMessage = If(errorToken.Type = Newtonsoft.Json.Linq.JTokenType.String,
+                        errorToken.Value(Of System.String)(), errorToken.ToString(Newtonsoft.Json.Formatting.None))
+                End If
+                Return Not System.String.IsNullOrWhiteSpace(errorMessage)
             Catch ex As System.Exception
                 Return False
             End Try
         End Function
 
-        Public Shared Function TryGetEnvelopeRetryable(payload As String,
-                                                       ByRef retryable As Boolean) As Boolean
+        Public Shared Function TryGetEnvelopeRetryable(payload As System.String,
+                                                       ByRef retryable As System.Boolean) As System.Boolean
             retryable = False
-            If String.IsNullOrWhiteSpace(payload) Then Return False
-
+            If System.String.IsNullOrWhiteSpace(payload) Then Return False
             Try
-                Dim obj As JObject = JObject.Parse(payload)
-                Dim errObj As JObject = TryCast(obj("error"), JObject)
-                If errObj Is Nothing Then Return False
+                Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(payload)
+                Dim errObj As Newtonsoft.Json.Linq.JObject = TryCast(obj("error"), Newtonsoft.Json.Linq.JObject)
+                Dim retryToken As Newtonsoft.Json.Linq.JToken = If(errObj Is Nothing, Nothing, errObj("retryable"))
+                If retryToken Is Nothing Then retryToken = obj("retryable")
+                If retryToken Is Nothing Then Return False
+                If retryToken.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+                    retryable = retryToken.Value(Of System.Boolean)()
+                    Return True
+                End If
+                If retryToken.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                    Return System.Boolean.TryParse(retryToken.Value(Of System.String)().Trim(), retryable)
+                End If
+                Return False
+            Catch ex As System.Exception
+                Return False
+            End Try
+        End Function
 
-                Dim retryToken As JToken = errObj("retryable")
-                If retryToken Is Nothing OrElse retryToken.Type <> JTokenType.Boolean Then Return False
+        Public Shared Function IsEmptyResultRetryAllowed(payload As System.String,
+                                                         errorCode As System.String) As System.Boolean
+            If Not System.String.Equals(errorCode, EmptyResultCode, System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not System.String.Equals(errorCode, ModelEmptyResponseCode, System.StringComparison.OrdinalIgnoreCase) Then Return False
+            Dim declaredRetryable As System.Boolean = True
+            Return Not TryGetEnvelopeRetryable(payload, declaredRetryable) OrElse declaredRetryable
+        End Function
 
-                retryable = retryToken.Value(Of Boolean)()
+        Public Shared Function TryGetEnvelopeErrorInfo(payload As System.String,
+                                                       ByRef errorCode As System.String,
+                                                       ByRef resultKind As System.String) As System.Boolean
+            errorCode = System.String.Empty
+            resultKind = System.String.Empty
+            If System.String.IsNullOrWhiteSpace(payload) Then Return False
+            Try
+                Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(payload)
+                resultKind = ReadScalarText(obj("resultKind"))
+                errorCode = GetErrorTokenCode(obj("error"))
+                If errorCode = System.String.Empty AndAlso TokenIsExplicitlyFalse(obj("success")) Then errorCode = "success_false"
+                If errorCode = System.String.Empty AndAlso TokenIsExplicitlyFalse(obj("ok")) Then errorCode = "ok_false"
+                Dim statusValue As System.String = ReadScalarText(obj("status"))
+                If errorCode = System.String.Empty AndAlso
+                   (System.String.Equals(statusValue, "error", System.StringComparison.OrdinalIgnoreCase) OrElse
+                    System.String.Equals(statusValue, "failed", System.StringComparison.OrdinalIgnoreCase)) Then errorCode = statusValue.ToLowerInvariant()
+                If System.String.Equals(resultKind, "error", System.StringComparison.OrdinalIgnoreCase) AndAlso errorCode = System.String.Empty Then errorCode = "agent_error"
+                If errorCode = System.String.Empty Then Return False
+                If resultKind = System.String.Empty Then resultKind = "error"
                 Return True
             Catch ex As System.Exception
                 Return False
             End Try
         End Function
 
-        Public Shared Function TryGetEnvelopeErrorInfo(payload As String,
-                                                       ByRef errorCode As String,
-                                                       ByRef resultKind As String) As Boolean
-            errorCode = ""
-            resultKind = ""
+        ' Only reserved protocol fields are interpreted. Arbitrary nested domain data is not scanned.
+        Private Shared Function ReadScalarText(token As Newtonsoft.Json.Linq.JToken) As System.String
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null OrElse
+               token.Type = Newtonsoft.Json.Linq.JTokenType.Object OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Array Then Return System.String.Empty
+            Return token.ToString().Trim()
+        End Function
 
-            If String.IsNullOrWhiteSpace(payload) Then Return False
-
-            Try
-                Dim obj As JObject = JObject.Parse(payload)
-
-                resultKind = If(obj.Value(Of String)("resultKind"), "")
-
-                ' Structured error object: {"error":{"code":"..."}}
-                Dim errObj As JObject = TryCast(obj("error"), JObject)
-                If errObj IsNot Nothing Then
-                    errorCode = If(errObj.Value(Of String)("code"), "")
-                End If
-
-                ' Flat / string error: {"error":"skill_not_found"} or any non-null "error".
-                If String.IsNullOrWhiteSpace(errorCode) Then
-                    Dim errToken As JToken = obj("error")
-                    If errToken IsNot Nothing AndAlso errToken.Type <> JTokenType.Null Then
-                        If errToken.Type = JTokenType.String Then
-                            errorCode = errToken.Value(Of String)()
-                        ElseIf errToken.Type <> JTokenType.Object Then
-                            errorCode = errToken.ToString()
-                        End If
-                        If String.IsNullOrWhiteSpace(errorCode) Then errorCode = "error"
-                    End If
-                End If
-
-                ' Explicit business-failure flags: {"success":false} / {"ok":false}.
-                If String.IsNullOrWhiteSpace(errorCode) Then
-                    If TokenIsExplicitlyFalse(obj("success")) Then errorCode = "success_false"
-                    If String.IsNullOrWhiteSpace(errorCode) AndAlso TokenIsExplicitlyFalse(obj("ok")) Then errorCode = "ok_false"
-                End If
-
-                ' Explicit status strings: {"status":"error"} / {"status":"failed"}.
-                Dim statusValue As String = If(obj.Value(Of String)("status"), "").Trim()
-                If String.IsNullOrWhiteSpace(errorCode) AndAlso
-                   (String.Equals(statusValue, "error", StringComparison.OrdinalIgnoreCase) OrElse
-                    String.Equals(statusValue, "failed", StringComparison.OrdinalIgnoreCase)) Then
-                    errorCode = statusValue.ToLowerInvariant()
-                End If
-
-                If String.Equals(resultKind, "error", StringComparison.OrdinalIgnoreCase) Then
-                    If String.IsNullOrWhiteSpace(resultKind) Then resultKind = "error"
-                    Return True
-                End If
-
-                If Not String.IsNullOrWhiteSpace(errorCode) Then
-                    If String.IsNullOrWhiteSpace(resultKind) Then resultKind = "error"
-                    Return True
-                End If
-            Catch
-            End Try
-
-            Return False
+        Private Shared Function GetErrorTokenCode(token As Newtonsoft.Json.Linq.JToken) As System.String
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return System.String.Empty
+            If token.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+                Return If(token.Value(Of System.Boolean)(), "error", System.String.Empty)
+            End If
+            If token.Type = Newtonsoft.Json.Linq.JTokenType.String Then Return token.Value(Of System.String)().Trim()
+            Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+            If obj IsNot Nothing Then
+                If obj.Count = 0 Then Return System.String.Empty
+                Dim code As System.String = ReadScalarText(obj("code"))
+                Return If(code = System.String.Empty, "error", code)
+            End If
+            If token.Type = Newtonsoft.Json.Linq.JTokenType.Array AndAlso Not token.HasValues Then Return System.String.Empty
+            Return "error"
         End Function
 
         Private Shared Function TokenIsExplicitlyFalse(token As JToken) As Boolean
@@ -468,7 +481,7 @@ Namespace Agents
                 Case JTokenType.Boolean
                     Return Not token.Value(Of Boolean)()
                 Case JTokenType.String
-                    Return String.Equals(token.Value(Of String)(), "false", StringComparison.OrdinalIgnoreCase)
+                    Return System.String.Equals(token.Value(Of System.String)().Trim(), "false", System.StringComparison.OrdinalIgnoreCase)
                 Case Else
                     Return False
             End Select
@@ -503,7 +516,7 @@ Namespace Agents
             Dim hasResult As Boolean = (obj("result") IsNot Nothing)
 
             If hasSummary OrElse hasResult Then
-                Dim summary As String = If(obj.Value(Of String)("summary"), "")
+                Dim summary As System.String = ReadScalarText(obj("summary"))
                 Dim resultToken As JToken = obj("result")
 
                 ' A sub-agent model call can complete successfully at the transport layer while
@@ -550,26 +563,25 @@ Namespace Agents
             }
         End Function
 
-        Private Shared Function NormalizeErrorObject(obj As JObject, rawLength As Integer) As NormalizedEnvelope
-            Dim errObj As JObject = TryCast(obj("error"), JObject)
-            Dim summary As String = If(obj.Value(Of String)("summary"), "")
-
+        Private Shared Function NormalizeErrorObject(obj As Newtonsoft.Json.Linq.JObject, rawLength As System.Int32) As NormalizedEnvelope
+            Dim errObj As Newtonsoft.Json.Linq.JObject = TryCast(obj("error"), Newtonsoft.Json.Linq.JObject)
+            Dim summary As System.String = ReadScalarText(obj("summary"))
+            Dim code As System.String = GetErrorTokenCode(obj("error"))
+            If code = System.String.Empty Then code = "agent_error"
             If errObj Is Nothing Then
-                errObj = New JObject(
-                    New JProperty("code", "agent_error"),
-                    New JProperty("phase", EmptyResultPhase),
-                    New JProperty("message", If(obj.Value(Of String)("message"), EmptyResultMessage)))
+                errObj = New Newtonsoft.Json.Linq.JObject()
             Else
-                errObj = CType(errObj.DeepClone(), JObject)
-                If String.IsNullOrWhiteSpace(errObj.Value(Of String)("phase")) Then
-                    errObj("phase") = EmptyResultPhase
-                End If
+                errObj = DirectCast(errObj.DeepClone(), Newtonsoft.Json.Linq.JObject)
             End If
-
-            If String.IsNullOrWhiteSpace(summary) Then
-                summary = If(errObj.Value(Of String)("message"), "Sub-agent reported an error.")
+            errObj("code") = code
+            If ReadScalarText(errObj("phase")) = System.String.Empty Then errObj("phase") = EmptyResultPhase
+            If ReadScalarText(errObj("message")) = System.String.Empty Then
+                Dim message As System.String = System.String.Empty
+                If Not TryGetEnvelopeErrorMessage(obj.ToString(Newtonsoft.Json.Formatting.None), message) Then message = "Sub-agent reported an error."
+                errObj("message") = message
             End If
-
+            If errObj("retryable") Is Nothing AndAlso obj("retryable") IsNot Nothing Then errObj("retryable") = obj("retryable").DeepClone()
+            If summary = System.String.Empty Then summary = ReadScalarText(errObj("message"))
             Return New NormalizedEnvelope With {
                 .Summary = summary,
                 .Result = If(obj("result") Is Nothing, Nothing, obj("result").DeepClone()),
@@ -602,29 +614,34 @@ Namespace Agents
                 errObj = CType(errObj.DeepClone(), JObject)
             End If
 
-            If System.String.IsNullOrWhiteSpace(errObj.Value(Of System.String)("code")) Then
+            If System.String.IsNullOrWhiteSpace(ReadScalarText(errObj("code"))) Then
                 errObj("code") = normalizedCode
             End If
-            If System.String.IsNullOrWhiteSpace(errObj.Value(Of System.String)("phase")) Then
+            If System.String.IsNullOrWhiteSpace(ReadScalarText(errObj("phase"))) Then
                 errObj("phase") = "declared_result_status"
             End If
 
             Dim summary As System.String = System.String.Empty
             If container IsNot Nothing Then
-                summary = If(container.Value(Of System.String)("summary"), System.String.Empty).Trim()
+                summary = ReadScalarText(container("summary"))
             End If
             If System.String.IsNullOrWhiteSpace(summary) AndAlso resultObject IsNot Nothing Then
-                summary = If(resultObject.Value(Of System.String)("message"), System.String.Empty).Trim()
+                summary = ReadScalarText(resultObject("message"))
                 If System.String.IsNullOrWhiteSpace(summary) Then
-                    summary = If(resultObject.Value(Of System.String)("reason"), System.String.Empty).Trim()
+                    summary = ReadScalarText(resultObject("reason"))
                 End If
             End If
             If System.String.IsNullOrWhiteSpace(summary) Then
                 summary = "Sub-agent returned declared failure outcome '" & normalizedCode & "'."
             End If
 
-            If System.String.IsNullOrWhiteSpace(errObj.Value(Of System.String)("message")) Then
+            If System.String.IsNullOrWhiteSpace(ReadScalarText(errObj("message"))) Then
                 errObj("message") = summary
+            End If
+            If errObj("retryable") Is Nothing Then
+                Dim retryToken As Newtonsoft.Json.Linq.JToken = If(resultObject Is Nothing, Nothing, resultObject("retryable"))
+                If retryToken Is Nothing AndAlso container IsNot Nothing Then retryToken = container("retryable")
+                If retryToken IsNot Nothing Then errObj("retryable") = retryToken.DeepClone()
             End If
 
             Return New NormalizedEnvelope With {
@@ -643,10 +660,12 @@ Namespace Agents
             ' but its arbitrary domain fields are still data. Only explicit generic outcome
             ' flags and the reserved failure-status vocabulary are promoted to orchestration
             ' failure. Existing top-level structured error-envelope handling remains unchanged.
+            Dim explicitError As System.String = GetErrorTokenCode(obj("error"))
+            If explicitError <> System.String.Empty Then Return explicitError
             If TokenIsExplicitlyFalse(obj("success")) Then Return "success_false"
             If TokenIsExplicitlyFalse(obj("ok")) Then Return "ok_false"
 
-            Dim statusValue As System.String = If(obj.Value(Of System.String)("status"), System.String.Empty).Trim().ToLowerInvariant()
+            Dim statusValue As System.String = ReadScalarText(obj("status")).ToLowerInvariant()
             If statusValue = "error" OrElse
                statusValue = "failed" OrElse
                statusValue = "failure" OrElse
@@ -670,19 +689,10 @@ Namespace Agents
             Return normalized.StartsWith("blocked_", System.StringComparison.Ordinal)
         End Function
 
-        Private Shared Function IsExplicitErrorObject(obj As JObject) As Boolean
+        Private Shared Function IsExplicitErrorObject(obj As Newtonsoft.Json.Linq.JObject) As System.Boolean
             If obj Is Nothing Then Return False
-
-            If String.Equals(obj.Value(Of String)("resultKind"), "error", StringComparison.OrdinalIgnoreCase) Then
-                Return True
-            End If
-
-            Dim errObj As JObject = TryCast(obj("error"), JObject)
-            If errObj IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(errObj.Value(Of String)("code")) Then
-                Return True
-            End If
-
-            Return False
+            Return System.String.Equals(ReadScalarText(obj("resultKind")), "error", System.StringComparison.OrdinalIgnoreCase) OrElse
+                GetErrorTokenCode(obj("error")) <> System.String.Empty
         End Function
 
         Private Shared Function IsUsableToken(token As JToken) As Boolean

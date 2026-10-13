@@ -1108,7 +1108,7 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("3")>  _
+         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
         Public Property AP_LogDiagnosticsReportIntervalDays() As Global.System.Int32
             Get
                 Return CType(Me("AP_LogDiagnosticsReportIntervalDays"), Global.System.Int32)

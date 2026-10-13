@@ -177,8 +177,8 @@ Namespace Agents
             Dim truncated As Boolean = False
 
             If maxChars > 0 AndAlso joined.Length > maxChars Then
-                joined = joined.Substring(0, maxChars)
-                truncated = True
+                Return ToolResultStore.BuildSourcePreview(
+                    WorkflowContinuity.CurrentWorkflowId, ToolExtract, joined, maxChars, p).ToString(Newtonsoft.Json.Formatting.None)
             End If
 
             Return JsonConvert.SerializeObject(New With {
@@ -2926,7 +2926,7 @@ Namespace Agents
                 .ToolPriority = 880,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (extract text)",
-                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from a .docx file, including the main body, footnotes, endnotes, headers/footers, tables, numbering, and text-box/margin text when present."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length.""}},""required"":[""path""]}}",
+                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from a .docx file, including the main body, footnotes, endnotes, headers/footers, tables, numbering, and text-box/margin text when present."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional inline-preview cap. The complete extraction is stored under result_ref; retrieve omitted ranges with context_expand before using them. If snapshot storage fails, the full text is returned.""}},""required"":[""path""]}}",
                 .ToolInstructionsPrompt = ToolExtract & ": Extract plain text from a .docx file, including footnotes and endnotes."
             }
         End Function
