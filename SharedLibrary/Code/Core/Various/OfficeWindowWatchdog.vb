@@ -822,6 +822,15 @@ Namespace SharedLibrary
             End If
 
             Try
+                ' Same-process title reads send synchronous window messages. The
+                ' diagnostic worker must not wait on a possibly blocked Office UI.
+                Dim ownerPid As System.Int32 = 0
+                GetWindowThreadProcessId(hwnd, ownerPid)
+                Dim currentPid As System.Int32 = GetCurrentProcessIdSafe()
+                If ownerPid = 0 OrElse currentPid = 0 Then Return "[title unavailable]"
+                If ownerPid = currentPid Then Return "[same-process title omitted: non-blocking diagnostics]"
+
+                ' Foreign top-level captions use the system-maintained caption text.
                 Dim length As System.Int32 = GetWindowTextLength(hwnd)
                 If length <= 0 Then
                     Return System.String.Empty

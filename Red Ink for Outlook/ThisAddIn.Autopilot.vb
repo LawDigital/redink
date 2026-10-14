@@ -3541,7 +3541,7 @@ Partial Public Class ThisAddIn
                 If Not jobAborted AndAlso
                    _lastCompletedToolingWasBlocked AndAlso
                    Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingWorkflowId) AndAlso
-                   SharedLibrary.Agents.WorkflowContinuity.HasContinuationSnapshot(_lastCompletedToolingWorkflowId) Then
+                   SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(_lastCompletedToolingWorkflowId) Then
                     Dim retryInstructionLanguage As System.String = continuationInstructionLanguage
                     If _lastCompletedToolingRunState IsNot Nothing AndAlso
                        Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingRunState.UserLanguage) Then
@@ -7341,7 +7341,7 @@ Partial Public Class ThisAddIn
             SharedLibrary.Agents.WorkflowContinuity.BuildContinuationRetryHint(userLanguage)
         If text = System.String.Empty Then Return hint
         If text.IndexOf(hint, System.StringComparison.Ordinal) >= 0 Then Return text
-        Return text & Environment.NewLine & Environment.NewLine & hint
+        Return SharedLibrary.Agents.WorkflowContinuity.PrependContinuationNotice(text, hint)
     End Function
 
     Private Function IsPartOfAutoPilotConversation(mi As MailItem) As Boolean
