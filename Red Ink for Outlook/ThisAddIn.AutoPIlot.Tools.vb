@@ -71,7 +71,7 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
     Private Const AP_Tool_CreateCodeFile As String = "create_code_file"
     Private Const AP_Tool_CommentPdf As String = "comment_pdf_document"
-    Private Const AP_Tool_ExtractDataFromAttachments As String = "extract_data_from_attachments"
+    Private Const AP_Tool_ExtractDataFromDocs As String = "extract_data_from_docs"
     Private Const AP_Tool_RedactPdf As String = "redact_pdf"
     Private Const AP_Tool_OverlayPdf As String = "overlay_pdf"
     Private Const AP_Tool_CreateAudioFile As String = "create_audio_file"
@@ -982,13 +982,22 @@ Partial Public Class ThisAddIn
         })
 
 
-        ' ── extract_data_from_attachments ──
+        ' ── extract_data_from_docs ──
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractDataFromAttachments,
-            .ModelDescription = "Extract structured data from attachments into a table (built-in)",
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractDataFromDocs,
+            .ModelDescription = "Extract structured data from documents and attachments into a table (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ExtractDataFromAttachments & ": Extracts structured/tabular data from one or more attachments " &
-                "(PDF, Word, Excel, text files, or files from a .zip archive) using AI-driven fact extraction. " &
+                AP_Tool_ExtractDataFromDocs & ": Extracts structured/tabular data from readable documents and attachments " &
+                "(PDF, Word, Excel, text files, or attachment files unpacked from a .zip archive) using the existing document readers and AI-driven fact extraction. " &
+                "Pass file_paths for normal files accessible to the agent, attachment_names for attachments, or both. " &
+                "If neither list is provided, all processable attachments are used. An explicit list never adds other attachments implicitly. " &
+                "Inspect file_results, input_errors, failed_files, outcome and complete. " &
+                "A corrupt, unreadable or empty document is a diagnosed file outcome, not a reason to repeat the whole batch. " &
+                "processing_complete=true means all files have been handled, NOT that all content was extracted. " &
+                "For completed_with_file_errors, present the extracted rows and explicitly list unavailable files and their errors. " &
+                "Even if rows is empty, report the file outcomes; never invent missing facts. Do not retry unchanged unavailable_content files or rerun successful files. " &
+                "Only technical_failure requires recovery; retain the existing rows and address affected files only. " &
+                "complete=false means the content result has gaps: disclose them and do not claim every document was successfully analysed. " &
                 "You MUST provide an 'instruction' describing WHAT to extract (e.g. 'Extract invoice number, date, vendor name, and total amount'). " &
                 "You SHOULD provide a 'schema' defining the output columns using the format 'ColumnName:type;ColumnName:type' " &
                 "where type is one of: text, date, datetime, number, other. Example: 'Invoice Number:text;Date:date;Vendor:text;Amount:number'. " &
@@ -1001,8 +1010,8 @@ Partial Public Class ThisAddIn
                 "- Or any other appropriate presentation. " &
                 "This tool ONLY extracts and returns the structured data — it does NOT create any files.",
                 .ToolDefinition =
-                "{""name"":""" & AP_Tool_ExtractDataFromAttachments & """," &
-                """description"":""Extracts structured/tabular data from one or more attachments using AI-driven fact extraction. " &
+                "{""name"":""" & AP_Tool_ExtractDataFromDocs & """," &
+                """description"":""Reads/converts accessible documents and attachments and extracts structured/tabular data using AI-driven fact extraction. " &
                 "Returns a JSON object with 'schema' (column definitions) and 'rows' (extracted data). " &
                 "Supports PDF, Word, Excel, text files, and files unpacked from .zip archives. " &
                 "You MUST then decide how to present the result (create_excel_spreadsheet, create_word_document, or inline table).""," &
@@ -1014,7 +1023,8 @@ Partial Public Class ThisAddIn
                 "Example: 'Invoice No:text;Date:date*;Vendor:text;Amount:number;Notes:text'. " &
                 "If omitted, the AI infers the schema automatically.""}," &
                 """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of attachments to extract data from. " &
-                "If empty or omitted, processes all readable attachments (PDF, DOCX, XLSX, TXT, CSV, etc.).""}," &
+                "Used together with file_paths when supplied. If neither list is supplied, processes all readable attachments.""}," &
+                """file_paths"":{""type"":""array"",""items"":{""type"":""string""},""description"":""List of normal document paths the agent is allowed to read. Relative paths resolve in the agent workspace. Each accessible file is processed once; unsupported, missing or denied inputs are reported explicitly. Does not grant access to protected web links or document systems.""}," &
                 """output_language"":{""type"":""string"",""description"":""Language for extracted column names and textual values (e.g. 'English', 'German', 'French'). " &
                 "Use the language the user expects the output in. If omitted, uses the language of the user's email.""}," &
                 """sort_column"":{""type"":""integer"",""description"":""Optional: 1-based column index to sort by. Use 0 or omit for no sorting.""}," &
@@ -1571,8 +1581,8 @@ Partial Public Class ThisAddIn
                     response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
                 Case AP_Tool_CreateCodeFile
                     response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
-                Case AP_Tool_ExtractDataFromAttachments
-                    response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractDataFromDocs
+                    response = Await ExecuteExtractDataFromDocsTool(toolCall, context, cancellationToken)
                 Case AP_Tool_RedactPdf
                     response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
                 Case AP_Tool_OverlayPdf
@@ -2298,7 +2308,7 @@ Partial Public Class ThisAddIn
      AP_Tool_CreatePowerPoint,
      AP_Tool_CreateCodeFile,
      AP_Tool_CommentPdf,
-     AP_Tool_ExtractDataFromAttachments,
+     AP_Tool_ExtractDataFromDocs,
      AP_Tool_RedactPdf,
      AP_Tool_OverlayPdf,
      AP_Tool_CreateAudioFile,

@@ -384,6 +384,10 @@ Partial Public Class ThisAddIn
                (nowUtc - lastUtc).TotalMinutes < 5 Then Return
             _apLogDiagnosticsStatusTimes(phase) = nowUtc
         End SyncLock
+        If phase = "idle" OrElse phase = "analysis" OrElse phase = "model" OrElse phase = "report" Then
+            System.Diagnostics.Debug.WriteLine("AutoPilot log diagnostics [" & phase & "]: " & reason)
+            Return
+        End If
         ApDashboardLog("AutoPilot log diagnostics [" & phase & "]: " & reason, "info")
     End Sub
 
@@ -445,7 +449,7 @@ Partial Public Class ThisAddIn
                     Exit While
                 End If
 
-                ApDashboardLog("🔎 Analysing AutoPilot tooling log " & bundle.RunId & " for engineering diagnostics.", "step")
+                System.Diagnostics.Debug.WriteLine("🔎 Analysing AutoPilot tooling log " & bundle.RunId & " for engineering diagnostics.")
                 attemptedRunIds.Add(bundle.RunId)
                 Dim topicPolicy As AutoPilotLogDiagnosticTopicPolicy = Nothing
                 Try
@@ -459,7 +463,7 @@ Partial Public Class ThisAddIn
                     ct.ThrowIfCancellationRequested()
                     If Not IsAutoPilotLogDiagnosticsMailIdle() Then Throw New System.OperationCanceledException(ct)
                     Dim attemptNumber As System.Int32 = GetAutoPilotLogDiagnosticFailedAttempts(bundle.RunKey) + 1
-                    ApDashboardLog("AutoPilot log diagnostics run " & bundle.RunId & ": analysis attempt " & attemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & "/2.", "info")
+                    System.Diagnostics.Debug.WriteLine("AutoPilot log diagnostics run " & bundle.RunId & ": analysis attempt " & attemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & "/2.")
                     Try
                         analysed = Await AnalyseAutoPilotLogDiagnosticRunAsync(bundle, ct, topicPolicy).ConfigureAwait(False)
                     Catch ex As System.OperationCanceledException When ct.IsCancellationRequested OrElse Not IsAutoPilotLogDiagnosticsMailIdle()
@@ -493,7 +497,7 @@ Partial Public Class ThisAddIn
                 CleanupAutoPilotLogDiagnosticResults()
             End If
         Catch ex As System.OperationCanceledException
-            ApDashboardLog("AutoPilot log diagnostics interrupted: mail/scheduler work or shutdown. Unfinished runs remain available for retry.", "info")
+            System.Diagnostics.Debug.WriteLine("AutoPilot log diagnostics interrupted: mail/scheduler work or shutdown. Unfinished runs remain available for retry.")
         Catch ex As System.Exception
             ApDashboardLog("AutoPilot log diagnostics idle task failed: " & ex.Message, "warn")
         Finally
@@ -593,9 +597,9 @@ Partial Public Class ThisAddIn
             _context.INI_AutoPilotLogDiagnosticsMaxInputChars, If(_apConfig Is Nothing, 0, _apConfig.LogDiagnosticsMaxInputChars))
         Dim chunks As System.Collections.Generic.List(Of System.String) = SplitAutoPilotLogDiagnosticText(logText, inputCharLimit)
         If chunks.Count > 1 Then
-            ApDashboardLog("AutoPilot log diagnostics run " & bundle.RunId & ": configured input limit requires " & chunks.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " parts; all parts will be analysed without overlap.", "warn")
+            System.Diagnostics.Debug.WriteLine("AutoPilot log diagnostics run " & bundle.RunId & ": configured input limit requires " & chunks.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " parts; all parts will be analysed without overlap.")
         Else
-            ApDashboardLog("AutoPilot log diagnostics run " & bundle.RunId & ": analysing the complete log in one model call.", "info")
+            System.Diagnostics.Debug.WriteLine("AutoPilot log diagnostics run " & bundle.RunId & ": analysing the complete log in one model call.")
         End If
         Dim findingsByFingerprint As New System.Collections.Generic.Dictionary(Of System.String, Newtonsoft.Json.Linq.JObject)(System.StringComparer.OrdinalIgnoreCase)
 
@@ -648,7 +652,9 @@ Partial Public Class ThisAddIn
         }
 
         WriteAutoPilotLogDiagnosticResult(bundle.RunKey, result)
-        ApDashboardLog("✓ AutoPilot tooling log " & bundle.RunId & " analysed (" & findingsByFingerprint.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " finding(s)).", "info")
+        If findingsByFingerprint.Count > 0 Then
+            ApDashboardLog("✓ AutoPilot tooling log " & bundle.RunId & " analysed (" & findingsByFingerprint.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " finding(s)).", "info")
+        End If
         Return True
     End Function
 
@@ -757,7 +763,7 @@ Partial Public Class ThisAddIn
             gateOwned = True
             ct.ThrowIfCancellationRequested()
             If Not IsAutoPilotLogDiagnosticsMailIdle() Then Throw New System.OperationCanceledException(ct)
-            ApDashboardLog("AutoPilot log diagnostics model gate acquired for run " & runId & ", chunk " & chunkNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".", "info")
+            System.Diagnostics.Debug.WriteLine("AutoPilot log diagnostics model gate acquired for run " & runId & ", chunk " & chunkNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
 
             backupConfig = Global.SharedLibrary.SharedLibrary.SharedMethods.GetCurrentConfig(_context)
             If _apBaseModelConfig IsNot Nothing Then Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyModelConfig(_context, _apBaseModelConfig)

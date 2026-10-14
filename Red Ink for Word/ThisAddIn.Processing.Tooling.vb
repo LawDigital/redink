@@ -4068,7 +4068,8 @@ Partial Public Class ThisAddIn
                         context.LatestUserRequestRaw,
                         currentResponse,
                         workflowContinuationKey,
-                        workflowContinuationRetentionDays)
+                        workflowContinuationRetentionDays,
+                        blockedReason:=context.FinalizationBlockedReason)
 
                 context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
                 context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}", "diag")
@@ -4178,7 +4179,8 @@ Partial Public Class ThisAddIn
                         PreserveSuccessfulToolResults(context)
                         Dim saved As System.Boolean = SharedLibrary.Agents.WorkflowContinuity.NoteFinalStatus(
                             context.WorkflowId, context.HostKind, True, context.SequencingState,
-                            context.LatestUserRequestRaw, "", workflowContinuationKey, workflowContinuationRetentionDays)
+                            context.LatestUserRequestRaw, "", workflowContinuationKey, workflowContinuationRetentionDays,
+                            blockedReason:=context.FinalizationBlockedReason)
                         If Not saved Then context.LogWarn("Continuation checkpoint failed; retained snapshots and in-memory state require recovery.")
                     End If
                 Catch snapshotError As System.Exception

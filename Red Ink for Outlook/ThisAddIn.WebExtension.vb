@@ -1578,7 +1578,7 @@ Partial Public Class ThisAddIn
         If Not System.String.Equals(If(snapshot.ContinuationKey, System.String.Empty).Trim(), key, System.StringComparison.Ordinal) Then Return False
 
         Dim runtime As SharedLibrary.Agents.WorkflowRuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(id)
-        If runtime Is Nothing Then Return False
+        If runtime Is Nothing OrElse Not SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(id) Then Return False
         If Not System.String.Equals(If(runtime.HostPipeline, System.String.Empty), "Outlook", System.StringComparison.OrdinalIgnoreCase) Then Return False
         Return System.String.Equals(If(runtime.CurrentPhase, System.String.Empty), "final_blocked", System.StringComparison.OrdinalIgnoreCase)
     End Function
@@ -4382,7 +4382,7 @@ Partial Public Class ThisAddIn
                                         Dim completedBlocked As System.Boolean =
                                             _lastCompletedToolingWasBlocked AndAlso
                                             System.String.Equals(_lastCompletedToolingWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) AndAlso
-                                            SharedLibrary.Agents.WorkflowContinuity.HasContinuationSnapshot(workflowIdForJob)
+                                            SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(workflowIdForJob)
 
                                         Dim continuationState As InkyState = LoadInkyState(originatingChatId)
                                         EnsureLocalChatContinuationSessionId(continuationState)
@@ -4422,7 +4422,7 @@ Partial Public Class ThisAddIn
                                                 Dim retryHint As System.String = BuildLocalChatRetryHint(localUserLanguage)
                                                 If Not System.String.IsNullOrWhiteSpace(retryHint) AndAlso
                                                    (localOutput Is Nothing OrElse localOutput.IndexOf("`retry`", System.StringComparison.OrdinalIgnoreCase) < 0) Then
-                                                    localOutput = If(localOutput, System.String.Empty).TrimEnd() & vbCrLf & vbCrLf & retryHint
+                                                    localOutput = SharedLibrary.Agents.WorkflowContinuity.PrependContinuationNotice(localOutput, retryHint)
                                                 End If
                                             End If
                                         Else
@@ -4558,7 +4558,7 @@ Partial Public Class ThisAddIn
                                             ex.Message)
                                     If Not System.String.IsNullOrWhiteSpace(continuationFailureSuffix) AndAlso
                                        terminalFailureText.IndexOf("`retry`", System.StringComparison.OrdinalIgnoreCase) < 0 Then
-                                        terminalFailureText = terminalFailureText.TrimEnd() & vbCrLf & vbCrLf & continuationFailureSuffix
+                                        terminalFailureText = SharedLibrary.Agents.WorkflowContinuity.PrependContinuationNotice(terminalFailureText, continuationFailureSuffix)
                                     End If
                                     Dim terminalFailureHtml As System.String = MarkdownToHtml(terminalFailureText)
                                     job.TerminalResultText = terminalFailureText

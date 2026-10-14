@@ -62,6 +62,7 @@ Namespace Agents
         Public Property HostPipeline As String = ""
         Public Property ActiveSkillName As String = ""
         Public Property CurrentPhase As String = ""
+        Public Property ContinuationRetryAllowed As System.Boolean = False
         Public Property LastSuccessfulTool As String = ""
         Public Property LastFailedTool As String = ""
         Public Property UnresolvedToolFailure As Boolean = False
@@ -434,6 +435,7 @@ Namespace Agents
                         Dim envelope As WorkflowCheckpointEnvelope = LoadCheckpointEnvelopeFromPathUnlocked(checkpointPath)
                         If envelope Is Nothing OrElse envelope.RuntimeState Is Nothing OrElse envelope.ContinuationState Is Nothing Then Continue For
                         If Not String.Equals(envelope.RuntimeState.CurrentPhase, "final_blocked", StringComparison.OrdinalIgnoreCase) Then Continue For
+                        If Not envelope.RuntimeState.ContinuationRetryAllowed Then Continue For
                         If IsContinuationExpired(envelope.ContinuationState) Then Continue For
                         If Not String.Equals(If(envelope.ContinuationState.ContinuationKey, "").Trim(), key, StringComparison.Ordinal) Then Continue For
                         If Not String.IsNullOrWhiteSpace(hostPipeline) AndAlso
@@ -486,6 +488,33 @@ Namespace Agents
                     Return ""
                 End Try
             End SyncLock
+        End Function
+
+        ' Offer retry only from positive host evidence, never from blocked prose or a URL.
+        Private Shared Function IsTransientContinuationReason(reason As System.String,
+                                                               runState As ToolCallSequencing.ToolingRunState) As System.Boolean
+            If runState IsNot Nothing AndAlso runState.HasUnresolvedToolFailure Then Return False
+            Select Case If(reason, System.String.Empty).Trim().ToLowerInvariant()
+                Case "llm_transport_retry_exhausted", "llm_transport_timeout"
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Public Shared Function CanOfferContinuationRetry(workflowId As System.String) As System.Boolean
+            Dim state As WorkflowRuntimeState = GetState(workflowId)
+            Return state IsNot Nothing AndAlso state.ContinuationRetryAllowed AndAlso
+                   System.String.Equals(state.CurrentPhase, "final_blocked", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   HasContinuationSnapshot(workflowId)
+        End Function
+
+        Public Shared Function PrependContinuationNotice(text As System.String, notice As System.String) As System.String
+            Dim body As System.String = If(text, System.String.Empty).Trim()
+            Dim hint As System.String = If(notice, System.String.Empty).Trim()
+            If hint.Length = 0 OrElse body.IndexOf(hint, System.StringComparison.Ordinal) >= 0 Then Return body
+            If body.Length = 0 Then Return hint
+            Return hint & System.Environment.NewLine & System.Environment.NewLine & body
         End Function
 
         Public Shared Function BuildContinuationRetryHint(userLanguage As String) As String
@@ -674,13 +703,15 @@ Namespace Agents
             Optional originalUserRequestRaw As String = "",
             Optional lastUserFacingResponse As String = "",
             Optional continuationKey As String = "",
-            Optional continuationRetentionDays As System.Int32 = DefaultContinuationRetentionDays) As Boolean
+            Optional continuationRetentionDays As System.Int32 = DefaultContinuationRetentionDays,
+            Optional blockedReason As System.String = "") As Boolean
 
             If String.IsNullOrWhiteSpace(workflowId) Then Return False
 
             SyncLock _sync
                 Dim state = GetOrLoadUnlocked(workflowId, hostPipeline)
                 state.CurrentPhase = If(isBlocked, "final_blocked", "final_complete")
+                state.ContinuationRetryAllowed = isBlocked AndAlso IsTransientContinuationReason(blockedReason, sequencingState)
                 state.UpdatedAt = DateTime.UtcNow
                 PruneStaleContinuationArtifactsUnlocked(GetPrivateWorkflowDirectory())
 
@@ -1130,6 +1161,7 @@ Namespace Agents
                 .HostPipeline = state.HostPipeline,
                 .ActiveSkillName = state.ActiveSkillName,
                 .CurrentPhase = state.CurrentPhase,
+                .ContinuationRetryAllowed = state.ContinuationRetryAllowed,
                 .LastSuccessfulTool = state.LastSuccessfulTool,
                 .LastFailedTool = state.LastFailedTool,
                 .UnresolvedToolFailure = state.UnresolvedToolFailure,
