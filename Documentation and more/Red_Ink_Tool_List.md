@@ -156,7 +156,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `create_powerpoint` | Creates a new PowerPoint presentation output. | No | Yes | Yes |
 | `create_code_file` | Creates a source code or text-based file output. | No | Yes | Yes |
 | `comment_pdf_document` | Adds annotation comments to a PDF. | No | Yes | Yes |
-| `extract_data_from_attachments` | Pulls structured information from one or more attachments. | No | Yes | Yes |
+| `extract_data_from_docs` | Reads/converts authorized document paths (`file_paths`) and/or attachments (`attachment_names`) and returns structured data with explicit partial-input errors. | No | Yes | Yes |
 | `redact_pdf` | Redacts content in a PDF. | No | Yes | Yes |
 | `overlay_pdf` | Overlays one PDF onto another PDF. | No | Yes | Yes |
 | `create_audio_file` | Generates an audio file output. | No | Yes | Yes |
