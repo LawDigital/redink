@@ -59,6 +59,7 @@ Partial Public Class ThisAddIn
                 {"AP_AutoDeleteAfterHours", My.Settings.AP_AutoDeleteAfterHours},
                 {"AP_EnableWebGrounding", My.Settings.AP_EnableWebGrounding},
                 {"AP_EnableVoicemailProcessing", My.Settings.AP_EnableVoicemailProcessing},
+                {"AP_EnableScanProcessing", My.Settings.AP_EnableScanProcessing},
                 {"AP_VoicemailSenderAddress", If(My.Settings.AP_VoicemailSenderAddress, "")},
                 {"AP_VoicemailCallerIdMapPath", If(My.Settings.AP_VoicemailCallerIdMapPath, "")},
                 {"AP_EnableScheduler", My.Settings.AP_EnableScheduler},
@@ -159,6 +160,7 @@ Partial Public Class ThisAddIn
             My.Settings.AP_AutoDeleteAfterHours = GetJsonInteger(json, "AP_AutoDeleteAfterHours", My.Settings.AP_AutoDeleteAfterHours)
             My.Settings.AP_EnableWebGrounding = GetJsonBoolean(json, "AP_EnableWebGrounding", My.Settings.AP_EnableWebGrounding)
             My.Settings.AP_EnableVoicemailProcessing = GetJsonBoolean(json, "AP_EnableVoicemailProcessing", My.Settings.AP_EnableVoicemailProcessing)
+            My.Settings.AP_EnableScanProcessing = GetJsonBoolean(json, "AP_EnableScanProcessing", False)
             My.Settings.AP_VoicemailSenderAddress = GetJsonString(json, "AP_VoicemailSenderAddress")
             My.Settings.AP_VoicemailCallerIdMapPath = GetJsonString(json, "AP_VoicemailCallerIdMapPath")
             My.Settings.AP_EnableScheduler = GetJsonBoolean(json, "AP_EnableScheduler", My.Settings.AP_EnableScheduler)

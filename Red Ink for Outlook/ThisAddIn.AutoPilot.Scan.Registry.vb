@@ -1,0 +1,202 @@
+﻿' Part of "Red Ink for Outlook"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ThisAddIn.AutoPilot.Scan.Registry.vb
+' Purpose: Versioned, locked and recoverable scanner register.
+'
+' Architecture:
+'  - Part of the AutoPilot Scan Handler; configuration and recipient authority
+'    remain in the validated, persisted scan register.
+'  - Document/model content never grants transport or filesystem permissions.
+'  - Host lifecycle, shared UI and retained operation checkpoints are reused.
+' =============================================================================
+Option Explicit On
+Option Strict On
+Option Infer On
+Imports System.Linq
+Imports Newtonsoft.Json
+
+Namespace ScanInbox
+    Public NotInheritable Class Registry
+        Private Sub New()
+        End Sub
+
+        ' Only the model boundary accepts a complete Markdown JSON fence. Disk contracts stay strict.
+        Public Shared Function ParseModel(Of T)(response As System.String) As T
+            Dim json = If(response, "").Trim().TrimStart(ChrW(&HFEFF)).Trim()
+            If json.StartsWith("```", System.StringComparison.Ordinal) Then
+                Dim match = System.Text.RegularExpressions.Regex.Match(json, "\A```(?:json)?[ \t]*\r?\n(?<json>[\s\S]*?)\r?\n```\z", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+                If Not match.Success Then Throw New System.IO.InvalidDataException("Invalid fenced scan JSON response.")
+                json = match.Groups("json").Value.Trim()
+            End If
+            Return Parse(Of T)(json)
+        End Function
+
+        Public Shared Function Parse(Of T)(json As System.String) As T
+            ' Unknown members (including model-supplied address fields) are contract errors.
+            Dim settings As New Newtonsoft.Json.JsonSerializerSettings With {
+                .MissingMemberHandling = Newtonsoft.Json.MissingMemberHandling.Error,
+                .TypeNameHandling = Newtonsoft.Json.TypeNameHandling.None,
+                .ObjectCreationHandling = Newtonsoft.Json.ObjectCreationHandling.Replace,
+                .DateParseHandling = Newtonsoft.Json.DateParseHandling.None,
+                .MaxDepth = 64}
+            Using input As New System.IO.StringReader(json)
+                Using reader As New Newtonsoft.Json.JsonTextReader(input) With {.DateParseHandling = Newtonsoft.Json.DateParseHandling.None, .MaxDepth = 64}
+                    Dim token = Newtonsoft.Json.Linq.JToken.Load(reader, New Newtonsoft.Json.Linq.JsonLoadSettings With {
+                        .DuplicatePropertyNameHandling = Newtonsoft.Json.Linq.DuplicatePropertyNameHandling.Error})
+                    If reader.Read() Then Throw New System.IO.InvalidDataException("Unexpected trailing JSON content.")
+                    Return token.ToObject(Of T)(Newtonsoft.Json.JsonSerializer.Create(settings))
+                End Using
+            End Using
+        End Function
+
+        Public Shared Function Load(path As System.String) As Configuration
+            If Not System.IO.File.Exists(path) Then Throw New System.IO.FileNotFoundException("Scan register is missing; delivery stopped.", path)
+            Dim value = Parse(Of Configuration)(System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8))
+            Validate(value)
+            Return value
+        End Function
+
+        Public Shared Function Hash(text As System.String) As System.String
+            Using sha = System.Security.Cryptography.SHA256.Create()
+                Return System.BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text))).Replace("-", "").ToLowerInvariant()
+            End Using
+        End Function
+
+        Public Shared Function Address(value As System.String) As System.String
+            If System.String.IsNullOrWhiteSpace(value) Then Throw New System.IO.InvalidDataException("An SMTP address is empty.")
+            Dim parsed As New System.Net.Mail.MailAddress(value.Trim())
+            If Not parsed.Address.Equals(value.Trim(), System.StringComparison.OrdinalIgnoreCase) OrElse Not parsed.Address.Contains("@") Then
+                Throw New System.IO.InvalidDataException("Use one bare SMTP address per entry.")
+            End If
+            Return parsed.Address.ToLowerInvariant()
+        End Function
+
+        Private Shared Sub Require(condition As System.Boolean, message As System.String)
+            If Not condition Then Throw New System.IO.InvalidDataException(message)
+        End Sub
+
+        Private Shared Sub UniqueIds(ids As System.Collections.Generic.IEnumerable(Of System.String), label As System.String)
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            For Each id In ids
+                Require(Not System.String.IsNullOrWhiteSpace(id) AndAlso id.Length <= 100 AndAlso seen.Add(id), "Missing/duplicate " & label & " ID.")
+            Next
+        End Sub
+
+        Public Shared Sub Validate(config As Configuration)
+            Require(config IsNot Nothing AndAlso config.SchemaVersion = 1, "Unsupported scan register version.")
+            Require(config.Revision >= 0 AndAlso config.InitialLookbackDays >= 1 AndAlso config.InitialLookbackDays <= 365 AndAlso config.OverlapHours >= 1 AndAlso config.OverlapHours <= 168, "Invalid scan lookback/revision.")
+            Require(config.Recipients IsNot Nothing AndAlso config.RuleSets IsNot Nothing, "Missing register collections.")
+            Require(config.Recipients.All(Function(p) p IsNot Nothing) AndAlso config.RuleSets.All(Function(p) p IsNot Nothing), "Null register entries.")
+            UniqueIds(config.Recipients.Select(Function(p) p.Id), "recipient")
+            UniqueIds(config.RuleSets.Select(Function(p) p.Id), "rule set")
+            Dim smtp As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each person In config.Recipients
+                Require(Not System.String.IsNullOrWhiteSpace(person.Name), "Recipient name is required.")
+                Require(person.Aliases IsNot Nothing AndAlso person.Attributes IsNot Nothing, "Recipient aliases/attributes must be arrays.")
+                person.SmtpAddress = Address(person.SmtpAddress)
+                Require(smtp.Add(person.SmtpAddress), "Duplicate register SMTP address.")
+            Next
+            Dim combinations As New System.Collections.Generic.List(Of System.Tuple(Of System.String, System.String))()
+            For Each rule In config.RuleSets
+                Require(Not System.String.IsNullOrWhiteSpace(rule.Name), "Rule set name is required.")
+                Require(rule.ScannerSenders IsNot Nothing AndAlso rule.ScannerSenders.Count > 0 AndAlso rule.AllowedRecipientIds IsNot Nothing AndAlso rule.AdditionalRules IsNot Nothing AndAlso rule.ReminderDays IsNot Nothing, "Incomplete rule set.")
+                System.TimeZoneInfo.FindSystemTimeZoneById(rule.TimeZoneId)
+                AttachmentNaming.ValidateTemplate(rule.AttachmentNameTemplate)
+                ValidateSubjectTemplate(rule.SubjectTemplate)
+                Require(rule.AttachmentNamingInstruction Is Nothing OrElse rule.AttachmentNamingInstruction.Length <= 20000, "Attachment naming instruction is too long.")
+                Require(rule.DeadlineProfile = "calendar_days" OrElse rule.DeadlineProfile = "review_only", "Unsupported deadline profile; choose calendar_days or review_only.")
+                Require(rule.RetentionDays >= 1 AndAlso rule.RetentionDays <= 3650, "RetentionDays must be 1..3650.")
+                Require(rule.ReminderDays.Count > 0 AndAlso rule.ReminderDays.All(Function(d) d > 0 AndAlso d <= 3650) AndAlso rule.ReminderDays.Distinct().Count() = rule.ReminderDays.Count, "Invalid reminder days.")
+                UniqueIds(rule.AllowedRecipientIds, "allowed recipient")
+                For Each id In rule.AllowedRecipientIds
+                    Require(config.Recipients.Any(Function(p) p.Id = id AndAlso p.Active), "Allowed recipient missing or inactive: " & id)
+                Next
+                Require(rule.AllowedRecipientIds.Contains(rule.DefaultRecipientId), "Default must be active and allowed.")
+                UniqueIds(rule.AdditionalRules.Select(Function(r) r.Id), "additional rule")
+                For Each extra In rule.AdditionalRules
+                    Require(extra IsNot Nothing AndAlso (extra.Kind = "exact" OrElse extra.Kind = "semantic") AndAlso Not System.String.IsNullOrWhiteSpace(extra.Criteria), "Invalid additional rule.")
+                    Require(extra.RecipientIds IsNot Nothing AndAlso extra.RecipientIds.Count > 0 AndAlso extra.RecipientIds.All(Function(id) rule.AllowedRecipientIds.Contains(id)), "Additional recipients must be allowed.")
+                Next
+                Dim mailbox = If(System.String.IsNullOrWhiteSpace(rule.Mailbox), "", Address(rule.Mailbox))
+                rule.Mailbox = mailbox
+                rule.ScannerSenders = rule.ScannerSenders.Select(Function(sender) Address(sender)).ToList()
+                Dim ownSenders As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                For Each sender In rule.ScannerSenders
+                    Dim normalized = Address(sender)
+                    Require(ownSenders.Add(normalized), "Duplicate scanner sender in rule set.")
+                    Require(Not config.Recipients.Any(Function(p) Address(p.SmtpAddress) = normalized), "Scanner sender cannot also be a delivery recipient.")
+                    If rule.Active Then
+                        Require(Not combinations.Any(Function(c) c.Item1 = normalized AndAlso (c.Item2 = mailbox OrElse c.Item2 = "" OrElse mailbox = "")), "Ambiguous scanner sender/mailbox combination.")
+                        combinations.Add(System.Tuple.Create(normalized, mailbox))
+                    End If
+                Next
+            Next
+        End Sub
+
+        Public Shared Sub ValidateSubjectTemplate(value As System.String)
+            Dim template = If(value, "")
+            Require(template.Length <= 240 AndAlso Not template.Any(Function(c) System.Char.IsControl(c)), "Email subject must be one line of at most 240 characters.")
+            Dim literal = template.Replace("{subject}", "")
+            Require(Not literal.Contains("{") AndAlso Not literal.Contains("}"), "Only {subject} is supported in the email subject.")
+        End Sub
+
+        Public Shared Function EmailSubject(template As System.String, description As System.String) As System.String
+            ValidateSubjectTemplate(template)
+            Dim subject = If(System.String.IsNullOrWhiteSpace(template), "Red Ink Scan Handler: {subject}", template.Trim()).Replace("{subject}", If(description, "").Trim())
+            Require(Not System.String.IsNullOrWhiteSpace(subject) AndAlso subject.Length <= 512 AndAlso Not subject.Any(Function(c) System.Char.IsControl(c)), "Invalid generated email subject.")
+            Return subject
+        End Function
+
+        Public Shared Function Match(config As Configuration, sender As System.String, mailbox As System.String) As RuleSet
+            Dim normalized = Address(sender)
+            Dim found = config.RuleSets.Where(Function(r) r.Active AndAlso r.ScannerSenders.Any(Function(s) Address(s) = normalized) AndAlso
+                (System.String.IsNullOrWhiteSpace(r.Mailbox) OrElse Address(r.Mailbox) = mailbox.ToLowerInvariant())).ToList()
+            If found.Count > 1 Then Throw New System.IO.InvalidDataException("Ambiguous scanner classification.")
+            Return found.SingleOrDefault()
+        End Function
+
+        Public Shared Sub AtomicWrite(path As System.String, json As System.String)
+            Dim temp = path & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+            Try
+                Using stream As New System.IO.FileStream(temp, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None)
+                    Dim bytes = New System.Text.UTF8Encoding(False).GetBytes(json)
+                    stream.Write(bytes, 0, bytes.Length)
+                    stream.Flush(True)
+                End Using
+                If System.IO.File.Exists(path) Then
+                    System.IO.File.Replace(temp, path, path & ".bak")
+                Else
+                    System.IO.File.Move(temp, path)
+                End If
+            Finally
+                If System.IO.File.Exists(temp) Then System.IO.File.Delete(temp)
+            End Try
+        End Sub
+
+        Public Shared Sub Save(path As System.String, config As Configuration, expectedRevision As System.Int64, Optional expectedContentHash As System.String = "", Optional expectedMissing As System.Boolean = False)
+            Validate(config)
+            Using gate As New System.IO.FileStream(path & ".lock", System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                Dim exists = System.IO.File.Exists(path)
+                If expectedMissing Then Require(Not exists, "The scan register was created in another window. Reload before saving.")
+                Dim actualHash = If(exists, Hash(System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8)), "")
+                If expectedContentHash <> "" Then Require(actualHash = expectedContentHash, "The scan register changed. Reload before saving.")
+                Dim currentRevision As System.Int64 = 0
+                If exists Then
+                    Try
+                        currentRevision = Load(path).Revision
+                    Catch ex As System.Exception
+                        ' Explicit reviewed repair is permitted only against the exact loaded bytes.
+                        If expectedContentHash = "" OrElse actualHash <> expectedContentHash Then Throw
+                        currentRevision = expectedRevision
+                        config.Revision = System.Math.Max(config.Revision, expectedRevision)
+                    End Try
+                End If
+                Require(currentRevision = expectedRevision, "The scan register changed. Reload before saving.")
+                config.Revision = System.Math.Max(currentRevision, config.Revision) + 1
+                AtomicWrite(path, Newtonsoft.Json.JsonConvert.SerializeObject(config, Newtonsoft.Json.Formatting.Indented))
+            End Using
+        End Sub
+    End Class
+End Namespace

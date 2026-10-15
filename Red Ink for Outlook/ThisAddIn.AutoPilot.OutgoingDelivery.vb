@@ -180,7 +180,8 @@ Partial Public Class ThisAddIn
                                                  cleanupIsEligible As Boolean,
                                                  cleanupAnsweredUtc As DateTime?,
                                                  cleanupDeleteAfterUtc As DateTime?,
-                                                 Optional disclaimerHtml As System.String = "")
+                                                 Optional disclaimerHtml As System.String = "",
+                                                 Optional ccRecipientAddresses As System.Collections.Generic.IEnumerable(Of System.String) = Nothing)
         If plan Is Nothing OrElse Not plan.UsesAttachmentFollowUps Then Return
 
         Dim recipients As New System.Collections.Generic.List(Of String)()
@@ -192,6 +193,12 @@ Partial Public Class ThisAddIn
                 ToList()
         End If
 
+        Dim ccAddresses As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If ccRecipientAddresses IsNot Nothing Then
+            For Each address In ccRecipientAddresses
+                If Not System.String.IsNullOrWhiteSpace(address) AndAlso Not recipients.Contains(address, System.StringComparer.OrdinalIgnoreCase) Then ccAddresses.Add(address.Trim())
+            Next
+        End If
         If recipients.Count = 0 Then
             Throw New System.InvalidOperationException(
                 "Attachment follow-up delivery has no resolved recipient address.")
@@ -203,11 +210,11 @@ Partial Public Class ThisAddIn
             Try
                 followUp = Application.CreateItem(Microsoft.Office.Interop.Outlook.OlItemType.olMailItem)
 
-                For Each address As String In recipients
+                For Each address As String In recipients.Concat(ccAddresses)
                     Dim recipient As Microsoft.Office.Interop.Outlook.Recipient = Nothing
                     Try
                         recipient = followUp.Recipients.Add(address)
-                        recipient.Type = Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo
+                        recipient.Type = CInt(If(ccAddresses.Contains(address), Microsoft.Office.Interop.Outlook.OlMailRecipientType.olCC, Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo))
                     Finally
                         If recipient IsNot Nothing Then
                             Try

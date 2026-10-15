@@ -53,26 +53,26 @@
   ═══════════════════════════════════════════════════════════════════════
   The Windows.Data.Pdf API (used for PDF rasterization in burn-in and
   overlay fallback) requires references to the Windows 10 SDK WinRT metadata.
-  
+
   THREE locations in this .vbproj reference a SPECIFIC SDK version and
   MUST ALL be updated together when the installed SDK version changes:
-  
+
     1. PropertyGroup (HAS_WINRT conditional constant):
        Defines the HAS_WINRT compilation constant if Windows.winmd exists.
-  
+
     2. Reference "Windows" (Windows.winmd):
        Points to the WinRT union metadata file.
-  
+
     3. Reference "System.Runtime.WindowsRuntime":
        Required for WinRT async interop and WindowsRuntimeStreamExtensions.
-  
+
     4. Reference "System.Runtime.InteropServices.WindowsRuntime":
        Required for WinRT / .NET interop marshalling.
-  
+
   HOW TO UPDATE (all must match):
     Search for: 10.0.26100.0
     Replace with: <your installed version>
-  
+
   AFFECTED SOURCE FILES (use Windows.Data.Pdf behind #If HAS_WINRT):
     - ThisAddIn.AutoPilot.PdfRedactor.vb (APRedactBurnIn)
     - ThisAddIn.AutoPIlot.Tools.vb (APOverlayViaRasterizeCore, APOverlayViaRasterizeWithElementsCore)
@@ -82,7 +82,7 @@
     <DefineConstants>$(DefineConstants),HAS_WINRT</DefineConstants>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.7.48.700</ApplicationVersion>
+    <ApplicationVersion>1.7.49.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Develop%29</ProductName>
@@ -468,10 +468,10 @@
   </ItemGroup>
   <!--
     This section defines the user source files that are part of the project.
-     
+
     A "Compile" element specifies a source file to compile.
     An "EmbeddedResource" element specifies an .resx file for embedded resources.
-    A "None" element specifies a file that is not to be passed to the compiler (for instance, 
+    A "None" element specifies a file that is not to be passed to the compiler (for instance,
     a text file or XML file).
     The "AppDesigner" element specifies the directory where the application properties files
     can be found.
@@ -510,6 +510,19 @@
     <Compile Include="ThisAddIn.AutoPilot.OutgoingDelivery.vb" />
     <Compile Include="ThisAddIn.AutoPilot.RegistryBackup.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Contracts.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Registry.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Decisions.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Retention.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Runtime.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Delivery.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Management.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Admin.Model.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Admin.Editors.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Admin.RuleEditor.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Admin.Dashboard.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Naming.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scan.Naming.Host.vb" />
     <Compile Include="ThisAddIn.AutoPilot.SenderToolPolicy.vb" />
     <Compile Include="ThisAddIn.AutoPilot.ThreadRetention.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Tools.DataCollector.vb" />

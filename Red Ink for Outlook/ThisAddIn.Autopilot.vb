@@ -619,6 +619,7 @@ Partial Public Class ThisAddIn
             Return
         End If
         _apActive = False
+        StopScanInbox()
         Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
         Try : SaveAutoPilotDashboardBounds(_apDashboard) : Catch : End Try
         Try
@@ -1006,6 +1007,7 @@ Partial Public Class ThisAddIn
         ' Scan historical/missed mail only after the live listener is active.
         ' Run asynchronously so the catch-up selection window does not block
         ' Outlook's UI/STA thread or live NewMailEx processing.
+        StartScanInbox()
         Dim ignoredCatchUpTask As System.Threading.Tasks.Task = CatchUpMissedMailsAsync()
 
         ' Start scheduler if enabled
@@ -1300,6 +1302,17 @@ Partial Public Class ThisAddIn
                 scanCutoffLocal = lastProcessedLocal
             End If
 
+            Dim ordinaryCutoffLocal = scanCutoffLocal
+            If _apConfig.EnableScanProcessing Then
+                Try
+                    Dim register = ScanInbox.Registry.Load(GetScanRegisterPath())
+                    Dim scanHistoryCutoff = DateTime.Now.AddDays(-register.InitialLookbackDays)
+                    If scanHistoryCutoff < scanCutoffLocal Then scanCutoffLocal = scanHistoryCutoff
+                Catch ex As System.Exception
+                    ApDashboardLog("Scan history unavailable: " & ex.Message, "warn")
+                End Try
+            End If
+
             If isFirstRun Then
                 ApDashboardLog(
                 $"Scanning for mails received after: " &
@@ -1452,7 +1465,10 @@ Partial Public Class ThisAddIn
                         Dim isVoicemail As Boolean =
                         IsVoicemailFromRegisteredSender(mailInfo)
 
-                        If Not isVoicemail Then
+                        Dim isScan = _apConfig.EnableScanProcessing AndAlso MatchScanRule(mi, mailInfo) IsNot Nothing
+                        If Not isScan AndAlso mi.ReceivedTime <= ordinaryCutoffLocal Then Continue For
+
+                        If Not isVoicemail AndAlso Not isScan Then
                             If mailInfo.HasAutoReplyHeader Then
                                 Continue For
                             End If
@@ -1517,6 +1533,7 @@ Partial Public Class ThisAddIn
                             .SenderEmail = mailInfo.SenderEmail,
                             .Subject = mailInfo.Subject,
                             .ReceivedTime = mailInfo.ReceivedTime,
+                            .IsScanCandidate = isScan,
                             .IsReprocessCandidate = isAlreadyProcessed,
                             .CustomDisplayLabel = displayLabel
                         })
@@ -1649,6 +1666,14 @@ Partial Public Class ThisAddIn
                         Continue For
                     End If
 
+                    If selectedCandidate IsNot Nothing AndAlso selectedCandidate.IsScanCandidate Then
+                        If Await SwitchToUi(Function() QueueSelectedScan(entryId, isExplicitReprocess)) Then
+                            queuedCount += 1
+                        Else
+                            alreadyQueuedCount += 1
+                        End If
+                        Continue For
+                    End If
                     _apCatchUpEntryIds.TryAdd(entryId, True)
 
                     If EnqueueAutoPilotMail(entryId) Then
@@ -1752,6 +1777,8 @@ Partial Public Class ThisAddIn
         Public Property Subject As String
         Public Property ReceivedTime As DateTime
 
+        ''' <summary>Uses the dedicated scan pipeline after the existing catch-up selection.</summary>
+        Public Property IsScanCandidate As System.Boolean
         ''' <summary>True if this mail was already processed but falls within the reprocess lookback window.</summary>
         Public Property IsReprocessCandidate As Boolean = False
 
@@ -2691,6 +2718,12 @@ Partial Public Class ThisAddIn
     ''' <returns>True if the mail would pass all filters and be processed.</returns>
     Private Function WouldMailBeProcessed(mi As MailItem, Optional entryId As String = Nothing) As Boolean
         Try
+            If _apConfig.EnableScanProcessing Then
+                Dim info = ExtractMailInfo(mi)
+                If MatchScanRule(mi, info) IsNot Nothing Then
+                    Return System.String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) OrElse ScanMailbox(mi).Equals(_apConfig.MonitoredMailbox, System.StringComparison.OrdinalIgnoreCase)
+                End If
+            End If
             ' Mailbox filter
             If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
                 Dim recipientAddress As String = ""
@@ -2832,6 +2865,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     Dim mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
+                    If _apConfig.EnableScanProcessing AndAlso Await SwitchToUi(Function() MatchScanRule(mi, mailInfo)) IsNot Nothing Then Continue For
                     Dim senderLabel = If(mailInfo IsNot Nothing, mailInfo.SenderEmail, "unknown")
 
                     ' Count heavy jobs ahead of this mail (including current processing)
@@ -2940,6 +2974,7 @@ Partial Public Class ThisAddIn
 
             Try
                 Dim mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
+                If _apConfig.EnableScanProcessing AndAlso Await SwitchToUi(Function() MatchScanRule(mi, mailInfo)) IsNot Nothing Then Return
                 Dim senderLabel = If(mailInfo IsNot Nothing, mailInfo.SenderEmail, "unknown")
 
                 Dim elapsedMinutes = CInt(Math.Floor(elapsedSeconds / 60))
@@ -3000,6 +3035,11 @@ Partial Public Class ThisAddIn
             Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
             runIsolationOwned = True
 
+            If _apConfig.EnableScanProcessing AndAlso entryId.StartsWith("scan-op:", System.StringComparison.Ordinal) Then
+                Await ProcessScanOperationAsync(entryId.Substring(8), Nothing, ct)
+                Return
+            End If
+
             mi = Await SwitchToUi(Function() As MailItem
                                       Try
                                           Dim ns = Application.GetNamespace("MAPI")
@@ -3012,6 +3052,20 @@ Partial Public Class ThisAddIn
             If mi Is Nothing Then
                 ApDashboardLog("SKIP (could not resolve mail item from EntryID — may have been moved or is not a MailItem)", "warn")
                 Return
+            End If
+
+            ' Registered scanner intake is host-routed before legacy envelope/subject filters.
+            ' An invalid/missing enabled register fails closed; scanner content is never a command.
+            If _apConfig.EnableScanProcessing Then
+                Dim scanInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
+                Dim scanRule = Await SwitchToUi(Function() MatchScanRule(mi, scanInfo))
+                If scanRule IsNot Nothing Then
+                    Dim scanMailboxAddress = Await SwitchToUi(Function() ScanMailbox(mi))
+                    If Not System.String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) AndAlso
+                       Not _apConfig.MonitoredMailbox.Equals(scanMailboxAddress, System.StringComparison.OrdinalIgnoreCase) Then Return
+                    Await ProcessScanMailAsync(mi, scanInfo, ct)
+                    Return
+                End If
             End If
 
             ' Mailbox filter
@@ -3076,7 +3130,8 @@ Partial Public Class ThisAddIn
             ' SECURITY: Filter rules (domain/sender) are NEVER bypassed — they are the trust boundary.
             ' An attacker could spoof a ConversationID (same subject line) to join an existing thread,
             ' so we must always verify the sender is permitted regardless of conversation membership.
-            If Not MatchesFilterRules(mailInfo) Then : ApDashboardLog("SKIP (no filter match): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
+            Dim isScanThreadParticipant As System.Boolean = AuthorizedScanThread(mailInfo)
+            If Not isScanThreadParticipant AndAlso Not MatchesFilterRules(mailInfo) Then : ApDashboardLog("SKIP (no filter match): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
             If MatchesNegativeFilters(mailInfo) Then : ApDashboardLog("SKIP (negative filter): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "step") : Return : End If
 
             ' Cross-mail continuation is opt-in and bound to the configured sender address plus
@@ -3105,7 +3160,7 @@ Partial Public Class ThisAddIn
             ' often have "Re: Re: ..." prefixes or the trigger word gets stripped in threading.
             If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
                 If Not mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) >= 0 Then
-                    If isExistingConversation Then
+                    If isExistingConversation OrElse isScanThreadParticipant Then
                         ApDashboardLog("TRIGGER BYPASS (existing conversation): " & mailInfo.Subject, "step")
                     Else
                         ApDashboardLog("SKIP (no trigger word): " & mailInfo.Subject, "step") : Return
@@ -3177,7 +3232,7 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-            Dim isWhitelisted As Boolean = IsSenderWhitelisted(mailInfo.SenderEmail)
+            Dim isWhitelisted As Boolean = IsSenderWhitelisted(mailInfo.SenderEmail) OrElse isScanThreadParticipant
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
             Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation)
 
@@ -3886,6 +3941,12 @@ Partial Public Class ThisAddIn
                     End Try
 
                     If submitted Then Continue For
+                    Dim scanCheckpoint As System.String = ""
+                    Try
+                        scanCheckpoint = CStr(mi.PropertyAccessor.GetProperty(ScanDeliveryProperty))
+                    Catch ex As System.Exception
+                    End Try
+                    If Not System.String.IsNullOrWhiteSpace(scanCheckpoint) Then Continue For
 
                     Dim toAddr As String = Nothing
                     Try : toAddr = mi.To : Catch : End Try
@@ -4128,7 +4189,7 @@ Partial Public Class ThisAddIn
     ''' the catch-up scan can identify it as already processed.
     ''' Also starts the auto-delete retention clock for the whole cleanup group.
     ''' </summary>
-    Private Function TryTagOriginalMailAsProcessed(mi As MailItem) As Boolean
+    Private Function TryTagOriginalMailAsProcessed(mi As MailItem, Optional answeredUtcOverride As System.DateTime? = Nothing) As Boolean
         Try
             Dim existing = mi.Categories
             Dim needsSave As Boolean = False
@@ -4145,7 +4206,7 @@ Partial Public Class ThisAddIn
                 mi.Save()
             End If
 
-            MarkMailGroupAsAnsweredAndEligible(mi)
+            MarkMailGroupAsAnsweredAndEligible(mi, answeredUtcOverride)
             Return True
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] TagOriginalMailAsProcessed error: {ex.Message}")
@@ -6236,6 +6297,7 @@ Partial Public Class ThisAddIn
             End Try
 
             reply.To = senderAddr
+            ConfigureScanThreadReply(originalMail, reply)
 
             ' Clear any Reply-To recipients populated by Outlook.Reply().
             Try
@@ -6370,9 +6432,12 @@ Partial Public Class ThisAddIn
                     "Outlook reports no configured sending accounts.")
                 End If
 
-                ' Prefer the configured monitored mailbox when available.
-                If _apConfig IsNot Nothing AndAlso
-               Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+                Dim replyMailbox As System.String = If(_apConfig?.MonitoredMailbox, "")
+                Dim scanReplyMailbox As System.String = ""
+                If _apConfig IsNot Nothing AndAlso _apConfig.EnableScanProcessing Then scanReplyMailbox = ScanThreadMailbox(ExtractMailInfo(originalMail))
+                If scanReplyMailbox <> "" Then replyMailbox = scanReplyMailbox
+                ' Scan replies retain the account of the initial package.
+                If Not System.String.IsNullOrWhiteSpace(replyMailbox) Then
 
                     For i As Integer = 1 To accounts.Count
                         Dim candidate As Microsoft.Office.Interop.Outlook.Account = Nothing
@@ -6383,7 +6448,7 @@ Partial Public Class ThisAddIn
                             If candidate IsNot Nothing AndAlso
                            Not String.IsNullOrWhiteSpace(candidate.SmtpAddress) AndAlso
                            candidate.SmtpAddress.Equals(
-                               _apConfig.MonitoredMailbox,
+                               replyMailbox,
                                StringComparison.OrdinalIgnoreCase) Then
 
                                 sendAccount = candidate
@@ -6436,6 +6501,7 @@ Partial Public Class ThisAddIn
 
             Dim sentPrimarySubject As String = reply.Subject
             Dim sentPrimaryTo As String = reply.To
+            Dim scanFollowUpCc = ScanReplyCcAddresses(originalMail, reply)
             reply.Send()
 
             If onPrimarySubmitted IsNot Nothing Then
@@ -6469,7 +6535,8 @@ Partial Public Class ThisAddIn
                 cleanupIsEligible,
                 cleanupAnsweredUtc,
                 cleanupDeleteAfterUtc,
-                disclaimerHtml)
+                disclaimerHtml,
+                ccRecipientAddresses:=scanFollowUpCc)
 
         Catch ex As System.Exception
             ApDashboardLog(

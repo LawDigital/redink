@@ -215,11 +215,11 @@ Partial Public Class ThisAddIn
                                              isWhitelisted As Boolean) As Integer
         Try
             If mailInfo Is Nothing Then Return 0
-            If Not IsThreadRetentionEligible(mailInfo.SenderEmail, isWhitelisted) Then Return 0
+            If Not AuthorizedScanThread(mailInfo) AndAlso Not IsThreadRetentionEligible(mailInfo.SenderEmail, isWhitelisted) Then Return 0
             If String.IsNullOrWhiteSpace(tempDir) OrElse Not Directory.Exists(tempDir) Then Return 0
             If attachments Is Nothing Then Return 0
 
-            Dim convKey = ComputeThreadConversationKey(mailInfo)
+            Dim convKey = ResolveRetentionConversationKey(mailInfo)
             If String.IsNullOrWhiteSpace(convKey) Then Return 0
 
             Dim threadDir = GetThreadDirSafe(mailInfo.SenderEmail, convKey, createIfMissing:=False)
@@ -290,9 +290,11 @@ Partial Public Class ThisAddIn
                                                   isWhitelisted As Boolean)
         Try
             If mailInfo Is Nothing Then Return
+            ' Scan seed is immutable: private follow-ups never rewrite or prune original package data.
+            If AuthorizedScanThread(mailInfo) Then Return
             If Not IsThreadRetentionEligible(mailInfo.SenderEmail, isWhitelisted) Then Return
 
-            Dim convKey = ComputeThreadConversationKey(mailInfo)
+            Dim convKey = ResolveRetentionConversationKey(mailInfo)
             If String.IsNullOrWhiteSpace(convKey) Then Return
 
             Dim threadDir = GetThreadDirSafe(mailInfo.SenderEmail, convKey, createIfMissing:=True)
