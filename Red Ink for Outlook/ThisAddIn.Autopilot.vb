@@ -978,7 +978,7 @@ Partial Public Class ThisAddIn
         Dim recoverOperationalState As System.Action =
             Sub()
                 Try
-                    ResubmitUnsubmittedAutoPilotOutboxItems()
+                    InspectUnsubmittedAutoPilotOutboxItems()
                 Catch ex As System.Exception
                     ApDashboardLog("Outbox recovery failed: " & ex.Message, "warn")
                 End Try
@@ -3025,6 +3025,7 @@ Partial Public Class ThisAddIn
         Dim continuationRetryRequested As System.Boolean = False
         Dim resumeBlockedWorkflow As System.Boolean = False
         Dim continuationInstructionLanguage As System.String = System.String.Empty
+        Dim failureNoticeLanguage As System.String = System.String.Empty
         Dim workflowContinuationRetentionDays As System.Int32 =
             SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
 
@@ -3616,6 +3617,7 @@ Partial Public Class ThisAddIn
                        Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingRunState.UserLanguage) Then
                         retryInstructionLanguage = _lastCompletedToolingRunState.UserLanguage
                     End If
+                    failureNoticeLanguage = retryInstructionLanguage
                     response = AppendAutoPilotContinuationRetryHint(response, retryInstructionLanguage)
                 End If
 
@@ -3822,9 +3824,6 @@ Partial Public Class ThisAddIn
                             ApDashboardLog($"⚠ Could not retain conversation files: {exPersist.Message}", "warn")
                         End Try
 
-                        Await System.Threading.Tasks.Task.Delay(1500)
-                        Await SwitchToUi(Sub() ResubmitUnsubmittedAutoPilotOutboxItems())
-
                         Interlocked.Increment(_apSessionReplyCount)
                         RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                         RecordLastProcessedTime()
@@ -3883,8 +3882,8 @@ Partial Public Class ThisAddIn
                 Try
                     Dim failureNotice As System.String =
                         If(primaryReplySubmitted,
-                           BuildAutoPilotPostSendFailureNotice(),
-                           BuildAutoPilotProcessingFailureNotice())
+                           BuildAutoPilotPostSendFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)),
+                           BuildAutoPilotProcessingFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)))
                     Await SwitchToUi(
                         Sub() SendReplyToSender(
                             mi,
@@ -3915,12 +3914,10 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
-    ''' Re-submits only AutoPilot's own UN-SUBMITTED items currently in the Outbox by
-    ''' calling .Send() again, mirroring the manual "open item → Send" recovery action.
-    ''' Items whose Outlook Submitted flag is already True are left untouched to avoid
-    ''' duplicate submission. Only AutoPilot-tagged items are considered. Must run on the UI thread.
+    ''' Inspects stale AutoPilot Outbox items. Submitted=False is not proof that Send never ran.
+    ''' Ambiguous messages require manual delivery verification; no automatic second Send occurs.
     ''' </summary>
-    Friend Sub ResubmitUnsubmittedAutoPilotOutboxItems()
+    Friend Sub InspectUnsubmittedAutoPilotOutboxItems()
         Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
         Dim outbox As MAPIFolder = Nothing
         Dim items As Items = Nothing
@@ -3930,7 +3927,7 @@ Partial Public Class ThisAddIn
             If outbox Is Nothing Then Return
             items = outbox.Items
 
-            ' Iterate backwards: a successful .Send() removes the item from the Outbox collection.
+            ' Inspect only; never infer safe resubmission from the volatile Submitted flag.
             For i As Integer = items.Count To 1 Step -1
                 Dim obj As Object = Nothing
                 Dim mi As MailItem = Nothing
@@ -3965,19 +3962,16 @@ Partial Public Class ThisAddIn
                     Dim toAddr As String = Nothing
                     Try : toAddr = mi.To : Catch : End Try
 
-                    Try
-                        mi.Send()
-                        ApDashboardLog($"✉ Re-submitted unsubmitted AutoPilot Outbox item via .Send() → {If(toAddr, "(unknown)")}", "warn")
-                    Catch exSend As System.Exception
-                        ApDashboardLog($"✉ Re-submit .Send() failed for '{If(toAddr, "(unknown)")}': {exSend.Message}", "warn")
-                    End Try
+                    ' A missing legacy marker is also ambiguous, not permission to resend.
+                    If System.DateTime.UtcNow - mi.CreationTime.ToUniversalTime() < System.TimeSpan.FromMinutes(2) Then Continue For
+                    ApDashboardLog($"Unsubmitted AutoPilot Outbox item requires delivery verification: {If(toAddr, "(unknown)")}. It was not automatically sent again.", "warn")
                 Finally
                     If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
                     If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then Try : Marshal.ReleaseComObject(obj) : Catch : End Try
                 End Try
             Next
         Catch ex As System.Exception
-            Debug.WriteLine($"[AutoPilot] ResubmitUnsubmittedAutoPilotOutboxItems error: {ex.Message}")
+            Debug.WriteLine($"[AutoPilot] InspectUnsubmittedAutoPilotOutboxItems error: {ex.Message}")
         Finally
             If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
             If outbox IsNot Nothing Then Try : Marshal.ReleaseComObject(outbox) : Catch : End Try
@@ -6516,7 +6510,7 @@ Partial Public Class ThisAddIn
             Dim sentPrimarySubject As String = reply.Subject
             Dim sentPrimaryTo As String = reply.To
             Dim scanFollowUpCc = ScanReplyCcAddresses(originalMail, reply)
-            reply.Send()
+            SubmitAutoPilotMailOnce(reply)
 
             If onPrimarySubmitted IsNot Nothing Then
                 Try
@@ -7943,24 +7937,33 @@ Partial Public Class ThisAddIn
     '  HELPFUL FAILURE RESPONSE
     ' ═══════════════════════════════════════════════════════════════════════════
 
-    Private Function BuildAutoPilotProcessingFailureNotice() As System.String
-        Dim sb As New System.Text.StringBuilder()
-        sb.AppendLine("I'm sorry, but an internal error prevented me from completing your request safely.")
-        sb.AppendLine()
-        sb.AppendLine("No incomplete or unvalidated result files have been sent. Please resend your request or contact the operator if the problem persists.")
-        sb.AppendLine()
-        sb.Append("— " & AN6)
-        Return sb.ToString()
+    Private Function BuildAutoPilotProcessingFailureNotice(Optional userLanguage As System.String = "") As System.String
+        Return BuildAutoPilotDeliveryFailureNotice(userLanguage, False)
     End Function
 
-    Private Function BuildAutoPilotPostSendFailureNotice() As System.String
-        Dim sb As New System.Text.StringBuilder()
-        sb.AppendLine("A reply to your request was submitted, but an internal error occurred while completing the remaining delivery steps.")
-        sb.AppendLine()
-        sb.AppendLine("One or more requested result files may therefore be missing. Please resend your request or contact the operator if you need the complete result set.")
-        sb.AppendLine()
-        sb.Append("— " & AN6)
-        Return sb.ToString()
+    Private Function BuildAutoPilotPostSendFailureNotice(Optional userLanguage As System.String = "") As System.String
+        Return BuildAutoPilotDeliveryFailureNotice(userLanguage, True)
+    End Function
+
+    Private Function BuildAutoPilotDeliveryFailureNotice(userLanguage As System.String, submitted As System.Boolean) As System.String
+        Dim language As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant().Split("-"c, "_"c)(0)
+        Dim first As System.String
+        Dim second As System.String
+        Select Case language
+            Case "de"
+                first = If(submitted, "Eine Antwort auf Ihre Anfrage wurde zum Versand übergeben. Bei den verbleibenden Zustellungsschritten ist jedoch ein interner Fehler aufgetreten.", "Ein interner Fehler hat verhindert, dass ich Ihre Anfrage sicher abschliessen konnte.")
+                second = If(submitted, "Daher können angeforderte Ergebnisdateien fehlen. Bitte senden Sie Ihre Anfrage erneut oder kontaktieren Sie den Betreiber, wenn Sie das vollständige Ergebnis benötigen.", "Es wurden keine unvollständigen oder ungeprüften Ergebnisdateien versandt. Bitte senden Sie Ihre Anfrage erneut oder kontaktieren Sie den Betreiber, falls das Problem weiterhin besteht.")
+            Case "fr"
+                first = If(submitted, "Une réponse à votre demande a été soumise à l’envoi, mais une erreur interne est survenue pendant les étapes de livraison restantes.", "Une erreur interne a empêché de terminer votre demande de manière sûre.")
+                second = If(submitted, "Certains fichiers demandés peuvent donc manquer. Veuillez renvoyer votre demande ou contacter l’opérateur pour obtenir le résultat complet.", "Aucun fichier de résultat incomplet ou non validé n’a été envoyé. Veuillez renvoyer votre demande ou contacter l’opérateur si le problème persiste.")
+            Case "it"
+                first = If(submitted, "Una risposta alla richiesta è stata inoltrata per l’invio, ma si è verificato un errore interno durante le restanti fasi di consegna.", "Un errore interno ha impedito di completare la richiesta in modo sicuro.")
+                second = If(submitted, "Potrebbero quindi mancare alcuni file richiesti. Invia nuovamente la richiesta o contatta il gestore per ottenere il risultato completo.", "Non sono stati inviati file di risultato incompleti o non verificati. Invia nuovamente la richiesta o contatta il gestore se il problema persiste.")
+            Case Else
+                first = If(submitted, "A reply to your request was submitted, but an internal error occurred while completing the remaining delivery steps.", "I'm sorry, but an internal error prevented me from completing your request safely.")
+                second = If(submitted, "One or more requested result files may therefore be missing. Please resend your request or contact the operator if you need the complete result set.", "No incomplete or unvalidated result files have been sent. Please resend your request or contact the operator if the problem persists.")
+        End Select
+        Return first & System.Environment.NewLine & System.Environment.NewLine & second & System.Environment.NewLine & System.Environment.NewLine & "— " & AN6
     End Function
 
     ''' <summary>
@@ -9053,7 +9056,7 @@ Partial Public Class ThisAddIn
 
             Dim sentPrimarySubject As String = newMail.Subject
             Dim sentPrimaryTo As String = newMail.To
-            newMail.Send()
+            SubmitAutoPilotMailOnce(newMail)
 
             Try
                 MoveLastSentToInkyReplies(

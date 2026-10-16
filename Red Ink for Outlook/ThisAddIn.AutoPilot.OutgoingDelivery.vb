@@ -47,6 +47,39 @@ Partial Public Class ThisAddIn
     ''' <summary>Reserved body/header space in attachment-only follow-up messages.</summary>
     Private Const AP_OutgoingFollowUpReserveBytes As Long = 512L * 1024L
 
+    Private Const AP_SubmissionProperty As System.String = "http://schemas.microsoft.com/mapi/string/{00020329-0000-0000-C000-000000000046}/RedInkSubmissionAttempt"
+
+    Private Shared ReadOnly AP_SubmittedMailObjects As New System.Runtime.CompilerServices.ConditionalWeakTable(Of Microsoft.Office.Interop.Outlook.MailItem, System.Object)()
+
+    ' Persist intent BEFORE Send where supported. A transport exception never authorizes resubmission.
+    Private Sub SubmitAutoPilotMailOnce(mail As Microsoft.Office.Interop.Outlook.MailItem)
+        If mail Is Nothing Then Throw New System.ArgumentNullException(NameOf(mail))
+        Dim previous As System.Object = Nothing
+        If AP_SubmittedMailObjects.TryGetValue(mail, previous) Then Throw New System.InvalidOperationException("This mail object already has a submission attempt.")
+        Dim accessor As Microsoft.Office.Interop.Outlook.PropertyAccessor = Nothing
+        Dim submissionId As System.String = System.Guid.NewGuid().ToString("N")
+        Try
+            ' All callers pass a newly created reply/message. Do not treat inherited source
+            ' properties as this new message's send state; the marker is an audit reference.
+            AP_SubmittedMailObjects.Add(mail, New System.Object())
+            Try
+                accessor = mail.PropertyAccessor
+                accessor.SetProperty(AP_SubmissionProperty, submissionId)
+                mail.Save()
+            Catch ex As System.Exception
+                ' Some stores do not support named properties. Preserve ordinary first-send behavior,
+                ' but never reopen this uncertain message for an automatic second submission.
+                ApDashboardLog("Submission marker persistence unavailable for " & submissionId & ": " & ex.Message & ". Automatic resubmission is disabled.", "warn")
+            End Try
+            ApDashboardLog("Mail submission attempt: " & submissionId, "step")
+            mail.Send()
+        Finally
+            If accessor IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(accessor) : Catch ex As System.Exception : End Try
+            End If
+        End Try
+    End Sub
+
     Private NotInheritable Class AutoPilotOutgoingDeliveryPlan
         Public Property PrimaryAttachments As New System.Collections.Generic.List(Of String)()
         Public Property FollowUpBatches As New System.Collections.Generic.List(Of System.Collections.Generic.List(Of String))()
@@ -270,7 +303,7 @@ Partial Public Class ThisAddIn
 
                 Dim sentSubject As String = followUp.Subject
                 Dim sentTo As String = followUp.To
-                followUp.Send()
+                SubmitAutoPilotMailOnce(followUp)
 
                 Try
                     MoveLastSentToInkyReplies(

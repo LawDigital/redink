@@ -1101,6 +1101,13 @@ Namespace Agents
             Dim m = _frontmatterRegex.Match(text)
             If Not m.Success Then Return
 
+            Dim unsupportedSyntaxReason As System.String = System.String.Empty
+            If TryGetUnsupportedFrontmatterSyntax(m.Groups("yaml").Value, unsupportedSyntaxReason) Then
+                ' Keep the descriptor visible for inspection, but never route to malformed guidance.
+                target.Enabled = False
+                System.Diagnostics.Trace.TraceWarning("[AgentResources] Disabled resource '{0}': {1}", mdPath, unsupportedSyntaxReason)
+                Return
+            End If
             Dim fm = ParseSimpleYaml(m.Groups("yaml").Value)
             target.Frontmatter = fm
 

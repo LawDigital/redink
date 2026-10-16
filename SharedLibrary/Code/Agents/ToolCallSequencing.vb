@@ -1965,7 +1965,8 @@ Namespace Agents
                                Optional terminal As Boolean = False,
                                Optional recoveryScopeKey As String = "",
                                Optional allowRetryScopeRebinding As System.Boolean = False,
-                               Optional retryCorrelationArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object) = Nothing)
+                               Optional retryCorrelationArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object) = Nothing,
+                               Optional retryCorrelationAllowedArgumentNames As System.Collections.Generic.IEnumerable(Of System.String) = Nothing)
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedHandling As String = If(toolErrorHandling, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
@@ -1998,14 +1999,15 @@ Namespace Agents
                         deliverableTargetCorrelationSignature)
                 End If
 
-                If normalizedRecoveryScopeKey = System.String.Empty AndAlso
+                If (normalizedRecoveryScopeKey = System.String.Empty OrElse allowRetryScopeRebinding) AndAlso
                    retryCorrelationArguments IsNot Nothing Then
 
                     hasExactRetryCorrelation = TryBuildPreflightRetryCorrelation(
                         retryCorrelationArguments,
                         If(errorCode, System.String.Empty),
                         retryCorrelationSignature,
-                        retryCorrelationRepairablePaths)
+                        retryCorrelationRepairablePaths,
+                        retryCorrelationAllowedArgumentNames)
 
                     If hasExactRetryCorrelation AndAlso
                        System.String.Equals(
@@ -2252,9 +2254,7 @@ Namespace Agents
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
 
-                If IsRecoveryNeutralAdministrativeTool(normalizedToolName) Then
-                    Return
-                End If
+                Dim administrativeSuccess As System.Boolean = IsRecoveryNeutralAdministrativeTool(normalizedToolName)
 
                 _attemptSequence += 1
                 Dim currentProgressEpoch As Long = _substantiveProgressEpoch
@@ -2271,7 +2271,7 @@ Namespace Agents
                 End If
 
                 If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
-                    _substantiveProgressEpoch += 1
+                    If Not administrativeSuccess Then _substantiveProgressEpoch += 1
                     Return
                 End If
 
@@ -2287,6 +2287,11 @@ Namespace Agents
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
+                    ' Neutral calls may repair only their own host-correlated preflight failure.
+                    ' They never count as substantive progress or recover another tool's failure.
+                    If administrativeSuccess AndAlso
+                       (Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) OrElse
+                        System.String.IsNullOrWhiteSpace(candidate.RetryCorrelationSignature)) Then Continue For
                     Dim exactRetryCorrelationMatches As System.Boolean =
                         DoesPreflightRetryCorrelationMatch(candidate, successfulArguments)
                     Dim sameStep As System.Boolean =
@@ -2352,9 +2357,11 @@ Namespace Agents
                         RecoveryToolName = normalizedToolName
                     End If
 
-                    _substantiveProgressEpoch += 1
+                    If Not administrativeSuccess Then _substantiveProgressEpoch += 1
                     Return
                 End If
+
+                If administrativeSuccess Then Return
 
                 ' Different successful steps are alternative/replacement candidates, not retries.
                 ' Record evidence only. HasBlockingUnresolvedToolFailure will permit finalization
@@ -2743,7 +2750,8 @@ Namespace Agents
                 arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
                 errorCode As System.String,
                 ByRef signature As System.String,
-                ByRef repairablePaths As System.Collections.Generic.List(Of System.String)) As System.Boolean
+                ByRef repairablePaths As System.Collections.Generic.List(Of System.String),
+                Optional allowedArgumentNames As System.Collections.Generic.IEnumerable(Of System.String) = Nothing) As System.Boolean
 
                 signature = System.String.Empty
                 repairablePaths = New System.Collections.Generic.List(Of System.String)()
@@ -2760,7 +2768,27 @@ Namespace Agents
 
                 If root Is Nothing Then Return False
 
-                If System.String.Equals(
+                If System.String.Equals(normalizedErrorCode, "invalid_tool_arguments", System.StringComparison.Ordinal) AndAlso allowedArgumentNames IsNot Nothing Then
+                    Dim allowed As New System.Collections.Generic.HashSet(Of System.String)(allowedArgumentNames, System.StringComparer.OrdinalIgnoreCase)
+                    If allowed.Count = 0 Then Return False
+                    Dim retainedCount As System.Int32 = 0
+                    For Each prop As Newtonsoft.Json.Linq.JProperty In root.Properties()
+                        If allowed.Contains(prop.Name) Then
+                            retainedCount += 1
+                        Else
+                            repairablePaths.Add("field:" & prop.Name)
+                        End If
+                    Next
+                    ' No guessing if the rejected call contains no known target arguments.
+                    If retainedCount = 0 Then Return False
+                ElseIf normalizedErrorCode = "locked_expected_artifact_slot_mismatch" OrElse
+                       normalizedErrorCode = "locked_expected_artifact_identity_incomplete" OrElse
+                       normalizedErrorCode = "locked_expected_artifact_slot_required" Then
+                    repairablePaths.Add("field:logical_deliverable_id")
+                    repairablePaths.Add("field:output_slot_id")
+                    ' artifact_id may be absent on a preflight-rejected incomplete identity.
+                    If root("artifact_id") Is Nothing Then repairablePaths.Add("field:artifact_id")
+                ElseIf System.String.Equals(
                     normalizedErrorCode,
                     "explicit_artifact_identity_incomplete",
                     System.StringComparison.Ordinal) Then

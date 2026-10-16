@@ -434,6 +434,7 @@ Namespace Agents
             If System.String.IsNullOrWhiteSpace(payload) Then Return False
             Try
                 Dim obj As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(payload)
+                If Not IsProtocolEnvelope(obj) AndAlso Not IsLegacyOutcomeObject(obj) Then Return False
                 resultKind = ReadScalarText(obj("resultKind"))
                 errorCode = GetErrorTokenCode(obj("error"))
                 If errorCode = System.String.Empty AndAlso TokenIsExplicitlyFalse(obj("success")) Then errorCode = "success_false"
@@ -512,10 +513,7 @@ Namespace Agents
                 Return NormalizeErrorObject(obj, rawLength)
             End If
 
-            Dim hasSummary As Boolean = (obj("summary") IsNot Nothing)
-            Dim hasResult As Boolean = (obj("result") IsNot Nothing)
-
-            If hasSummary OrElse hasResult Then
+            If IsProtocolEnvelope(obj) Then
                 Dim summary As System.String = ReadScalarText(obj("summary"))
                 Dim resultToken As JToken = obj("result")
 
@@ -534,7 +532,12 @@ Namespace Agents
                 End If
 
                 Dim resultObject As JObject = TryCast(resultToken, JObject)
-                Dim nestedFailureCode As System.String = GetDeclaredOutcomeFailureCode(resultObject)
+                Dim nestedFailureCode As System.String = System.String.Empty
+                Dim declaredKind As System.String = ReadScalarText(obj("resultKind")).ToLowerInvariant()
+                If (declaredKind = System.String.Empty OrElse declaredKind = "envelope") AndAlso
+                   (IsProtocolEnvelope(resultObject) OrElse IsLegacyOutcomeObject(resultObject)) Then
+                    nestedFailureCode = GetDeclaredOutcomeFailureCode(resultObject)
+                End If
                 If Not System.String.IsNullOrWhiteSpace(nestedFailureCode) Then
                     Return NormalizeDeclaredFailureObject(obj, resultToken, nestedFailureCode, rawLength)
                 End If
@@ -546,7 +549,7 @@ Namespace Agents
                 Return New NormalizedEnvelope With {
                     .Summary = summary,
                     .Result = resultToken.DeepClone(),
-                    .ResultKind = "envelope",
+                    .ResultKind = If(declaredKind = "json_object" OrElse declaredKind = "json_array" OrElse declaredKind = "text", declaredKind, "envelope"),
                     .RawLength = rawLength
                 }
             End If
@@ -689,10 +692,44 @@ Namespace Agents
             Return normalized.StartsWith("blocked_", System.StringComparison.Ordinal)
         End Function
 
+        ' A reserved envelope requires an explicit discriminator or the complete legacy shape.
+        ' A single domain field named summary/result/error is not envelope metadata.
+        Private Shared Function IsProtocolEnvelope(obj As Newtonsoft.Json.Linq.JObject) As System.Boolean
+            If obj Is Nothing Then Return False
+            Dim kind As System.String = ReadScalarText(obj("resultKind")).ToLowerInvariant()
+            If kind = "error" Then Return True
+            ' A discriminator alone can be a domain field. Require the payload member
+            ' before interpreting a non-error object as an envelope (JSON null still counts).
+            If obj("result") IsNot Nothing AndAlso
+               (kind = "envelope" OrElse kind = "json_object" OrElse kind = "json_array" OrElse kind = "text") Then Return True
+            If obj("summary") Is Nothing OrElse obj("result") Is Nothing Then Return False
+            Return HasOnlyOutcomeProperties(obj)
+        End Function
+
+        Private Shared Function HasOnlyOutcomeProperties(obj As Newtonsoft.Json.Linq.JObject) As System.Boolean
+            If obj Is Nothing OrElse obj.Count = 0 Then Return False
+            Dim reserved As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal) From {
+                "summary", "result", "resultKind", "rawLength", "error", "status", "success", "ok", "message", "reason", "retryable", "code", "phase"
+            }
+            For Each prop As Newtonsoft.Json.Linq.JProperty In obj.Properties()
+                If Not reserved.Contains(prop.Name) Then Return False
+            Next
+            Return True
+        End Function
+
+        Private Shared Function IsLegacyOutcomeObject(obj As Newtonsoft.Json.Linq.JObject) As System.Boolean
+            If Not HasOnlyOutcomeProperties(obj) Then Return False
+            ' Retain explicit failure reports, including structured {error:{code,...}}.
+            Dim structuredError As Newtonsoft.Json.Linq.JObject = TryCast(obj("error"), Newtonsoft.Json.Linq.JObject)
+            If structuredError IsNot Nothing AndAlso structuredError("code") IsNot Nothing Then Return True
+            Return obj("status") IsNot Nothing OrElse obj("success") IsNot Nothing OrElse obj("ok") IsNot Nothing
+        End Function
+
         Private Shared Function IsExplicitErrorObject(obj As Newtonsoft.Json.Linq.JObject) As System.Boolean
             If obj Is Nothing Then Return False
             Return System.String.Equals(ReadScalarText(obj("resultKind")), "error", System.StringComparison.OrdinalIgnoreCase) OrElse
-                GetErrorTokenCode(obj("error")) <> System.String.Empty
+                ((IsProtocolEnvelope(obj) OrElse IsLegacyOutcomeObject(obj)) AndAlso
+                 GetErrorTokenCode(obj("error")) <> System.String.Empty)
         End Function
 
         Private Shared Function IsUsableToken(token As JToken) As Boolean
