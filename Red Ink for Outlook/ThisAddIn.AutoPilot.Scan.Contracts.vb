@@ -35,6 +35,13 @@ Namespace ScanInbox
         Public Property Attributes As New System.Collections.Generic.List(Of System.String)()
         Public Property SmtpAddress As System.String = ""
         Public Property Instruction As System.String = ""
+        Public Property MailLanguage As System.String = ""
+        Public Property TranslateAttachments As System.Boolean
+        Public Property TranslationLanguage As System.String = ""
+        Public Property DraftReply As System.Boolean
+        Public Property ReplyOnlyWhenAppropriate As System.Boolean = True
+        Public Property WebResearch As System.Boolean
+        Public Property TaskInstructions As System.String = ""
     End Class
 
     Public Class RuleSet
@@ -98,6 +105,21 @@ Namespace ScanInbox
         Public Property Actions As New System.Collections.Generic.List(Of System.String)()
     End Class
 
+    Public Class PersonalTaskReport
+        Public Property Summary As System.String = ""
+        Public Property Tasks As New System.Collections.Generic.List(Of PersonalTaskResult)()
+    End Class
+
+    Public Class PersonalTaskResult
+        Public Property Paragraphs As New System.Collections.Generic.List(Of System.String)()
+        Public Property Kind As System.String = ""
+        Public Property Title As System.String = ""
+        Public Property Text As System.String = ""
+        Public Property Status As System.String = ""
+        Public Property Reason As System.String = ""
+        Public Property Files As New System.Collections.Generic.List(Of System.String)()
+    End Class
+
     Public Class Extraction
         <Newtonsoft.Json.JsonProperty(Required:=Newtonsoft.Json.Required.Always)>
         Public Property Sources As New System.Collections.Generic.List(Of Source)()
@@ -133,6 +155,9 @@ Namespace ScanInbox
 
     Public Class RecipientClaim
         Public Property CandidateIds As New System.Collections.Generic.List(Of System.String)()
+        Public Property MatchedRecipientId As System.String = ""
+        Public Property MatchConfidence As System.Double?
+        Public Property MatchReason As System.String = ""
         ' direct, copy, mention, signature; external entities have no candidate ID.
         Public Property Role As System.String = "mention"
         Public Property Name As System.String = ""
@@ -203,6 +228,7 @@ Namespace ScanInbox
         Public Property RuleSetId As System.String = ""
         Public Property ConfigurationRevision As System.Int64
         Public Property ConfigurationHash As System.String = ""
+        Public Property AuthorityHash As System.String = ""
         Public Property ReceivedUtc As System.DateTime
         Public Property Mailbox As System.String = ""
         Public Property Subject As System.String = ""

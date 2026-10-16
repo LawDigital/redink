@@ -281,7 +281,7 @@ Namespace ScanInbox
             _subject = AdminUi.Text(_value.SubjectTemplate)
             _subject.MaxLength = 240
             AdminUi.Field(fields, "Email subject (optional)", _subject)
-            AdminUi.Help(_subject, "Leave blank for Red Ink Scan Handler: followed by the document subject, or a matter, company or topic. Enter fixed text, optionally including {subject} for that automatic description. Example: Incoming mail: {subject}")
+            AdminUi.Help(_subject, "Leave blank for Scan: followed by the document subject, or a matter, company or topic. Enter fixed text, optionally including {subject} for that automatic description. Example: Incoming mail: {subject}")
             _guidance = AdminUi.Text(_value.Guidance, True)
             AdminUi.Field(fields, "Document analysis instructions", _guidance)
             AdminUi.Help(_guidance, "Optional instructions for interpreting all documents in this scanner email, for example how to recognize a receipt stamp or a matter reference. These do not change allowed recipients or deadline calculation. For recipient-specific output use the recipient instructions.")

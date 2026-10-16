@@ -74,7 +74,7 @@ Namespace ScanInbox
                                              _status.MaximumSize = New System.Drawing.Size(width, 0)
                                              _summary.MaximumSize = New System.Drawing.Size(width, 0)
                                          End Sub
-            Dim page = DataPage("Recipient register", _recipients, AdminUi.Buttons(AdminUi.Button("Add recipient", Sub() EditRecipient(True)), AdminUi.Button("Import names…", AddressOf ImportNames), AdminUi.Button("Edit", Sub() EditRecipient(False)), AdminUi.Button("Remove", AddressOf DeleteRecipient)))
+            Dim page = DataPage("Recipient register", _recipients, AdminUi.Buttons(AdminUi.Button("Add recipient", Sub() EditRecipient(True)), AdminUi.Button("Import CSV…", AddressOf ImportNames), AdminUi.Button("Export CSV…", AddressOf ExportRecipients), AdminUi.Button("Edit", Sub() EditRecipient(False)), AdminUi.Button("Remove", AddressOf DeleteRecipient)))
             _configurationPages.Add(page)
             page = DataPage("Recipient sets", _sets, AdminUi.Buttons(AdminUi.Button("Add recipient set", Sub() EditSet(True)), AdminUi.Button("Edit", Sub() EditSet(False)), AdminUi.Button("Duplicate", AddressOf DuplicateSet), AdminUi.Button("Enable / disable", AddressOf ToggleSet), AdminUi.Button("Remove", AddressOf DeleteSet)))
             _configurationPages.Add(page)
@@ -227,11 +227,20 @@ Namespace ScanInbox
             End Using
         End Sub
 
+        Private Sub ExportRecipients()
+            If _busy Then Return
+            Using dialog As New System.Windows.Forms.SaveFileDialog With {.Title = "Export recipients", .Filter = "CSV recipients (*.csv)|*.csv", .DefaultExt = "csv", .AddExtension = True, .FileName = "Scan-Recipients.csv", .OverwritePrompt = True}
+                If dialog.ShowDialog(Me) <> System.Windows.Forms.DialogResult.OK Then Return
+                _session.ExportRecipientsFile(dialog.FileName)
+                SetStatus("Recipients exported. To apply edits, import the CSV with Update existing recipients enabled.")
+            End Using
+        End Sub
+
         Private Sub ImportNames()
             Using editor As New AdminRecipientImport(_session)
                 If editor.ShowDialog(Me) = System.Windows.Forms.DialogResult.OK Then
                     RefreshConfigurationLists()
-                    SetStatus("New recipients imported and saved. Existing recipients were left unchanged.")
+                    SetStatus("Recipient import saved.")
                 End If
             End Using
         End Sub

@@ -30,10 +30,14 @@ Namespace ScanInbox
                 If Not match.Success Then Throw New System.IO.InvalidDataException("Invalid fenced scan JSON response.")
                 json = match.Groups("json").Value.Trim()
             End If
-            Return Parse(Of T)(json)
+            Return ParseCore(Of T)(json, True)
         End Function
 
         Public Shared Function Parse(Of T)(json As System.String) As T
+            Return ParseCore(Of T)(json, False)
+        End Function
+
+        Private Shared Function ParseCore(Of T)(json As System.String, modelOutput As System.Boolean) As T
             ' Unknown members (including model-supplied address fields) are contract errors.
             Dim settings As New Newtonsoft.Json.JsonSerializerSettings With {
                 .MissingMemberHandling = Newtonsoft.Json.MissingMemberHandling.Error,
@@ -46,10 +50,124 @@ Namespace ScanInbox
                     Dim token = Newtonsoft.Json.Linq.JToken.Load(reader, New Newtonsoft.Json.Linq.JsonLoadSettings With {
                         .DuplicatePropertyNameHandling = Newtonsoft.Json.Linq.DuplicatePropertyNameHandling.Error})
                     If reader.Read() Then Throw New System.IO.InvalidDataException("Unexpected trailing JSON content.")
-                    Return token.ToObject(Of T)(Newtonsoft.Json.JsonSerializer.Create(settings))
+                    Dim serializer = Newtonsoft.Json.JsonSerializer.Create(settings)
+                    If modelOutput Then NormalizeModelToken(token, GetType(T), serializer)
+                    Return token.ToObject(Of T)(serializer)
                 End Using
             End Using
         End Function
+
+        ' Normalize only model responses, never persisted configuration or operation files.
+        ' Narrative metadata cannot grant identity, evidence, dates or transport authority.
+        Private Shared Sub NormalizeTextList(owner As Newtonsoft.Json.Linq.JObject, key As System.String,
+                                             diagnostics As System.Collections.Generic.List(Of System.String), Optional structured As System.Boolean = False)
+            Dim prop = owner.Property(key, System.StringComparison.OrdinalIgnoreCase)
+            If prop Is Nothing Then Return
+            Dim original = prop.Value
+            Dim values = TryCast(original, Newtonsoft.Json.Linq.JArray)
+            If values Is Nothing Then
+                values = New Newtonsoft.Json.Linq.JArray()
+                If original.Type <> Newtonsoft.Json.Linq.JTokenType.Null Then values.Add(original.DeepClone())
+            End If
+            Dim normalized As New Newtonsoft.Json.Linq.JArray()
+            For Each item In values
+                If item.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                    normalized.Add(item.DeepClone())
+                ElseIf structured Then
+                    normalized.Add(item.ToString(Newtonsoft.Json.Formatting.None))
+                Else
+                    Dim wrapper = TryCast(item, Newtonsoft.Json.Linq.JObject)
+                    Dim text = If(wrapper Is Nothing, Nothing, wrapper.Property("Text", System.StringComparison.OrdinalIgnoreCase))
+                    If wrapper IsNot Nothing AndAlso wrapper.Properties().Count() = 1 AndAlso text IsNot Nothing AndAlso text.Value.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                        normalized.Add(text.Value.DeepClone())
+                    Else
+                        Throw New System.IO.InvalidDataException("Invalid text item at " & prop.Path & "; expected text or a single Text field.")
+                    End If
+                End If
+            Next
+            If Not Newtonsoft.Json.Linq.JToken.DeepEquals(original, normalized) Then
+                diagnostics.Add("Model structure normalized: " & prop.Path)
+                prop.Value = normalized
+            End If
+        End Sub
+
+        Private Shared Sub NormalizeModelToken(token As Newtonsoft.Json.Linq.JToken, target As System.Type, serializer As Newtonsoft.Json.JsonSerializer)
+            Dim root = TryCast(token, Newtonsoft.Json.Linq.JObject)
+            If root Is Nothing Then Return
+            Dim diagnostics As New System.Collections.Generic.List(Of System.String)()
+            If target Is GetType(Extraction) Then
+                NormalizeTextList(root, "Problems", diagnostics)
+                Dim sources = TryCast(root.GetValue("Sources", System.StringComparison.OrdinalIgnoreCase), Newtonsoft.Json.Linq.JArray)
+                If sources IsNot Nothing Then
+                    For Each source In sources.OfType(Of Newtonsoft.Json.Linq.JObject)()
+                        NormalizeTextList(source, "Relationships", diagnostics, structured:=True)
+                        For Each key In New System.String() {"Subject", "SubjectEvidence", "DateIso", "DateEvidence", "DocumentType", "Language"}
+                            Dim prop = source.Property(key, System.StringComparison.OrdinalIgnoreCase)
+                            If prop Is Nothing Then Continue For
+                            Try
+                                If key.EndsWith("Evidence", System.StringComparison.Ordinal) Then
+                                    prop.Value.ToObject(Of Evidence)(serializer)
+                                ElseIf prop.Value.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                                    prop.Value = New Newtonsoft.Json.Linq.JValue("")
+                                ElseIf prop.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                                    Throw New System.IO.InvalidDataException("Expected optional text.")
+                                End If
+                            Catch ex As System.Exception When TypeOf ex Is Newtonsoft.Json.JsonException OrElse TypeOf ex Is System.IO.InvalidDataException
+                                diagnostics.Add("Optional source metadata omitted: " & prop.Path & "; " & ex.Message & " Original: " & prop.Value.ToString(Newtonsoft.Json.Formatting.None))
+                                prop.Value = If(key.EndsWith("Evidence", System.StringComparison.Ordinal), Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(""))
+                            End Try
+                        Next
+                        For Each key In New System.String() {"Summary", "Actions", "Uncertainties"}
+                            Try
+                                NormalizeTextList(source, key, diagnostics)
+                            Catch ex As System.IO.InvalidDataException
+                                Dim prop = source.Property(key, System.StringComparison.OrdinalIgnoreCase)
+                                diagnostics.Add("Optional narrative omitted: " & ex.Message & " Original: " & prop.Value.ToString(Newtonsoft.Json.Formatting.None))
+                                prop.Value = New Newtonsoft.Json.Linq.JArray()
+                            End Try
+                        Next
+                    Next
+                End If
+                ' A malformed optional calendar claim must not discard validated address blocks.
+                For Each key In New System.String() {"Deadlines", "Stamps", "RuleMatches"}
+                    Dim prop = root.Property(key, System.StringComparison.OrdinalIgnoreCase)
+                    If prop Is Nothing Then Continue For
+                    If prop.Value.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                        prop.Value = New Newtonsoft.Json.Linq.JArray()
+                        diagnostics.Add("Empty optional collection normalized: " & key)
+                    End If
+                    Dim entries = TryCast(prop.Value, Newtonsoft.Json.Linq.JArray)
+                    If entries Is Nothing Then Continue For
+                    For Each entry In entries.ToList()
+                        Try
+                            Dim kind = If(key = "Deadlines", GetType(Deadline), If(key = "Stamps", GetType(ReceiptStamp), GetType(RuleMatch)))
+                            If entry.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then Throw New System.IO.InvalidDataException("Expected an object.")
+                            entry.ToObject(kind, serializer)
+                        Catch ex As System.Exception When TypeOf ex Is Newtonsoft.Json.JsonException OrElse TypeOf ex Is System.IO.InvalidDataException
+                            diagnostics.Add("Optional " & key & " entry omitted: " & ex.Message & " Original: " & entry.ToString(Newtonsoft.Json.Formatting.None))
+                            entry.Remove()
+                        End Try
+                    Next
+                Next
+                Dim problems = TryCast(root.GetValue("Problems", System.StringComparison.OrdinalIgnoreCase), Newtonsoft.Json.Linq.JArray)
+                If problems IsNot Nothing Then
+                    For Each diagnostic In diagnostics
+                        problems.Add(diagnostic)
+                    Next
+                End If
+            ElseIf target Is GetType(PersonalTaskReport) Then
+                Dim tasks = TryCast(root.GetValue("Tasks", System.StringComparison.OrdinalIgnoreCase), Newtonsoft.Json.Linq.JArray)
+                If tasks IsNot Nothing Then
+                    For Each task In tasks.OfType(Of Newtonsoft.Json.Linq.JObject)()
+                        NormalizeTextList(task, "Paragraphs", diagnostics)
+                    Next
+                End If
+            ElseIf target Is GetType(Presentation) Then
+                For Each key In New System.String() {"Summary", "Actions", "EventTitles", "ReviewNotes"}
+                    NormalizeTextList(root, key, diagnostics)
+                Next
+            End If
+        End Sub
 
         Public Shared Function Load(path As System.String) As Configuration
             If Not System.IO.File.Exists(path) Then Throw New System.IO.FileNotFoundException("Scan register is missing; delivery stopped.", path)
@@ -62,6 +180,40 @@ Namespace ScanInbox
             Using sha = System.Security.Cryptography.SHA256.Create()
                 Return System.BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text))).Replace("-", "").ToLowerInvariant()
             End Using
+        End Function
+
+        Public Shared Function DeliveryAuthorityHash(config As Configuration) As System.String
+            Dim snapshot = Parse(Of Configuration)(Newtonsoft.Json.JsonConvert.SerializeObject(config))
+            snapshot.Revision = 0
+            For Each person In snapshot.Recipients
+                person.Instruction = ""
+                person.MailLanguage = ""
+                person.TranslateAttachments = False
+                person.TranslationLanguage = ""
+                person.DraftReply = False
+                person.WebResearch = False
+                person.TaskInstructions = ""
+            Next
+            ' Keep the prior authority shape: this personal option grants no routing permission.
+            Dim authority = Newtonsoft.Json.Linq.JObject.FromObject(snapshot)
+            For Each person As Newtonsoft.Json.Linq.JObject In DirectCast(authority("Recipients"), Newtonsoft.Json.Linq.JArray)
+                person.Remove("ReplyOnlyWhenAppropriate")
+            Next
+            Return Hash(authority.ToString(Newtonsoft.Json.Formatting.None))
+        End Function
+
+        Public Shared Function MatchesPrePersonalConfiguration(config As Configuration, operation As Operation) As System.Boolean
+            ' Older pending operations hashed the same register without the new preference fields.
+            ' Verify every pre-existing field exactly, at the captured revision, before adopting authority.
+            If operation.AuthorityHash <> "" OrElse operation.ConfigurationHash = "" Then Return False
+            Dim snapshot = Newtonsoft.Json.Linq.JObject.FromObject(config)
+            snapshot("Revision") = New Newtonsoft.Json.Linq.JValue(operation.ConfigurationRevision)
+            For Each person As Newtonsoft.Json.Linq.JObject In DirectCast(snapshot("Recipients"), Newtonsoft.Json.Linq.JArray)
+                For Each key In New System.String() {"MailLanguage", "TranslateAttachments", "TranslationLanguage", "DraftReply", "ReplyOnlyWhenAppropriate", "WebResearch", "TaskInstructions"}
+                    person.Remove(key)
+                Next
+            Next
+            Return Hash(snapshot.ToString(Newtonsoft.Json.Formatting.None)) = operation.ConfigurationHash
         End Function
 
         Public Shared Function Address(value As System.String) As System.String
@@ -95,6 +247,7 @@ Namespace ScanInbox
             For Each person In config.Recipients
                 Require(Not System.String.IsNullOrWhiteSpace(person.Name), "Recipient name is required.")
                 Require(person.Aliases IsNot Nothing AndAlso person.Attributes IsNot Nothing, "Recipient aliases/attributes must be arrays.")
+                ValidatePersonalSettings(person)
                 person.SmtpAddress = Address(person.SmtpAddress)
                 Require(smtp.Add(person.SmtpAddress), "Duplicate register SMTP address.")
             Next
@@ -135,6 +288,47 @@ Namespace ScanInbox
             Next
         End Sub
 
+        Public Shared Sub ValidatePersonalSettings(person As RegisteredRecipient)
+            For Each language In New System.String() {person.MailLanguage, person.TranslationLanguage}
+                Require(language IsNot Nothing AndAlso language.Length <= 80 AndAlso Not language.Any(Function(c) System.Char.IsControl(c)), "Language must be a single line of at most 80 characters.")
+            Next
+            Require(Not person.TranslateAttachments OrElse Not System.String.IsNullOrWhiteSpace(person.TranslationLanguage), "Choose a target language for attachment translations.")
+            Require(person.Instruction IsNot Nothing AndAlso person.Instruction.Length <= 20000 AndAlso person.TaskInstructions IsNot Nothing AndAlso person.TaskInstructions.Length <= 20000, "Personal instructions must contain at most 20,000 characters.")
+        End Sub
+
+        Public Shared Function PersonalSettings(path As System.String, trustedSender As System.String, action As System.String, changes As Newtonsoft.Json.Linq.JObject) As Newtonsoft.Json.Linq.JObject
+            ' The caller supplies the transport sender, never a model-selected identity.
+            Dim sender = Address(trustedSender)
+            Dim bytes = System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8)
+            Dim config = Parse(Of Configuration)(bytes)
+            Validate(config)
+            Dim person = config.Recipients.SingleOrDefault(Function(p) p.Active AndAlso p.SmtpAddress.Equals(sender, System.StringComparison.OrdinalIgnoreCase))
+            Require(person IsNot Nothing, "This sender is not an active registered scan recipient.")
+            Dim keys = New System.String() {"Instruction", "MailLanguage", "TranslateAttachments", "TranslationLanguage", "DraftReply", "ReplyOnlyWhenAppropriate", "WebResearch", "TaskInstructions"}
+            Dim result As New Newtonsoft.Json.Linq.JObject()
+            Dim source = Newtonsoft.Json.Linq.JObject.FromObject(person)
+            For Each key In keys
+                result.Add(key, source(key).DeepClone())
+            Next
+            Require(action = "get" OrElse action = "update", "Use get or update.")
+            If action = "get" Then
+                Require(changes Is Nothing OrElse Not changes.Properties().Any(), "get does not accept changes.")
+                Return result
+            End If
+            Require(changes IsNot Nothing AndAlso changes.Properties().Any(), "Provide at least one setting to update.")
+            For Each change In changes.Properties()
+                Require(keys.Contains(change.Name), "Only personal scan settings can be updated; recipient identity, address and routing are administrator-controlled.")
+                Require(change.Value.Type = result(change.Name).Type, "Invalid setting type: " & change.Name)
+                result(change.Name) = change.Value.DeepClone()
+                source(change.Name) = change.Value.DeepClone()
+            Next
+            Dim updated = source.ToObject(Of RegisteredRecipient)()
+            ValidatePersonalSettings(updated)
+            config.Recipients(config.Recipients.IndexOf(person)) = updated
+            Save(path, config, config.Revision, Hash(bytes))
+            Return result
+        End Function
+
         Public Shared Sub ValidateSubjectTemplate(value As System.String)
             Dim template = If(value, "")
             Require(template.Length <= 240 AndAlso Not template.Any(Function(c) System.Char.IsControl(c)), "Email subject must be one line of at most 240 characters.")
@@ -144,7 +338,7 @@ Namespace ScanInbox
 
         Public Shared Function EmailSubject(template As System.String, description As System.String) As System.String
             ValidateSubjectTemplate(template)
-            Dim subject = If(System.String.IsNullOrWhiteSpace(template), "Red Ink Scan Handler: {subject}", template.Trim()).Replace("{subject}", If(description, "").Trim())
+            Dim subject = If(System.String.IsNullOrWhiteSpace(template), "Scan: {subject}", template.Trim()).Replace("{subject}", If(description, "").Trim())
             Require(Not System.String.IsNullOrWhiteSpace(subject) AndAlso subject.Length <= 512 AndAlso Not subject.Any(Function(c) System.Char.IsControl(c)), "Invalid generated email subject.")
             Return subject
         End Function

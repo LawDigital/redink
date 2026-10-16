@@ -132,9 +132,10 @@ Namespace ScanInbox
                 Dim original = System.IO.Path.GetFileNameWithoutExtension(document.FileName)
                 Dim content = If(suggestion Is Nothing OrElse System.String.IsNullOrWhiteSpace(suggestion.Content), original, suggestion.Content)
                 Dim dateSource As Source = Nothing
+                Dim dateNote As System.String = ""
                 If suggestion IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(suggestion.DateSourceId) Then
                     dateSource = operation.Extraction.Sources.SingleOrDefault(Function(s) s.Id = suggestion.DateSourceId AndAlso s.Certain AndAlso s.Evidence.DocumentId = document.Id AndAlso Decisions.IsoDate(s.DateIso).HasValue)
-                    If dateSource Is Nothing Then Throw New System.IO.InvalidDataException("Naming date does not reference a verified letter date in the same attachment.")
+                    If dateSource Is Nothing Then dateNote = "Unverified letter-date reference ignored; descriptive filename retained."
                 End If
                 Dim ordinal = index + 1
                 Dim standard = IsStandardTemplate(rule.AttachmentNameTemplate)
@@ -169,7 +170,7 @@ Namespace ScanInbox
                 Loop
                 result.Add(New AttachmentName With {.DocumentId = document.Id, .OriginalFileName = document.FileName, .FileName = name,
                     .Content = content, .DateSourceId = If(dateSource Is Nothing, "", dateSource.Id),
-                    .Note = fallbackReason & If(stem.Length + extension.Length + suffix.Length > fileNameLimit, "; filename shortened to fit the portable path limit", "") & If(dateSource Is Nothing AndAlso rule.AttachmentNameTemplate.Contains("{documentDate"), "; no evidenced letter date: 00000000", "")})
+                    .Note = fallbackReason & If(dateNote = "", "", If(fallbackReason = "", "", "; ") & dateNote) & If(stem.Length + extension.Length + suffix.Length > fileNameLimit, "; filename shortened to fit the portable path limit", "") & If(dateSource Is Nothing AndAlso rule.AttachmentNameTemplate.Contains("{documentDate"), "; no evidenced letter date: 00000000", "")})
             Next
             Return result
         End Function

@@ -322,6 +322,13 @@ Namespace ScanInbox
         Private ReadOnly _location As System.Windows.Forms.TextBox
         Private ReadOnly _attributes As AdminTextList
         Private ReadOnly _instruction As System.Windows.Forms.TextBox
+        Private ReadOnly _mailLanguage As System.Windows.Forms.TextBox
+        Private ReadOnly _translationLanguage As System.Windows.Forms.TextBox
+        Private ReadOnly _translate As System.Windows.Forms.CheckBox
+        Private ReadOnly _draftReply As System.Windows.Forms.CheckBox
+        Private ReadOnly _replyWhenAppropriate As System.Windows.Forms.CheckBox
+        Private ReadOnly _webResearch As System.Windows.Forms.CheckBox
+        Private ReadOnly _tasks As System.Windows.Forms.TextBox
 
         Public Sub New(session As AdminSession, person As RegisteredRecipient)
             MyBase.New(If(person Is Nothing, "Add recipient", "Edit recipient"))
@@ -345,7 +352,34 @@ Namespace ScanInbox
             _attributes = New AdminTextList(_value.Attributes)
             _instruction = AdminUi.Text(_value.Instruction, True)
             AdminUi.Field(fields, "Matching attributes", _attributes)
-            AdminUi.Field(fields, "Instructions for this recipient", _instruction)
+            AdminUi.Field(fields, "Additional analysis", _instruction)
+            AdminUi.Help(_instruction, "Instructions for a short additional analysis in the notification. To request reply drafts, translations or other files, use Language & tasks.")
+            fields = AdminUi.Fields(Tabs, "Language & tasks")
+            _mailLanguage = AdminUi.Text(_value.MailLanguage)
+            _translationLanguage = AdminUi.Text(_value.TranslationLanguage)
+            _translate = AdminUi.Check("Translate foreign-language attachments", _value.TranslateAttachments)
+            _draftReply = AdminUi.Check("Prepare a reply draft", _value.DraftReply)
+            _replyWhenAppropriate = AdminUi.Check("Only when a response is appropriate", _value.ReplyOnlyWhenAppropriate)
+            _replyWhenAppropriate.Enabled = _draftReply.Checked
+            AddHandler _draftReply.CheckedChanged, Sub() _replyWhenAppropriate.Enabled = _draftReply.Checked
+            _webResearch = AdminUi.Check("Research relevant questions online", _value.WebResearch)
+            _tasks = AdminUi.Text(_value.TaskInstructions, True)
+            _tasks.MaxLength = 20000
+            _mailLanguage.MaxLength = 80
+            _translationLanguage.MaxLength = 80
+            AdminUi.Field(fields, "Email language", _mailLanguage)
+            AdminUi.Help(_mailLanguage, "For example English, German or French. Leave empty to use the document language. Applies to the notification and reply drafts, not the separate translation target.")
+            AdminUi.Field(fields, "Translations", _translate)
+            AdminUi.Field(fields, "Target language", _translationLanguage)
+            AdminUi.Field(fields, "Reply draft", _draftReply)
+            AdminUi.Field(fields, "When to draft", _replyWhenAppropriate)
+            AdminUi.Help(_replyWhenAppropriate, "Enabled by default: assess whether a response is appropriate and explain any skipped draft. Clear to always prepare a draft, subject to explicit conditions below. Short drafts appear in the notification; longer drafts are attached as documents. Replies are never sent.")
+            AdminUi.Field(fields, "Web research", _webResearch)
+            AdminUi.Field(fields, "Conditions & custom tasks", _tasks)
+            AdminUi.Help(_tasks, "Optional steps and conditions, for example: translate only court correspondence; prepare a reply for refund requests. Available document tools run in a private workspace. Web research requires the checkbox and the configured web tool. No replies are sent by these tasks.")
+            AdminUi.Help(_translate, "Deliver a complete translation of each attachment in another language as an additional file. Original attachments are always included. Unreadable content or tool failures are reported.")
+            _translationLanguage.Enabled = _translate.Checked
+            AddHandler _translate.CheckedChanged, Sub() _translationLanguage.Enabled = _translate.Checked
         End Sub
 
         Protected Overrides Sub Commit()
@@ -359,6 +393,14 @@ Namespace ScanInbox
             _value.Aliases = _aliases.Values
             _value.Attributes = _attributes.Values
             _value.Instruction = _instruction.Text
+            _value.MailLanguage = _mailLanguage.Text.Trim()
+            _value.TranslationLanguage = _translationLanguage.Text.Trim()
+            _value.TranslateAttachments = _translate.Checked
+            _value.DraftReply = _draftReply.Checked
+            _value.ReplyOnlyWhenAppropriate = _replyWhenAppropriate.Checked
+            _value.WebResearch = _webResearch.Checked
+            _value.TaskInstructions = _tasks.Text
+            Registry.ValidatePersonalSettings(_value)
             _session.SaveChange(Sub() _session.PutRecipient(_value))
         End Sub
     End Class
@@ -403,6 +445,7 @@ Namespace ScanInbox
         Private ReadOnly _text As System.Windows.Forms.TextBox = AdminUi.Text("", True)
         Private ReadOnly _separator As New System.Windows.Forms.ComboBox With {.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList}
         Private ReadOnly _header As System.Windows.Forms.CheckBox = AdminUi.Check("First row contains column headings", False)
+        Private ReadOnly _updateExisting As System.Windows.Forms.CheckBox = AdminUi.Check("Update existing recipients", False)
         Private ReadOnly _set As New System.Windows.Forms.ComboBox With {.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList}
         Private ReadOnly _grid As System.Windows.Forms.DataGridView = AdminUi.Grid("Row", "Name", "Email", "Organization", "Result")
         Private _previewKey As System.String = ""
@@ -412,7 +455,8 @@ Namespace ScanInbox
             ApplyButton.Text = "Import"
             ApplyButton.Enabled = False
             Dim fields = AdminUi.Fields(Tabs, "Names and addresses")
-            AdminUi.Field(fields, "Columns", New System.Windows.Forms.Label With {.Text = "Name | Email | Organization (optional). Paste cells copied from Excel, or open a CSV file.", .AutoSize = True})
+            AdminUi.Field(fields, "Columns", New System.Windows.Forms.Label With {.Text = "Name and Email required. Use headings to import all recipient settings.", .AutoSize = True})
+            AdminUi.Help(_header, "Supported headings: " & System.String.Join(", ", AdminSession.ImportColumns) & ". Separate aliases and attributes with |; escape a literal pipe as \| and a backslash as \\. Booleans: true/false, yes/no or 1/0. Empty switches preserve defaults/current values. Empty text/list cells clear that field. Absent columns preserve existing values. Inactive recipients are not assigned to sets.")
             _text.MinimumSize = New System.Drawing.Size(180, 180)
             _text.MaxLength = 2000000
             _text.AcceptsTab = True
@@ -421,6 +465,8 @@ Namespace ScanInbox
             _separator.SelectedIndex = 0
             AdminUi.Field(fields, "Column separator", _separator)
             AdminUi.Field(fields, "Headings", _header)
+            AdminUi.Field(fields, "Updates", _updateExisting)
+            AdminUi.Help(_updateExisting, "Match existing recipients by email address and update only imported columns. IDs and set assignments are preserved. Leave off to add new recipients only. Review the preview before importing.")
             _set.Items.Add(New AdminChoice With {.Id = "", .Label = "Register only — assign to a set later"})
             For Each rule In session.Configuration.RuleSets.OrderBy(Function(r) r.Name)
                 _set.Items.Add(New AdminChoice With {.Id = rule.Id, .Label = rule.Name})
@@ -435,6 +481,7 @@ Namespace ScanInbox
             AddHandler _text.TextChanged, Sub() InvalidatePreview()
             AddHandler _separator.SelectedIndexChanged, Sub() InvalidatePreview()
             AddHandler _header.CheckedChanged, Sub() InvalidatePreview()
+            AddHandler _updateExisting.CheckedChanged, Sub() InvalidatePreview()
             AddHandler _set.SelectedIndexChanged, Sub() InvalidatePreview()
         End Sub
 
@@ -449,7 +496,7 @@ Namespace ScanInbox
         End Sub
 
         Private Function CurrentKey() As System.String
-            Return Registry.Hash(_text.Text & ChrW(0) & Separator() & _header.Checked.ToString() & DirectCast(_set.SelectedItem, AdminChoice).Id)
+            Return Registry.Hash(_text.Text & ChrW(0) & Separator() & _header.Checked.ToString() & _updateExisting.Checked.ToString() & DirectCast(_set.SelectedItem, AdminChoice).Id)
         End Function
 
         Private Sub OpenFile()
@@ -461,24 +508,32 @@ Namespace ScanInbox
                     _text.Text = reader.ReadToEnd()
                 End Using
                 _separator.SelectedIndex = If(System.IO.Path.GetExtension(dialog.FileName).Equals(".tsv", System.StringComparison.OrdinalIgnoreCase), 0, 1)
+                Using input As New System.IO.StringReader(_text.Text.TrimStart(ChrW(&HFEFF)))
+                    Using parser As New Microsoft.VisualBasic.FileIO.TextFieldParser(input)
+                        parser.SetDelimiters(Separator())
+                        parser.HasFieldsEnclosedInQuotes = True
+                        Dim first = If(parser.EndOfData, New System.String() {}, parser.ReadFields())
+                        _header.Checked = first.Contains("Name", System.StringComparer.OrdinalIgnoreCase) AndAlso first.Contains("Email", System.StringComparer.OrdinalIgnoreCase)
+                    End Using
+                End Using
             End Using
         End Sub
 
         Private Sub Preview()
-            Dim rows = _session.PreviewRecipients(_text.Text, Separator(), _header.Checked)
+            Dim rows = _session.PreviewRecipients(_text.Text, Separator(), _header.Checked, _updateExisting.Checked)
             _grid.Rows.Clear()
             For Each row In rows
                 Dim index = _grid.Rows.Add(row.Line, row.Name, row.Email, row.Organization, If(row.Issue = "", row.Status, row.Issue))
                 If row.Issue <> "" Then _grid.Rows(index).DefaultCellStyle.ForeColor = System.Drawing.Color.DarkRed
             Next
             _previewKey = CurrentKey()
-            ApplyButton.Enabled = rows.Any(Function(r) r.Add) AndAlso Not rows.Any(Function(r) r.Issue <> "")
+            ApplyButton.Enabled = rows.Any(Function(r) r.Add OrElse r.Update) AndAlso Not rows.Any(Function(r) r.Issue <> "")
             Tabs.SelectedIndex = 1
         End Sub
 
         Protected Overrides Sub Commit()
             If _previewKey = "" OrElse _previewKey <> CurrentKey() Then Throw New System.IO.InvalidDataException("Preview the current data before importing.")
-            _session.ImportRecipients(_text.Text, Separator(), _header.Checked, DirectCast(_set.SelectedItem, AdminChoice).Id)
+            _session.ImportRecipients(_text.Text, Separator(), _header.Checked, DirectCast(_set.SelectedItem, AdminChoice).Id, _updateExisting.Checked)
         End Sub
     End Class
 End Namespace

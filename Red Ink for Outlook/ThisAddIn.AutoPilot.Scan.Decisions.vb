@@ -3,7 +3,7 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Scan.Decisions.vb
-' Purpose: Deterministic routing, deadlines and calendar serialization.
+' Purpose: Validate model recipient choices; deterministic deadlines and calendar serialization.
 '
 ' Architecture:
 '  - Part of the AutoPilot Scan Handler; configuration and recipient authority
@@ -18,6 +18,8 @@ Imports System.Linq
 
 Namespace ScanInbox
     Public NotInheritable Class Decisions
+        Public Const RecipientMatchThreshold As System.Double = 0.8R
+
         Private Sub New()
         End Sub
 
@@ -59,45 +61,101 @@ Namespace ScanInbox
                 Check(Not System.String.IsNullOrWhiteSpace(source.Id), "Missing source ID.")
                 ValidateEvidence(source.Evidence, documents)
                 ValidateEvidence(source.ContextEvidence, documents)
-                Check({"current_cover", "current_letter", "attachment", "historical", "unknown"}.Contains(source.FunctionInPackage), "Unknown document function.")
+                source.FunctionInPackage = If(source.FunctionInPackage, "").Trim().ToLowerInvariant()
+                If Not {"current_cover", "current_letter", "attachment", "historical", "unknown"}.Contains(source.FunctionInPackage) Then
+                    value.Problems.Add("Unknown source function: " & source.FunctionInPackage & "; default routing required.")
+                    source.FunctionInPackage = "unknown"
+                    source.Certain = False
+                End If
                 Check(source.Recipients IsNot Nothing AndAlso source.Uncertainties IsNot Nothing AndAlso source.Relationships IsNot Nothing AndAlso source.Summary IsNot Nothing AndAlso source.Actions IsNot Nothing, "Missing source arrays.")
                 If source.DateIso <> "" Then
-                    Check(IsoDate(source.DateIso).HasValue, "Invalid document date.")
-                    ValidateEvidence(source.DateEvidence, documents)
-                    Check(InSource(source.DateEvidence, source), "Document date outside source.")
+                    Try
+                        Check(IsoDate(source.DateIso).HasValue, "Invalid document date.")
+                        ValidateEvidence(source.DateEvidence, documents)
+                        Check(InSource(source.DateEvidence, source), "Document date outside source.")
+                    Catch ex As System.IO.InvalidDataException
+                        value.Problems.Add("Optional letter date discarded: " & ex.Message)
+                        source.DateIso = ""
+                        source.DateEvidence = Nothing
+                    End Try
                 End If
                 If Not System.String.IsNullOrWhiteSpace(source.Subject) Then
-                    Check(source.Subject.Length <= 2000 AndAlso Not source.Subject.Any(Function(c) System.Char.IsControl(c)), "Invalid document subject.")
-                    ValidateEvidence(source.SubjectEvidence, documents)
-                    Check(InSource(source.SubjectEvidence, source) AndAlso Normalize(source.SubjectEvidence.Quote).Contains(Normalize(source.Subject)), "Document subject is not supported by source evidence.")
+                    Try
+                        Check(source.Subject.Length <= 2000 AndAlso Not source.Subject.Any(Function(c) System.Char.IsControl(c)), "Invalid document subject.")
+                        ValidateEvidence(source.SubjectEvidence, documents)
+                        Check(InSource(source.SubjectEvidence, source) AndAlso Normalize(source.SubjectEvidence.Quote).Contains(Normalize(source.Subject)), "Document subject is not supported by source evidence.")
+                    Catch ex As System.IO.InvalidDataException
+                        ' Optional presentation metadata cannot invalidate recipient/deadline evidence.
+                        value.Problems.Add("Document heading discarded: " & ex.Message)
+                        source.Subject = ""
+                        source.SubjectEvidence = Nothing
+                    End Try
                 End If
                 For Each recipient In source.Recipients
                     Check(recipient IsNot Nothing AndAlso recipient.CandidateIds IsNot Nothing, "Null recipient/IDs.")
-                    Check({"direct", "copy", "mention", "signature"}.Contains(recipient.Role), "Unknown document recipient role.")
+                    recipient.Role = If(recipient.Role, "").Trim().ToLowerInvariant()
+                    Select Case recipient.Role
+                        Case "to", "addressee", "recipient", "primary" : recipient.Role = "direct"
+                        Case "cc", "carbon_copy" : recipient.Role = "copy"
+                        Case "direct", "copy", "mention", "signature"
+                        Case Else
+                            recipient.Role = "unknown"
+                            source.Certain = False
+                            source.Uncertainties.Add("An address-block role could not be established; use the default recipient.")
+                    End Select
                     ValidateEvidence(recipient.Evidence, documents)
                     Check(InSource(recipient.Evidence, source), "Recipient evidence outside source.")
+                    If recipient.MatchConfidence.HasValue Then
+                        Check(Not System.Double.IsNaN(recipient.MatchConfidence.Value) AndAlso Not System.Double.IsInfinity(recipient.MatchConfidence.Value) AndAlso recipient.MatchConfidence.Value >= 0 AndAlso recipient.MatchConfidence.Value <= 1, "Recipient match confidence must be between 0 and 1.")
+                    End If
+                    If Not System.String.IsNullOrEmpty(recipient.MatchedRecipientId) Then
+                        Check(rule.AllowedRecipientIds.Contains(recipient.MatchedRecipientId) AndAlso config.Recipients.Any(Function(p) p.Active AndAlso p.Id = recipient.MatchedRecipientId), "Unknown/disallowed matched recipient ID.")
+                    End If
                     For Each id In recipient.CandidateIds
                         Check(rule.AllowedRecipientIds.Contains(id) AndAlso config.Recipients.Any(Function(p) p.Id = id AndAlso p.Active), "Unknown/disallowed recipient ID.")
                     Next
                 Next
             Next
-            Check(value.Deadlines.All(Function(d) d IsNot Nothing) AndAlso value.Deadlines.Select(Function(d) d.Id).Distinct().Count() = value.Deadlines.Count, "Duplicate/null deadlines.")
-            For Each deadline In value.Deadlines
-                Check(Not System.String.IsNullOrWhiteSpace(deadline.Id), "Missing deadline ID.")
-                ValidateEvidence(deadline.Evidence, documents)
-                Check({"current", "historical", "unclear"}.Contains(deadline.Status), "Unknown deadline status.")
-                Check({"receipt", "explicit", "other", ""}.Contains(deadline.Trigger), "Unknown deadline trigger.")
-                Check(deadline.Duration >= 0 AndAlso deadline.Duration <= 36500, "Invalid deadline duration.")
-                If deadline.DateIso <> "" Then Check(IsoDate(deadline.DateIso).HasValue, "Invalid deadline date.")
+            Dim deadlineIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            Dim duplicateIds = value.Deadlines.Where(Function(d) d IsNot Nothing).GroupBy(Function(d) d.Id).Where(Function(g) g.Count() > 1).Select(Function(g) g.Key).ToList()
+            For Each deadline In value.Deadlines.ToList()
+                Try
+                    Check(deadline IsNot Nothing, "Null deadline.")
+                    Check(Not System.String.IsNullOrWhiteSpace(deadline.Id) AndAlso Not duplicateIds.Contains(deadline.Id) AndAlso deadlineIds.Add(deadline.Id), "Missing/duplicate deadline ID.")
+                    ValidateEvidence(deadline.Evidence, documents)
+                    deadline.Status = If(deadline.Status, "").Trim().ToLowerInvariant()
+                    deadline.Trigger = If(deadline.Trigger, "").Trim().ToLowerInvariant()
+                    deadline.Unit = If(deadline.Unit, "").Trim().ToLowerInvariant()
+                    deadline.Profile = If(deadline.Profile, "").Trim().ToLowerInvariant()
+                    Check({"current", "historical", "unclear"}.Contains(deadline.Status), "Unknown deadline status.")
+                    Check({"receipt", "explicit", "other", ""}.Contains(deadline.Trigger), "Unknown deadline trigger.")
+                    Check(deadline.Duration >= 0 AndAlso deadline.Duration <= 36500, "Invalid deadline duration.")
+                    Check(Not System.String.IsNullOrWhiteSpace(deadline.Action), "Missing deadline action.")
+                    If Not System.String.IsNullOrEmpty(deadline.DateIso) Then Check(IsoDate(deadline.DateIso).HasValue, "Invalid deadline date.")
+                Catch ex As System.IO.InvalidDataException
+                    value.Problems.Add("Calendar claim omitted: " & ex.Message & " Original: " & Newtonsoft.Json.JsonConvert.SerializeObject(deadline))
+                    value.Deadlines.Remove(deadline)
+                End Try
             Next
-            For Each stamp In value.Stamps
-                Check(stamp IsNot Nothing AndAlso IsoDate(stamp.DateIso).HasValue, "Invalid receipt stamp.")
-                Check({"current", "historical", "unclear"}.Contains(stamp.Relation), "Invalid stamp relation.")
-                ValidateEvidence(stamp.Evidence, documents)
+            For Each stamp In value.Stamps.ToList()
+                Try
+                    Check(stamp IsNot Nothing AndAlso IsoDate(stamp.DateIso).HasValue, "Invalid receipt stamp.")
+                    stamp.Relation = If(stamp.Relation, "").Trim().ToLowerInvariant()
+                    Check({"current", "historical", "unclear"}.Contains(stamp.Relation), "Invalid stamp relation.")
+                    ValidateEvidence(stamp.Evidence, documents)
+                Catch ex As System.IO.InvalidDataException
+                    value.Problems.Add("Receipt stamp omitted; email receipt basis remains available: " & ex.Message & " Original: " & Newtonsoft.Json.JsonConvert.SerializeObject(stamp))
+                    value.Stamps.Remove(stamp)
+                End Try
             Next
-            For Each hit In value.RuleMatches
-                Check(hit IsNot Nothing AndAlso rule.AdditionalRules.Any(Function(r) r.Active AndAlso r.Kind = "semantic" AndAlso r.Id = hit.RuleId), "Unknown semantic rule ID.")
-                ValidateEvidence(hit.Evidence, documents)
+            For Each hit In value.RuleMatches.ToList()
+                Try
+                    Check(hit IsNot Nothing AndAlso rule.AdditionalRules.Any(Function(r) r.Active AndAlso r.Kind = "semantic" AndAlso r.Id = hit.RuleId), "Unknown semantic rule ID.")
+                    ValidateEvidence(hit.Evidence, documents)
+                Catch ex As System.IO.InvalidDataException
+                    value.Problems.Add("Optional topic claim omitted: " & ex.Message & " Original: " & Newtonsoft.Json.JsonConvert.SerializeObject(hit))
+                    value.RuleMatches.Remove(hit)
+                End Try
             Next
         End Sub
 
@@ -145,61 +203,11 @@ Namespace ScanInbox
             Return selected
         End Function
 
-        Private Shared Function NameWords(value As System.String) As System.Collections.Generic.List(Of System.String)
-            Return System.Text.RegularExpressions.Regex.Matches(Normalize(value).Normalize(System.Text.NormalizationForm.FormKC), "[\p{L}\p{M}]+").Cast(Of System.Text.RegularExpressions.Match)().Select(Function(m) m.Value).ToList()
-        End Function
-
-        Private Shared Function NameScore(written As System.String, registered As System.String) As System.Int32
-            Dim parts = If(written, "").Split(","c)
-            Dim actual = NameWords(If(parts.Length = 2, parts(1) & " " & parts(0), written))
-            Dim expected = NameWords(registered)
-            If actual.Count = 0 OrElse expected.Count = 0 Then Return 0
-            If actual.SequenceEqual(expected) Then Return 2
-            ' Initials may replace given-name tokens, never the final family-name token.
-            ' Match remaining tokens in order; omitted middle names are allowed, different spelled-out names are not.
-            If actual.Count > expected.Count OrElse actual.Count < 2 OrElse actual.Last() <> expected.Last() Then Return 0
-            If actual(0) <> expected(0) AndAlso Not (actual(0).Length = 1 AndAlso expected(0).StartsWith(actual(0), System.StringComparison.Ordinal)) Then Return 0
-            Dim position As System.Int32 = 1
-            For i As System.Int32 = 1 To actual.Count - 2
-                While position < expected.Count - 1 AndAlso actual(i) <> expected(position) AndAlso Not (actual(i).Length = 1 AndAlso expected(position).StartsWith(actual(i), System.StringComparison.Ordinal))
-                    position += 1
-                End While
-                If position >= expected.Count - 1 Then Return 0
-                position += 1
-            Next
-            Return 1
-        End Function
-
-        Private Shared Function NameInEvidence(name As System.String, evidence As System.String) As System.Boolean
-            Dim words = NameWords(name)
-            Dim quote = NameWords(evidence)
-            If words.Count = 0 Then Return False
-            For offset As System.Int32 = 0 To quote.Count - words.Count
-                If quote.Skip(offset).Take(words.Count).SequenceEqual(words) Then Return True
-            Next
-            Return False
-        End Function
-
-        Private Shared Function PersonCandidates(claim As RecipientClaim, config As Configuration, rule As RuleSet) As System.Collections.Generic.List(Of RegisteredRecipient)
-            Dim exactEvidence = config.Recipients.Where(Function(p) p.Active AndAlso rule.AllowedRecipientIds.Contains(p.Id) AndAlso New System.String() {p.Name}.Concat(p.Aliases).Any(Function(n) NameInEvidence(n, claim.Evidence.Quote))).ToList()
-            If Not NameInEvidence(claim.Name, claim.Evidence.Quote) Then Return If(NameWords(claim.Name).Count < 2, exactEvidence, New System.Collections.Generic.List(Of RegisteredRecipient)())
-            Dim scored = config.Recipients.Where(Function(p) p.Active AndAlso rule.AllowedRecipientIds.Contains(p.Id)).Select(
-                Function(p) New With {.Person = p, .Score = New System.String() {p.Name}.Concat(p.Aliases).Select(Function(n) NameScore(claim.Name, n)).Max()}).Where(Function(p) p.Score > 0).ToList()
-            If scored.Count = 0 Then Return If(NameWords(claim.Name).Count < 2, exactEvidence, New System.Collections.Generic.List(Of RegisteredRecipient)())
-            Dim best = scored.Max(Function(p) p.Score)
-            Return scored.Where(Function(p) p.Score = best).Select(Function(p) p.Person).ToList()
-        End Function
-
-        Private Shared Function MatchPerson(claim As RecipientClaim, config As Configuration, rule As RuleSet) As System.String
-            Dim named = PersonCandidates(claim, config, rule)
-            If named.Count > 1 Then
-                named = named.Where(Function(p) New System.String() {p.Organization, p.Location}.Concat(p.Attributes).
-                    Any(Function(a) Not System.String.IsNullOrWhiteSpace(a) AndAlso ContainsLiteral(claim.Evidence.Quote, a))).ToList()
-            End If
-            ' Host evidence and the finite active register are authoritative. Organisation
-            ' is a tie-breaker, not a veto on a unique name. Model IDs cannot add addresses.
-            If named.Count <> 1 Then Return ""
-            Return named(0).Id
+        Private Shared Function MatchPerson(claim As RecipientClaim) As System.String
+            ' Identity selection belongs exclusively to the model. No lexical/name heuristic.
+            ' ValidateExtraction has already checked the finite register and confidence range.
+            If Not claim.MatchConfidence.HasValue OrElse claim.MatchConfidence.Value < RecipientMatchThreshold Then Return ""
+            Return If(claim.MatchedRecipientId, "")
         End Function
 
         Public Shared Function Decide(config As Configuration, rule As RuleSet, documents As System.Collections.Generic.List(Of Document), extraction As Extraction,
@@ -221,8 +229,9 @@ Namespace ScanInbox
             If selected IsNot Nothing Then
                 For Each claim In selected.Recipients.Where(Function(c) c.Role = "direct" OrElse c.Role = "copy")
                     ' External recipients retain their document role, but can never become addresses.
-                    If claim.CandidateIds.Count = 0 AndAlso PersonCandidates(claim, config, rule).Count = 0 Then Continue For
-                    Dim id = MatchPerson(claim, config, rule)
+                    If claim.CandidateIds.Count = 0 AndAlso System.String.IsNullOrEmpty(claim.MatchedRecipientId) Then Continue For
+                    Dim id = MatchPerson(claim)
+                    result.Reasons.Add("Model recipient match for " & claim.Name & ": " & If(id = "", "below threshold or unresolved", config.Recipients.Single(Function(p) p.Id = id).Name) & "; confidence=" & If(claim.MatchConfidence.HasValue, claim.MatchConfidence.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture), "missing") & "; " & claim.MatchReason)
                     If id = "" Then
                         unresolved = True
                     ElseIf claim.Role = "direct" Then
@@ -283,6 +292,7 @@ Namespace ScanInbox
                 result.Review.Add("Receipt stamp not used (" & stamp.Relation & ", certainty=" & stamp.Certain.ToString() & "): " & Citation(stamp.Evidence))
             Next
             Dim conflicting = stamps.Select(Function(s) s.DateIso).Distinct().Count() > 1
+            Dim receiptUncertain = extraction.Problems.Any(Function(p) p.StartsWith("Receipt stamp omitted", System.StringComparison.Ordinal) OrElse p.StartsWith("Optional Stamps entry omitted", System.StringComparison.Ordinal))
             For Each deadline In extraction.Deadlines
                 Dim dateValue As System.DateTime? = Nothing
                 Dim basis = ""
@@ -291,7 +301,7 @@ Namespace ScanInbox
                     If deadline.Trigger = "explicit" AndAlso IsoDate(deadline.DateIso).HasValue Then
                         dateValue = IsoDate(deadline.DateIso)
                         basis = "Explicit end date."
-                    ElseIf Not conflicting AndAlso deadline.Trigger = "receipt" AndAlso deadline.Duration > 0 AndAlso deadline.Unit = "calendar_days" AndAlso rule.DeadlineProfile = "calendar_days" AndAlso deadline.Profile = rule.DeadlineProfile Then
+                    ElseIf Not conflicting AndAlso Not receiptUncertain AndAlso deadline.Trigger = "receipt" AndAlso deadline.Duration > 0 AndAlso deadline.Unit = "calendar_days" AndAlso rule.DeadlineProfile = "calendar_days" AndAlso deadline.Profile = rule.DeadlineProfile Then
                         dateValue = result.ReceiptDate.AddDays(deadline.Duration)
                         basis = result.ReceiptBasis & "; day 1 is the following day; +" & deadline.Duration.ToString(System.Globalization.CultureInfo.InvariantCulture) & " calendar days."
                     End If

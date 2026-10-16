@@ -161,6 +161,7 @@ Partial Public Class ThisAddIn
     ''' </returns>
     Friend Function GetAutoPilotInternalTools() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
+        tools.Add(BuildScanSettingsTool())
 
         ' Deterministic helper for exact text/data computation inside AutoPilot.
         Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
@@ -1531,6 +1532,8 @@ Partial Public Class ThisAddIn
 
         Try
             Select Case toolCall.ToolName
+                Case AP_Tool_ScanSettings
+                    response = ExecuteScanSettingsTool(toolCall)
                 Case AP_Tool_ProcessWordDoc
                     response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ExtractPdfText
@@ -2283,7 +2286,7 @@ Partial Public Class ThisAddIn
 
     Friend Function IsAutoPilotInternalTool(toolName As String) As Boolean
         Select Case toolName
-            Case AP_Tool_ProcessWordDoc,
+            Case AP_Tool_ScanSettings, AP_Tool_ProcessWordDoc,
      AP_Tool_CommentWordDoc,
      AP_Tool_ExtractPdfText,
      AP_Tool_MergePdfs,
