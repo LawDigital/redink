@@ -921,13 +921,33 @@ Partial Public Class ThisAddIn
         Return $"PowerPoint visual-quality guard: rebalance this {slidesArray.Count}-slide deck instead of making every content slide graphical or every slide textual. Current mix: {visualCount} rich visual / {textSlideCount} native text-data slides across {contentCount} content slides; bullets={bulletCount}; longest rich-visual run={maxConsecutiveVisuals}; longest bullet run={maxConsecutiveBullets}. For a normal executive deck, use roughly 30-60% rich visuals and deliberately keep native bullets/two-column/table/quote slides for explanatory, legal, tax, caveat, and detail-heavy content. Use structure/process/comparison/cards/timeline/matrix/chart/KPI only where the visual form genuinely improves the story, and normally place no more than two rich visuals consecutively. Set allow_text_heavy=true or allow_visual_heavy=true only when the user explicitly requested that extreme style."
     End Function
 
+    ''' <summary>
+    ''' Keeps embedded line breaks within one bullet paragraph. Accepts double-escaped
+    ''' newline aliases from tool input, without unescaping arbitrary JSON or path text.
+    ''' </summary>
+    Private Shared Function NormalizePowerPointBulletLineBreaks(value As System.String) As System.String
+        Dim text As System.String = If(value, System.String.Empty)
+        text = System.Text.RegularExpressions.Regex.Replace(
+            text,
+            "(?:[A-Za-z]:\\|\\\\|[A-Za-z][A-Za-z0-9+.-]*://)\S+|\\r\\n|\\n|\\r",
+            Function(m As System.Text.RegularExpressions.Match) As System.String
+                Select Case m.Value
+                    Case "\r\n", "\n", "\r"
+                        Return vbLf
+                    Case Else
+                        Return m.Value
+                End Select
+            End Function)
+        Return text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Replace(vbLf, ChrW(11).ToString())
+    End Function
+
     Private Shared Function BuildAutoPilotPowerPointBulletItemsFromLines(lines As System.Collections.Generic.IEnumerable(Of String)) As JArray
         Dim result As New JArray()
         If lines Is Nothing Then Return result
 
         Dim indentFollowingNumberedHeading As Boolean = False
         For Each raw As String In lines
-            Dim cleaned As String = If(raw, "").Trim()
+            Dim cleaned As String = NormalizePowerPointBulletLineBreaks(raw).Trim()
             cleaned = System.Text.RegularExpressions.Regex.Replace(
                 cleaned,
                 "^(?:[•·▪◦‣⁃∙●○■□◆◇►▸\-\*\+]\s*)+",
@@ -963,13 +983,13 @@ Partial Public Class ThisAddIn
                 If itemToken Is Nothing OrElse itemToken.Type = JTokenType.Null Then Continue For
                 If itemToken.Type = JTokenType.Object Then
                     Dim itemObj As JObject = DirectCast(itemToken, JObject)
-                    Dim itemText As String = CleanPptBulletText(If(itemObj.Value(Of String)("text"), "")).Trim()
+                    Dim itemText As String = CleanPptBulletText(NormalizePowerPointBulletLineBreaks(itemObj.Value(Of String)("text"))).Trim()
                     If itemText = "" Then Continue For
                     Dim level As Integer = itemObj.Value(Of Integer?)("level").GetValueOrDefault(0)
                     level = Math.Max(0, Math.Min(4, level))
                     normalized.Add(New JObject From {{"text", itemText}, {"level", level}})
                 Else
-                    Dim itemText As String = CleanPptBulletText(itemToken.ToString()).Trim()
+                    Dim itemText As String = CleanPptBulletText(NormalizePowerPointBulletLineBreaks(itemToken.ToString())).Trim()
                     If itemText <> "" Then normalized.Add(New JObject From {{"text", itemText}, {"level", 0}})
                 End If
             Next
@@ -3716,7 +3736,7 @@ Partial Public Class ThisAddIn
         Dim lines As New System.Collections.Generic.List(Of String)()
         Dim levels As New System.Collections.Generic.List(Of Integer)()
         For Each itemObj As JObject In bulletItems.OfType(Of JObject)()
-            Dim itemText As String = If(itemObj.Value(Of String)("text"), "").Trim()
+            Dim itemText As String = NormalizePowerPointBulletLineBreaks(itemObj.Value(Of String)("text")).Trim()
             If itemText = "" Then Continue For
             lines.Add(itemText)
             levels.Add(Math.Max(0, Math.Min(4, itemObj.Value(Of Integer?)("level").GetValueOrDefault(0))))
@@ -5274,7 +5294,7 @@ Partial Public Class ThisAddIn
                                                      minimum As Single,
                                                      denseMinimum As Single) As Single
         If String.IsNullOrWhiteSpace(text) Then Return preferred
-        Dim normalized As String = text.Replace(vbCr, "").Trim()
+        Dim normalized As String = text.Replace(vbCr, "").Replace(ChrW(11).ToString(), vbLf).Trim()
         Dim lines As Integer = Math.Max(1, normalized.Split({vbLf}, StringSplitOptions.None).Length)
         Dim chars As Integer = normalized.Length
         Dim density As Double = chars + Math.Max(0, lines - 1) * 35.0

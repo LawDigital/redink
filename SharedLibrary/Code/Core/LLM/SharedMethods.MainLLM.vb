@@ -2797,10 +2797,19 @@ PostProcess:
 
                     text = ResponseText
                 Else
-                    text = text & JsonTemplateFormatter.FormatJsonWithTemplate(jsonObject, ResponseKey, RKMode)
                     Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+([^\s\%]+)\s*\%\}", RegexOptions.Singleline)
                     Dim hasPh = Regex.IsMatch(ResponseKey, "\{([^}]+)\}")
-                    If Not hasLoop AndAlso Not hasPh Then text = text & ExtractCitations(jsonObject)
+                    If Not hasLoop AndAlso Not hasPh Then
+                        ' Citation adapters separate evidence from answer content on a clone.
+                        ' Preserve the original response and the formatter's lossless fragments.
+                        JsonTemplateFormatter.NormalizeSources(jsonObject)
+                        Dim answerPayload As Newtonsoft.Json.Linq.JObject = Nothing
+                        Dim citations As System.String = ExtractCitations(jsonObject, answerPayload)
+                        text &= JsonTemplateFormatter.FormatJsonWithTemplate(answerPayload, ResponseKey, RKMode) & citations
+                    Else
+                        ' Explicit templates retain full access to metadata and source links.
+                        text &= JsonTemplateFormatter.FormatJsonWithTemplate(jsonObject, ResponseKey, RKMode)
+                    End If
                 End If
 
                 Return text
@@ -2844,7 +2853,8 @@ PostProcess:
         ''' </summary>
         ''' <param name="jsonObj">JSON object to inspect.</param>
         ''' <returns>Formatted citations text; returns an empty string if no citations are found.</returns>
-        Public Shared Function ExtractCitations(ByRef jsonObj As JObject) As String
+        Public Shared Function ExtractCitations(ByRef jsonObj As JObject, Optional ByRef answerPayload As Newtonsoft.Json.Linq.JObject = Nothing) As String
+            answerPayload = DirectCast(jsonObj.DeepClone(), Newtonsoft.Json.Linq.JObject)
             Try
                 Dim OriginalJsonObj As JObject = CType(jsonObj.DeepClone(), JObject)
                 Dim citationList As New List(Of String)
@@ -2900,7 +2910,7 @@ PostProcess:
                 End If
 
                 ' 3b. Evaluate Google grounding supports.
-                ProcessGroundingSupports(jsonObj, citationList, sourceUris)
+                ProcessGroundingSupports(jsonObj, citationList, sourceUris, answerPayload)
 
                 ' 4. Check legacy formats
                 ExtractLegacyCitations(jsonObj, citationList, sourceUris)
@@ -3204,7 +3214,18 @@ PostProcess:
         ''' <param name="sourceUris">Set used to deduplicate source URLs.</param>
         Private Shared Sub ProcessGroundingSupports(jsonObj As Newtonsoft.Json.Linq.JObject,
                                             ByRef citationList As System.Collections.Generic.List(Of String),
-                                            ByRef sourceUris As System.Collections.Generic.HashSet(Of String))
+                                            ByRef sourceUris As System.Collections.Generic.HashSet(Of String),
+                                            Optional answerPayload As Newtonsoft.Json.Linq.JObject = Nothing)
+
+            ' This adapter owns the grounding schema. Evidence segments repeat answer text;
+            ' they are not additional answer fragments. Remove only their metadata container
+            ' from the text projection, never from the original used to render references.
+            If answerPayload IsNot Nothing Then
+                For Each metadata As Newtonsoft.Json.Linq.JToken In answerPayload.SelectTokens("candidates[*].groundingMetadata").ToList()
+                    Dim propertyNode As Newtonsoft.Json.Linq.JProperty = TryCast(metadata.Parent, Newtonsoft.Json.Linq.JProperty)
+                    If propertyNode IsNot Nothing Then propertyNode.Remove()
+                Next
+            End If
 
             Try
                 ' Check expected paths.

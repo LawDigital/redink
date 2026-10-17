@@ -128,140 +128,183 @@ Partial Public Class ThisAddIn
     Public Async Function BalloonMerge(
         ByVal selectWholeParagraph As Boolean, Silent As Boolean) As System.Threading.Tasks.Task
 
-        Dim app As Word.Application = Globals.ThisAddIn.Application
-        Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
-        Dim doc As Microsoft.Office.Interop.Word.Document = sel.Range.Document
-
-        Dim activeComment As Microsoft.Office.Interop.Word.Comment = Nothing
-        Dim newtext As String = String.Empty
-
         Try
-            ' Find the comment at current cursor position
-            If sel.StoryType = WdStoryType.wdCommentsStory Then
-                For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
-                    If sel.Range.Start >= c.Range.Start AndAlso
-                       sel.Range.End <= c.Range.End Then
-                        activeComment = c
-                        Exit For
-                    End If
-                Next
-            Else
-                For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
-                    Dim anchor As Range = c.Scope
-                    If sel.Range.End > anchor.Start AndAlso
-                       sel.Range.Start < anchor.End Then
-                        activeComment = c
-                        Exit For
-                    End If
-                Next
-            End If
-
-            ' Validate cursor is in or on a comment
-            If activeComment Is Nothing Then
-                ShowCustomMessageBox(
-                    "This command only works when the cursor is inside a comment " &
-                    "balloon or on text that has a comment.")
+            Dim context As BalloonMergeContext = CaptureBalloonMergeContext(Globals.ThisAddIn.Application.Selection, selectWholeParagraph)
+            If context Is Nothing Then
+                ShowCustomMessageBox("This command only works when the cursor is inside a comment balloon or on text that has a comment.")
                 Return
             End If
-
-            ' Extract text from comment or selection
-            Dim selectedText As String = SafeRangeText(sel.Range)
-
-            If sel.StoryType = WdStoryType.wdCommentsStory Then
-                ' Inside balloon
-                If selectedText.Trim().Length = 0 Then
-                    newtext = SafeRangeText(activeComment.Range)
-                Else
-                    newtext = selectedText
-                End If
-            Else
-                ' On anchor in main story
-                If selectedText.Trim().Length = 0 Then
-                    newtext = SafeRangeText(activeComment.Range)
-                Else
-                    newtext = selectedText
-                End If
-            End If
-
-            ' Select target range in main document
-            Dim anchorRange As Range = activeComment.Scope
-            Dim targetRange As Range
-
-            If selectWholeParagraph Then
-                If anchorRange.Paragraphs.Count > 0 Then
-                    ' Anchor spans one or more paragraphs - select them all
-                    Dim firstPara As Range = anchorRange.Paragraphs(1).Range
-                    Dim lastPara As Range = anchorRange.Paragraphs(anchorRange.Paragraphs.Count).Range
-                    targetRange = doc.Range(firstPara.Start, lastPara.End)
-                Else
-                    ' Collapsed anchor (no text selected when comment was made) - select containing paragraph
-                    targetRange = doc.Range(anchorRange.Start, anchorRange.Start).Paragraphs(1).Range
-                End If
-            Else
-                ' Only the exact anchor text
-                targetRange = anchorRange.Duplicate
-            End If
-
-            targetRange = targetRange.Duplicate
-
-            Await EnsureUIThread()
-            ActivateDocumentRangeContext(targetRange)
-
-            ' Get merge prompt from user or cached value
-            ActivateDocumentRangeContext(targetRange)
-
-            If Not Silent Or String.IsNullOrWhiteSpace(SP_MergePrompt2) Then
-                OtherPrompt = SLib.ShowCustomInputBox(
-                    "If you want, you can amend the prompt that will be used to " &
-                    "intelligently merge your comment into your document:",
-                    $"{AN} Intelligent Merge", False, SP_MergePrompt2, Context:=_context).Trim()
-
-                If String.IsNullOrEmpty(OtherPrompt) OrElse OtherPrompt = "ESC" Then Return
-            Else
-                OtherPrompt = SP_MergePrompt2
-            End If
-
-            ' Prompt user for markup method
-            Dim items = {
-                New SelectionItem("Word", 1),
-                New SelectionItem("Diff", 2),
-                New SelectionItem("Diff Window", 3),
-                New SelectionItem("Regex", 4),
-                New SelectionItem("Diff (words only)", 5),
-                New SelectionItem("Diff Classic", 6),
-                New SelectionItem("None", 7)
-            }
-
-            Dim DefaultItem As Integer = 7
-            If INI_DoMarkupWord Then
-                DefaultItem = Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)
-            End If
-
-            Dim picked As Integer = SelectValue(items, DefaultItem, "Choose markup method ...")
-            If picked < 1 Then Return
-
-            ' Process merge with LLM against the main document selection.
-            ' Call TrueProcessSelectedText directly to avoid the comment-bubble reroute in ProcessSelectedText.
-            ActivateDocumentRangeContext(targetRange)
-
-            Dim result As String = Await TrueProcessSelectedText(
-                OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" &
-                newtext & "</INSERT> ",
-                True,
-                INI_KeepFormat2,
-                INI_KeepParaFormatInline,
-                Override(INI_ReplaceText2, INI_ReplaceText2Override),
-                If(picked < 7, True, False),
-                If(picked < 7, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
-                False,
-                False,
-                True,
-                False,
-                INI_KeepFormatCap)
-
+            If Not Await ApplyBalloonMergeContextAsync(context, Silent) Then Return
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in BalloonMerge:{Environment.NewLine}{ex.Message}", "Error")
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in BalloonMerge:{System.Environment.NewLine}{ex.Message}", "Error")
         End Try
+    End Function
+
+    ''' <summary>One captured comment, instruction source and target, shared by merge and justification.</summary>
+    Private NotInheritable Class BalloonMergeContext
+        Public Property Comment As Microsoft.Office.Interop.Word.Comment
+        Public Property TargetRange As Microsoft.Office.Interop.Word.Range
+        Public Property OriginalSelection As Microsoft.Office.Interop.Word.Range
+        Public Property SelectionWasInComment As System.Boolean
+        Public Property FullCommentText As System.String
+        Public Property SelectedCommentText As System.String
+    End Class
+
+    Private Function CaptureBalloonMergeContext(selection As Microsoft.Office.Interop.Word.Selection,
+                                                selectWholeParagraph As System.Boolean) As BalloonMergeContext
+        If selection Is Nothing Then Return Nothing
+
+        ' Word.Selection is live. Capture origin, coordinates and text BEFORE inspecting comments
+        ' or activating ranges; later UI/COM state must not become the instruction source.
+        Dim origin As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
+        Dim originStory As Microsoft.Office.Interop.Word.WdStoryType = origin.StoryType
+        Dim originStart As System.Int32 = origin.Start
+        Dim originEnd As System.Int32 = origin.End
+        Dim originText As System.String = SafeRangeText(origin)
+        Dim doc As Microsoft.Office.Interop.Word.Document = origin.Document
+        Dim activeComment As Microsoft.Office.Interop.Word.Comment = Nothing
+
+        For Each candidate As Microsoft.Office.Interop.Word.Comment In doc.Comments
+            If originStory = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory Then
+                Dim commentRange As Microsoft.Office.Interop.Word.Range = candidate.Range
+                If origin.InRange(commentRange) Then
+                    activeComment = candidate
+                    Exit For
+                End If
+            Else
+                Dim anchor As Microsoft.Office.Interop.Word.Range = candidate.Scope
+                If anchor.StoryType = originStory AndAlso originEnd > anchor.Start AndAlso originStart < anchor.End Then
+                    activeComment = candidate
+                    Exit For
+                End If
+            End If
+        Next
+        If activeComment Is Nothing Then Return Nothing
+
+        Dim fullCommentText As System.String = SafeRangeText(activeComment.Range.Duplicate)
+        If System.String.IsNullOrWhiteSpace(fullCommentText) Then
+            Throw New System.InvalidOperationException("The complete comment text could not be read. No merge was started.")
+        End If
+
+        Dim anchorRange As Microsoft.Office.Interop.Word.Range = activeComment.Scope.Duplicate
+        Dim targetRange As Microsoft.Office.Interop.Word.Range
+        If selectWholeParagraph Then
+            If anchorRange.Paragraphs.Count > 0 Then
+                Dim firstPara As Microsoft.Office.Interop.Word.Range = anchorRange.Paragraphs(1).Range
+                Dim lastPara As Microsoft.Office.Interop.Word.Range = anchorRange.Paragraphs(anchorRange.Paragraphs.Count).Range
+                targetRange = doc.Range(firstPara.Start, lastPara.End)
+            Else
+                targetRange = doc.Range(anchorRange.Start, anchorRange.Start).Paragraphs(1).Range
+            End If
+        Else
+            targetRange = anchorRange.Duplicate
+        End If
+
+        Dim inComment As System.Boolean = originStory = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory
+        Return New BalloonMergeContext With {
+            .Comment = activeComment,
+            .TargetRange = targetRange.Duplicate,
+            .OriginalSelection = origin,
+            .SelectionWasInComment = inComment,
+            .FullCommentText = fullCommentText,
+            .SelectedCommentText = If(inComment, originText, System.String.Empty)
+        }
+    End Function
+
+    Private Async Function ApplyBalloonMergeContextAsync(context As BalloonMergeContext,
+                                                        Silent As System.Boolean) As System.Threading.Tasks.Task(Of System.Boolean)
+        Dim targetRange As Microsoft.Office.Interop.Word.Range = context.TargetRange.Duplicate
+        Dim newtext As System.String = context.FullCommentText
+        Dim instructionSource As System.String = "full_comment"
+
+        ' A partial comment-story selection can be deliberate, or Word's residual selection
+        ' (for example just a leading label). Make the choice explicit; never silently truncate.
+        If context.SelectionWasInComment AndAlso Not System.String.IsNullOrWhiteSpace(context.SelectedCommentText) Then
+            If System.String.Equals(context.SelectedCommentText.Trim(), context.FullCommentText.Trim(), System.StringComparison.Ordinal) Then
+                newtext = context.SelectedCommentText
+                instructionSource = "selected_full_comment"
+            Else
+                Dim sourceItems As New System.Collections.Generic.List(Of SharedLibrary.SharedLibrary.SharedMethods.SelectionItem) From {
+                    New SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Use the entire comment", 1),
+                    New SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Use only the selected comment text", 2)
+                }
+                Dim preview As System.String = context.SelectedCommentText.Replace(vbCr, " ").Replace(vbLf, " ")
+                If preview.Length > 160 Then preview = preview.Substring(0, 160) & "..."
+                Dim sourceChoice As System.Int32 = SelectValue(sourceItems, 1,
+                    "Word reports a partial selection inside the comment: " & preview & System.Environment.NewLine &
+                    "Choose the instruction to apply. The entire comment is selected by default.")
+                If sourceChoice < 1 Then Return False
+                If sourceChoice = 2 Then
+                    newtext = context.SelectedCommentText
+                    instructionSource = "selected_fragment"
+                End If
+            End If
+        End If
+
+        If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+            SharedLibrary.SharedLogger.Log(_context, _context.RDV,
+                "BalloonMerge input source=" & instructionSource &
+                "; fullCommentChars=" & context.FullCommentText.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; selectedCommentChars=" & context.SelectedCommentText.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; sentChars=" & newtext.Length.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End If
+
+        Await EnsureUIThread()
+        ActivateDocumentRangeContext(targetRange)
+
+        ' Get merge prompt from user or cached value
+        ActivateDocumentRangeContext(targetRange)
+
+        If Not Silent Or String.IsNullOrWhiteSpace(SP_MergePrompt2) Then
+            OtherPrompt = SLib.ShowCustomInputBox(
+                "If you want, you can amend the prompt that will be used to " &
+                "intelligently merge your comment into your document:",
+                $"{AN} Intelligent Merge", False, SP_MergePrompt2, Context:=_context).Trim()
+
+            If String.IsNullOrEmpty(OtherPrompt) OrElse OtherPrompt = "ESC" Then Return False
+        Else
+            OtherPrompt = SP_MergePrompt2
+        End If
+
+        ' Prompt user for markup method
+        Dim items = {
+            New SelectionItem("Word", 1),
+            New SelectionItem("Diff", 2),
+            New SelectionItem("Diff Window", 3),
+            New SelectionItem("Regex", 4),
+            New SelectionItem("Diff (words only)", 5),
+            New SelectionItem("Diff Classic", 6),
+            New SelectionItem("None", 7)
+        }
+
+        Dim DefaultItem As Integer = 7
+        If INI_DoMarkupWord Then
+            DefaultItem = Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)
+        End If
+
+        Dim picked As Integer = SelectValue(items, DefaultItem, "Choose markup method ...")
+        If picked < 1 Then Return False
+
+        ' Process merge with LLM against the main document selection.
+        ' Call TrueProcessSelectedText directly to avoid the comment-bubble reroute in ProcessSelectedText.
+        ActivateDocumentRangeContext(targetRange)
+
+        Dim result As String = Await TrueProcessSelectedText(
+            OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" &
+            newtext & "</INSERT> ",
+            True,
+            INI_KeepFormat2,
+            INI_KeepParaFormatInline,
+            Override(INI_ReplaceText2, INI_ReplaceText2Override),
+            If(picked < 7, True, False),
+            If(picked < 7, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
+            False,
+            False,
+            True,
+            False,
+            INI_KeepFormatCap)
+
+        Return True
     End Function
 
     ''' <summary>

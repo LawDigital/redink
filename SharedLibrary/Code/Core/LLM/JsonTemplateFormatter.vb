@@ -520,7 +520,7 @@ Namespace SharedLibrary
         ''' converting entries of the form <c>[*,*,jsonObjectAsString,...]</c> into <see cref="JObject"/> items.
         ''' </summary>
         ''' <param name="jObj">JSON object to normalize in-place.</param>
-        Private Sub NormalizeSources(jObj As JObject)
+        Public Sub NormalizeSources(jObj As JObject)
             Dim srcToken = jObj.SelectToken("sources")
             If srcToken IsNot Nothing AndAlso srcToken.Type = JTokenType.Array Then
                 Dim newArray As New JArray()
