@@ -1290,7 +1290,8 @@ Partial Public Class ThisAddIn
                         ex.Message,
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
-                        appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                        userLanguage:=ResolveBlockedFallbackUserLanguage(context),
+                        appendTaskStatusFooter:=False)
 
                 Catch ex As System.TimeoutException
                     context.FinalizationBlocked = True
@@ -1312,7 +1313,7 @@ Partial Public Class ThisAddIn
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                         userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                        appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                        appendTaskStatusFooter:=False)
 
                 Catch ex As System.OperationCanceledException
                     If subAgentMode Then Throw
@@ -1848,7 +1849,10 @@ Partial Public Class ThisAddIn
                                     tc.ToolName,
                                     If(invalidArgsResponse.ErrorCode, "invalid_tool_arguments"),
                                     If(invalidArgsResponse.ErrorMessage, "Tool arguments failed schema validation."),
-                                    recoveryScopeKey:=recoveryScopeKey)
+                                    recoveryScopeKey:=recoveryScopeKey,
+                                    allowRetryScopeRebinding:=True,
+                                    retryCorrelationArguments:=tc.Arguments,
+                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys)
                             End If
 
                             context.PendingContinuationGuardPrompt =
@@ -2097,7 +2101,9 @@ Partial Public Class ThisAddIn
                                 tc.ToolName,
                                 lockedArtifactErrorCode,
                                 syntheticLockedArtifactContract.ErrorMessage,
-                                recoveryScopeKey:=recoveryScopeKey)
+                                recoveryScopeKey:=recoveryScopeKey,
+                                allowRetryScopeRebinding:=True,
+                                retryCorrelationArguments:=tc.Arguments)
 
                             context.PendingContinuationGuardPrompt =
                                 "HOST LOCKED EXPECTED-ARTIFACT CONTRACT: The previous tool call was rejected before execution because its explicit artifact slot/contract did not exactly match the delegated locked expected_artifacts set. Reuse the locked opaque ids unchanged. Do not add, remove, rename, normalize, or substitute slots."
@@ -4128,7 +4134,7 @@ Partial Public Class ThisAddIn
                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                 userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                appendTaskStatusFooter:=False)
 
         Catch ex As System.OperationCanceledException
             context.IsCancelled = True

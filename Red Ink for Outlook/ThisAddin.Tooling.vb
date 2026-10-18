@@ -515,14 +515,17 @@ Partial Public Class ThisAddIn
             context.Log("bootstrapParseError=" & decision.ParseError, "diag")
         End If
 
-        If Not String.IsNullOrWhiteSpace(explicitUserLanguage) Then
-            context.SequencingState.UserLanguage = explicitUserLanguage.Trim()
-            decision.LanguageApplied = True
-            context.Log("Bootstrap language skipped because an explicit user language was supplied: " & context.SequencingState.UserLanguage, "diag")
-        ElseIf decision.LanguageValid Then
+        ' The detected language of the latest user request takes precedence over the
+        ' caller-provided language, which may merely be the Office UI culture.
+        ' A configured language is used only when the bootstrap cannot identify one.
+        If decision.LanguageValid Then
             context.SequencingState.UserLanguage = decision.Language
             decision.LanguageApplied = True
-            context.Log("Bootstrap response language applied: " & decision.Language, "diag")
+            context.Log("Bootstrap detected request language applied: " & decision.Language, "diag")
+        ElseIf Not String.IsNullOrWhiteSpace(explicitUserLanguage) Then
+            context.SequencingState.UserLanguage = explicitUserLanguage.Trim()
+            decision.LanguageApplied = True
+            context.Log("Bootstrap request language unclear; configured language fallback applied: " & context.SequencingState.UserLanguage, "diag")
         End If
 
         If decision.SourceFormatAuthorityValid AndAlso context.SequencingState IsNot Nothing Then
@@ -790,7 +793,8 @@ Partial Public Class ThisAddIn
         Optional semanticArchiveRequest As System.String = Nothing,
         Optional semanticArchivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing,
         Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing,
-        Optional retainedToolResultsSink As System.Action(Of Newtonsoft.Json.Linq.JArray) = Nothing) As System.Threading.Tasks.Task(Of String)
+        Optional retainedToolResultsSink As System.Action(Of Newtonsoft.Json.Linq.JArray) = Nothing,
+        Optional enforceSelectedToolScope As System.Boolean = False) As System.Threading.Tasks.Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -1041,7 +1045,7 @@ Partial Public Class ThisAddIn
                     SharedLibrary.Agents.ToolingHostKind.Outlook,
                     selectedTools),
                 StringComparer.OrdinalIgnoreCase)
-        context.EnforceAllowedToolScope = subAgentMode
+        context.EnforceAllowedToolScope = subAgentMode OrElse enforceSelectedToolScope
         context.SequencingState.ActiveToolingSession = True
         context.SequencingState.HasOpenToolWorkflow = True
         context.SequencingState.ToolRequiredModeUsed = False
@@ -1101,10 +1105,10 @@ Partial Public Class ThisAddIn
 
         Dim initialSubAgentToolNames As HashSet(Of String) = Nothing
 
-        If subAgentMode Then
+        If subAgentMode OrElse enforceSelectedToolScope Then
             Dim expandedSubAgentAllowedToolNames As List(Of String) =
         ExpandAllowedToolNamesForRegistry(
-            subAgentAllowedToolNames,
+            If(enforceSelectedToolScope, selectedTools.Select(Function(t) t.ToolName).ToList(), subAgentAllowedToolNames),
             context.AuthoritativeToolRegistrySnapshot)
 
             initialSubAgentToolNames = BuildToolNameSet(expandedSubAgentAllowedToolNames)
@@ -1814,7 +1818,7 @@ Partial Public Class ThisAddIn
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                                 userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                                appendTaskStatusFooter:=False)
 
                         Catch ex As System.TimeoutException
                             context.FinalizationBlocked = True
@@ -1836,7 +1840,7 @@ Partial Public Class ThisAddIn
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                                 userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                                appendTaskStatusFooter:=False)
 
                         Catch ex As System.OperationCanceledException When timeoutCts.IsCancellationRequested AndAlso
                                                                           Not cancellationToken.IsCancellationRequested
@@ -1859,7 +1863,7 @@ Partial Public Class ThisAddIn
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                                 userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                                appendTaskStatusFooter:=False)
 
                         Catch ex As System.OperationCanceledException
                             If subAgentMode Then Throw
@@ -2318,7 +2322,7 @@ Partial Public Class ThisAddIn
                             context.Log($"Confirmed exposed tool is now being attempted: {tc.ToolName}.", "diag")
                         End If
 
-                        If subAgentMode AndAlso Not IsToolAllowedForCurrentContext(tc.ToolName, context) Then
+                        If context.EnforceAllowedToolScope AndAlso Not IsToolAllowedForCurrentContext(tc.ToolName, context) Then
                             Dim blockedResponse = BuildToolNotAllowedResponse(tc, context)
                             AddToolResponseToHistory(context, blockedResponse)
 
@@ -2411,7 +2415,10 @@ Partial Public Class ThisAddIn
                                     tc.ToolName,
                                     If(invalidArgsResponse.ErrorCode, "invalid_tool_arguments"),
                                     If(invalidArgsResponse.ErrorMessage, "Tool arguments failed schema validation."),
-                                    recoveryScopeKey:=recoveryScopeKey)
+                                    recoveryScopeKey:=recoveryScopeKey,
+                                    allowRetryScopeRebinding:=True,
+                                    retryCorrelationArguments:=tc.Arguments,
+                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys)
                             End If
 
                             context.PendingContinuationGuardPrompt =
@@ -2678,7 +2685,9 @@ Partial Public Class ThisAddIn
                                 tc.ToolName,
                                 lockedArtifactErrorCode,
                                 syntheticLockedArtifactContract.ErrorMessage,
-                                recoveryScopeKey:=recoveryScopeKey)
+                                recoveryScopeKey:=recoveryScopeKey,
+                                allowRetryScopeRebinding:=True,
+                                retryCorrelationArguments:=tc.Arguments)
 
                             context.PendingContinuationGuardPrompt =
                                 "HOST LOCKED EXPECTED-ARTIFACT CONTRACT: The previous tool call was rejected before execution because its explicit artifact slot/contract did not exactly match the delegated locked expected_artifacts set. Reuse the locked opaque ids unchanged. Do not add, remove, rename, normalize, or substitute slots."
@@ -4880,7 +4889,7 @@ Partial Public Class ThisAddIn
                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                 userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                appendTaskStatusFooter:=False)
 
         Catch ex As System.OperationCanceledException
             context.IsCancelled = True

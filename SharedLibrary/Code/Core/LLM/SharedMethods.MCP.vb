@@ -500,6 +500,57 @@ Namespace SharedLibrary
         ''' </summary>
         Public Const MCP_STREAMABLE_PREFIX As String = "mcp:"
 
+        ''' <summary>Ephemeral Streamable HTTP state; never persist session IDs in INI files.</summary>
+        Public NotInheritable Class MCPStreamableSessionState
+            Private _endpoint As System.String = System.String.Empty
+            Private _sessionId As System.String = System.String.Empty
+            Private _protocolVersion As System.String = System.String.Empty
+
+            Public Sub ApplyHeaders(client As System.Net.Http.HttpClient, endpoint As System.String)
+                If _endpoint.Length > 0 AndAlso Not System.String.Equals(_endpoint, endpoint, System.StringComparison.Ordinal) Then
+                    Throw New System.InvalidOperationException("MCP session cannot be reused for a different endpoint.")
+                End If
+                client.DefaultRequestHeaders.Remove("Mcp-Session-Id")
+                client.DefaultRequestHeaders.Remove("MCP-Protocol-Version")
+                If _sessionId.Length > 0 Then client.DefaultRequestHeaders.Add("Mcp-Session-Id", _sessionId)
+                If _protocolVersion.Length > 0 Then client.DefaultRequestHeaders.Add("MCP-Protocol-Version", _protocolVersion)
+            End Sub
+
+            Public Sub CaptureInitialization(endpoint As System.String,
+                                             response As System.Net.Http.HttpResponseMessage,
+                                             payload As Newtonsoft.Json.Linq.JObject)
+                Dim result As Newtonsoft.Json.Linq.JObject = TryCast(payload("result"), Newtonsoft.Json.Linq.JObject)
+                Dim protocol As System.String = result?.Value(Of System.String)("protocolVersion")
+                If System.String.IsNullOrWhiteSpace(protocol) OrElse protocol.Any(Function(ch As System.Char) ch < "!"c OrElse ch > "~"c) Then
+                    Throw New System.IO.InvalidDataException("MCP initialize returned no valid protocol version.")
+                End If
+                Dim values As System.Collections.Generic.IEnumerable(Of System.String) = Nothing
+                Dim sessionId As System.String = System.String.Empty
+                If response.Headers.TryGetValues("Mcp-Session-Id", values) Then
+                    Dim ids As System.String() = values.ToArray()
+                    If ids.Length <> 1 OrElse System.String.IsNullOrEmpty(ids(0)) OrElse
+                       ids(0).Any(Function(ch As System.Char) ch < "!"c OrElse ch > "~"c) Then
+                        Throw New System.IO.InvalidDataException("MCP initialize returned an invalid session ID.")
+                    End If
+                    sessionId = ids(0)
+                End If
+                _endpoint = endpoint
+                _sessionId = sessionId
+                _protocolVersion = protocol
+            End Sub
+        End Class
+
+        Public NotInheritable Class MCPHttpRequestException
+            Inherits System.Net.Http.HttpRequestException
+
+            Public ReadOnly Property ResponseStatusCode As System.Net.HttpStatusCode
+
+            Public Sub New(statusCode As System.Net.HttpStatusCode, message As System.String)
+                MyBase.New(message)
+                ResponseStatusCode = statusCode
+            End Sub
+        End Class
+
         ''' <summary>
         ''' Performs a complete MCP tool call over Streamable HTTP transport:
         '''   1. POST "initialize"
@@ -512,7 +563,7 @@ Namespace SharedLibrary
                 requestBody As String,
                 headerA As String,
                 headerB As String,
-                Optional timeoutMs As Integer = 60000) As Task(Of String)
+                Optional timeoutMs As Integer = 60000) As System.Threading.Tasks.Task(Of System.String)
 
             EnsureTls12()
 
@@ -548,27 +599,27 @@ Namespace SharedLibrary
                             }}
                         }
 
+                        Dim session As New MCPStreamableSessionState()
                         Await PostMCPStreamableRequest(
                             client,
                             mcpUrl,
                             initPayload,
                             timeoutMs,
-                            expectResponse:=True).ConfigureAwait(False)
+                            expectResponse:=True,
+                            session:=session).ConfigureAwait(False)
 
                         Dim notifPayload As New JObject From {
                             {"jsonrpc", "2.0"},
                             {"method", "notifications/initialized"}
                         }
 
-                        Try
-                            Await PostMCPStreamableRequest(
-                                client,
-                                mcpUrl,
-                                notifPayload,
-                                timeoutMs,
-                                expectResponse:=False).ConfigureAwait(False)
-                        Catch
-                        End Try
+                        Await PostMCPStreamableRequest(
+                            client,
+                            mcpUrl,
+                            notifPayload,
+                            timeoutMs,
+                            expectResponse:=False,
+                            session:=session).ConfigureAwait(False)
 
                         Dim toolPayload As JObject = JObject.Parse(requestBody)
                         Dim toolResult As JObject =
@@ -578,7 +629,8 @@ Namespace SharedLibrary
                                 toolPayload,
                                 timeoutMs,
                                 expectResponse:=True,
-                                preserveRpcError:=True).ConfigureAwait(False)
+                                preserveRpcError:=True,
+                                session:=session).ConfigureAwait(False)
 
                         Return toolResult.ToString(Formatting.None)
                     End Using
@@ -597,14 +649,16 @@ Namespace SharedLibrary
                 payload As JObject,
                 timeoutMs As Integer,
                 Optional expectResponse As System.Boolean = True,
-                Optional preserveRpcError As System.Boolean = False) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+                Optional preserveRpcError As System.Boolean = False,
+                Optional session As MCPStreamableSessionState = Nothing) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
 
+            If session IsNot Nothing Then session.ApplyHeaders(client, mcpUrl)
             Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
             Dim response As HttpResponseMessage = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
             Dim responseText As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
 
             If Not response.IsSuccessStatusCode Then
-                Throw New Exception(
+                Throw New MCPHttpRequestException(response.StatusCode,
                     $"MCP Streamable HTTP POST {CInt(response.StatusCode)} ({response.ReasonPhrase}): " &
                     responseText)
             End If
@@ -626,6 +680,9 @@ Namespace SharedLibrary
                 Throw New System.InvalidOperationException("MCP response id does not match the request: " & responseText)
             End If
             If Not preserveRpcError Then CheckJsonRpcError(result)
+            If session IsNot Nothing AndAlso System.String.Equals(payload.Value(Of System.String)("method"), "initialize", System.StringComparison.Ordinal) Then
+                session.CaptureInitialization(mcpUrl, response, result)
+            End If
             Return result
         End Function
 

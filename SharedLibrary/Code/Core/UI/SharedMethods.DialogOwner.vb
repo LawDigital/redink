@@ -279,6 +279,21 @@ Namespace SharedLibrary
 
 
         ''' <summary>
+        ''' A WinForms ComboBox uses a separate native popup HWND while its list is open.
+        ''' That HWND can become the foreground window even though it belongs to the
+        ''' dialog's own UI, and must not be treated as a foreign Office dialog.
+        ''' </summary>
+        Private Shared Function ContainsExpandedComboBox(root As System.Windows.Forms.Control) As System.Boolean
+            If root Is Nothing OrElse root.IsDisposed Then Return False
+            Dim combo As System.Windows.Forms.ComboBox = TryCast(root, System.Windows.Forms.ComboBox)
+            If combo IsNot Nothing AndAlso combo.DroppedDown Then Return True
+            For Each child As System.Windows.Forms.Control In root.Controls
+                If ContainsExpandedComboBox(child) Then Return True
+            Next
+            Return False
+        End Function
+
+        ''' <summary>
         ''' When a TopMost shared dialog is showing and a window belonging to the
         ''' SAME (host) process — e.g. Word's native "Save changes?" prompt raised
         ''' while the user is closing the application — steals the input focus, that
@@ -315,6 +330,14 @@ Namespace SharedLibrary
                 System.Diagnostics.Debug.WriteLine("[PromoteForeign] fgPid=" & fgPid & " ourPid=" & ourPid)
                 If fgPid <> ourPid Then
                     System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: foreground window belongs to a different process.")
+                    Return
+                End If
+
+                ' An expanded ComboBox's native list is an intentional, same-process
+                ' popup, not a competing Office dialog. Preserve the parent TopMost
+                ' state while it is open; otherwise the list can disappear immediately.
+                If ContainsExpandedComboBox(dialog) Then
+                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: dialog ComboBox dropdown is open.")
                     Return
                 End If
 

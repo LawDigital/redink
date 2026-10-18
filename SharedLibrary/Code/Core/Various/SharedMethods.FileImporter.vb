@@ -76,6 +76,8 @@ Namespace SharedLibrary
         ''' Result from reading a PDF file, including content and metadata about OCR status.
         ''' </summary>
         Public Class PdfReadResult
+            ' Additive page-aligned text for provenance-aware callers; Content remains unchanged.
+            Public Property PageTexts As New System.Collections.Generic.List(Of System.String)()
             ' Populated only after an explicitly requested OCR cleanup. Never used by default.
             Public Property OcrCleanupRawContent As System.String = System.String.Empty
             Public Property OcrCleanupReport As System.String = System.String.Empty
@@ -607,6 +609,7 @@ Namespace SharedLibrary
                     Next
                 End Using
 
+                result.PageTexts = New System.Collections.Generic.List(Of System.String)(pageTexts)
                 Dim extractedText As String = sb.ToString().Trim()
 
                 ' Heuristics to determine if OCR might be needed
@@ -792,6 +795,7 @@ Namespace SharedLibrary
                     If selectiveOcr IsNot Nothing AndAlso selectiveOcr.Success Then
                         result.OcrUsed = True
                         result.Content = selectiveOcr.MergedText
+                        result.PageTexts = New System.Collections.Generic.List(Of System.String)(selectiveOcr.PageTexts)
                         Await ApplyOptionalPdfOcrCleanupAsync(result, selectiveOcr, OcrCleanupMode, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                         If pageTexts.Count <> pageCount OrElse Not pageSequenceComplete Then
                             result.ExtractionComplete = False
@@ -810,6 +814,7 @@ Namespace SharedLibrary
                         If selectiveOcr IsNot Nothing AndAlso selectiveOcr.RetainedOcrPageCount > 0 Then
                             result.OcrUsed = True
                             result.Content = selectiveOcr.MergedText
+                        result.PageTexts = New System.Collections.Generic.List(Of System.String)(selectiveOcr.PageTexts)
                         Await ApplyOptionalPdfOcrCleanupAsync(result, selectiveOcr, OcrCleanupMode, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
                             Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, "Selective OCR retained validated pages and the remaining native text; missing/unreadable pages keep the representation incomplete.")
                             Return result
@@ -949,6 +954,7 @@ Namespace SharedLibrary
             If fallback IsNot Nothing AndAlso fallback.Success AndAlso validRanges AndAlso covered.Count = pageCount Then
                 result.OcrUsed = True
                 result.Content = fallback.MergedText
+                result.PageTexts = New System.Collections.Generic.List(Of System.String)(fallback.PageTexts)
                 Await ApplyOptionalPdfOcrCleanupAsync(result, fallback, OcrCleanupMode, MarkdownPreparation, context, cancellationToken).ConfigureAwait(False)
                 result.ExtractionComplete = True
                 result.ExtractionCoverageBasis = "pdf_parser_failure_full_ocr_all_pages_covered"
@@ -962,6 +968,7 @@ Namespace SharedLibrary
                 ' an incomplete representation, never a successful complete extraction.
                 result.OcrUsed = True
                 result.Content = fallback.MergedText
+                result.PageTexts = New System.Collections.Generic.List(Of System.String)(fallback.PageTexts)
                 Await ApplyOptionalPdfOcrCleanupAsync(result, fallback, OcrCleanupMode, MarkdownPreparation, context, cancellationToken).ConfigureAwait(False)
                 result.ExtractionComplete = False
                 result.ExtractionCoverageBasis = "pdf_parser_failure_ocr_incomplete"

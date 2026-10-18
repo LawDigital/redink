@@ -198,7 +198,7 @@ Namespace Agents
                             New Newtonsoft.Json.Linq.JProperty("description", "Optional relative names made available read-only inside the sandbox. Inside the script, open each one via redink_pythonagent.agent_api.input_path(name) using the same name listed here; do not open it by a bare filename or absolute path, because staged inputs are not in the working directory. Do not pass a returned internal results path (for example results/<session-id>/file.docx); published-result paths are not reusable as inputs. Use attachment references, workspace-relative paths, uniquely resolvable Skill reference files, or explicitly reusable published-file handles."))),
                         New Newtonsoft.Json.Linq.JProperty("timeout_seconds", New Newtonsoft.Json.Linq.JObject(
                             New Newtonsoft.Json.Linq.JProperty("type", "integer"),
-                            New Newtonsoft.Json.Linq.JProperty("description", "Optional absolute wall-clock limit in seconds, clamped to host policy; default 30. Keep the default unless the task genuinely needs long computation; do not raise it to accommodate waiting, polling, or slow optional host calls."))))),
+                            New Newtonsoft.Json.Linq.JProperty("description", "Optional absolute wall-clock limit in seconds, clamped to host policy; default " & (New PythonExecuteToolCoreOptions()).DefaultTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Keep the default unless the task genuinely needs long computation; do not raise it to accommodate waiting, polling, or slow optional host calls."))))),
                     New Newtonsoft.Json.Linq.JProperty("required", New Newtonsoft.Json.Linq.JArray("code")))))
                 Return definition.ToString(Newtonsoft.Json.Formatting.None)
             End Get
@@ -1298,7 +1298,7 @@ Namespace Agents
 
         Private Shared Function CreateLimits(options As PythonExecuteToolCoreOptions, executeSeconds As System.Int32) As RedInkPythonAgentLimits
             Dim startupSeconds As System.Int32 = System.Math.Max(1, options.StartupWallTimeSeconds)
-            Dim inactivitySeconds As System.Int32 = System.Math.Max(1, options.ExecutionInactivitySeconds)
+            Dim inactivitySeconds As System.Int32 = System.Math.Min(executeSeconds, System.Math.Max(1, options.ExecutionInactivitySeconds))
             Dim validatorSeconds As System.Int32 = System.Math.Max(1, options.ValidatorWallTimeSeconds)
             Dim cleanupMarginSeconds As System.Int32 = System.Math.Max(0, options.OverallCleanupMarginSeconds)
             Dim overallSeconds As System.Int32 = startupSeconds + executeSeconds + validatorSeconds + cleanupMarginSeconds

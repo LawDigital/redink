@@ -1771,7 +1771,7 @@ Partial Public Class ThisAddIn
                 Throw New System.InvalidOperationException(
                     "Could not resolve the configured AutoPilot diagnostics report recipient.")
             End If
-            mail.Send()
+            SubmitAutoPilotMailOnce(mail)
         Finally
             If attachment IsNot Nothing Then
                 Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(attachment) : Catch : End Try

@@ -664,6 +664,13 @@ Public Module WordSearchHelper
     ''' <param name="src">Source text to canonicalize.</param>
     ''' <param name="collapseWS">When True, collapses consecutive whitespace to single space.</param>
     ''' <returns>Canonical string with leading/trailing whitespace trimmed.</returns>
+    Friend Function IsEquivalentSearchText(first As System.String, second As System.String) As System.Boolean
+        Return System.String.Equals(
+            Canonicalise(If(first, System.String.Empty), True),
+            Canonicalise(If(second, System.String.Empty), True),
+            System.StringComparison.OrdinalIgnoreCase)
+    End Function
+
     Private Function Canonicalise(ByVal src As String, ByVal collapseWS As Boolean) As String
         src = PrepareNeedle(src).Normalize(System.Text.NormalizationForm.FormKC)
 

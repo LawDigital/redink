@@ -200,7 +200,7 @@ Partial Public Class ThisAddIn
     ''' <param name="text2">Revised serialized text returned by the LLM after post-processing.</param>
     ''' <param name="targetRange">Live Word range to be patched in place with tracked revisions.</param>
     ''' <param name="trailingCR">True when the original source ended in a trailing paragraph break that must be preserved.</param>
-    Private Sub CompareAndInsertSurgical(ByVal text1 As String, ByVal text2 As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False)
+    Private Function CompareAndInsertSurgical(ByVal text1 As String, ByVal text2 As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False, Optional ByVal showFailureNotice As System.Boolean = True) As System.Boolean
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
         Dim doc As Microsoft.Office.Interop.Word.Document = targetRange.Document
 
@@ -300,7 +300,7 @@ Partial Public Class ThisAddIn
             Dim hasChanges As Boolean = runs.Any(Function(r) r.RunType <> ChangeType.Unchanged)
             If Not hasChanges Then
                 Debug.WriteLine("SurgicalMarkup: No changes detected, skipping.")
-                Return
+                Return True
             End If
 
             ' ======================================================================
@@ -353,8 +353,8 @@ Partial Public Class ThisAddIn
                         uiYieldStopwatch.Restart()
                     End If
 
-                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Return
-                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then Return
+                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Return False
+                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then Return False
 
                     Dim run As DiffRun = runs(ri)
 
@@ -492,7 +492,7 @@ Partial Public Class ThisAddIn
                     End If
                 Next
 
-                ApplySurgicalPendingEdits(targetRange, atoms, pendingEdits, mutationStarted)
+                If Not ApplySurgicalPendingEdits(targetRange, atoms, pendingEdits, mutationStarted) Then Return False
 
                 ' Leave untouched text and existing revisions intact; all whitespace edits belong in the diff.
             End Using
@@ -541,7 +541,7 @@ Partial Public Class ThisAddIn
             wordApp.Options.SmartCutPaste = originalSmartCutPaste
 
             wordApp.Selection.SetRange(targetRange.Start, targetRange.End)
-            If noticeRequired Then
+            If noticeRequired AndAlso showFailureNotice Then
                 Dim subject As System.String = "One or more changes"
                 If skippedChanges = 1 Then
                     subject = "One change"
@@ -552,7 +552,8 @@ Partial Public Class ThisAddIn
                 SLib.ShowCustomMessageBox(subject & " could not be applied" & reason & ". Please undo any applied changes and retry.")
             End If
         End Try
-    End Sub
+        Return Not noticeRequired
+    End Function
 
     Private NotInheritable Class SurgicalSourceChangedException
         Inherits System.Exception
@@ -781,9 +782,9 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    Public Sub ApplySurgicalReplacement(ByVal originalText As String, ByVal newText As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False)
-        CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR)
-    End Sub
+    Public Function ApplySurgicalReplacement(ByVal originalText As String, ByVal newText As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False, Optional ByVal showFailureNotice As System.Boolean = True) As System.Boolean
+        Return CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR, showFailureNotice)
+    End Function
 
     ''' <summary>
     ''' Returns the exact inline whitespace suffix of the original selection. This suffix is a

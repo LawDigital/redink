@@ -51,7 +51,7 @@
     <FriendlyName>Red Ink for Excel %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.7.14.200</ApplicationVersion>
+    <ApplicationVersion>1.7.15.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/excel/</InstallUrl>
     <ProductName>Red Ink for Excel %28Preview%29</ProductName>
@@ -406,7 +406,7 @@
     </ManifestKeyFile>
   </PropertyGroup>
   <PropertyGroup>
-    <ManifestCertificateThumbprint>50229D23A3CA721BCA66C2ECC258074E6C6D6456</ManifestCertificateThumbprint>
+    <ManifestCertificateThumbprint>B3192C186D292F5D35CE353DDAE67C3EF92263A5</ManifestCertificateThumbprint>
   </PropertyGroup>
   <PropertyGroup>
     <ManifestTimestampUrl>http://timestamp.digicert.com</ManifestTimestampUrl>

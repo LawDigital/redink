@@ -284,7 +284,7 @@ Partial Public Class ThisAddIn
         If rng Is Nothing Then Return False
         Try
             If trackChanges Then
-                ApplySurgicalReplacement(rng.Text, If(replacement, ""), rng)
+                Return ApplySurgicalReplacement(GetVisibleText(rng), If(replacement, ""), rng, showFailureNotice:=False)
             Else
                 Dim prevTrack As Boolean = d.TrackRevisions
                 Try

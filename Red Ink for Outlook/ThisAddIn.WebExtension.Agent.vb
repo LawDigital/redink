@@ -3031,6 +3031,11 @@ Partial Public Class ThisAddIn
 
         Dim sb As New StringBuilder()
         sb.AppendLine("[SESSION FILES]")
+        Dim stagingRoot As System.String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+        If Not System.String.IsNullOrWhiteSpace(stagingRoot) Then
+            sb.AppendLine("Session staging directory: " & Newtonsoft.Json.JsonConvert.SerializeObject(stagingRoot))
+            sb.AppendLine("For a staged file, use its full path under this directory. Workspace-relative paths continue to refer to the connected workspace; do not guess between files with the same name.")
+        End If
         sb.AppendLine("These files currently exist in the active agent session, persist across follow-up chat turns, and may be referenced by session tools or agent_workspace_save_session_file.")
         If Not IsChatAgentWorkspaceConnected() Then
             sb.AppendLine("No persistent agent workspace is connected for this run. If the user asks for a text, Markdown, JSON, or code deliverable, use workspace_write with a relative filename or relative path to create it inside the temporary session workspace. Files created there will be surfaced back to the user as output files after the run.")

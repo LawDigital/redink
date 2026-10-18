@@ -43,16 +43,15 @@ Namespace SharedLibrary
     Public Class ConfigWizardForm
         Inherits Form
 
-        Protected Overrides Sub OnShown(e As System.EventArgs)
-            MyBase.OnShown(e)
-            Me.TopMost = True
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
-            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
-        End Sub
+        ' This wizard is shown with ShowDialog(form), with a same-thread WinForms owner.
+        ' Modal ownership already maintains the correct Z-order and activation.
+        ' Forcing TopMost and polling foreground here can interfere with the native
+        ' ComboBox drop-down (a separate popup HWND). Leave the modal owner in charge.
 
 
         Private ReadOnly _context As ISharedContext
         Private ReadOnly _definition As WizardDefinition
+        Private _activeProviderCatalog As ProviderTemplateCatalogSnapshot
         Private _iniPath As String
 
         ''' <summary>Working copy of all INI values being edited.</summary>
@@ -130,6 +129,7 @@ Namespace SharedLibrary
         Public Sub New(context As ISharedContext, definition As WizardDefinition, iniPath As String, iniValues As Dictionary(Of String, String))
             _context = context
             _definition = definition
+            _activeProviderCatalog = ProviderTemplateCatalog.LoadEmbedded()
             _iniPath = iniPath
 
             ' Copy INI values into working set
@@ -851,6 +851,7 @@ Namespace SharedLibrary
                 _branchCombo = New ComboBox() With {
                     .DropDownStyle = ComboBoxStyle.DropDownList,
                     .Width = branchComboWidth,
+                    .MaxDropDownItems = Math.Min(grp.Branches.Count, 12),
                     .Location = New Point(dynamicLabelWidth, yPos)
                 }
                 For Each branch In grp.Branches
@@ -893,7 +894,16 @@ Namespace SharedLibrary
                 _contentPanel.Controls.Add(btnApplyTemplate)
                 _contentPanel.Controls.Add(applyTemplateNote)
 
-                yPos = applyTemplateNote.Bottom + Dpi(8)
+                ' Online lookups are strictly opt-in and use the same provider catalog
+                ' update path as the installation wizard. No current INI is changed.
+                Dim btnOnlineTemplates As New Button() With {
+                    .Text = "Check Online Updates",
+                    .AutoSize = True,
+                    .Location = New Point(dynamicLabelWidth, applyTemplateNote.Bottom + Dpi(6))
+                }
+                AddHandler btnOnlineTemplates.Click, AddressOf CheckOnlineProviderTemplates_Click
+                _contentPanel.Controls.Add(btnOnlineTemplates)
+                yPos = btnOnlineTemplates.Bottom + Dpi(20)
             End If
 
             ' Fields
@@ -1124,6 +1134,30 @@ Namespace SharedLibrary
         ''' are cleared or removed.
         ''' </summary>
         ''' <param name="grp">The current wizard group containing branches.</param>
+        Private Sub CheckOnlineProviderTemplates_Click(sender As System.Object, e As System.EventArgs)
+            ' Save the unsaved edits first, then update template definitions only.
+            ' Nothing is applied to the configured INI until Apply Template + Save.
+            SaveCurrentGroupValues()
+            Try
+                Dim candidate As ProviderTemplateCatalogSnapshot
+                Using Global.SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(Me)
+                    candidate = ProviderTemplateCatalog.OfferOnlineUpdate(_activeProviderCatalog, "Configuration Wizard")
+                End Using
+                If System.Object.ReferenceEquals(candidate, _activeProviderCatalog) Then Return
+                ProviderTemplateCatalog.ApplyToWizard(_definition, candidate)
+                _activeProviderCatalog = candidate
+                Dim index As System.Int32 = GetCurrentDefinitionGroupIndex()
+                If index >= 0 Then LoadGroup(index)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Configuration Wizard provider update rejected: " & ex.ToString())
+                Using Global.SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(Me)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(
+                        "Online templates could not be applied to this wizard. Existing templates and unsaved values were preserved." &
+                        System.Environment.NewLine & ex.Message)
+                End Using
+            End Try
+        End Sub
+
         Private Sub ApplyBranchDefaults(grp As WizardGroup)
             If _branchCombo Is Nothing OrElse _branchCombo.SelectedIndex < 0 Then Return
 

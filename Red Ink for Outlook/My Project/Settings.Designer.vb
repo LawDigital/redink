@@ -649,6 +649,18 @@ Namespace My
                 Me("AP_EnableVoicemailProcessing") = value
             End Set
         End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_EnableScanProcessing() As System.Boolean
+            Get
+                Return CType(Me("AP_EnableScanProcessing"), System.Boolean)
+            End Get
+            Set
+                Me("AP_EnableScanProcessing") = value
+            End Set
+        End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _

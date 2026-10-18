@@ -2248,7 +2248,8 @@ Namespace SharedLibrary
                                             Optional extraButtonText As System.String = Nothing,
                                             Optional extraButtonAction As System.Action = Nothing,
                                             Optional CloseAfterExtra As System.Boolean = False,
-                                            Optional checkboxRightClearance As System.Int32 = 0
+                                            Optional checkboxRightClearance As System.Int32 = 0,
+                                            Optional labelMaxWidth As System.Int32 = 0
                                         ) As Boolean
             If String.IsNullOrWhiteSpace(header) Then header = String.Empty
 
@@ -2312,6 +2313,8 @@ Namespace SharedLibrary
                         .Anchor = AnchorStyles.Left,
                         .Margin = New Padding(0, 0, 8, 8)
                     }
+                    If labelMaxWidth > 0 Then lbl.MaximumSize = New System.Drawing.Size(CInt(labelMaxWidth * inputForm.Font.Height / 15.0), 0)
+                    If Not System.String.IsNullOrWhiteSpace(param.ToolTipText) Then toolTip.SetToolTip(lbl, param.ToolTipText)
                     mainLayout.Controls.Add(lbl, 0, i + 1)
                 End If
 
@@ -2433,6 +2436,7 @@ Namespace SharedLibrary
                     toolTip.SetToolTip(ctrl, "Not available")
                 End If
 
+                If Not System.String.IsNullOrWhiteSpace(param.ToolTipText) Then toolTip.SetToolTip(ctrl, param.ToolTipText)
                 param.InputControl = ctrl
                 If showLabel Then
                     mainLayout.Controls.Add(ctrl, 1, i + 1)
@@ -2492,6 +2496,10 @@ Namespace SharedLibrary
                 btnCancel.TabIndex = 1
             End If
 
+            If labelMaxWidth > 0 Then
+                inputForm.MaximumSize = System.Windows.Forms.Screen.FromControl(inputForm).WorkingArea.Size
+                mainLayout.AutoScroll = True
+            End If
             inputForm.Controls.Add(mainLayout)
             inputForm.Controls.Add(buttonFlow)
 
@@ -3013,6 +3021,8 @@ Namespace SharedLibrary
         ''' including the UI control created to edit the parameter.
         ''' </summary>
         Public Class InputParameter
+            ''' <summary>Optional explanatory tooltip for both the label and its input.</summary>
+            Public Property ToolTipText As System.String
             ''' <summary>
             ''' Display name used for the label.
             ''' </summary>

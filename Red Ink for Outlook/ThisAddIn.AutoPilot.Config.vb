@@ -116,6 +116,8 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property EnableVoicemailProcessing As Boolean = False
 
+        Public Property EnableScanProcessing As System.Boolean = False
+
         ''' <summary>
         ''' SMTP address of the voicemail system (e.g. noreply@combox.swisscom.ch).
         ''' Only mails from this sender with audio attachments are treated as voicemails.
@@ -374,60 +376,79 @@ Partial Public Class ThisAddIn
 
         ' ── Step 5: Rate limits ──
         Dim pCooldown As New InputParameter() With {
-            .Name = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
+            .Name = "Cooldown (seconds)",
+            .ToolTipText = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
             .Value = saved.CooldownSeconds.ToString()
         }
         Dim pMaxReplies As New InputParameter() With {
-            .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
+            .Name = "Replies per session",
+            .ToolTipText = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
             .Value = saved.MaxRepliesPerSession.ToString()
         }
         Dim pMaxAttachmentMb As New InputParameter() With {
-            .Name = "Max attachment size (MB, default 10)",
+            .Name = "Attachment limit (MB)",
+            .ToolTipText = "Max attachment size (MB, default 10)",
             .Value = CInt(saved.MaxAttachmentBytes / 1024 / 1024).ToString()
         }
         Dim pReprocessLookback As New InputParameter() With {
-            .Name = "Reprocess lookback (hours, 0 = only new mails)",
+            .Name = "Reprocess window (hours)",
+            .ToolTipText = "Reprocess lookback (hours, 0 = only new mails)",
             .Value = saved.ReprocessLookbackHours.ToString()
         }
         Dim pAutoDeleteAfterHours As New InputParameter() With {
-            .Name = "Auto-delete answered mails after N hours (0 = disabled; also empties Deleted Items for tagged mails)",
+            .Name = "Delete answered mail (hours)",
+            .ToolTipText = "Auto-delete answered mails after N hours (0 = disabled; also empties Deleted Items for tagged mails)",
             .Value = saved.AutoDeleteAfterHours.ToString()
         }
         Dim pEnableWebGrounding As New InputParameter() With {
-            .Name = "Add web grounding (if models are configured)",
+            .Name = "Web grounding",
+            .ToolTipText = "Add web grounding (if models are configured)",
             .Value = saved.EnableWebGrounding
         }
+        Dim pEnableScan As New InputParameter() With {
+            .Name = "AutoPilot Scan Handler",
+            .ToolTipText = "Enable AutoPilot Scan Handler (manage under Expert Tools)",
+            .Value = saved.EnableScanProcessing
+        }
         Dim pEnableScheduler As New InputParameter() With {
-            .Name = "Enable task scheduler (create && run scheduled tasks)",
+            .Name = "Task scheduler",
+            .ToolTipText = "Enable task scheduler (create && run scheduled tasks)",
             .Value = saved.EnableScheduler
         }
         Dim pEnableUserMemory As New InputParameter() With {
-            .Name = "Enable per-user memory (learn user preferences)",
+            .Name = "User memory",
+            .ToolTipText = "Enable per-user memory (learn user preferences)",
             .Value = saved.EnableUserMemory
         }
         Dim pEnableUserFiles As New InputParameter() With {
-            .Name = "Enable per-user file storage (home directory)",
+            .Name = "User file storage",
+            .ToolTipText = "Enable per-user file storage (home directory)",
             .Value = saved.EnableUserFiles
         }
         Dim pEnablePrivacyProtection As New InputParameter() With {
-            .Name = "Enable privacy protection for web/search queries (restrict personal data in queries)",
+            .Name = "Privacy protection",
+            .ToolTipText = "Enable privacy protection for web/search queries (restrict personal data in queries)",
             .Value = saved.EnablePrivacyProtection
         }
         Dim pIncludeSourcesFooter As New InputParameter() With {
-            .Name = "Include host-generated Sources used footer (external evidence sources only)",
+            .Name = "Sources footer",
+            .ToolTipText = "Include host-generated Sources used footer (external evidence sources only)",
             .Value = Not String.Equals(saved.SourcesFooterMode, "off", StringComparison.OrdinalIgnoreCase)
         }
         Dim pThreadRetentionDays As New InputParameter() With {
-            .Name = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
+            .Name = "Thread retention (days)",
+            .ToolTipText = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
             .Value = saved.ThreadRetentionDays.ToString()
         }
         Dim pLogDiagnosticsReportEmail As New InputParameter() With {
-            .Name = "Engineering diagnostics recipient (confirmed High/Critical only; daily digest at 20:00 local time; new security issues immediately; empty = disabled)",
+            .Name = "Diagnostics recipient",
+            .ToolTipText = "Engineering diagnostics recipient (confirmed High/Critical only; daily digest at 20:00 local time; new security issues immediately; empty = disabled)",
             .Value = If(saved.LogDiagnosticsReportEmail, "")
         }
 
         Dim pLogDiagnosticsMaxInputChars As New InputParameter() With {
-            .Name = "Engineering diagnostics maximum log characters per call (0 = complete log; otherwise at least 10000; positive AutoPilotLogDiagnosticsMaxInputChars in redink.ini overrides this preference)",
+            .Name = "Diagnostics log limit",
+            .ToolTipText = "Engineering diagnostics maximum log characters per call (0 = complete log; otherwise at least 10000; positive AutoPilotLogDiagnosticsMaxInputChars in redink.ini overrides this preference)",
             .Value = saved.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture)
         }
 
@@ -439,6 +460,7 @@ Partial Public Class ThisAddIn
             pAutoDeleteAfterHours,
             pEnableWebGrounding,
             pEnableScheduler,
+            pEnableScan,
             pEnableUserMemory,
             pEnableUserFiles,
             pEnablePrivacyProtection,
@@ -455,19 +477,22 @@ Partial Public Class ThisAddIn
         Dim pVoicemailMapPath As InputParameter = Nothing
         If audioTranscriptionAvailable Then
             pVoicemail = New InputParameter() With {
-                .Name = "Process voicemails (transcribe & respond)",
+                .Name = "Process voicemails",
+                .ToolTipText = "Process voicemails (transcribe & respond)",
                 .Value = saved.EnableVoicemailProcessing
             }
             paramsList.Add(pVoicemail)
 
             pVoicemailSender = New InputParameter() With {
-                .Name = "Voicemail sender address (e.g. comboxmailer@swisscom.com)",
+                .Name = "Voicemail sender",
+                .ToolTipText = "Voicemail sender address (e.g. comboxmailer@swisscom.com)",
                 .Value = If(saved.VoicemailSenderAddress, "")
             }
             paramsList.Add(pVoicemailSender)
 
             pVoicemailMapPath = New InputParameter() With {
-                .Name = "Caller ID → Email map file (CSV path)",
+                .Name = "Caller ID map (CSV)",
+                .ToolTipText = "Caller ID → Email map file (CSV path)",
                 .Value = If(saved.VoicemailCallerIdMapPath, "")
             }
             paramsList.Add(pVoicemailMapPath)
@@ -475,8 +500,8 @@ Partial Public Class ThisAddIn
 
         Dim limitsOk = ShowCustomVariableInputForm(
             "Configure rate limits, restrictions, and optional features:",
-            $"{AN6} AutoPilot — Limits & Features",
-            paramsList.ToArray())
+            "Red Ink AutoPilot — Limits & Features",
+            paramsList.ToArray(), labelMaxWidth:=250)
 
         If Not limitsOk Then Return Nothing
 
@@ -507,6 +532,15 @@ Partial Public Class ThisAddIn
 
         config.EnableWebGrounding = CBool(If(pEnableWebGrounding.Value, False))
         config.EnableScheduler = CBool(If(pEnableScheduler.Value, False))
+        config.EnableScanProcessing = CBool(If(pEnableScan.Value, False))
+        If config.EnableScanProcessing Then
+            Try
+                CacheScanClassification(ScanInbox.Registry.Load(GetScanRegisterPath()))
+            Catch ex As System.Exception
+                ShowCustomMessageBox("Configure the AutoPilot Scan Handler under Expert Tools before enabling it: " & ex.Message, AN)
+                Return Nothing
+            End Try
+        End If
         config.EnableUserMemory = CBool(If(pEnableUserMemory.Value, False))
         config.EnableUserFiles = CBool(If(pEnableUserFiles.Value, False))
         config.EnablePrivacyProtection = CBool(If(pEnablePrivacyProtection.Value, False))
@@ -827,6 +861,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_ReprocessLookbackHours = config.ReprocessLookbackHours
         My.Settings.AP_EnableWebGrounding = config.EnableWebGrounding
         My.Settings.AP_EnableVoicemailProcessing = config.EnableVoicemailProcessing
+        My.Settings.AP_EnableScanProcessing = config.EnableScanProcessing
         My.Settings.AP_VoicemailSenderAddress = If(config.VoicemailSenderAddress, "")
         My.Settings.AP_VoicemailCallerIdMapPath = If(config.VoicemailCallerIdMapPath, "")
         My.Settings.AP_EnableScheduler = config.EnableScheduler
@@ -879,6 +914,7 @@ Partial Public Class ThisAddIn
         config.ReprocessLookbackHours = If(My.Settings.AP_ReprocessLookbackHours >= 0, My.Settings.AP_ReprocessLookbackHours, 0)
         config.EnableWebGrounding = My.Settings.AP_EnableWebGrounding
         config.EnableVoicemailProcessing = My.Settings.AP_EnableVoicemailProcessing
+        config.EnableScanProcessing = My.Settings.AP_EnableScanProcessing
         config.VoicemailSenderAddress = If(My.Settings.AP_VoicemailSenderAddress, "")
         config.VoicemailCallerIdMapPath = If(My.Settings.AP_VoicemailCallerIdMapPath, "")
         config.EnableScheduler = My.Settings.AP_EnableScheduler

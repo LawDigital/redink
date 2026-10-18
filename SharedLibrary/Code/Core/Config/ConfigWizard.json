@@ -1,6 +1,6 @@
 ﻿{
-  "version": "1.0",
-  "title": "Configuration Wizard",
+    "version": "1.0",
+    "title": "Configuration Wizard",
     "groups": [
         {
             "id": "licensing",
@@ -105,81 +105,36 @@
                     "label": "OpenAI",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "sk-proj-",
-                        "Endpoint": "https://api.openai.com/v1/responses",
-                        "HeaderA": "Authorization",
-                        "HeaderB": "Bearer {apikey}",
-                        "Response": "text (rkmode_first)",
-                        "Model": "gpt-5.4",
-                        "Timeout": "300000",
-                        "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
-                        "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                        "APIKeyPrefix": "sk-proj-"
                     }
                 },
                 {
                     "label": "Microsoft Azure OpenAI Services",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "",
-                        "Endpoint": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
-                        "HeaderA": "Authorization",
-                        "HeaderB": "Bearer {apikey}",
-                        "Response": "text (rkmode_first)",
-                        "Model": "gpt-5.4",
-                        "Timeout": "300000",
-                        "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
-                        "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                        "APIKeyPrefix": ""
                     }
                 },
                 {
                     "label": "Google Gemini",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "",
-                        "Endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
-                        "HeaderA": "X-Goog-Api-Key",
-                        "HeaderB": "{apikey}",
-                        "Response": "text",
-                        "Model": "gemini-2.5-pro",
-                        "Temperature": "0.2",
-                        "Timeout": "300000",
-                        "APICall": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
+                        "APIKeyPrefix": ""
                     }
                 },
                 {
                     "label": "Anthropic",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "[[Your Anthropic API Key Prefix]]",
-                        "Endpoint": "https://api.anthropic.com/v1/messages",
-                        "HeaderA": "x-api-key¦anthropic-version",
-                        "HeaderB": "{apikey}¦2023-06-01",
-                        "Response": "text (rkmode_first)",
-                        "Model": "claude-sonnet-4-6",
-                        "Temperature": "1.0",
-                        "Timeout": "200000",
-                        "APICall": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
-                        "APICall_Object": ""
+                        "APIKeyPrefix": "[[Your Anthropic API Key Prefix]]"
                     }
                 },
                 {
-                    "label": "Google Vertex (OAuth2)",
+                    "label": "Google Enterprise Agent Platform",
                     "defaults": {
                         "APIKeyEncrypted": "False",
                         "APIKeyPrefix": "",
-                        "Endpoint": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
-                        "HeaderA": "Authorization",
-                        "HeaderB": "Bearer {apikey}",
-                        "Response": "text",
-                        "Model": "gemini-2.5-pro",
-                        "Temperature": "0.2",
-                        "Timeout": "300000",
-                        "OAuth2": "True",
-                        "OAuth2Scopes": "https://www.googleapis.com/auth/cloud-platform",
-                        "OAuth2Endpoint": "https://oauth2.googleapis.com/token",
-                        "OAuth2ATExpiry": "3600",
-                        "APICall": "{\"contents\": [{\"role\": \"user\", \"parts\":[{\"text\": \"{promptsystem} {promptuser}\"}{objectcall}]}], \"generationConfig\": {\"temperature\": {temperature},  \"thinking_config\": {\"thinking_budget\": 128}}}",
-                        "APICall_Object": ", {\"inlineData\": {\"mimeType\": \"{mimetype}\",\"data\": \"{encodeddata}\"}}"
+                        "OAuth2": "True"
                     },
                     "showExtra": [
                         "OAuth2",
@@ -193,76 +148,35 @@
                     "label": "MTF",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "",
-                        "Endpoint": "https://api.ai.mtf.cloud/v1/chat/completions",
-                        "HeaderA": "Authorization",
-                        "HeaderB": "Bearer {apikey}",
-                        "Response": "content",
-                        "Model": "openai-gpt-oss-20b",
-                        "Temperature": "0.2",
-                        "Timeout": "200000",
-                        "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                        "APIKeyPrefix": ""
                     }
                 },
                 {
                     "label": "SafeSwissCloud",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "",
-                        "Endpoint": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
-                        "HeaderA": "Authorization",
-                        "HeaderB": "Bearer {apikey}",
-                        "Response": "content",
-                        "Model": "gpt-oss-120b",
-                        "Temperature": "0.2",
-                        "Timeout": "200000",
-                        "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                        "APIKeyPrefix": ""
                     }
                 },
                 {
                     "label": "llama.cpp (local)",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "",
-                        "APIKey": "dummy",
-                        "Endpoint": "http://localhost:8080/v1/chat/completions",
-                        "Response": "content",
-                        "APICall": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
-                        "Timeout": "200000",
-                        "Temperature": "0.2",
-                        "Model": "AnyModel"
+                        "APIKeyPrefix": ""
                     }
                 },
                 {
                     "label": "Ollama (local)",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "",
-                        "APIKey": "dummy",
-                        "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
-                        "HeaderA": "Authorization",
-                        "HeaderB": "Bearer {apikey}",
-                        "Response": "content",
-                        "APICall": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
-                        "Timeout": "200000",
-                        "Temperature": "0.2",
-                        "Model": "[[Your Model]]"
+                        "APIKeyPrefix": ""
                     }
                 },
                 {
                     "label": "OpenWebUI (local)",
                     "defaults": {
                         "APIKeyEncrypted": "False",
-                        "APIKeyPrefix": "",
-                        "APIKey": "dummy",
-                        "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
-                        "HeaderA": "Authorization",
-                        "HeaderB": "Bearer {apikey}",
-                        "Response": "content",
-                        "APICall": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
-                        "Timeout": "200000",
-                        "Temperature": "0.2",
-                        "Model": "[[Your Model]]"
+                        "APIKeyPrefix": ""
                     }
                 },
                 {
@@ -381,8 +295,8 @@
                     "label": "Use OAuth2",
                     "type": "boolean",
                     "default": "False",
-                    "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Vertex AI. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2]",
-                    "condition": "_provider == Google Vertex (OAuth2)"
+                    "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Enterprise Agent Platform. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2]",
+                    "condition": "OAuth2 == True"
                 },
                 {
                     "key": "OAuth2ClientMail",
@@ -395,7 +309,7 @@
                     "key": "OAuth2Scopes",
                     "label": "OAuth2 Scopes",
                     "type": "string",
-                    "description": "Enter the OAuth 2.0 scopes required by the provider. For Vertex AI this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes]",
+                    "description": "Enter the OAuth 2.0 scopes required by the provider. For Google Enterprise Agent Platform this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes]",
                     "condition": "OAuth2 == True"
                 },
                 {
@@ -428,81 +342,36 @@
                     "label": "OpenAI",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "sk-proj-",
-                        "Endpoint_2": "https://api.openai.com/v1/responses",
-                        "HeaderA_2": "Authorization",
-                        "HeaderB_2": "Bearer {apikey}",
-                        "Response_2": "text (rkmode_first)",
-                        "Model_2": "gpt-5.4",
-                        "Timeout_2": "300000",
-                        "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
-                        "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                        "APIKeyPrefix_2": "sk-proj-"
                     }
                 },
                 {
                     "label": "Microsoft Azure OpenAI Services",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "",
-                        "Endpoint_2": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
-                        "HeaderA_2": "Authorization",
-                        "HeaderB_2": "Bearer {apikey}",
-                        "Response_2": "text (rkmode_first)",
-                        "Model_2": "gpt-5.4",
-                        "Timeout_2": "300000",
-                        "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
-                        "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                        "APIKeyPrefix_2": ""
                     }
                 },
                 {
                     "label": "Google Gemini",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "",
-                        "Endpoint_2": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
-                        "HeaderA_2": "X-Goog-Api-Key",
-                        "HeaderB_2": "{apikey}",
-                        "Response_2": "text",
-                        "Model_2": "gemini-2.5-pro",
-                        "Temperature_2": "0.2",
-                        "Timeout_2": "300000",
-                        "APICall_2": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
+                        "APIKeyPrefix_2": ""
                     }
                 },
                 {
                     "label": "Anthropic",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "[[Your Anthropic API Key Prefix]]",
-                        "Endpoint_2": "https://api.anthropic.com/v1/messages",
-                        "HeaderA_2": "x-api-key¦anthropic-version",
-                        "HeaderB_2": "{apikey}¦2023-06-01",
-                        "Response_2": "text (rkmode_first)",
-                        "Model_2": "claude-sonnet-4-6",
-                        "Temperature_2": "1.0",
-                        "Timeout_2": "200000",
-                        "APICall_2": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
-                        "APICall_Object_2": ""
+                        "APIKeyPrefix_2": "[[Your Anthropic API Key Prefix]]"
                     }
                 },
                 {
-                    "label": "Google Vertex (OAuth2)",
+                    "label": "Google Enterprise Agent Platform",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
                         "APIKeyPrefix_2": "",
-                        "Endpoint_2": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
-                        "HeaderA_2": "Authorization",
-                        "HeaderB_2": "Bearer {apikey}",
-                        "Response_2": "text",
-                        "Model_2": "gemini-2.5-pro",
-                        "Temperature_2": "0.2",
-                        "Timeout_2": "300000",
-                        "OAuth2_2": "True",
-                        "OAuth2Scopes_2": "https://www.googleapis.com/auth/cloud-platform",
-                        "OAuth2Endpoint_2": "https://oauth2.googleapis.com/token",
-                        "OAuth2ATExpiry_2": "3600",
-                        "APICall_2": "{\"contents\": [{\"role\": \"user\", \"parts\":[{\"text\": \"{promptsystem} {promptuser}\"}{objectcall}]}], \"generationConfig\": {\"temperature\": {temperature},  \"thinking_config\": {\"thinking_budget\": 128}}}",
-                        "APICall_Object_2": ", {\"inlineData\": {\"mimeType\": \"{mimetype}\",\"data\": \"{encodeddata}\"}}"
+                        "OAuth2_2": "True"
                     },
                     "showExtra": [
                         "OAuth2_2",
@@ -516,76 +385,35 @@
                     "label": "MTF",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "",
-                        "Endpoint_2": "https://api.ai.mtf.cloud/v1/chat/completions",
-                        "HeaderA_2": "Authorization",
-                        "HeaderB_2": "Bearer {apikey}",
-                        "Response_2": "content",
-                        "Model_2": "openai-gpt-oss-20b",
-                        "Temperature_2": "0.2",
-                        "Timeout_2": "200000",
-                        "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                        "APIKeyPrefix_2": ""
                     }
                 },
                 {
                     "label": "SafeSwissCloud",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "",
-                        "Endpoint_2": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
-                        "HeaderA_2": "Authorization",
-                        "HeaderB_2": "Bearer {apikey}",
-                        "Response_2": "content",
-                        "Model_2": "gpt-oss-120b",
-                        "Temperature_2": "0.2",
-                        "Timeout_2": "200000",
-                        "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                        "APIKeyPrefix_2": ""
                     }
                 },
                 {
                     "label": "llama.cpp (local)",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "",
-                        "APIKey_2": "dummy",
-                        "Endpoint_2": "http://localhost:8080/v1/chat/completions",
-                        "Response_2": "content",
-                        "APICall_2": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
-                        "Timeout_2": "200000",
-                        "Temperature_2": "0.2",
-                        "Model_2": "AnyModel"
+                        "APIKeyPrefix_2": ""
                     }
                 },
                 {
                     "label": "Ollama (local)",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "",
-                        "APIKey_2": "dummy",
-                        "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
-                        "HeaderA_2": "Authorization",
-                        "HeaderB_2": "Bearer {apikey}",
-                        "Response_2": "content",
-                        "APICall_2": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
-                        "Timeout_2": "200000",
-                        "Temperature_2": "0.2",
-                        "Model_2": "[[Your Model]]"
+                        "APIKeyPrefix_2": ""
                     }
                 },
                 {
                     "label": "OpenWebUI (local)",
                     "defaults": {
                         "APIKeyEncrypted_2": "False",
-                        "APIKeyPrefix_2": "",
-                        "APIKey_2": "dummy",
-                        "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
-                        "HeaderA_2": "Authorization",
-                        "HeaderB_2": "Bearer {apikey}",
-                        "Response_2": "content",
-                        "APICall_2": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
-                        "Timeout_2": "200000",
-                        "Temperature_2": "0.2",
-                        "Model_2": "[[Your Model]]"
+                        "APIKeyPrefix_2": ""
                     }
                 },
                 {
@@ -720,7 +548,7 @@
                     "type": "boolean",
                     "default": "False",
                     "condition": "SecondAPI == True",
-                    "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Vertex AI. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2_2]"
+                    "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Enterprise Agent Platform. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2_2]"
                 },
                 {
                     "key": "OAuth2ClientMail_2",
@@ -734,7 +562,7 @@
                     "label": "OAuth2 Scopes (2nd)",
                     "type": "string",
                     "condition": "OAuth2_2 == True",
-                    "description": "Enter the OAuth 2.0 scopes required by the provider. For Vertex AI this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes_2]"
+                    "description": "Enter the OAuth 2.0 scopes required by the provider. For Google Enterprise Agent Platform this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes_2]"
                 },
                 {
                     "key": "OAuth2Endpoint_2",
@@ -804,7 +632,7 @@
                     "label": "Google STT Project ID",
                     "type": "string",
                     "default": "",
-                    "description": "Google Cloud project ID used for Google transcription engines, including Gemini 3.5 Transcribe on Vertex AI. Required for Google V2 / Gemini transcription. [STT_Google_ProjectID]"
+                    "description": "Google Cloud project ID used for Google transcription engines, including Gemini 3.5 Transcribe on Google Enterprise Agent Platform. Required for Google V2 / Gemini transcription. [STT_Google_ProjectID]"
                 },
                 {
                     "key": "STT_OpenAI",
@@ -1387,722 +1215,722 @@
                     "description": "Optional custom logo path or URL for the large logo variant. Supports local paths, UNC paths and URLs. Leave empty to use the embedded default logo. Example: https://intranet.example.com/redink-logo-large.png. [LogoPathLarge]"
                 }
             ]
-    },
-    {
-      "id": "prompt_resources",
-      "title": "Prompt & Style Resources",
-      "description": "Files that shape prompting and style behaviour, including shared/local prompt libraries, transcript prompts, and local MyStyle storage. You can have the prompt library parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample prompt library files to give you an idea on how to build such files.",
-      "fields": [
-        {
-          "key": "PromptLib",
-          "label": "Prompt Library (Central)",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\promptlib.txt",
-          "description": "Path to the shared prompt library used by Freestyle when the user opens the prompt picker. The file must be a TXT file in prompt-library syntax. Example: N:\\AI\\promptlib.txt. [PromptLib]"
         },
         {
-          "key": "PromptLibLocal",
-          "label": "Prompt Library (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local prompt library, usually used together with a shared central prompt library. This lets users keep personal prompts separate from the shared file. Example: %APPDATA%\\Microsoft\\Word\\promptlib.txt. [PromptLibLocal]"
+            "id": "prompt_resources",
+            "title": "Prompt & Style Resources",
+            "description": "Files that shape prompting and style behaviour, including shared/local prompt libraries, transcript prompts, and local MyStyle storage. You can have the prompt library parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample prompt library files to give you an idea on how to build such files.",
+            "fields": [
+                {
+                    "key": "PromptLib",
+                    "label": "Prompt Library (Central)",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\promptlib.txt",
+                    "description": "Path to the shared prompt library used by Freestyle when the user opens the prompt picker. The file must be a TXT file in prompt-library syntax. Example: N:\\AI\\promptlib.txt. [PromptLib]"
+                },
+                {
+                    "key": "PromptLibLocal",
+                    "label": "Prompt Library (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local prompt library, usually used together with a shared central prompt library. This lets users keep personal prompts separate from the shared file. Example: %APPDATA%\\Microsoft\\Word\\promptlib.txt. [PromptLibLocal]"
+                },
+                {
+                    "key": "PromptLib_Transcript",
+                    "label": "Transcript Prompt Library",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\promptlib_transcript.txt",
+                    "description": "Path to the transcript-processing prompt library used by the Transcriptor. This is only available as a shared resource. The file format matches the normal prompt library. Example: X:\\Speech\\promptlib_transcript.txt. [PromptLib_Transcript]"
+                },
+                {
+                    "key": "MyStylePath",
+                    "label": "My Style File",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\mystyle.txt",
+                    "description": "Path to the user's personal MyStyle prompt file (not to be used as a shared resource). If this file exists, MyStyle becomes available in Word and Outlook. Example: %APPDATA%\\Microsoft\\Word\\mystyle.txt. [MyStylePath]"
+                }
+            ]
         },
         {
-          "key": "PromptLib_Transcript",
-          "label": "Transcript Prompt Library",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\promptlib_transcript.txt",
-          "description": "Path to the transcript-processing prompt library used by the Transcriptor. This is only available as a shared resource. The file format matches the normal prompt library. Example: X:\\Speech\\promptlib_transcript.txt. [PromptLib_Transcript]"
+            "id": "content_resources",
+            "title": "Content Libraries & Rule Sets",
+            "description": "Shared and local files that power document-centric functions such as the resources for Red Ink's agentic features, WebAgent, Find Clause, Document Check, MyDocStyle, redaction and discussion personas. The local files can edited by the users themselves, whereas the shared files can be edited via the ''Expert Config'' menu. You can have these parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample files to give you an idea on how to build such files.",
+            "fields": [
+                {
+                    "key": "WebAgentPath",
+                    "label": "Web Agent Directory",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word",
+                    "description": "Path to the shared directory that contains WebAgent scripts. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ag-*.json. Example: N:\\AI\\Library. [WebAgentPath]"
+                },
+                {
+                    "key": "WebAgentPathLocal",
+                    "label": "Web Agent Directory (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [WebAgentPathLocal]"
+                },
+                {
+                    "key": "FindClausePath",
+                    "label": "Find Clause Directory",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word",
+                    "description": "Path to the shared directory that contains clause library files. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-lib-*.txt. Example: N:\\AI\\Library. [FindClausePath]"
+                },
+                {
+                    "key": "FindClausePathLocal",
+                    "label": "Find Clause Directory (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [FindClausePathLocal]"
+                },
+                {
+                    "key": "DocCheckPath",
+                    "label": "DocCheck Directory",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word",
+                    "description": "Path to the shared directory that contains Document Check rule sets. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-dc-*.txt. Example: N:\\AI\\Library. [DocCheckPath]"
+                },
+                {
+                    "key": "DocCheckPathLocal",
+                    "label": "DocCheck Directory (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocCheckPathLocal]"
+                },
+                {
+                    "key": "DocStylePath",
+                    "label": "DocStyle Directory",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word",
+                    "description": "Path to the shared directory that contains MyDocStyle templates. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ds-*.json. Example: N:\\AI\\Library. [DocStylePath]"
+                },
+                {
+                    "key": "DocStylePathLocal",
+                    "label": "DocStyle Directory (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocStylePathLocal]"
+                },
+                {
+                    "key": "RedactionInstructionsPath",
+                    "label": "Redaction Instructions",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\redactionlib.txt",
+                    "description": "Path to the shared file that contains redaction instructions. Use a central network location if the same resources should be shared across users; the file is used by the redaction feature. Example: N:\\AI\\redactions.txt. [RedactionInstructionsPath]"
+                },
+                {
+                    "key": "RedactionInstructionsPathLocal",
+                    "label": "Redaction Instructions (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\redactionslocal.txt. [RedactionInstructionsPathLocal]"
+                },
+                {
+                    "key": "DiscussInkyPath",
+                    "label": "Discuss this Personas",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\personalib.txt",
+                    "description": "Path to the shared persona file for the Discuss this function. Use a central network location if the same resources should be shared across users; the file defines reusable personas. Example: N:\\AI\\Library\\personalib.txt. [DiscussInkyPath]"
+                },
+                {
+                    "key": "DiscussInkyPathLocal",
+                    "label": "Discuss this Personas (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\personaliblocal.txt. Note that ''Discuss this'' will save Mission files in the same directory by adding ''-missions.txt'' to the filename. [DiscussInkyPathLocal]"
+                },
+                {
+                    "key": "DictionaryPath",
+                    "label": "Global Dictionary",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\dictionary.txt",
+                    "description": "Path to the shared translation dictionary text file. Use a central network location if the same dictionary should be shared across users. Its content is injected into translation prompts inside <globaldictionary>...</globaldictionary>. Example: N:\\AI\\Library\\dictionary.txt. [DictionaryPath]"
+                },
+                {
+                    "key": "DictionaryPathLocal",
+                    "label": "User Dictionary",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local translation dictionary text file. Its content is injected into translation prompts inside <userdictionary>...</userdictionary>; if both dictionaries exist, the user dictionary takes precedence. Example: %APPDATA%\\Microsoft\\Word\\dictionary_local.txt. [DictionaryPathLocal]"
+                },
+                {
+                    "key": "DictionarySegmentPrompt",
+                    "label": "Ask for Dictionary Segments",
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When enabled, interactive translations show a multi-selection dialog only when the dictionary contains selectable segments for the current target language. Use [German] for entries always applied to German and [German:Hochdeutsch] for an optional German segment. Text before the first header is global and always included. Agentic and AutoPilot runs never show a dialog and use only global plus target-language common entries. [DictionarySegmentPrompt]"
+                }
+            ]
         },
         {
-          "key": "MyStylePath",
-          "label": "My Style File",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\mystyle.txt",
-          "description": "Path to the user's personal MyStyle prompt file (not to be used as a shared resource). If this file exists, MyStyle becomes available in Word and Outlook. Example: %APPDATA%\\Microsoft\\Word\\mystyle.txt. [MyStylePath]"
+            "id": "automation_resources",
+            "title": "Automation & Library Files",
+            "description": "Files and directories used by agent resources, extraction, file renaming, snapshot tracking and MailMover. Keep shared resources on a central path if the same rules should be available to all users.",
+            "fields": [
+                {
+                    "key": "AgentResourcesPath",
+                    "label": "Agent Resources Directory",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word",
+                    "description": "Path to the shared directory that contains agent resources such as inky.md, skills, agents and the central designs\\designs.json Office design repository. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
+                },
+                {
+                    "key": "AgentResourcesPathLocal",
+                    "label": "Agent Resources Directory (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource directory, including optional local designs\\designs.json overrides, so personal resources can be kept separate from the shared central directory. Local design ids override central entries with the same id. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
+                },
+                {
+                    "key": "ExtractorPath",
+                    "label": "Extractor Library",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\extractorlib.txt",
+                    "description": "Path to the shared instruction file for Data Extractor. Use a central network location if the same resources should be shared across users; the file stores reusable extraction rules. Example: N:\\AI\\extractorlib.txt. [ExtractorPath]"
+                },
+                {
+                    "key": "ExtractorPathLocal",
+                    "label": "Extractor Library (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\extractorliblocal.txt. [ExtractorPathLocal]"
+                },
+                {
+                    "key": "RenameLibPath",
+                    "label": "Rename Library",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\renamelib.txt",
+                    "description": "Path to the shared instruction file for File Renamer. Use a central network location if the same resources should be shared across users; the file stores reusable renaming rules. Example: N:\\AI\\renamelib.txt. [RenameLibPath]"
+                },
+                {
+                    "key": "RenameLibPathLocal",
+                    "label": "Rename Library (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\renameliblocal.txt. [RenameLibPathLocal]"
+                },
+                {
+                    "key": "SnapshotLibPath",
+                    "label": "Snapshot Library",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\snapshotlib.txt",
+                    "description": "Path to the shared snapshot metadata file for Snapshot & Compare. Use a central network location if the same resources should be shared across users; the file stores monitored websites and files. Example: N:\\AI\\Library\\snapshotlib.txt. [SnapshotLibPath]"
+                },
+                {
+                    "key": "SnapshotLibPathLocal",
+                    "label": "Snapshot Library (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\snapshotliblocal.txt. [SnapshotLibPathLocal]"
+                },
+                {
+                    "key": "MailMoverPath",
+                    "label": "Mail Mover",
+                    "type": "path",
+                    "default": "%APPDATA%\\Microsoft\\Word\\mailmover.txt",
+                    "description": "Path to the shared rules file for MailMover. Use a central network location if the same resources should be shared across users; the file stores reusable mail-moving rules. Example: N:\\AI\\Library\\mailmover.txt. [MailMoverPath]"
+                },
+                {
+                    "key": "MailMoverPathLocal",
+                    "label": "Mail Mover (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\mailmoverlocal.txt. [MailMoverPathLocal]"
+                },
+                {
+                    "key": "DataCollectorPath",
+                    "label": "Data Collector (AutoPilot)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the schema file for the AutoPilot Data Collector. The path should contain the filename of the JSON file that contains the tasks that the Data Collector shall undertake. Example: N:\\AI\\Library\\datacollector.json. [DataCollectorPath]"
+                }
+            ]
+        },
+        {
+            "id": "document_assembly",
+            "title": "Document Assembly",
+            "description": "Settings for the template-based document assembly feature (Word only). Configure the template directories and LLM processing limits.",
+            "fields": [
+                {
+                    "key": "AssemblePath",
+                    "label": "Assembly Templates (Central)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the shared directory containing .docx assembly templates. Red Ink lists these templates when the user starts an assembly. Example: N:\\AI\\Library\\Templates. [AssemblePath]"
+                },
+                {
+                    "key": "AssemblePathLocal",
+                    "label": "Assembly Templates (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local directory containing .docx assembly templates. Local templates appear first in the selection list and are marked with '(local)'. Example: C:\\Users\\david\\Desktop. [AssemblePathLocal]"
+                },
+                {
+                    "key": "AssembleExecMaxChars",
+                    "label": "Max Chars per LLM Call",
+                    "type": "integer",
+                    "default": "80000",
+                    "description": "Maximum characters of template text sent per LLM execution call during assembly. Larger values allow more context but may exceed token limits for some models. Example: 80000. [AssembleExecMaxChars]"
+                },
+                {
+                    "key": "AssembleMaxContextSummaryChars",
+                    "label": "Max Context Summary Chars",
+                    "type": "integer",
+                    "default": "20000",
+                    "description": "Maximum characters for the rolling context summary that keeps the LLM coherent across assembly sections. Increase if documents have many long sections. Example: 20000. [AssembleMaxContextSummaryChars]"
+                }
+            ]
+        },
+        {
+            "id": "knowledge_store",
+            "title": "Knowledge Store",
+            "description": "The Knowledge Store lets you index local documents (contracts, templates, guides) so they can be injected as context into LLM prompts using the (kb) or (kb:storename) trigger. Configure a central catalog for shared team resources and a local catalog for personal stores. Each catalog is a JSON file listing named Knowledge Stores with their source directories.",
+            "fields": [
+                {
+                    "key": "KnowledgeStorePath",
+                    "label": "Knowledge Store Catalog (Central)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the shared Knowledge Store catalog JSON file. This file lists named Knowledge Stores that are available to all users. Each entry defines a store name, source directory, owner, role and active flag. Use a central network location for team-wide access. Example: N:\\AI\\Library\\knowledge-stores.json. [KnowledgeStorePath]"
+                },
+                {
+                    "key": "KnowledgeStorePathLocal",
+                    "label": "Knowledge Store Catalog (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Path to the user's local Knowledge Store catalog JSON file. Local entries take precedence over central entries with the same store name. Personal stores are defined here. Example: %APPDATA%\\Microsoft\\Word\\knowledge-stores.json. [KnowledgeStorePathLocal]"
+                },
+                {
+                    "key": "KnowledgeStoreUseLLMIndex",
+                    "label": "Use LLM for Indexing",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "When enabled, the Knowledge Store indexer uses the LLM to generate richer summaries and keywords for each indexed document. This improves search quality but consumes API credits during indexing. Disable this for cost-sensitive environments or when basic keyword extraction is sufficient. Example: True. [KnowledgeStoreUseLLMIndex]"
+                },
+                {
+                    "key": "KnowledgeStoreOwner",
+                    "label": "Default Store Owner",
+                    "type": "string",
+                    "default": "",
+                    "description": "Default owner identity for locally created Knowledge Stores. When set, this value is used as the Owner field for new stores created through the UI. Leave empty to use the current Windows username (%USERNAME%). Example: jdoe. [KnowledgeStoreOwner]"
+                }
+            ]
+        },
+        {
+            "id": "semantic_archive",
+            "title": "Semantic Archive",
+            "description": "Global Semantic Archive configuration defaults. Explicit personal maintenance preferences override these INI defaults. Archive definitions, source bindings and document-index thresholds are configured separately in the Semantic Archive console.",
+            "fields": [
+                {
+                    "key": "SemanticArchiveCatalogPathLocal",
+                    "label": "Semantic Archive Catalog Directory",
+                    "type": "path",
+                    "defaultConstant": "DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL",
+                    "description": "Directory (not a JSON filename) for the private Semantic Archive catalog and personal index state. Leave empty to disable Semantic Archive integration. SharedMethods placeholders such as %APPDATA%, %LOCALAPPDATA%, %DESKTOP% and %DOCUMENTS% are supported. Example: %LOCALAPPDATA%\\RedInk\\SA. Source archives and shared artifact roots can be local or UNC paths and are recorded per archive in this catalog. [SemanticArchiveCatalogPathLocal]"
+                },
+                {
+                    "key": "SemanticArchiveCatalogLibraryPath",
+                    "type": "path",
+                    "label": "Semantic Archive library directory",
+                    "defaultConstant": "DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH",
+                    "description": "Optional centrally administered directory containing per-archive .json definitions. Users automatically subscribe to readable published definitions; publishers can publish, update or withdraw their own entries from Semantic Archives administration. Local catalog and index data stay private. Requires SemanticArchiveCatalogPathLocal; an empty local path disables all Semantic Archive entry points even when this path is set. Uses SharedMethods environment/Red Ink placeholders. Example: \\\\server\\share\\RedInk\\SemanticArchives. [SemanticArchiveCatalogLibraryPath]"
+                },
+                {
+                    "key": "SemanticArchiveBackgroundIndexingEnabled",
+                    "label": "Semantic Archive Automatic Content Indexing",
+                    "type": "boolean",
+                    "defaultConstant": "DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED",
+                    "description": "Default for automatic Semantic Archive content indexing while Office is idle. This is independent of Knowledge Store indexing and permission reconciliation. A saved personal preference takes precedence. Individual archives must also allow automatic indexing. [SemanticArchiveBackgroundIndexingEnabled]"
+                },
+                {
+                    "key": "SemanticArchiveBackgroundIndexingWindow",
+                    "label": "Semantic Archive Content Indexing Window",
+                    "type": "string",
+                    "defaultConstant": "DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_WINDOW",
+                    "validation": "ProcessingWindow",
+                    "description": "Default local-time window for automatic Semantic Archive content indexing. Empty permits any time. Use allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. An explicit personal window, including an empty one, takes precedence. [SemanticArchiveBackgroundIndexingWindow]"
+                },
+                {
+                    "key": "SemanticArchivePermissionMaintenanceEnabled",
+                    "label": "Semantic Archive Automatic Permission Maintenance",
+                    "type": "boolean",
+                    "defaultConstant": "DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED",
+                    "description": "Default for independent background reconciliation of generated artifact permissions. Permission reconciliation can run while content indexing is off. A saved personal preference takes precedence. Read-time source authorization remains mandatory regardless of this setting. [SemanticArchivePermissionMaintenanceEnabled]"
+                },
+                {
+                    "key": "SemanticArchivePermissionMaintenanceWindow",
+                    "label": "Semantic Archive Permission Maintenance Window",
+                    "type": "string",
+                    "defaultConstant": "DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_WINDOW",
+                    "validation": "ProcessingWindow",
+                    "description": "Default local-time window for independent permission reconciliation. Empty permits any time. Use allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. An explicit personal window, including an empty one, takes precedence. [SemanticArchivePermissionMaintenanceWindow]"
+                }
+            ],
+            "note": "Use sastore in Word or Outlook to manage archive-specific settings, including SemanticArchiveSourceIndexThresholdBytes and the per-binding SemanticArchiveSharedArtifactRoot. A threshold of 0 disables only the additional per-document section index. These are catalog values, not global INI settings. Reset Optional Values keeps the catalog pointer and personal preferences, removes the four optional INI maintenance defaults, and never deletes archive data."
+        },
+        {
+            "id": "search",
+            "title": "Internet Search (ISearch)",
+            "description": "Configuration for Red Ink internet searching inside Freestyle. These values describe the search engine endpoint and how result links are extracted from its HTML.",
+            "fields": [
+                {
+                    "key": "ISearch",
+                    "label": "Enable Search",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if Freestyle should be allowed to perform internet searches through the configured search engine. Example: True. [ISearch]"
+                },
+                {
+                    "key": "ISearch_URL",
+                    "label": "Search URL",
+                    "type": "string",
+                    "default": "https://duckduckgo.com/html/?q=",
+                    "condition": "ISearch == True",
+                    "description": "Base URL used to perform the web search. The search term is appended or inserted according to the service's expected format. Example: https://duckduckgo.com/html/?q=. [ISearch_URL]"
+                },
+                {
+                    "key": "ISearch_Name",
+                    "label": "Search Engine Name",
+                    "type": "string",
+                    "default": "DuckDuckGo",
+                    "condition": "ISearch == True",
+                    "description": "Friendly name of the configured search engine as shown to the user. Example: DuckDuckGo. [ISearch_Name]"
+                },
+                {
+                    "key": "ISearch_ResponseMask1",
+                    "label": "Response Mask 1",
+                    "type": "string",
+                    "condition": "ISearch == True",
+                    "description": "Text pattern found immediately to the left of a result URL in the search engine HTML. Red Ink uses it to extract links from the results page. Example: duckduckgo.com/l/?uddg=. [ISearch_ResponseMask1]"
+                },
+                {
+                    "key": "ISearch_ResponseMask2",
+                    "label": "Response Mask 2",
+                    "type": "string",
+                    "condition": "ISearch == True",
+                    "description": "Text pattern found immediately to the right of a result URL in the search engine HTML. Red Ink uses it together with ResponseMask1 to isolate the link. Example: &. [ISearch_ResponseMask2]"
+                },
+                {
+                    "key": "ISearch_Tries",
+                    "label": "Max Tries",
+                    "type": "integer",
+                    "default": "4",
+                    "condition": "ISearch == True",
+                    "description": "Maximum number of top search results Red Ink should inspect while gathering enough source content. Higher values increase coverage but also time. Example: 10. [ISearch_Tries]"
+                },
+                {
+                    "key": "ISearch_Results",
+                    "label": "Results Per Search",
+                    "type": "integer",
+                    "default": "2",
+                    "condition": "ISearch == True",
+                    "description": "Target amount of source pages or extracted result blocks Red Ink should collect for one internet-search run. Example: 5. [ISearch_Results]"
+                },
+                {
+                    "key": "ISearch_MaxDepth",
+                    "label": "Max Depth",
+                    "type": "integer",
+                    "default": "2",
+                    "condition": "ISearch == True",
+                    "description": "How deeply Red Ink may follow sub-pages from an initially visited search hit to find the needed information. Example: 2. [ISearch_MaxDepth]"
+                },
+                {
+                    "key": "ISearch_Approve",
+                    "label": "Require Approval",
+                    "type": "boolean",
+                    "default": "False",
+                    "condition": "ISearch == True",
+                    "description": "Enable this if the user should be asked for permission before Red Ink sends a query to the internet search engine. Example: False. [ISearch_Approve]"
+                },
+                {
+                    "key": "EnablePrivacyForSearch",
+                    "label": "Privacy Protection",
+                    "type": "boolean",
+                    "default": "False",
+                    "condition": "ISearch == True",
+                    "description": "Enable this to enforce privacy constraints on internet search queries. When enabled, the model is instructed never to include personal data, confidential information, or non-public details in search queries sent to external search engines. This affects both the tool definition and the prompt instructions. Example: True. [EnablePrivacyForSearch]"
+                },
+                {
+                    "key": "ISearch_Timeout",
+                    "label": "Timeout (ms)",
+                    "type": "integer",
+                    "default": "30000",
+                    "condition": "ISearch == True",
+                    "description": "Maximum time in seconds Red Ink should spend on a single internet-search hit before moving on. Example: 3. [ISearch_Timeout]"
+                }
+            ]
+        },
+        {
+            "id": "library",
+            "title": "Local Library Search (Lib)",
+            "description": "Local library/RAG settings for searching a file first and then applying the extracted content to the user request.",
+            "fields": [
+                {
+                    "key": "Lib",
+                    "label": "Enable Library",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if the local library search function should be available. The library file is searched first and relevant content is then applied to the user's request. Example: True. [Lib]"
+                },
+                {
+                    "key": "Lib_File",
+                    "label": "Library File Path",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\library.txt",
+                    "description": "Path to the local library file used for the library search feature. TXT, DOC, DOCX and RTF are supported. Example: C:\\Users\\username\\Documents\\library.txt. [Lib_File]",
+                    "condition": "Lib == True"
+                },
+                {
+                    "key": "Lib_Timeout",
+                    "label": "Timeout (ms)",
+                    "type": "integer",
+                    "default": "30000",
+                    "condition": "Lib == True",
+                    "description": "Timeout in milliseconds used for the LLM step of the library function. Increase it if large library extracts time out. Example: 30000. [Lib_Timeout]"
+                }
+            ]
+        },
+        {
+            "id": "autopilot",
+            "title": "AutoPilot and Other Restrictions",
+            "description": "Controls which users may use AutoPilot, whether Draw.io must run in local-only mode and whether legacy .doc files may be processed.",
+            "fields": [
+                {
+                    "key": "AutoPilot",
+                    "label": "AP Allowed Users",
+                    "type": "string",
+                    "default": "",
+                    "description": "Comma-separated Windows usernames allowed to use the AutoPilot function in Outlook (use ''Client Name'' button below to identify your Windows username). Use * if everyone should be allowed. Example: Peter.Pan,John.Doe or *. [AutoPilot]"
+                },
+                {
+                    "key": "AutoPilotAutoStart",
+                    "label": "AutoPilot Auto Start",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
+                },
+                {
+                    "key": "MonitorLink",
+                    "label": "Status Monitor Link",
+                    "type": "string",
+                    "validation": "Hyperlink",
+                    "default": "",
+                    "description": "Optional HTTP/HTTPS link to a status or monitoring page. When set, Red Ink shows it in the About window below the Local Chat link and includes it in AutoPilot holding responses. Example: https://ink.acme.com/status. [MonitorLink]"
+                },
+                {
+                    "key": "AutoPilotSchedulerLocalChat",
+                    "label": "Permit Scheduler in Local Chat to Send Emails",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
+                },
+                {
+                    "key": "ForceDrawioLocal",
+                    "label": "Force Draw.io Offline",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this to force Draw.io to run only in the local/offline mode offered by Red Ink, which helps protect confidential information. Example: True. [ForceDrawioLocal]"
+                },
+                {
+                    "key": "AllowLegacyDocFiles",
+                    "label": "Allow Legacy .doc Files",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Controls whether legacy .doc (binary Word) files can be opened via COM Interop. Set this to False to block .doc processing for security hardening, which prevents OLE and macro-based attacks. When disabled, .doc files are rejected with a security message. Note that .docx files (OpenXML ZIP) are always permitted as they are processed via sandboxed XML parsing. Example: False. [AllowLegacyDocFiles]"
+                }
+            ]
+        },
+        {
+            "id": "updates",
+            "title": "Updates",
+            "description": "Controls how Red Ink checks for add-in updates. This is separate from the automatic INI update mechanism below.",
+            "fields": [
+                {
+                    "key": "UpdateCheckInterval",
+                    "label": "Check Interval (days)",
+                    "type": "integer",
+                    "default": "7",
+                    "description": "Number of days Red Ink waits before checking again for add-in updates. Use 0 to disable update checks and -1 to do a check at every startup. Example: 7. [UpdateCheckInterval]"
+                },
+                {
+                    "key": "UpdatePath",
+                    "label": "Local Update Path",
+                    "type": "path",
+                    "default": "",
+                    "description": "Local directory that contains the Red Ink installation package for manual or network-based updates. The subfolders word, excel and outlook are expected here (including the *.vsto file; you can copy the structures from redink.zip). Example: X:\\Updates\\RedInk\\. [UpdatePath]"
+                }
+            ]
+        },
+        {
+            "id": "ini_update",
+            "title": "INI Update Mechanism",
+            "description": "Advanced central update mechanism for redink.ini and related configuration files. Use this only if your organisation distributes configuration changes centrally.",
+            "fields": [
+                {
+                    "key": "UpdateIni",
+                    "label": "Enable INI Updates",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Master switch for the INI self-update mechanism. Set this to False if configuration updates from UpdateSource should never be checked or applied. Example: True. [UpdateIni]"
+                },
+                {
+                    "key": "UpdateIniAllowRemote",
+                    "label": "Allow Remote Sources",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if UpdateSource may point to HTTP or HTTPS locations. Disable it to allow only local paths and UNC shares. Example: True. [UpdateIniAllowRemote]",
+                    "condition": "UpdateIni == True"
+                },
+                {
+                    "key": "UpdateIniNoSignature",
+                    "label": "Skip Signature Check",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Set this to True only for testing if signature verification should be skipped. In production, keep it False so .sig files and Ed25519 verification are enforced where configured. Example: False. [UpdateIniNoSignature]",
+                    "condition": "UpdateIni == True"
+                },
+                {
+                    "key": "UpdateSource",
+                    "label": "Update Source",
+                    "type": "string",
+                    "default": "",
+                    "description": "Source definition for configuration updates in the format Path; Keys; PublicKey. The path may be local, UNC or remote, the keys part can be all, new or a comma-separated list. Example: https://updates.example.com/redink.ini; all; MCowBQYDK2VwAyEA... [UpdateSource]",
+                    "condition": "UpdateIni == True"
+                },
+                {
+                    "key": "UpdateIniIgnoreOverride",
+                    "label": "Ignore Override Keys",
+                    "type": "string",
+                    "default": "",
+                    "description": "Central override rules for the local update ignore list. Prefix each rule with + to ignore or - to enforce processing. Example: +all,-redink.ini|APIKey. [UpdateIniIgnoreOverride]",
+                    "condition": "UpdateIni == True"
+                },
+                {
+                    "key": "UpdateIniSilentMode",
+                    "label": "Silent Mode (0=off)",
+                    "type": "integer",
+                    "default": "0",
+                    "description": "Controls how automatically Red Ink may apply configuration changes. 0 = interactive, 1 = safe only, 2 = signed only, 3 = local trusted, 4 = all. Example: 0. [UpdateIniSilentMode]",
+                    "condition": "UpdateIni == True"
+                },
+                {
+                    "key": "UpdateIniSilentLog",
+                    "label": "Log Silent Updates",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if regular log entries should still be written when INI updates run in silent mode. Example: True. [UpdateIniSilentLog]",
+                    "condition": "UpdateIni == True"
+                },
+                {
+                    "key": "UpdateIniClients",
+                    "label": "Allowed Update Clients",
+                    "type": "string",
+                    "default": "",
+                    "description": "Comma-separated Windows client names that are allowed to execute the INI update mechanism in a networked setup (use ''Client Name'' button below to identify your Windows client name). Use this to prevent many clients from checking in parallel. Example: DSKTOP01,ADMDSKTP01. [UpdateIniClients]",
+                    "condition": "UpdateIni == True"
+                }
+            ]
+        },
+        {
+            "id": "access_control",
+            "title": "Configuration Access Control",
+            "description": "Administrative restrictions that control whether users may save local configuration files or download helper add-ins from within Red Ink.",
+            "fields": [
+                {
+                    "key": "NoLocalConfig",
+                    "label": "Disable Local Config Saving",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to stop users from saving their own local configuration file from Settings and diverging from the central configuration. Example: True. [NoLocalConfig]"
+                },
+                {
+                    "key": "NoHelperDownload",
+                    "label": "Disable Helper Download",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to prevent users from downloading the Word or Excel helper add-ins from Settings. This is useful in locked-down environments. Example: True. [NoHelperDownload]"
+                },
+                {
+                    "key": "CentralConfigClients",
+                    "label": "Central Config Clients",
+                    "type": "string",
+                    "default": "",
+                    "description": "Comma-separated Windows client names that are allowed to manage or write central configuration files (use ''Client Name'' button below to identify your Windows client name). Leave empty to allow all clients. Example: DSKTOP01,ADMDSKTP01. [CentralConfigClients]"
+                },
+                {
+                    "key": "CentralConfigPW",
+                    "label": "Central Config Password",
+                    "type": "string",
+                    "default": "",
+                    "description": "The password with which a user can temporarily access Expert Config and the other features of Settings if NoLocalConfig is true. If there is an encryption key in the registry, the password will first be decrypted with it (hence, it must have been encrypted with it using it, like an API key). [CentralConfigPW]"
+                }
+            ]
+        },
+        {
+            "id": "m365",
+            "title": "Microsoft 365 Integration",
+            "description": "Settings for the optional Microsoft 365 integration that lets the LLM search and retrieve the user's own emails, OneDrive/SharePoint files, Teams chats, calendar events, OneNote pages and contacts via Microsoft Graph. Auth is interactive (MSAL) on the user's PC; the resulting token is cached cross-process under %APPDATA%\\RedInk. Leave Client ID empty to disable the integration entirely.",
+            "fields": [
+                {
+                    "key": "M365ClientId",
+                    "label": "M365 Application (Client) ID",
+                    "type": "string",
+                    "default": "",
+                    "description": "The Azure AD application (client) ID of the Red Ink app registration in your tenant (or a multi-tenant registration). This is the GUID shown on the App Registration overview page in Microsoft Entra ID / Azure AD. Leave empty to disable the entire M365 integration (search, mail/file/event/chat/OneNote retrieval, M365 LLM tools). Example: 11111111-2222-3333-4444-555555555555. [M365ClientId]"
+                },
+                {
+                    "key": "M365TenantId",
+                    "label": "M365 Tenant ID",
+                    "type": "string",
+                    "default": "common",
+                    "description": "Azure AD tenant the app is registered in. Use the tenant GUID for single-tenant apps, your verified domain (e.g. contoso.onmicrosoft.com), 'organizations' to allow any work/school account, or 'common' to allow both work/school and personal Microsoft accounts. Defaults to 'common' when empty. Example: contoso.onmicrosoft.com. [M365TenantId]",
+                    "condition": "M365ClientId != \"\""
+                },
+                {
+                    "key": "M365Scopes",
+                    "label": "M365 Graph Scopes",
+                    "type": "string",
+                    "default": "openid profile offline_access User.Read Mail.Read Files.Read Files.Read.All Sites.Read.All Calendars.Read Chat.Read ChannelMessage.Read.All Notes.Read.All People.Read Contacts.Read",
+                    "description": "Space-separated list of Microsoft Graph delegated permission scopes requested at sign-in. Must match the scopes consented to in the Azure AD app registration; users will see a consent prompt if any are new. Keep openid/profile/offline_access for sign-in and silent token refresh. The default covers full read-only access across mail, files (personal + shared + SharePoint), calendar, Teams chats and channel messages, OneNote, people and contacts — everything the M365 LLM tools can call. ADMIN CONSENT: Files.Read.All, Sites.Read.All, ChannelMessage.Read.All, Notes.Read.All, People.Read and Contacts.Read are admin-consent scopes; a tenant admin must grant consent once before regular users can sign in. Reduce the list to a stricter subset (e.g. ''openid profile offline_access User.Read Mail.Read Calendars.Read'') to limit the surface, at the cost of disabling the corresponding tools. Example: openid profile offline_access User.Read Mail.Read Files.Read.All Sites.Read.All Calendars.Read. [M365Scopes]",
+                    "condition": "M365ClientId != \"\""
+                }
+            ]
+        },
+        {
+            "id": "registry_fixes",
+            "title": "Registry Fixes",
+            "description": "Optional registry entries applied at startup to harden the Office add-in against being disabled or to enforce specific load behaviours. Each entry uses the pipe-delimited format Host|RegPath|ValueName|ValueKind|Data. Only HKEY_CURRENT_USER is allowed. Supported tokens: {ProgID}, {Host}, {HostVersion}. Leave empty to skip.",
+            "fields": [
+                {
+                    "key": "RegFix_1",
+                    "label": "Registry Fix 1",
+                    "type": "string",
+                    "default": "",
+                    "description": "First registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Outlook|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\{HostVersion}\\Outlook\\Resiliency\\DoNotDisableAddinList|{ProgID}|DWORD|1. [RegFix_1]"
+                },
+                {
+                    "key": "RegFix_2",
+                    "label": "Registry Fix 2",
+                    "type": "string",
+                    "default": "",
+                    "description": "Second registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Word|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\{HostVersion}\\Word\\Resiliency\\DoNotDisableAddinList|{ProgID}|DWORD|1. [RegFix_2]"
+                },
+                {
+                    "key": "RegFix_3",
+                    "label": "Registry Fix 3",
+                    "type": "string",
+                    "default": "",
+                    "description": "Third registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Excel|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\{HostVersion}\\Excel\\Resiliency\\DoNotDisableAddinList|{ProgID}|DWORD|1. [RegFix_3]"
+                },
+                {
+                    "key": "RegFix_4",
+                    "label": "Registry Fix 4",
+                    "type": "string",
+                    "default": "",
+                    "description": "Fourth registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Outlook|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\Outlook\\Addins\\{ProgID}|LoadBehavior|DWORD|3. [RegFix_4]"
+                }
+            ]
         }
-      ]
-    },
-    {
-      "id": "content_resources",
-      "title": "Content Libraries & Rule Sets",
-      "description": "Shared and local files that power document-centric functions such as the resources for Red Ink's agentic features, WebAgent, Find Clause, Document Check, MyDocStyle, redaction and discussion personas. The local files can edited by the users themselves, whereas the shared files can be edited via the ''Expert Config'' menu. You can have these parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample files to give you an idea on how to build such files.",
-        "fields": [
-            {
-                "key": "WebAgentPath",
-                "label": "Web Agent Directory",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word",
-                "description": "Path to the shared directory that contains WebAgent scripts. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ag-*.json. Example: N:\\AI\\Library. [WebAgentPath]"
-            },
-            {
-                "key": "WebAgentPathLocal",
-                "label": "Web Agent Directory (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [WebAgentPathLocal]"
-            },
-            {
-                "key": "FindClausePath",
-                "label": "Find Clause Directory",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word",
-                "description": "Path to the shared directory that contains clause library files. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-lib-*.txt. Example: N:\\AI\\Library. [FindClausePath]"
-            },
-            {
-                "key": "FindClausePathLocal",
-                "label": "Find Clause Directory (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [FindClausePathLocal]"
-            },
-            {
-                "key": "DocCheckPath",
-                "label": "DocCheck Directory",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word",
-                "description": "Path to the shared directory that contains Document Check rule sets. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-dc-*.txt. Example: N:\\AI\\Library. [DocCheckPath]"
-            },
-            {
-                "key": "DocCheckPathLocal",
-                "label": "DocCheck Directory (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocCheckPathLocal]"
-            },
-            {
-                "key": "DocStylePath",
-                "label": "DocStyle Directory",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word",
-                "description": "Path to the shared directory that contains MyDocStyle templates. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ds-*.json. Example: N:\\AI\\Library. [DocStylePath]"
-            },
-            {
-                "key": "DocStylePathLocal",
-                "label": "DocStyle Directory (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocStylePathLocal]"
-            },
-            {
-                "key": "RedactionInstructionsPath",
-                "label": "Redaction Instructions",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word\\redactionlib.txt",
-                "description": "Path to the shared file that contains redaction instructions. Use a central network location if the same resources should be shared across users; the file is used by the redaction feature. Example: N:\\AI\\redactions.txt. [RedactionInstructionsPath]"
-            },
-            {
-                "key": "RedactionInstructionsPathLocal",
-                "label": "Redaction Instructions (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\redactionslocal.txt. [RedactionInstructionsPathLocal]"
-            },
-            {
-                "key": "DiscussInkyPath",
-                "label": "Discuss this Personas",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word\\personalib.txt",
-                "description": "Path to the shared persona file for the Discuss this function. Use a central network location if the same resources should be shared across users; the file defines reusable personas. Example: N:\\AI\\Library\\personalib.txt. [DiscussInkyPath]"
-            },
-            {
-                "key": "DiscussInkyPathLocal",
-                "label": "Discuss this Personas (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\personaliblocal.txt. Note that ''Discuss this'' will save Mission files in the same directory by adding ''-missions.txt'' to the filename. [DiscussInkyPathLocal]"
-            },
-            {
-                "key": "DictionaryPath",
-                "label": "Global Dictionary",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word\\dictionary.txt",
-                "description": "Path to the shared translation dictionary text file. Use a central network location if the same dictionary should be shared across users. Its content is injected into translation prompts inside <globaldictionary>...</globaldictionary>. Example: N:\\AI\\Library\\dictionary.txt. [DictionaryPath]"
-            },
-            {
-                "key": "DictionaryPathLocal",
-                "label": "User Dictionary",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local translation dictionary text file. Its content is injected into translation prompts inside <userdictionary>...</userdictionary>; if both dictionaries exist, the user dictionary takes precedence. Example: %APPDATA%\\Microsoft\\Word\\dictionary_local.txt. [DictionaryPathLocal]"
-            },
-            {
-                "key": "DictionarySegmentPrompt",
-                "label": "Ask for Dictionary Segments",
-                "type": "boolean",
-                "default": false,
-                "description": "When enabled, interactive translations show a multi-selection dialog only when the dictionary contains selectable segments for the current target language. Use [German] for entries always applied to German and [German:Hochdeutsch] for an optional German segment. Text before the first header is global and always included. Agentic and AutoPilot runs never show a dialog and use only global plus target-language common entries. [DictionarySegmentPrompt]"
-            }
-        ]
-    },
-    {
-      "id": "automation_resources",
-      "title": "Automation & Library Files",
-      "description": "Files and directories used by agent resources, extraction, file renaming, snapshot tracking and MailMover. Keep shared resources on a central path if the same rules should be available to all users.",
-        "fields": [
-            {
-                "key": "AgentResourcesPath",
-                "label": "Agent Resources Directory",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word",
-                "description": "Path to the shared directory that contains agent resources such as inky.md, skills, agents and the central designs\\designs.json Office design repository. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
-            },
-            {
-                "key": "AgentResourcesPathLocal",
-                "label": "Agent Resources Directory (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource directory, including optional local designs\\designs.json overrides, so personal resources can be kept separate from the shared central directory. Local design ids override central entries with the same id. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
-            },
-            {
-                "key": "ExtractorPath",
-                "label": "Extractor Library",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word\\extractorlib.txt",
-                "description": "Path to the shared instruction file for Data Extractor. Use a central network location if the same resources should be shared across users; the file stores reusable extraction rules. Example: N:\\AI\\extractorlib.txt. [ExtractorPath]"
-            },
-            {
-                "key": "ExtractorPathLocal",
-                "label": "Extractor Library (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\extractorliblocal.txt. [ExtractorPathLocal]"
-            },
-            {
-                "key": "RenameLibPath",
-                "label": "Rename Library",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word\\renamelib.txt",
-                "description": "Path to the shared instruction file for File Renamer. Use a central network location if the same resources should be shared across users; the file stores reusable renaming rules. Example: N:\\AI\\renamelib.txt. [RenameLibPath]"
-            },
-            {
-                "key": "RenameLibPathLocal",
-                "label": "Rename Library (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\renameliblocal.txt. [RenameLibPathLocal]"
-            },
-            {
-                "key": "SnapshotLibPath",
-                "label": "Snapshot Library",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word\\snapshotlib.txt",
-                "description": "Path to the shared snapshot metadata file for Snapshot & Compare. Use a central network location if the same resources should be shared across users; the file stores monitored websites and files. Example: N:\\AI\\Library\\snapshotlib.txt. [SnapshotLibPath]"
-            },
-            {
-                "key": "SnapshotLibPathLocal",
-                "label": "Snapshot Library (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\snapshotliblocal.txt. [SnapshotLibPathLocal]"
-            },
-            {
-                "key": "MailMoverPath",
-                "label": "Mail Mover",
-                "type": "path",
-                "default": "%APPDATA%\\Microsoft\\Word\\mailmover.txt",
-                "description": "Path to the shared rules file for MailMover. Use a central network location if the same resources should be shared across users; the file stores reusable mail-moving rules. Example: N:\\AI\\Library\\mailmover.txt. [MailMoverPath]"
-            },
-            {
-                "key": "MailMoverPathLocal",
-                "label": "Mail Mover (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\mailmoverlocal.txt. [MailMoverPathLocal]"
-            },
-            {
-                "key": "DataCollectorPath",
-                "label": "Data Collector (AutoPilot)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the schema file for the AutoPilot Data Collector. The path should contain the filename of the JSON file that contains the tasks that the Data Collector shall undertake. Example: N:\\AI\\Library\\datacollector.json. [DataCollectorPath]"
-            }
-        ]
-    },
-    {
-      "id": "document_assembly",
-      "title": "Document Assembly",
-      "description": "Settings for the template-based document assembly feature (Word only). Configure the template directories and LLM processing limits.",
-      "fields": [
-        {
-          "key": "AssemblePath",
-          "label": "Assembly Templates (Central)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the shared directory containing .docx assembly templates. Red Ink lists these templates when the user starts an assembly. Example: N:\\AI\\Library\\Templates. [AssemblePath]"
-        },
-        {
-          "key": "AssemblePathLocal",
-          "label": "Assembly Templates (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local directory containing .docx assembly templates. Local templates appear first in the selection list and are marked with '(local)'. Example: C:\\Users\\david\\Desktop. [AssemblePathLocal]"
-        },
-        {
-          "key": "AssembleExecMaxChars",
-          "label": "Max Chars per LLM Call",
-          "type": "integer",
-          "default": "80000",
-          "description": "Maximum characters of template text sent per LLM execution call during assembly. Larger values allow more context but may exceed token limits for some models. Example: 80000. [AssembleExecMaxChars]"
-        },
-        {
-          "key": "AssembleMaxContextSummaryChars",
-          "label": "Max Context Summary Chars",
-          "type": "integer",
-          "default": "20000",
-          "description": "Maximum characters for the rolling context summary that keeps the LLM coherent across assembly sections. Increase if documents have many long sections. Example: 20000. [AssembleMaxContextSummaryChars]"
-        }
-      ]
-    },
-    {
-      "id": "knowledge_store",
-      "title": "Knowledge Store",
-      "description": "The Knowledge Store lets you index local documents (contracts, templates, guides) so they can be injected as context into LLM prompts using the (kb) or (kb:storename) trigger. Configure a central catalog for shared team resources and a local catalog for personal stores. Each catalog is a JSON file listing named Knowledge Stores with their source directories.",
-      "fields": [
-        {
-          "key": "KnowledgeStorePath",
-          "label": "Knowledge Store Catalog (Central)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the shared Knowledge Store catalog JSON file. This file lists named Knowledge Stores that are available to all users. Each entry defines a store name, source directory, owner, role and active flag. Use a central network location for team-wide access. Example: N:\\AI\\Library\\knowledge-stores.json. [KnowledgeStorePath]"
-        },
-        {
-          "key": "KnowledgeStorePathLocal",
-          "label": "Knowledge Store Catalog (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local Knowledge Store catalog JSON file. Local entries take precedence over central entries with the same store name. Personal stores are defined here. Example: %APPDATA%\\Microsoft\\Word\\knowledge-stores.json. [KnowledgeStorePathLocal]"
-        },
-        {
-          "key": "KnowledgeStoreUseLLMIndex",
-          "label": "Use LLM for Indexing",
-          "type": "boolean",
-          "default": "True",
-          "description": "When enabled, the Knowledge Store indexer uses the LLM to generate richer summaries and keywords for each indexed document. This improves search quality but consumes API credits during indexing. Disable this for cost-sensitive environments or when basic keyword extraction is sufficient. Example: True. [KnowledgeStoreUseLLMIndex]"
-        },
-        {
-          "key": "KnowledgeStoreOwner",
-          "label": "Default Store Owner",
-          "type": "string",
-          "default": "",
-          "description": "Default owner identity for locally created Knowledge Stores. When set, this value is used as the Owner field for new stores created through the UI. Leave empty to use the current Windows username (%USERNAME%). Example: jdoe. [KnowledgeStoreOwner]"
-        }
-      ]
-    },
-    {
-      "id": "semantic_archive",
-      "title": "Semantic Archive",
-      "description": "Global Semantic Archive configuration defaults. Explicit personal maintenance preferences override these INI defaults. Archive definitions, source bindings and document-index thresholds are configured separately in the Semantic Archive console.",
-      "fields": [
-        {
-          "key": "SemanticArchiveCatalogPathLocal",
-          "label": "Semantic Archive Catalog Directory",
-          "type": "path",
-          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL",
-          "description": "Directory (not a JSON filename) for the private Semantic Archive catalog and personal index state. Leave empty to disable Semantic Archive integration. SharedMethods placeholders such as %APPDATA%, %LOCALAPPDATA%, %DESKTOP% and %DOCUMENTS% are supported. Example: %LOCALAPPDATA%\\RedInk\\SA. Source archives and shared artifact roots can be local or UNC paths and are recorded per archive in this catalog. [SemanticArchiveCatalogPathLocal]"
-        },
-        {
-          "key": "SemanticArchiveCatalogLibraryPath",
-          "type": "path",
-          "label": "Semantic Archive library directory",
-          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH",
-          "description": "Optional centrally administered directory containing per-archive .json definitions. Users automatically subscribe to readable published definitions; publishers can publish, update or withdraw their own entries from Semantic Archives administration. Local catalog and index data stay private. Requires SemanticArchiveCatalogPathLocal; an empty local path disables all Semantic Archive entry points even when this path is set. Uses SharedMethods environment/Red Ink placeholders. Example: \\\\server\\share\\RedInk\\SemanticArchives. [SemanticArchiveCatalogLibraryPath]"
-        },
-        {
-          "key": "SemanticArchiveBackgroundIndexingEnabled",
-          "label": "Semantic Archive Automatic Content Indexing",
-          "type": "boolean",
-          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED",
-          "description": "Default for automatic Semantic Archive content indexing while Office is idle. This is independent of Knowledge Store indexing and permission reconciliation. A saved personal preference takes precedence. Individual archives must also allow automatic indexing. [SemanticArchiveBackgroundIndexingEnabled]"
-        },
-        {
-          "key": "SemanticArchiveBackgroundIndexingWindow",
-          "label": "Semantic Archive Content Indexing Window",
-          "type": "string",
-          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_WINDOW",
-          "validation": "ProcessingWindow",
-          "description": "Default local-time window for automatic Semantic Archive content indexing. Empty permits any time. Use allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. An explicit personal window, including an empty one, takes precedence. [SemanticArchiveBackgroundIndexingWindow]"
-        },
-        {
-          "key": "SemanticArchivePermissionMaintenanceEnabled",
-          "label": "Semantic Archive Automatic Permission Maintenance",
-          "type": "boolean",
-          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED",
-          "description": "Default for independent background reconciliation of generated artifact permissions. Permission reconciliation can run while content indexing is off. A saved personal preference takes precedence. Read-time source authorization remains mandatory regardless of this setting. [SemanticArchivePermissionMaintenanceEnabled]"
-        },
-        {
-          "key": "SemanticArchivePermissionMaintenanceWindow",
-          "label": "Semantic Archive Permission Maintenance Window",
-          "type": "string",
-          "defaultConstant": "DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_WINDOW",
-          "validation": "ProcessingWindow",
-          "description": "Default local-time window for independent permission reconciliation. Empty permits any time. Use allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. An explicit personal window, including an empty one, takes precedence. [SemanticArchivePermissionMaintenanceWindow]"
-        }
-      ],
-      "note": "Use sastore in Word or Outlook to manage archive-specific settings, including SemanticArchiveSourceIndexThresholdBytes and the per-binding SemanticArchiveSharedArtifactRoot. A threshold of 0 disables only the additional per-document section index. These are catalog values, not global INI settings. Reset Optional Values keeps the catalog pointer and personal preferences, removes the four optional INI maintenance defaults, and never deletes archive data."
-    },
-    {
-      "id": "search",
-      "title": "Internet Search (ISearch)",
-      "description": "Configuration for Red Ink internet searching inside Freestyle. These values describe the search engine endpoint and how result links are extracted from its HTML.",
-      "fields": [
-        {
-          "key": "ISearch",
-          "label": "Enable Search",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if Freestyle should be allowed to perform internet searches through the configured search engine. Example: True. [ISearch]"
-        },
-        {
-          "key": "ISearch_URL",
-          "label": "Search URL",
-          "type": "string",
-          "default": "https://duckduckgo.com/html/?q=",
-          "condition": "ISearch == True",
-          "description": "Base URL used to perform the web search. The search term is appended or inserted according to the service's expected format. Example: https://duckduckgo.com/html/?q=. [ISearch_URL]"
-        },
-        {
-          "key": "ISearch_Name",
-          "label": "Search Engine Name",
-          "type": "string",
-          "default": "DuckDuckGo",
-          "condition": "ISearch == True",
-          "description": "Friendly name of the configured search engine as shown to the user. Example: DuckDuckGo. [ISearch_Name]"
-        },
-        {
-          "key": "ISearch_ResponseMask1",
-          "label": "Response Mask 1",
-          "type": "string",
-          "condition": "ISearch == True",
-          "description": "Text pattern found immediately to the left of a result URL in the search engine HTML. Red Ink uses it to extract links from the results page. Example: duckduckgo.com/l/?uddg=. [ISearch_ResponseMask1]"
-        },
-        {
-          "key": "ISearch_ResponseMask2",
-          "label": "Response Mask 2",
-          "type": "string",
-          "condition": "ISearch == True",
-          "description": "Text pattern found immediately to the right of a result URL in the search engine HTML. Red Ink uses it together with ResponseMask1 to isolate the link. Example: &. [ISearch_ResponseMask2]"
-        },
-        {
-          "key": "ISearch_Tries",
-          "label": "Max Tries",
-          "type": "integer",
-          "default": "4",
-          "condition": "ISearch == True",
-          "description": "Maximum number of top search results Red Ink should inspect while gathering enough source content. Higher values increase coverage but also time. Example: 10. [ISearch_Tries]"
-        },
-        {
-          "key": "ISearch_Results",
-          "label": "Results Per Search",
-          "type": "integer",
-          "default": "2",
-          "condition": "ISearch == True",
-          "description": "Target amount of source pages or extracted result blocks Red Ink should collect for one internet-search run. Example: 5. [ISearch_Results]"
-        },
-        {
-          "key": "ISearch_MaxDepth",
-          "label": "Max Depth",
-          "type": "integer",
-          "default": "2",
-          "condition": "ISearch == True",
-          "description": "How deeply Red Ink may follow sub-pages from an initially visited search hit to find the needed information. Example: 2. [ISearch_MaxDepth]"
-        },
-        {
-          "key": "ISearch_Approve",
-          "label": "Require Approval",
-          "type": "boolean",
-          "default": "False",
-          "condition": "ISearch == True",
-          "description": "Enable this if the user should be asked for permission before Red Ink sends a query to the internet search engine. Example: False. [ISearch_Approve]"
-        },
-        {
-          "key": "EnablePrivacyForSearch",
-          "label": "Privacy Protection",
-          "type": "boolean",
-          "default": "False",
-          "condition": "ISearch == True",
-          "description": "Enable this to enforce privacy constraints on internet search queries. When enabled, the model is instructed never to include personal data, confidential information, or non-public details in search queries sent to external search engines. This affects both the tool definition and the prompt instructions. Example: True. [EnablePrivacyForSearch]"
-        },
-           {
-          "key": "ISearch_Timeout",
-          "label": "Timeout (ms)",
-          "type": "integer",
-          "default": "30000",
-          "condition": "ISearch == True",
-          "description": "Maximum time in seconds Red Ink should spend on a single internet-search hit before moving on. Example: 3. [ISearch_Timeout]"
-        }
-      ]
-    },
-    {
-      "id": "library",
-      "title": "Local Library Search (Lib)",
-      "description": "Local library/RAG settings for searching a file first and then applying the extracted content to the user request.",
-      "fields": [
-        {
-          "key": "Lib",
-          "label": "Enable Library",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if the local library search function should be available. The library file is searched first and relevant content is then applied to the user's request. Example: True. [Lib]"
-        },
-        {
-          "key": "Lib_File",
-          "label": "Library File Path",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\library.txt",
-          "description": "Path to the local library file used for the library search feature. TXT, DOC, DOCX and RTF are supported. Example: C:\\Users\\username\\Documents\\library.txt. [Lib_File]",
-          "condition": "Lib == True"
-        },
-        {
-          "key": "Lib_Timeout",
-          "label": "Timeout (ms)",
-          "type": "integer",
-          "default": "30000",
-          "condition": "Lib == True",
-          "description": "Timeout in milliseconds used for the LLM step of the library function. Increase it if large library extracts time out. Example: 30000. [Lib_Timeout]"
-        }
-      ]
-    },
-    {
-      "id": "autopilot",
-      "title": "AutoPilot and Other Restrictions",
-      "description": "Controls which users may use AutoPilot, whether Draw.io must run in local-only mode and whether legacy .doc files may be processed.",
-        "fields": [
-            {
-                "key": "AutoPilot",
-                "label": "AP Allowed Users",
-                "type": "string",
-                "default": "",
-                "description": "Comma-separated Windows usernames allowed to use the AutoPilot function in Outlook (use ''Client Name'' button below to identify your Windows username). Use * if everyone should be allowed. Example: Peter.Pan,John.Doe or *. [AutoPilot]"
-            },
-            {
-                "key": "AutoPilotAutoStart",
-                "label": "AutoPilot Auto Start",
-                "type": "boolean",
-                "default": "False",
-                "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
-            },
-            {
-                "key": "MonitorLink",
-                "label": "Status Monitor Link",
-                "type": "string",
-                "validation": "Hyperlink",
-                "default": "",
-                "description": "Optional HTTP/HTTPS link to a status or monitoring page. When set, Red Ink shows it in the About window below the Local Chat link and includes it in AutoPilot holding responses. Example: https://ink.acme.com/status. [MonitorLink]"
-            },
-            {
-                "key": "AutoPilotSchedulerLocalChat",
-                "label": "Permit Scheduler in Local Chat to Send Emails",
-                "type": "boolean",
-                "default": "False",
-                "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
-            },
-            {
-                "key": "ForceDrawioLocal",
-                "label": "Force Draw.io Offline",
-                "type": "boolean",
-                "default": "True",
-                "description": "Enable this to force Draw.io to run only in the local/offline mode offered by Red Ink, which helps protect confidential information. Example: True. [ForceDrawioLocal]"
-            },
-            {
-                "key": "AllowLegacyDocFiles",
-                "label": "Allow Legacy .doc Files",
-                "type": "boolean",
-                "default": "False",
-                "description": "Controls whether legacy .doc (binary Word) files can be opened via COM Interop. Set this to False to block .doc processing for security hardening, which prevents OLE and macro-based attacks. When disabled, .doc files are rejected with a security message. Note that .docx files (OpenXML ZIP) are always permitted as they are processed via sandboxed XML parsing. Example: False. [AllowLegacyDocFiles]"
-            }
-        ]
-    },
-    {
-      "id": "updates",
-      "title": "Updates",
-      "description": "Controls how Red Ink checks for add-in updates. This is separate from the automatic INI update mechanism below.",
-      "fields": [
-        {
-          "key": "UpdateCheckInterval",
-          "label": "Check Interval (days)",
-          "type": "integer",
-          "default": "7",
-          "description": "Number of days Red Ink waits before checking again for add-in updates. Use 0 to disable update checks and -1 to do a check at every startup. Example: 7. [UpdateCheckInterval]"
-        },
-        {
-          "key": "UpdatePath",
-          "label": "Local Update Path",
-          "type": "path",
-          "default": "",
-          "description": "Local directory that contains the Red Ink installation package for manual or network-based updates. The subfolders word, excel and outlook are expected here (including the *.vsto file; you can copy the structures from redink.zip). Example: X:\\Updates\\RedInk\\. [UpdatePath]"
-        }
-      ]
-    },
-    {
-      "id": "ini_update",
-      "title": "INI Update Mechanism",
-      "description": "Advanced central update mechanism for redink.ini and related configuration files. Use this only if your organisation distributes configuration changes centrally.",
-      "fields": [
-        {
-          "key": "UpdateIni",
-          "label": "Enable INI Updates",
-          "type": "boolean",
-          "default": "True",
-          "description": "Master switch for the INI self-update mechanism. Set this to False if configuration updates from UpdateSource should never be checked or applied. Example: True. [UpdateIni]"
-        },
-        {
-          "key": "UpdateIniAllowRemote",
-          "label": "Allow Remote Sources",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if UpdateSource may point to HTTP or HTTPS locations. Disable it to allow only local paths and UNC shares. Example: True. [UpdateIniAllowRemote]",
-          "condition": "UpdateIni == True"
-        },
-        {
-          "key": "UpdateIniNoSignature",
-          "label": "Skip Signature Check",
-          "type": "boolean",
-          "default": "False",
-          "description": "Set this to True only for testing if signature verification should be skipped. In production, keep it False so .sig files and Ed25519 verification are enforced where configured. Example: False. [UpdateIniNoSignature]",
-          "condition": "UpdateIni == True"
-        },
-        {
-          "key": "UpdateSource",
-          "label": "Update Source",
-          "type": "string",
-          "default": "",
-          "description": "Source definition for configuration updates in the format Path; Keys; PublicKey. The path may be local, UNC or remote, the keys part can be all, new or a comma-separated list. Example: https://updates.example.com/redink.ini; all; MCowBQYDK2VwAyEA... [UpdateSource]",
-          "condition": "UpdateIni == True"
-        },
-        {
-          "key": "UpdateIniIgnoreOverride",
-          "label": "Ignore Override Keys",
-          "type": "string",
-          "default": "",
-          "description": "Central override rules for the local update ignore list. Prefix each rule with + to ignore or - to enforce processing. Example: +all,-redink.ini|APIKey. [UpdateIniIgnoreOverride]",
-          "condition": "UpdateIni == True"
-        },
-        {
-          "key": "UpdateIniSilentMode",
-          "label": "Silent Mode (0=off)",
-          "type": "integer",
-          "default": "0",
-          "description": "Controls how automatically Red Ink may apply configuration changes. 0 = interactive, 1 = safe only, 2 = signed only, 3 = local trusted, 4 = all. Example: 0. [UpdateIniSilentMode]",
-          "condition": "UpdateIni == True"
-        },
-        {
-          "key": "UpdateIniSilentLog",
-          "label": "Log Silent Updates",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if regular log entries should still be written when INI updates run in silent mode. Example: True. [UpdateIniSilentLog]",
-          "condition": "UpdateIni == True"
-        },
-        {
-          "key": "UpdateIniClients",
-          "label": "Allowed Update Clients",
-          "type": "string",
-          "default": "",
-          "description": "Comma-separated Windows client names that are allowed to execute the INI update mechanism in a networked setup (use ''Client Name'' button below to identify your Windows client name). Use this to prevent many clients from checking in parallel. Example: DSKTOP01,ADMDSKTP01. [UpdateIniClients]",
-          "condition": "UpdateIni == True"
-        }
-      ]
-    },
-    {
-      "id": "access_control",
-      "title": "Configuration Access Control",
-      "description": "Administrative restrictions that control whether users may save local configuration files or download helper add-ins from within Red Ink.",
-      "fields": [
-        {
-          "key": "NoLocalConfig",
-          "label": "Disable Local Config Saving",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this to stop users from saving their own local configuration file from Settings and diverging from the central configuration. Example: True. [NoLocalConfig]"
-        },
-        {
-          "key": "NoHelperDownload",
-          "label": "Disable Helper Download",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this to prevent users from downloading the Word or Excel helper add-ins from Settings. This is useful in locked-down environments. Example: True. [NoHelperDownload]"
-        },
-        {
-            "key": "CentralConfigClients",
-            "label": "Central Config Clients",
-            "type": "string",
-            "default": "",
-            "description": "Comma-separated Windows client names that are allowed to manage or write central configuration files (use ''Client Name'' button below to identify your Windows client name). Leave empty to allow all clients. Example: DSKTOP01,ADMDSKTP01. [CentralConfigClients]"
-        },
-        {
-            "key": "CentralConfigPW",
-            "label": "Central Config Password",
-            "type": "string",
-            "default": "",
-            "description": "The password with which a user can temporarily access Expert Config and the other features of Settings if NoLocalConfig is true. If there is an encryption key in the registry, the password will first be decrypted with it (hence, it must have been encrypted with it using it, like an API key). [CentralConfigPW]"
-        }
-      ]
-    },
-    {
-      "id": "m365",
-      "title": "Microsoft 365 Integration",
-      "description": "Settings for the optional Microsoft 365 integration that lets the LLM search and retrieve the user's own emails, OneDrive/SharePoint files, Teams chats, calendar events, OneNote pages and contacts via Microsoft Graph. Auth is interactive (MSAL) on the user's PC; the resulting token is cached cross-process under %APPDATA%\\RedInk. Leave Client ID empty to disable the integration entirely.",
-      "fields": [
-        {
-          "key": "M365ClientId",
-          "label": "M365 Application (Client) ID",
-          "type": "string",
-          "default": "",
-          "description": "The Azure AD application (client) ID of the Red Ink app registration in your tenant (or a multi-tenant registration). This is the GUID shown on the App Registration overview page in Microsoft Entra ID / Azure AD. Leave empty to disable the entire M365 integration (search, mail/file/event/chat/OneNote retrieval, M365 LLM tools). Example: 11111111-2222-3333-4444-555555555555. [M365ClientId]"
-        },
-        {
-          "key": "M365TenantId",
-          "label": "M365 Tenant ID",
-          "type": "string",
-          "default": "common",
-          "description": "Azure AD tenant the app is registered in. Use the tenant GUID for single-tenant apps, your verified domain (e.g. contoso.onmicrosoft.com), 'organizations' to allow any work/school account, or 'common' to allow both work/school and personal Microsoft accounts. Defaults to 'common' when empty. Example: contoso.onmicrosoft.com. [M365TenantId]",
-          "condition": "M365ClientId != \"\""
-        },
-        {
-          "key": "M365Scopes",
-          "label": "M365 Graph Scopes",
-          "type": "string",
-          "default": "openid profile offline_access User.Read Mail.Read Files.Read Files.Read.All Sites.Read.All Calendars.Read Chat.Read ChannelMessage.Read.All Notes.Read.All People.Read Contacts.Read",
-          "description": "Space-separated list of Microsoft Graph delegated permission scopes requested at sign-in. Must match the scopes consented to in the Azure AD app registration; users will see a consent prompt if any are new. Keep openid/profile/offline_access for sign-in and silent token refresh. The default covers full read-only access across mail, files (personal + shared + SharePoint), calendar, Teams chats and channel messages, OneNote, people and contacts — everything the M365 LLM tools can call. ADMIN CONSENT: Files.Read.All, Sites.Read.All, ChannelMessage.Read.All, Notes.Read.All, People.Read and Contacts.Read are admin-consent scopes; a tenant admin must grant consent once before regular users can sign in. Reduce the list to a stricter subset (e.g. ''openid profile offline_access User.Read Mail.Read Calendars.Read'') to limit the surface, at the cost of disabling the corresponding tools. Example: openid profile offline_access User.Read Mail.Read Files.Read.All Sites.Read.All Calendars.Read. [M365Scopes]",
-          "condition": "M365ClientId != \"\""
-        }
-      ]
-    },
-    {
-      "id": "registry_fixes",
-      "title": "Registry Fixes",
-      "description": "Optional registry entries applied at startup to harden the Office add-in against being disabled or to enforce specific load behaviours. Each entry uses the pipe-delimited format Host|RegPath|ValueName|ValueKind|Data. Only HKEY_CURRENT_USER is allowed. Supported tokens: {ProgID}, {Host}, {HostVersion}. Leave empty to skip.",
-      "fields": [
-        {
-          "key": "RegFix_1",
-          "label": "Registry Fix 1",
-          "type": "string",
-          "default": "",
-          "description": "First registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Outlook|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\{HostVersion}\\Outlook\\Resiliency\\DoNotDisableAddinList|{ProgID}|DWORD|1. [RegFix_1]"
-        },
-        {
-          "key": "RegFix_2",
-          "label": "Registry Fix 2",
-          "type": "string",
-          "default": "",
-          "description": "Second registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Word|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\{HostVersion}\\Word\\Resiliency\\DoNotDisableAddinList|{ProgID}|DWORD|1. [RegFix_2]"
-        },
-        {
-          "key": "RegFix_3",
-          "label": "Registry Fix 3",
-          "type": "string",
-          "default": "",
-          "description": "Third registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Excel|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\{HostVersion}\\Excel\\Resiliency\\DoNotDisableAddinList|{ProgID}|DWORD|1. [RegFix_3]"
-        },
-        {
-          "key": "RegFix_4",
-          "label": "Registry Fix 4",
-          "type": "string",
-          "default": "",
-          "description": "Fourth registry fix entry in the format Host|RegPath|ValueName|ValueKind|Data. Host can be Outlook, Word, Excel or All. Only HKEY_CURRENT_USER paths are allowed. Use {ProgID}, {Host} and {HostVersion} as placeholders. Example: Outlook|HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\Outlook\\Addins\\{ProgID}|LoadBehavior|DWORD|3. [RegFix_4]"
-        }
-      ]
-    }
-  ]
+    ]
 }

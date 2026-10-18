@@ -47,6 +47,39 @@ Partial Public Class ThisAddIn
     ''' <summary>Reserved body/header space in attachment-only follow-up messages.</summary>
     Private Const AP_OutgoingFollowUpReserveBytes As Long = 512L * 1024L
 
+    Private Const AP_SubmissionProperty As System.String = "http://schemas.microsoft.com/mapi/string/{00020329-0000-0000-C000-000000000046}/RedInkSubmissionAttempt"
+
+    Private Shared ReadOnly AP_SubmittedMailObjects As New System.Runtime.CompilerServices.ConditionalWeakTable(Of Microsoft.Office.Interop.Outlook.MailItem, System.Object)()
+
+    ' Persist intent BEFORE Send where supported. A transport exception never authorizes resubmission.
+    Private Sub SubmitAutoPilotMailOnce(mail As Microsoft.Office.Interop.Outlook.MailItem)
+        If mail Is Nothing Then Throw New System.ArgumentNullException(NameOf(mail))
+        Dim previous As System.Object = Nothing
+        If AP_SubmittedMailObjects.TryGetValue(mail, previous) Then Throw New System.InvalidOperationException("This mail object already has a submission attempt.")
+        Dim accessor As Microsoft.Office.Interop.Outlook.PropertyAccessor = Nothing
+        Dim submissionId As System.String = System.Guid.NewGuid().ToString("N")
+        Try
+            ' All callers pass a newly created reply/message. Do not treat inherited source
+            ' properties as this new message's send state; the marker is an audit reference.
+            AP_SubmittedMailObjects.Add(mail, New System.Object())
+            Try
+                accessor = mail.PropertyAccessor
+                accessor.SetProperty(AP_SubmissionProperty, submissionId)
+                mail.Save()
+            Catch ex As System.Exception
+                ' Some stores do not support named properties. Preserve ordinary first-send behavior,
+                ' but never reopen this uncertain message for an automatic second submission.
+                ApDashboardLog("Submission marker persistence unavailable for " & submissionId & ": " & ex.Message & ". Automatic resubmission is disabled.", "warn")
+            End Try
+            ApDashboardLog("Mail submission attempt: " & submissionId, "step")
+            mail.Send()
+        Finally
+            If accessor IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(accessor) : Catch ex As System.Exception : End Try
+            End If
+        End Try
+    End Sub
+
     Private NotInheritable Class AutoPilotOutgoingDeliveryPlan
         Public Property PrimaryAttachments As New System.Collections.Generic.List(Of String)()
         Public Property FollowUpBatches As New System.Collections.Generic.List(Of System.Collections.Generic.List(Of String))()
@@ -180,7 +213,8 @@ Partial Public Class ThisAddIn
                                                  cleanupIsEligible As Boolean,
                                                  cleanupAnsweredUtc As DateTime?,
                                                  cleanupDeleteAfterUtc As DateTime?,
-                                                 Optional disclaimerHtml As System.String = "")
+                                                 Optional disclaimerHtml As System.String = "",
+                                                 Optional ccRecipientAddresses As System.Collections.Generic.IEnumerable(Of System.String) = Nothing)
         If plan Is Nothing OrElse Not plan.UsesAttachmentFollowUps Then Return
 
         Dim recipients As New System.Collections.Generic.List(Of String)()
@@ -192,6 +226,12 @@ Partial Public Class ThisAddIn
                 ToList()
         End If
 
+        Dim ccAddresses As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If ccRecipientAddresses IsNot Nothing Then
+            For Each address In ccRecipientAddresses
+                If Not System.String.IsNullOrWhiteSpace(address) AndAlso Not recipients.Contains(address, System.StringComparer.OrdinalIgnoreCase) Then ccAddresses.Add(address.Trim())
+            Next
+        End If
         If recipients.Count = 0 Then
             Throw New System.InvalidOperationException(
                 "Attachment follow-up delivery has no resolved recipient address.")
@@ -203,11 +243,11 @@ Partial Public Class ThisAddIn
             Try
                 followUp = Application.CreateItem(Microsoft.Office.Interop.Outlook.OlItemType.olMailItem)
 
-                For Each address As String In recipients
+                For Each address As String In recipients.Concat(ccAddresses)
                     Dim recipient As Microsoft.Office.Interop.Outlook.Recipient = Nothing
                     Try
                         recipient = followUp.Recipients.Add(address)
-                        recipient.Type = Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo
+                        recipient.Type = CInt(If(ccAddresses.Contains(address), Microsoft.Office.Interop.Outlook.OlMailRecipientType.olCC, Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo))
                     Finally
                         If recipient IsNot Nothing Then
                             Try
@@ -263,7 +303,7 @@ Partial Public Class ThisAddIn
 
                 Dim sentSubject As String = followUp.Subject
                 Dim sentTo As String = followUp.To
-                followUp.Send()
+                SubmitAutoPilotMailOnce(followUp)
 
                 Try
                     MoveLastSentToInkyReplies(

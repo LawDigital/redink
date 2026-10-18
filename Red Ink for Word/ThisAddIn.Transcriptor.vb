@@ -1282,7 +1282,7 @@ Partial Public Class ThisAddIn
                     ResolveGoogleSttSetting(d.ModelOrTag, "live_vertex_endpoint", ResolveGoogleSttSetting(d.ModelOrTag, "vertex_endpoint", "")),
                     ResolveGoogleSttSetting(d.ModelOrTag, "vertex_endpoint", ""))
 
-                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Authentication", "Vertex OAuth2 / configured service account"))
+                result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Authentication", "Google Enterprise Agent Platform OAuth2 / configured service account"))
                 result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Location", location))
                 result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Model", model))
                 result.Add(New System.Collections.Generic.KeyValuePair(Of System.String, System.String)("Endpoint", ResolveGeminiEndpointForDisplay(location, model, live, True, endpointOverride)))
@@ -1465,7 +1465,7 @@ Partial Public Class ThisAddIn
                         Return New GeminiTranscribeEngine(GetApiKeyFromModelConfig(googleApiKeyConfig), configuredApiModel, configuredMode, configuredWordTimestamp, configuredVocabulary, configuredApiEndpoint)
                     End If
 
-                    Throw New System.InvalidOperationException("No usable Google Vertex OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe.")
+                    Throw New System.InvalidOperationException("No usable Google Enterprise Agent Platform OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe.")
 
                 Case EngineKind.GeminiTranscribeLive
                     Dim configuredModeLive As String = ResolveGoogleSttSetting(d.ModelOrTag, "mode", "VERBATIM")
@@ -1491,7 +1491,7 @@ Partial Public Class ThisAddIn
                         Return New GeminiTranscribeLiveEngine(GetApiKeyFromModelConfig(googleApiKeyConfigLive), configuredApiLiveModel, configuredModeLive, configuredVocabularyLive, configuredApiLiveEndpoint)
                     End If
 
-                    Throw New System.InvalidOperationException("No usable Google Vertex OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe Live.")
+                    Throw New System.InvalidOperationException("No usable Google Enterprise Agent Platform OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe Live.")
 
                 Case EngineKind.OpenAiRest
                     Dim key As String = ResolveOpenAiKey()
