@@ -241,6 +241,24 @@ Namespace Agents
             Return Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
         End Function
 
+        Public Shared Function ResolveDownloadDirectory(requestedDirectory As System.String) As System.String
+            Dim root As System.String = System.String.Empty
+            Dim workspace As WorkspaceState = WorkspaceTools.Active
+            If workspace IsNot Nothing AndAlso workspace.AllowWrite AndAlso
+               Not System.String.IsNullOrWhiteSpace(workspace.RootPath) AndAlso System.IO.Directory.Exists(workspace.RootPath) Then
+                root = workspace.RootPath
+            ElseIf Not System.String.IsNullOrWhiteSpace(SessionStagingRoot) AndAlso System.IO.Directory.Exists(SessionStagingRoot) Then
+                root = SessionStagingRoot
+            End If
+            If System.String.IsNullOrWhiteSpace(root) Then Throw New System.InvalidOperationException("No writable workspace or session staging area is available for downloads.")
+            root = Resolve(root, PathAccess.Write)
+            Dim requested As System.String = If(requestedDirectory, System.String.Empty).Trim()
+            Dim target As System.String = If(requested = System.String.Empty, root,
+                If(System.IO.Path.IsPathRooted(requested), System.IO.Path.GetFullPath(requested), System.IO.Path.GetFullPath(System.IO.Path.Combine(root, requested))))
+            If Not IsUnder(target, root) Then Throw New System.UnauthorizedAccessException("Download directory is outside the active writable workspace/session staging root.")
+            Return Resolve(target, PathAccess.Write)
+        End Function
+
         ' --------------------------------------------------------------- validation
 
         ''' <summary>

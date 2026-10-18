@@ -478,63 +478,20 @@ Partial Public Class ThisAddIn
         Dim doc As Microsoft.Office.Interop.Word.Document = sel.Range.Document
 
         Try
-            ' Resolve the active comment and its target range (mirrors BalloonMerge logic)
-            Dim activeComment As Microsoft.Office.Interop.Word.Comment = Nothing
-
-            If sel.StoryType = WdStoryType.wdCommentsStory Then
-                For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
-                    If sel.Range.Start >= c.Range.Start AndAlso
-                       sel.Range.End <= c.Range.End Then
-                        activeComment = c : Exit For
-                    End If
-                Next
-            Else
-                For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
-                    Dim anchor As Range = c.Scope
-                    If sel.Range.End > anchor.Start AndAlso
-                       sel.Range.Start < anchor.End Then
-                        activeComment = c : Exit For
-                    End If
-                Next
-            End If
-
-            If activeComment Is Nothing Then
-                ShowCustomMessageBox(
-                    "This command only works when the cursor is inside a comment " &
-                    "balloon or on text that has a comment.")
+            ' Capture once, before visibility helpers can change the live Word selection.
+            Dim mergeContext As BalloonMergeContext = CaptureBalloonMergeContext(sel, selectWholeParagraph)
+            If mergeContext Is Nothing Then
+                ShowCustomMessageBox("This command only works when the cursor is inside a comment balloon or on text that has a comment.")
                 Return
             End If
-
-            ' Capture the balloon comment text BEFORE the merge (BalloonMerge may delete it)
-            Dim balloonCommentText As String = String.Empty
-            Try
-                balloonCommentText = activeComment.Range.Text
-            Catch
-            End Try
-
-            ' Determine target range (same logic as BalloonMerge)
-            Dim anchorRange As Range = activeComment.Scope
-            Dim targetRange As Range
-
-            If selectWholeParagraph Then
-                If anchorRange.Paragraphs.Count > 0 Then
-                    Dim firstPara As Range = anchorRange.Paragraphs(1).Range
-                    Dim lastPara As Range = anchorRange.Paragraphs(anchorRange.Paragraphs.Count).Range
-                    targetRange = doc.Range(firstPara.Start, lastPara.End)
-                Else
-                    targetRange = doc.Range(anchorRange.Start, anchorRange.Start).Paragraphs(1).Range
-                End If
-            Else
-                targetRange = anchorRange
-            End If
-
-            targetRange = targetRange.Duplicate
+            Dim balloonCommentText As System.String = mergeContext.FullCommentText
+            Dim targetRange As Microsoft.Office.Interop.Word.Range = mergeContext.TargetRange.Duplicate
 
             ' Capture original visible text BEFORE the merge (treats tracked changes as accepted).
-            ' Pass the comment range as restoreRange so the selection returns to the
-            ' comment balloon afterwards — BalloonMerge expects it there.
-            Dim restoreRange As Range = If(sel.StoryType = WdStoryType.wdCommentsStory,
-                                           activeComment.Range, Nothing)
+            ' Restore the original selection; the merge consumes its captured context
+            ' and does not resolve a new comment or fragment from the live selection.
+            Dim restoreRange As Microsoft.Office.Interop.Word.Range = If(mergeContext.SelectionWasInComment,
+                                           mergeContext.OriginalSelection, Nothing)
             Dim dummyRange As Range = Nothing
             Dim originalText As String = GetVisibleTextSafe(targetRange, restoreRange, dummyRange)
 
@@ -542,8 +499,8 @@ Partial Public Class ThisAddIn
             ' of the replaced text, giving us the end boundary.
             Dim premergeStart As Integer = targetRange.Start
 
-            ' Perform the standard BalloonMerge
-            Await BalloonMerge(selectWholeParagraph, Silent)
+            ' Apply the same captured comment and instruction source.
+            If Not Await ApplyBalloonMergeContextAsync(mergeContext, Silent) Then Return
 
             Await EnsureUIThread()
 

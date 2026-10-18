@@ -4040,8 +4040,6 @@ Namespace SharedLibrary
                 Sub()
                     Dim wasTopMost As Boolean = form.TopMost
                     form.TopMost = False
-                    form.Enabled = False
-                    Application.DoEvents()
 
                     Try
                         ' Load wizard definition
@@ -4057,7 +4055,8 @@ Namespace SharedLibrary
                         ' Read current values from the selected file
                         Dim iniValues = ConfigWizardEngine.ReadIniValues(iniPath)
 
-                        ' Show wizard form
+                        ' Show with the existing, same-thread owner. ShowDialog disables and
+                        ' re-enables it automatically; do not manually disable it first.
                         Using wizForm As New ConfigWizardForm(context, wizDef, iniPath, iniValues)
                             Dim result = wizForm.ShowDialog(form)
 

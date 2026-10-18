@@ -176,14 +176,17 @@ Partial Public Class ThisAddIn
             context.Log("bootstrapParseError=" & decision.ParseError, "diag")
         End If
 
-        If Not String.IsNullOrWhiteSpace(explicitUserLanguage) Then
-            context.SequencingState.UserLanguage = explicitUserLanguage.Trim()
-            decision.LanguageApplied = True
-            context.Log("Bootstrap language skipped because an explicit user language was supplied: " & context.SequencingState.UserLanguage, "diag")
-        ElseIf decision.LanguageValid Then
+        ' The detected language of the latest user request takes precedence over the
+        ' caller-provided language, which may merely be the Office UI culture.
+        ' A configured language is used only when the bootstrap cannot identify one.
+        If decision.LanguageValid Then
             context.SequencingState.UserLanguage = decision.Language
             decision.LanguageApplied = True
-            context.Log("Bootstrap response language applied: " & decision.Language, "diag")
+            context.Log("Bootstrap detected request language applied: " & decision.Language, "diag")
+        ElseIf Not String.IsNullOrWhiteSpace(explicitUserLanguage) Then
+            context.SequencingState.UserLanguage = explicitUserLanguage.Trim()
+            decision.LanguageApplied = True
+            context.Log("Bootstrap request language unclear; configured language fallback applied: " & context.SequencingState.UserLanguage, "diag")
         End If
 
         If decision.SourceFormatAuthorityValid AndAlso context.SequencingState IsNot Nothing Then

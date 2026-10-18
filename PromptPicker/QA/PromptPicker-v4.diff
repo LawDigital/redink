@@ -1,0 +1,282 @@
+--- v3/PromptPicker/LICENSE.txt
++++ v4/PromptPicker/LICENSE.txt
+@@ -1,20 +1,21 @@
+-ASK INKY – RED INK COMPONENT NOTICE
+-================================
+-
+-Ask Inky is part of Red Ink and is subject to the Red Ink License reproduced below without amendment.
+-The term Red Ink includes Ask Inky for purposes of this distribution.
+-
+-Ask Inky has direct package dependencies on:
+-- Markdig 0.41.3 – Alexandre Mutel and contributors – BSD-2-Clause.
+-  https://github.com/xoofx/markdig
+-- Microsoft.Web.WebView2 1.0.2903.40 – Microsoft Corporation – Microsoft.Web.WebView2 license.
+-  https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.2903.40
+-- .NET runtime components distributed with the self-contained executable – Microsoft Corporation and contributors; applicable .NET component licenses.
++RED INK PROMPT PICKER – LIZENZHINWEISE
++======================================
++
++Red Ink Prompt Picker ist Teil von Red Ink. Es gelten die nachfolgend
++unverändert wiedergegebenen Red-Ink-Lizenzbedingungen.
++
++Direkte Abhängigkeiten und verwendete Komponenten:
++- Microsoft.Web.WebView2 1.0.2903.40 – Microsoft Corporation; Microsoft-
++  WebView2-Lizenz: https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.2903.40
++- Microsoft .NET 8 und Windows Forms – Microsoft Corporation und
++  Mitwirkende; einschlägige .NET-Komponentenlizenzen:
+   https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+-
+-Ask Inky also includes adapted Lucide/Feather SVG icon paths and the Office Web CSS styling. Corresponding third-party notices from the Red Ink license are reproduced below. The Red Ink branding is owned by its respective rights holder.
+-
+-The following is the existing Red Ink license and notices as supplied, preserved verbatim. Third-party packages listed there for the wider Red Ink suite are not necessarily used by Ask Inky.
++- Einfache SVG-/Liniensymbole in Anlehnung an die bestehenden
++  Red-Ink-/Ask-Inky-Darstellungsressourcen; Hinweise siehe unten.
++
++Die folgenden Red-Ink-Lizenztexte und Hinweise sind aus der bereitgestellten
++Projektbasis uebernommen. Drittkomponenten der gesamten Red-Ink-Suite
++müssen nicht zwingend in Prompt Picker selbst enthalten sein.
+ 
+ RED INK 
+ =======
+--- /dev/null
++++ v4/PromptPicker/LegalResources.vb
+@@ -0,0 +1,19 @@
++' Part of Red Ink (Prompt Picker). Embedded license and notices, offline only.
++Option Strict On
++Option Explicit On
++
++Friend NotInheritable Class LegalResources
++    Private Sub New()
++    End Sub
++
++    Public Shared ReadOnly Property LicenseText As String
++        Get
++            Using stream As System.IO.Stream = GetType(LegalResources).Assembly.GetManifestResourceStream("PromptPicker.LICENSE.txt")
++                If stream Is Nothing Then Throw New System.IO.FileNotFoundException("Eingebettete Lizenzhinweise fehlen.")
++                Using reader As New System.IO.StreamReader(stream, System.Text.Encoding.UTF8, True)
++                    Return reader.ReadToEnd()
++                End Using
++            End Using
++        End Get
++    End Property
++End Class
+--- /dev/null
++++ v4/PromptPicker/LicenseInfoForm.vb
+@@ -0,0 +1,79 @@
++' Part of Red Ink (Prompt Picker). Calm, read-only license viewer launched from the tray.
++Option Strict On
++Option Explicit On
++
++Friend NotInheritable Class LicenseInfoForm
++    Inherits System.Windows.Forms.Form
++
++    Public Sub New()
++        Text = "Red Ink Prompt Picker – Lizenzhinweise"
++        ClientSize = New System.Drawing.Size(740, 550)
++        MinimumSize = New System.Drawing.Size(490, 375)
++        StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
++        AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
++        ShowInTaskbar = False
++        TopMost = True
++        BackColor = PickerUi.Surface
++        Font = New System.Drawing.Font("Segoe UI", 9.0F)
++        Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath)
++
++        Dim layout As New System.Windows.Forms.TableLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .Padding = New System.Windows.Forms.Padding(17, 14, 17, 12),
++            .ColumnCount = 1,
++            .RowCount = 4
++        }
++        layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 45.0F))
++        Controls.Add(layout)
++
++        Dim heading As New System.Windows.Forms.Label With {
++            .Text = "Red Ink · Lizenz und Drittanbieterhinweise",
++            .AutoSize = True,
++            .Font = New System.Drawing.Font("Segoe UI", 10.0F, System.Drawing.FontStyle.Regular),
++            .ForeColor = PickerUi.Ink,
++            .Margin = New System.Windows.Forms.Padding(0, 0, 0, 4)
++        }
++        layout.Controls.Add(heading, 0, 0)
++
++        Dim copyrightInfo As New System.Windows.Forms.Label With {
++            .Text = "© 2025– LawDigital Ltd., Schweiz · redink.ai",
++            .AutoSize = True,
++            .ForeColor = PickerUi.Muted,
++            .Margin = New System.Windows.Forms.Padding(0, 0, 0, 11)
++        }
++        layout.Controls.Add(copyrightInfo, 0, 1)
++
++        Dim viewer As New System.Windows.Forms.TextBox With {
++            .Text = LegalResources.LicenseText,
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .Margin = New System.Windows.Forms.Padding(0),
++            .Multiline = True,
++            .ReadOnly = True,
++            .ScrollBars = System.Windows.Forms.ScrollBars.Vertical,
++            .WordWrap = True,
++            .BackColor = System.Drawing.Color.White,
++            .ForeColor = PickerUi.Ink,
++            .BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle,
++            .Font = New System.Drawing.Font("Segoe UI", 9.0F),
++            .AccessibleName = "Lizenztext"
++        }
++        layout.Controls.Add(viewer, 0, 2)
++
++        Dim buttons As New System.Windows.Forms.FlowLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft,
++            .WrapContents = False,
++            .Margin = New System.Windows.Forms.Padding(0, 10, 0, 0)
++        }
++        Dim closeButton As System.Windows.Forms.Button = PickerUi.ActionButton("Schliessen", "close", False, 115)
++        closeButton.DialogResult = System.Windows.Forms.DialogResult.OK
++        buttons.Controls.Add(closeButton)
++        layout.Controls.Add(buttons, 0, 3)
++        AcceptButton = closeButton
++        CancelButton = closeButton
++    End Sub
++End Class
+--- v3/PromptPicker/PickerContext.vb
++++ v4/PromptPicker/PickerContext.vb
+@@ -22,6 +22,8 @@
+         menu = New System.Windows.Forms.ContextMenuStrip With {.ShowImageMargin = False}
+         menu.Items.Add("Prompt Picker öffnen", Nothing, Sub(sender As Object, e As System.EventArgs) BeginPicker(False))
+         menu.Items.Add("Tastenkombination ändern …", Nothing, Sub(sender As Object, e As System.EventArgs) ShowShortcutSettings())
++        menu.Items.Add(New System.Windows.Forms.ToolStripSeparator())
++        menu.Items.Add("Lizenzhinweise …", Nothing, Sub(sender As Object, e As System.EventArgs) ShowLicenseInformation())
+         menu.Items.Add("Beenden", Nothing, Sub(sender As Object, e As System.EventArgs) ExitThread())
+         DirectCast(menu.Items(0), System.Windows.Forms.ToolStripMenuItem).ShortcutKeyDisplayString = ShortcutService.Describe(currentSettings.HotkeyModifiers, currentSettings.HotkeyKey)
+         tray = New System.Windows.Forms.NotifyIcon With {
+@@ -145,6 +147,18 @@
+         End Try
+     End Sub
+ 
++    Private Sub ShowLicenseInformation()
++        If exiting Then Return
++        Try
++            Using license As New LicenseInfoForm()
++                license.ShowDialog()
++            End Using
++        Catch ex As System.Exception
++            AppLog.Write("license.view.failed", ex)
++            System.Windows.Forms.MessageBox.Show("Die Lizenzhinweise konnten nicht angezeigt werden.", "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
++        End Try
++    End Sub
++
+     Private Sub ShowShortcutSettings()
+         If running OrElse exiting Then Return
+         Using settings As New ShortcutSettingsForm(currentSettings)
+--- v3/PromptPicker/PickerForm.vb
++++ v4/PromptPicker/PickerForm.vb
+@@ -59,7 +59,12 @@
+     End Sub
+ 
+     Private Sub RestoreWindowPosition()
+-        If Not windowSettings.PickerX.HasValue OrElse Not windowSettings.PickerY.HasValue Then Return
++        ' Keep the wider first-run default entirely reachable on smaller screens.
++        ' Explicitly saved user sizes/positions remain authoritative whenever visible.
++        If Not windowSettings.PickerX.HasValue OrElse Not windowSettings.PickerY.HasValue Then
++            FitWindowToWorkArea(System.Windows.Forms.Screen.FromControl(Me).WorkingArea)
++            Return
++        End If
+         Dim desired As New System.Drawing.Rectangle(windowSettings.PickerX.Value, windowSettings.PickerY.Value, Width, Height)
+         Dim visibleScreen As System.Windows.Forms.Screen = Nothing
+         Dim largest As Long = 0
+@@ -71,7 +76,10 @@
+                 visibleScreen = display
+             End If
+         Next
+-        If visibleScreen Is Nothing OrElse largest < 80L * 80L Then Return
++        If visibleScreen Is Nothing OrElse largest < 80L * 80L Then
++            FitWindowToWorkArea(System.Windows.Forms.Screen.FromControl(Me).WorkingArea)
++            Return
++        End If
+         Dim limits As System.Drawing.Rectangle = visibleScreen.WorkingArea
+         ' Bring an oversized old window back inside the visible work area.
+         Dim bounds As New System.Drawing.Rectangle(desired.Location, New System.Drawing.Size(System.Math.Min(desired.Width, limits.Width), System.Math.Min(desired.Height, limits.Height)))
+@@ -79,6 +87,12 @@
+         bounds.Y = System.Math.Clamp(bounds.Y, limits.Top, limits.Bottom - bounds.Height)
+         StartPosition = System.Windows.Forms.FormStartPosition.Manual
+         Bounds = bounds
++    End Sub
++
++    Private Sub FitWindowToWorkArea(workArea As System.Drawing.Rectangle)
++        If Width > workArea.Width OrElse Height > workArea.Height Then
++            Size = New System.Drawing.Size(System.Math.Min(Width, workArea.Width), System.Math.Min(Height, workArea.Height))
++        End If
+     End Sub
+ 
+     Public Sub CaptureWindowSettings()
+--- v3/PromptPicker/PickerSettings.vb
++++ v4/PromptPicker/PickerSettings.vb
+@@ -5,7 +5,11 @@
+     ' settings.json files backward compatible and retain CenterScreen on first use.
+     Public Property PickerX As Integer? = Nothing
+     Public Property PickerY As Integer? = Nothing
+-    Public Property PickerClientWidth As Integer = 760
++    ' First-run width: 760 * 1.5 = 1140 client pixels. Previously customised
++    ' window sizes continue to win over the default on subsequent launches.
++    Public Const CurrentPickerLayoutVersion As Integer = 2
++    Public Property PickerLayoutVersion As Integer = CurrentPickerLayoutVersion
++    Public Property PickerClientWidth As Integer = 1140
+     Public Property PickerClientHeight As Integer = 540
+     Public Property PreviewPercent As Integer = 55
+ End Class
+@@ -22,8 +26,26 @@
+     Public Shared Function Load() As PickerSettings
+         Try
+             If Not System.IO.File.Exists(ConfigPath) Then Return New PickerSettings()
+-            Dim data As PickerSettings = System.Text.Json.JsonSerializer.Deserialize(Of PickerSettings)(System.IO.File.ReadAllText(ConfigPath))
+-            If data IsNot Nothing AndAlso ShortcutService.IsValid(data.HotkeyModifiers, data.HotkeyKey) Then Return data
++            Dim json As String = System.IO.File.ReadAllText(ConfigPath)
++            Dim data As PickerSettings = System.Text.Json.JsonSerializer.Deserialize(Of PickerSettings)(json)
++            If data IsNot Nothing AndAlso ShortcutService.IsValid(data.HotkeyModifiers, data.HotkeyKey) Then
++                ' v3 persisted its *default* width as 760. An ordinary default
++                ' change would never reach upgraded installations. Apply the
++                ' one-time migration only to that legacy default, not to
++                ' deliberately resized windows. An explicit version field
++                ' prevents migrating a user-sized 760px window on later runs.
++                Using document As System.Text.Json.JsonDocument = System.Text.Json.JsonDocument.Parse(json)
++                    Dim legacyVersion As System.Text.Json.JsonElement
++                    Dim isLegacy As Boolean = Not document.RootElement.TryGetProperty(NameOf(PickerSettings.PickerLayoutVersion), legacyVersion)
++                    If Not isLegacy AndAlso legacyVersion.ValueKind = System.Text.Json.JsonValueKind.Number Then
++                        Dim version As Integer
++                        isLegacy = legacyVersion.TryGetInt32(version) AndAlso version < PickerSettings.CurrentPickerLayoutVersion
++                    End If
++                    If isLegacy AndAlso data.PickerClientWidth = 760 Then data.PickerClientWidth = 1140
++                End Using
++                data.PickerLayoutVersion = PickerSettings.CurrentPickerLayoutVersion
++                Return data
++            End If
+         Catch ex As System.Exception
+             AppLog.Write("settings.read.failed.default-used", ex)
+         End Try
+--- v3/PromptPicker/README.md
++++ v4/PromptPicker/README.md
+@@ -7,7 +7,7 @@
+ 1. Bei Erstinstallation den Ordner `PromptPicker` neben `AskInky` ablegen und bei Bedarf die Solution aus der Erstlieferung verwenden. Bei diesem UI-Update die Dateien aus dem Änderungs-ZIP mit gleicher Verzeichnisstruktur im bestehenden Projekt überschreiben.
+ 2. In **Visual Studio 2022**, mit .NET-8-Windows-Desktop-Workload, `PromptPicker` als Startprojekt setzen und erstellen. NuGet stellt `Microsoft.Web.WebView2` 1.0.2903.40 wieder her.
+ 3. `PromptPicker.exe` starten; die App läuft ausschliesslich im Tray. Standardmässig öffnet **Ctrl+Alt+P** den Picker, separat von den Ask-Inky-Hotkeys Ctrl+Alt+K und Ctrl+Alt+O.
+-4. Per Rechtsklick auf das Tray-Icon: Picker öffnen, globalen Hotkey anpassen oder beenden. Hotkey, Picker-Fensterposition, Fenstergrösse und Breitenverhältnis der Vorschau liegen gemeinsam unter `%AppData%\Red Ink\PromptPicker\settings.json`, nicht in `redink.ini`. Bestehende `settings.json`-Dateien mit nur der Hotkey-Einstellung bleiben kompatibel. Die Fensterkoordinaten werden beim Wiederöffnen anhand der aktuell angeschlossenen Bildschirme geprüft; ein entferntes Monitorlayout führt zur zentrierten Darstellung.
++4. Per Rechtsklick auf das Tray-Icon: Picker öffnen, globalen Hotkey anpassen, **Lizenzhinweise anzeigen** oder beenden. Hotkey, Picker-Fensterposition, Fenstergrösse und Breitenverhältnis der Vorschau liegen gemeinsam unter `%AppData%\Red Ink\PromptPicker\settings.json`, nicht in `redink.ini`. Bestehende `settings.json`-Dateien mit nur der Hotkey-Einstellung bleiben kompatibel. Die Fensterkoordinaten werden beim Wiederöffnen anhand der aktuell angeschlossenen Bildschirme geprüft; ein entferntes Monitorlayout führt zur zentrierten Darstellung.
+ 
+ `dotnet publish PromptPicker.vbproj -c Release -r win-x64` erstellt gemäss `.vbproj` eine Self-contained Single-file-Veröffentlichung. Eine Authenticode-Signatur und Windows-/VSTO-Kompilierung sind **nicht** Bestandteil dieser Lieferung.
+ 
+@@ -23,6 +23,11 @@
+ 6. Die Ini-Datei und die zentrale Library werden unter keinen Umständen geschrieben. Fehlende/unlesbare Bibliotheken werden wie beim Add-in übersprungen und im Log protokolliert.
+ 
+ **HTTPS-Einschränkung:** Die Quell-URL wird mit einem .NET-HTTPS-Client (ohne Redirects, mit automatischer Client-Zertifikatswahl und Windows-Standardanmeldung) gelesen. Add-in-spezifische konfigurierbare HTTP-Stacks der konfigurierbare Auswahlmechanismus des Add-in-HTTP-Stacks aus `ConfigurationResourceLoader` sind in dieser eigenständigen App nicht enthalten. Wird eine Client-Zertifikats-authentifizierte Konfigurations-URL verwendet, muss der Transport entsprechend dem vorhandenen Unternehmens-Setup erweitert werden. Der Auflösungs-/Parsing-Algorithmus selbst entspricht Word.
++
++
++## Lizenzhinweise im Tray
++
++Der Tray-Menüpunkt **„Lizenzhinweise …“** (zwischen Hotkey-Einstellungen und Beenden) öffnet einen schlichten, skalierbaren Nur-Lese-Dialog mit Copyrightangabe und den vollständigen eingebetteten Red-Ink-Lizenzbedingungen sowie Drittanbieterhinweisen. Dafür ist weder eine Internetverbindung noch Zugriff auf `redink.ini` nötig. `LICENSE.txt` wurde im einleitenden Komponentenhinweis von Ask Inky auf Prompt Picker umgestellt; der eigentliche Red-Ink-Lizenztext ab der Überschrift `RED INK` bleibt bytegenau unverändert. Die Lizenzhinweise werden bewusst nicht als zusätzlicher Header im Picker angezeigt.
+ 
+ ## Auswahl und lokales Speichern
+ 

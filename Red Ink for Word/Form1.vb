@@ -630,21 +630,21 @@ Public Class frmAIChat
         AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
         ' Configure instructions label
-        Dim baseInstructions As String = "Enter your question and Enter (or 'Send'). You can allow the chatbot to do actions on your document (search, replace, delete, insert text and add or reply to comments). It does not see deletions, markups as such or formatting."
+        Dim baseInstructions As String = "Ask a question (Enter/Send). Allow edits if needed. Chat sees visible text."
 
         If _context.INI_PromptLib Then
-            baseInstructions &= " Type '/' at the start of a prompt or after whitespace to insert a prompt from the prompt library."
+            baseInstructions &= " '/' inserts library prompts."
         End If
 
         Dim toolTriggerAvailable As Boolean =
             SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
 
         If toolTriggerAvailable Then
-            baseInstructions &= $" Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request."
+            baseInstructions &= $" '{ToolTrigger}': {Globals.ThisAddIn.ToolFriendlyName.ToLower} model, once."
         End If
 
         If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
-            baseInstructions &= " Type '(sa)' to retrieve evidence from the selected Semantic Archives, or '(sa: archive:""Name"" query)' for a named archive. This also works without agent tools."
+            baseInstructions &= " SA (no tools needed): (sa) or (sa: archive:""Name"" query)."
         End If
 
         lblInstructions.Text = baseInstructions
@@ -5621,7 +5621,12 @@ Public Class frmAIChat
             End If
 
             If Not commandSuccess AndAlso Not String.IsNullOrWhiteSpace(commandDescription) Then
-                FailedCommandsList.Add($"Failed: {commandDescription}")
+                Select Case pc.Command.ToLowerInvariant()
+                    Case "replace", "insert", "insertbefore", "insertafter", "format"
+                        ' A partial apply must never leave last_change pointing at an older action.
+                        _lastRecentWordChangeId = ""
+                End Select
+                FailedCommandsList.Add($"Failed or incomplete: {commandDescription}. Check the affected passage before retrying; other commands may already have succeeded.")
             End If
 
             If LastCommandsList <> CommandsList Then
@@ -6486,6 +6491,19 @@ Public Class frmAIChat
                     Exit Do
                 End If
 
+                ' Word.Find may match text retained only in tracked deletions. Check the
+                ' current visible source before counting occurrences or planning any edit.
+                Dim visibleMatchText As System.String = Globals.ThisAddIn.GetVisibleText(doc.Range(selStart, selEnd))
+                If Not WordSearchHelper.IsEquivalentSearchText(visibleMatchText, oldText) Then
+                    LogReplaceDiag($"PASS1 rejecting non-current visible match [{selStart},{selEnd}]")
+                    Dim nextVisibleSearch As System.Int32 = System.Math.Max(selEnd, requestedSearchStart + 1)
+                    If nextVisibleSearch >= searchEnd Then Exit Do
+                    doc.Application.Selection.SetRange(nextVisibleSearch, searchEnd)
+                    requestedSearchStart = nextVisibleSearch
+                    lastFoundEnd = System.Math.Max(lastFoundEnd, selEnd)
+                    Continue Do
+                End If
+
                 ' Reject matches that cross a table-cell boundary.
                 ' The canonical fallback in FindLongTextAnchoredFast (Strategy 4)
                 ' joins adjacent cell text into a single canonical stream and can
@@ -6754,17 +6772,25 @@ Public Class frmAIChat
                         Else
                             ' Surgical replacement path for plain-text tracked edits.
                             Dim patchRange As Word.Range = doc.Range(mStart, mEnd)
-                            Dim originalPatchText As String = patchRange.Text
+                            ' Use the same explicit revision projection as surgical mapping, not Range.Text
+                            ' (which can still contain earlier tracked deletions in Final view).
+                            Dim originalPatchText As String = Globals.ThisAddIn.GetVisibleText(patchRange)
                             Dim preserveTrailingCr As Boolean =
                                 originalPatchText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
                                 originalPatchText.EndsWith(vbLf, StringComparison.Ordinal)
 
                             Debug.WriteLine("ExecuteReplaceCommand: applying surgical replacement")
-                            Globals.ThisAddIn.ApplySurgicalReplacement(
+                            If Not Globals.ThisAddIn.ApplySurgicalReplacement(
                                 originalPatchText,
                                 adjustedNewText,
                                 patchRange,
-                                preserveTrailingCr)
+                                preserveTrailingCr,
+                                showFailureNotice:=False) Then
+
+                                CommandsList = "Note: A surgical replacement was incomplete; check the affected passage before retrying." & System.Environment.NewLine & CommandsList
+                                LogReplaceDiag($"PASS2 surgical replacement incomplete at [{mStart},{mEnd}]; search='{PreviewForLog(oldText)}'")
+                                Continue For
+                            End If
 
                             RememberLastActionRange(patchRange.Start, patchRange.End)
                         End If
@@ -6796,8 +6822,12 @@ Public Class frmAIChat
                 End Try
             End Try
 
-            Debug.WriteLine($"ExecuteReplaceCommand: END (success={replaceCount > 0})")
-            Return replaceCount > 0
+            Dim allReplacementsApplied As System.Boolean = replaceCount = selectedMatchPositions.Count
+            Debug.WriteLine($"ExecuteReplaceCommand: END (success={allReplacementsApplied})")
+            If Not allReplacementsApplied Then
+                FailedCommandsList.Add($"Replacement incomplete: {replaceCount} of {selectedMatchPositions.Count} matches fully applied for '{oldText}'. Check this passage before retrying; partial changes may remain.")
+            End If
+            Return allReplacementsApplied
 
         Catch ex As System.Exception
             Debug.WriteLine($"ExecuteReplaceCommand: OUTER CATCH: {ex.GetType().Name}: {ex.Message}")

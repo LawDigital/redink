@@ -161,6 +161,7 @@ Partial Public Class ThisAddIn
     ''' </returns>
     Friend Function GetAutoPilotInternalTools() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
+        tools.Add(BuildScanSettingsTool())
 
         ' Deterministic helper for exact text/data computation inside AutoPilot.
         Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
@@ -774,7 +775,10 @@ Partial Public Class ThisAddIn
                 """series"":{ ""type"":""array"",""description"":""For charts: [{name, values:[numbers]}]."",""items"":{ ""type"":""object"",""properties"":{ ""name"":{ ""type"":""string""},""values"":{ ""type"":""array"",""items"":{ ""type"":""number""}}},""required"":[""values""]}}," &
                 """width_inches"":{ ""type"":""number"",""description"":""Optional display width. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}," &
                 """height_inches"":{ ""type"":""number"",""description"":""Optional display height. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}},""required"":[""id"",""type""]}}," &
-                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Renderer still applies professional header/banding treatment.""}," &
+                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Native template styles are preserved unless an explicit table override is requested.""}," &
+                """table_borders"":{""type"":""string"",""description"":""Explicit border override for all body tables: preserve keeps native/default formatting; none removes borders; grid applies a thin grid."",""enum"":[""preserve"",""none"",""grid""]}," &
+                """table_header_shading"":{""type"":""string"",""description"":""Optional first-row shading for all body tables: six-digit RGB hex color or none. Omitted preserves native/default shading.""}," &
+                """table_body_shading"":{""type"":""string"",""description"":""Optional remaining-row shading for all body tables: six-digit RGB hex color or none. Omitted preserves native/default shading.""}," &
                 """artifact_id"":{""type"":""string"",""description"":""Optional opaque artifact id for this single created DOCX. Use together with the other explicit artifact fields when this file must satisfy a host output slot.""}," &
                 """logical_deliverable_id"":{""type"":""string"",""description"":""Optional opaque logical deliverable id supplied by the orchestration contract.""}," &
                 """output_slot_id"":{""type"":""string"",""description"":""Optional opaque output slot id supplied by the orchestration contract.""}," &
@@ -1531,6 +1535,8 @@ Partial Public Class ThisAddIn
 
         Try
             Select Case toolCall.ToolName
+                Case AP_Tool_ScanSettings
+                    response = ExecuteScanSettingsTool(toolCall)
                 Case AP_Tool_ProcessWordDoc
                     response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ExtractPdfText
@@ -2283,7 +2289,7 @@ Partial Public Class ThisAddIn
 
     Friend Function IsAutoPilotInternalTool(toolName As String) As Boolean
         Select Case toolName
-            Case AP_Tool_ProcessWordDoc,
+            Case AP_Tool_ScanSettings, AP_Tool_ProcessWordDoc,
      AP_Tool_CommentWordDoc,
      AP_Tool_ExtractPdfText,
      AP_Tool_MergePdfs,

@@ -373,7 +373,7 @@ Partial Class Ribbon1
         End If
 
         Me.RI_Primlang.Label = ThisAddIn.INI_Language1 'primlang
-        Me.RI_PrimLang2.Label = ThisAddIn.INI_Language1 'primlang        
+        Me.RI_PrimLang2.Label = ThisAddIn.INI_Language1 'primlang
         Me.Menu1.ScreenTip = If(String.IsNullOrEmpty(ThisAddIn.INI_UsageRestrictions), "",
                             ThisAddIn.INI_UsageRestrictions)
         Me.Menu1.SuperTip = AN & " " & ThisAddIn.Version & BrandedVersion &
@@ -509,6 +509,7 @@ Partial Class Ribbon2
         Me.SearchTools = Me.Factory.CreateRibbonMenu
         Me.RI_SemanticArchives = Me.Factory.CreateRibbonButton
         Me.RI_KnowledgeStores = Me.Factory.CreateRibbonButton
+        Me.RI_ScanInbox = Me.Factory.CreateRibbonButton
         Me.RI_SchedulerDashboard = Me.Factory.CreateRibbonButton
         Me.RI_PSTExport = Me.Factory.CreateRibbonButton
         Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
@@ -769,6 +770,7 @@ Partial Class Ribbon2
         Me.SearchTools.Items.Add(Me.RI_SemanticArchives)
         Me.SearchTools.Items.Add(Me.RI_KnowledgeStores)
         Me.SearchTools.Items.Add(Me.RI_SchedulerDashboard)
+        Me.SearchTools.Items.Add(Me.RI_ScanInbox)
         Me.SearchTools.Items.Add(Me.RI_PSTExport)
         Me.SearchTools.Label = "Expert Tools"
         Me.SearchTools.Name = "SearchTools"
@@ -790,6 +792,12 @@ Partial Class Ribbon2
         Me.RI_KnowledgeStores.ScreenTip = "Configure and manage Knowledge Stores"
         Me.RI_KnowledgeStores.ShowImage = True
         '
+        'RI_ScanInbox
+        Me.RI_ScanInbox.Label = "AutoPilot Scan Handler"
+        Me.RI_ScanInbox.Name = "RI_ScanInbox"
+        Me.RI_ScanInbox.OfficeImageId = "FileOpen"
+        Me.RI_ScanInbox.ScreenTip = "Manage the AutoPilot scan register, routing and delivery status."
+        Me.RI_ScanInbox.ShowImage = True
         'RI_SchedulerDashboard
         '
         Me.RI_SchedulerDashboard.Label = "Scheduler Dashboard"
@@ -980,6 +988,7 @@ Partial Class Ribbon2
     Friend WithEvents SearchTools As RibbonMenu
     Friend WithEvents RI_SemanticArchives As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_KnowledgeStores As RibbonButton
+    Friend WithEvents RI_ScanInbox As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_SchedulerDashboard As RibbonButton
     Friend WithEvents RI_PSTExport As RibbonButton
     Friend WithEvents RI_AutoPilot As RibbonButton

@@ -808,6 +808,16 @@ Namespace SharedLibrary
                                         displayValue = sharedStrings(ssIndex)
                                     End If
                                 End If
+                            ElseIf cellType = "inlineStr" Then
+                                Dim inlineText As New System.Text.StringBuilder()
+                                ' Plain inline strings and rich-text runs; exclude phonetic annotations.
+                                Dim textNodes As System.Xml.XmlNodeList = cellNode.SelectNodes("x:is/x:t | x:is/x:r/x:t", sheetNs)
+                                If textNodes IsNot Nothing Then
+                                    For Each textNode As System.Xml.XmlNode In textNodes
+                                        inlineText.Append(textNode.InnerText)
+                                    Next
+                                End If
+                                displayValue = inlineText.ToString()
                             ElseIf cellType = "b" Then
                                 displayValue = If(vNode?.InnerText = "1", "TRUE", "FALSE")
                             Else

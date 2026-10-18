@@ -1923,7 +1923,7 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-            newMail.Send()
+            SubmitAutoPilotMailOnce(newMail)
 
             ' Do not access newMail properties after Send().
             ' The Outlook MailItem may already have been moved from Drafts/Outbox,

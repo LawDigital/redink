@@ -282,37 +282,9 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function ResolveDownloadTargetDirectory(requestedDirectory As String) As String
-        If String.IsNullOrWhiteSpace(requestedDirectory) Then
-            Dim workspaceRoot = GetSafeDownloadRoot()
-            If Not Directory.Exists(workspaceRoot) Then Directory.CreateDirectory(workspaceRoot)
-            Return workspaceRoot
-        End If
-
-        Dim root As String = GetSafeDownloadRoot()
-
-        If Path.IsPathRooted(requestedDirectory) Then
-            Dim absoluteTarget As String = Path.GetFullPath(requestedDirectory)
-
-            If Not absoluteTarget.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
-               Not absoluteTarget.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
-
-                Throw New UnauthorizedAccessException(
-                    "Absolute target_directory is outside the active writable workspace/session staging root.")
-            End If
-
-            If Not Directory.Exists(absoluteTarget) Then Directory.CreateDirectory(absoluteTarget)
-            Return absoluteTarget
-        End If
-
-        Dim fullPath As String = Path.GetFullPath(Path.Combine(root, requestedDirectory))
-
-        If Not fullPath.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
-           Not fullPath.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
-            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace/session staging root.")
-        End If
-
-        If Not Directory.Exists(fullPath) Then Directory.CreateDirectory(fullPath)
-        Return fullPath
+        Dim target As System.String = SharedLibrary.Agents.PathPolicy.ResolveDownloadDirectory(requestedDirectory)
+        System.IO.Directory.CreateDirectory(target)
+        Return target
     End Function
 
     Private Function SanitizeDownloadFileName(name As String) As String

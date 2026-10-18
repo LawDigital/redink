@@ -1798,6 +1798,150 @@ Partial Public Class ThisAddIn
         Return New System.Xml.Linq.XDocument(New System.Xml.Linq.XDeclaration("1.0", "UTF-8", "yes"), numbering)
     End Function
 
+    Private Shared Function ValidateAutoPilotWordTableOptions(arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object), ByRef errorMessage As System.String) As System.Boolean
+        errorMessage = System.String.Empty
+        Dim borders As System.String = GetArgString(arguments, "table_borders").Trim().ToLowerInvariant()
+        If borders <> System.String.Empty AndAlso borders <> "preserve" AndAlso borders <> "none" AndAlso borders <> "grid" Then
+            errorMessage = "table_borders must be preserve, none or grid."
+            Return False
+        End If
+        For Each key As System.String In New System.String() {"table_header_shading", "table_body_shading"}
+            Dim value As System.String = GetArgString(arguments, key).Trim()
+            If value <> System.String.Empty AndAlso Not System.String.Equals(value, "none", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not System.Text.RegularExpressions.Regex.IsMatch(value, "^#?[0-9A-Fa-f]{6}$") Then
+                errorMessage = key & " must be none or a six-digit RGB hex color."
+                Return False
+            End If
+        Next
+        Return True
+    End Function
+
+    ' Replace only explicitly requested properties, retaining native styles and unrelated properties.
+    Private Shared Sub SetAutoPilotWordOrderedProperty(parent As System.Xml.Linq.XElement, value As System.Xml.Linq.XElement, followingNames As System.String())
+        parent.Elements(value.Name).Remove()
+        Dim following As New System.Collections.Generic.HashSet(Of System.String)(followingNames, System.StringComparer.Ordinal)
+        Dim nextProperty As System.Xml.Linq.XElement = parent.Elements().FirstOrDefault(Function(e) following.Contains(e.Name.LocalName))
+        If nextProperty Is Nothing Then
+            parent.Add(value)
+        Else
+            nextProperty.AddBeforeSelf(value)
+        End If
+    End Sub
+
+    Private Shared Function ApplyAutoPilotWordPackageOptions(outputPath As System.String,
+            arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+            genericDocument As System.Boolean, ByRef errorMessage As System.String) As System.Boolean
+        If Not ValidateAutoPilotWordTableOptions(arguments, errorMessage) Then Return False
+        Dim borders As System.String = GetArgString(arguments, "table_borders").Trim().ToLowerInvariant()
+        Dim headerFill As System.String = GetArgString(arguments, "table_header_shading").Trim().TrimStart("#"c).ToUpperInvariant()
+        Dim bodyFill As System.String = GetArgString(arguments, "table_body_shading").Trim().TrimStart("#"c).ToUpperInvariant()
+        Dim changeBorders As System.Boolean = borders = "none" OrElse borders = "grid"
+        If Not genericDocument AndAlso Not changeBorders AndAlso headerFill = System.String.Empty AndAlso bodyFill = System.String.Empty Then Return True
+        Try
+            Using stream As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                Using archive As New System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Update)
+                    Dim w As System.Xml.Linq.XNamespace = AutoPilotWordMainNs
+                    Dim document As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/document.xml")
+                    If document Is Nothing OrElse document.Root Is Nothing Then Throw New System.IO.InvalidDataException("Word document part is missing.")
+                    For Each table As System.Xml.Linq.XElement In document.Descendants(w + "tbl").ToList()
+                        Dim tableProperties As System.Xml.Linq.XElement = table.Element(w + "tblPr")
+                        If tableProperties Is Nothing Then
+                            tableProperties = New System.Xml.Linq.XElement(w + "tblPr")
+                            table.AddFirst(tableProperties)
+                        End If
+                        If changeBorders Then
+                            Dim tableBorders As New System.Xml.Linq.XElement(w + "tblBorders")
+                            For Each edge As System.String In New System.String() {"top", "left", "bottom", "right", "insideH", "insideV"}
+                                tableBorders.Add(New System.Xml.Linq.XElement(w + edge,
+                                    New System.Xml.Linq.XAttribute(w + "val", If(borders = "none", "nil", "single")),
+                                    New System.Xml.Linq.XAttribute(w + "sz", "4"), New System.Xml.Linq.XAttribute(w + "color", "D9D9D9")))
+                            Next
+                            SetAutoPilotWordOrderedProperty(tableProperties, tableBorders, {"shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption", "tblDescription", "tblPrChange"})
+                        End If
+                        Dim rowIndex As System.Int32 = 0
+                        For Each row As System.Xml.Linq.XElement In table.Elements(w + "tr")
+                            Dim fill As System.String = If(rowIndex = 0, headerFill, bodyFill)
+                            For Each cell As System.Xml.Linq.XElement In row.Elements(w + "tc")
+                                Dim properties As System.Xml.Linq.XElement = cell.Element(w + "tcPr")
+                                If properties Is Nothing Then
+                                    properties = New System.Xml.Linq.XElement(w + "tcPr")
+                                    cell.AddFirst(properties)
+                                End If
+                                If changeBorders Then
+                                    Dim cellBorders As New System.Xml.Linq.XElement(w + "tcBorders")
+                                    For Each edge As System.String In New System.String() {"top", "left", "bottom", "right"}
+                                        cellBorders.Add(New System.Xml.Linq.XElement(w + edge,
+                                            New System.Xml.Linq.XAttribute(w + "val", If(borders = "none", "nil", "single")),
+                                            New System.Xml.Linq.XAttribute(w + "sz", "4"), New System.Xml.Linq.XAttribute(w + "color", "D9D9D9")))
+                                    Next
+                                    SetAutoPilotWordOrderedProperty(properties, cellBorders, {"shd", "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark", "cellIns", "cellDel", "cellMerge", "tcPrChange"})
+                                End If
+                                If fill <> System.String.Empty Then
+                                    Dim shading As New System.Xml.Linq.XElement(w + "shd",
+                                        New System.Xml.Linq.XAttribute(w + "val", If(fill = "NONE", "nil", "clear")),
+                                        New System.Xml.Linq.XAttribute(w + "color", "auto"),
+                                        New System.Xml.Linq.XAttribute(w + "fill", If(fill = "NONE", "auto", fill)))
+                                    SetAutoPilotWordOrderedProperty(properties, shading, {"noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark", "cellIns", "cellDel", "cellMerge", "tcPrChange"})
+                                End If
+                            Next
+                            rowIndex += 1
+                        Next
+                    Next
+                    If genericDocument Then
+                        Dim section As System.Xml.Linq.XElement = document.Root.Element(w + "body").Element(w + "sectPr")
+                        If section Is Nothing Then Throw New System.IO.InvalidDataException("Generic Word section properties are missing.")
+                        Dim headerText As System.String = GetArgString(arguments, "header_text")
+                        Dim footerText As System.String = GetArgString(arguments, "footer_text")
+                        Dim showPageNumbers As System.Boolean = GetArgBool(arguments, "show_page_numbers", True)
+                        If Not System.String.IsNullOrWhiteSpace(footerText) OrElse showPageNumbers Then
+                            AddAutoPilotGenericHeaderFooter(archive, section, "footer", footerText, showPageNumbers)
+                        End If
+                        If Not System.String.IsNullOrWhiteSpace(headerText) Then
+                            AddAutoPilotGenericHeaderFooter(archive, section, "header", headerText, False)
+                        End If
+                    End If
+                    SaveAutoPilotWordOpenXmlEntry(archive, "word/document.xml", document)
+                End Using
+            End Using
+            Return True
+        Catch ex As System.Exception
+            errorMessage = "Word package options failed: " & ex.Message
+            Return False
+        End Try
+    End Function
+
+    Private Shared Sub AddAutoPilotGenericHeaderFooter(archive As System.IO.Compression.ZipArchive,
+            section As System.Xml.Linq.XElement, kind As System.String, text As System.String, pageNumber As System.Boolean)
+        Dim w As System.Xml.Linq.XNamespace = AutoPilotWordMainNs
+        Dim r As System.Xml.Linq.XNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        Dim relationshipsNs As System.Xml.Linq.XNamespace = "http://schemas.openxmlformats.org/package/2006/relationships"
+        Dim contentNs As System.Xml.Linq.XNamespace = "http://schemas.openxmlformats.org/package/2006/content-types"
+        Dim relationships As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/_rels/document.xml.rels")
+        Dim contentTypes As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "[Content_Types].xml")
+        If relationships Is Nothing OrElse contentTypes Is Nothing Then Throw New System.IO.InvalidDataException("Word package metadata is missing.")
+        Dim id As System.String = "rId" & System.Guid.NewGuid().ToString("N")
+        Dim partName As System.String = kind & "-" & System.Guid.NewGuid().ToString("N") & ".xml"
+        Dim paragraph As New System.Xml.Linq.XElement(w + "p",
+            New System.Xml.Linq.XElement(w + "pPr", New System.Xml.Linq.XElement(w + "jc", New System.Xml.Linq.XAttribute(w + "val", If(kind = "footer", "right", "left")))))
+        If Not System.String.IsNullOrWhiteSpace(text) Then paragraph.Add(CreateAutoPilotWordOpenXmlRun(text.Trim(), False, False, False, False))
+        If pageNumber Then
+            If Not System.String.IsNullOrWhiteSpace(text) Then paragraph.Add(CreateAutoPilotWordOpenXmlRun("   •   ", False, False, False, False))
+            paragraph.Add(New System.Xml.Linq.XElement(w + "fldSimple",
+                New System.Xml.Linq.XAttribute(w + "instr", " PAGE "), New System.Xml.Linq.XAttribute(w + "dirty", "true"),
+                CreateAutoPilotWordOpenXmlRun("1", False, False, False, False)))
+        End If
+        Dim part As New System.Xml.Linq.XDocument(New System.Xml.Linq.XElement(w + If(kind = "header", "hdr", "ftr"), paragraph))
+        SaveAutoPilotWordOpenXmlEntry(archive, "word/" & partName, part)
+        relationships.Root.Add(New System.Xml.Linq.XElement(relationshipsNs + "Relationship",
+            New System.Xml.Linq.XAttribute("Id", id), New System.Xml.Linq.XAttribute("Type", r.NamespaceName & "/" & kind), New System.Xml.Linq.XAttribute("Target", partName)))
+        contentTypes.Root.Add(New System.Xml.Linq.XElement(contentNs + "Override",
+            New System.Xml.Linq.XAttribute("PartName", "/word/" & partName),
+            New System.Xml.Linq.XAttribute("ContentType", "application/vnd.openxmlformats-officedocument.wordprocessingml." & kind & "+xml")))
+        section.AddFirst(New System.Xml.Linq.XElement(w + (kind & "Reference"), New System.Xml.Linq.XAttribute(w + "type", "default"), New System.Xml.Linq.XAttribute(r + "id", id)))
+        SaveAutoPilotWordOpenXmlEntry(archive, "word/_rels/document.xml.rels", relationships)
+        SaveAutoPilotWordOpenXmlEntry(archive, "[Content_Types].xml", contentTypes)
+    End Sub
+
     Private Shared Function TryCreateAutoPilotGenericWordDocumentOpenXml(outputPath As System.String,
                                                                          markdownContent As System.String,
                                                                          arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
@@ -1822,7 +1966,10 @@ Partial Public Class ThisAddIn
                 {"GenericBullet1", 720}, {"GenericBullet2", 1080}, {"GenericBullet3", 1440}, {"GenericNumbered1", 720}, {"GenericNumbered2", 1080}, {"GenericNumbered3", 1440}
             }
             Dim renderingError As System.String = System.String.Empty
-            Dim rendered As System.Collections.Generic.List(Of System.Xml.Linq.XElement) = RenderAutoPilotWordMarkdownOpenXml(markdownContent, semanticStyleIds, System.String.Empty, "preserve", renderingError, genericIndentByStyleId)
+            Dim nativeNumbering As New System.Collections.Generic.Dictionary(Of System.String, System.Boolean)(System.StringComparer.OrdinalIgnoreCase) From {
+                {"GenericNumbered1", True}, {"GenericNumbered2", True}, {"GenericNumbered3", True}
+            }
+            Dim rendered As System.Collections.Generic.List(Of System.Xml.Linq.XElement) = RenderAutoPilotWordMarkdownOpenXml(markdownContent, semanticStyleIds, System.String.Empty, "preserve", renderingError, genericIndentByStyleId, nativeNumbering)
             If rendered Is Nothing Then
                 creationError = renderingError
                 Return False

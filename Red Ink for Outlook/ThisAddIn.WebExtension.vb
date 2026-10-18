@@ -1507,6 +1507,22 @@ Partial Public Class ThisAddIn
         Return language
     End Function
 
+    ''' <summary>
+    ''' The UI language is only a fallback. Once tooling has identified the request
+    ''' language, continuation notices for that same run must use it as well.
+    ''' </summary>
+    Private Function ResolveLocalChatResultLanguage(uiLanguage As System.String,
+                                                    workflowId As System.String) As System.String
+        If Not System.String.IsNullOrWhiteSpace(workflowId) AndAlso
+           System.String.Equals(_lastCompletedToolingWorkflowId, workflowId, System.StringComparison.OrdinalIgnoreCase) AndAlso
+           _lastCompletedToolingRunState IsNot Nothing AndAlso
+           Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingRunState.UserLanguage) Then
+            Return _lastCompletedToolingRunState.UserLanguage.Trim()
+        End If
+
+        Return If(uiLanguage, System.String.Empty).Trim()
+    End Function
+
     Private Function BuildLocalChatRetryHint(userLanguage As System.String) As System.String
         Select Case NormalizeLocalChatLanguageKey(userLanguage)
             Case "de"
@@ -4378,6 +4394,12 @@ Partial Public Class ThisAddIn
                                             ChatAgentTeardownToolContext()
                                         End If
                                     End Try
+
+                                    ' The model footer is an internal workflow protocol. Strip it before
+                                    ' adding host retry notices; once a notice follows it, the footer
+                                    ' is no longer trailing and cannot be recognized by the strict parser.
+                                    localOutput = SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(localOutput)
+
                                     If continuationEligibleForJob Then
                                         Dim completedBlocked As System.Boolean =
                                             _lastCompletedToolingWasBlocked AndAlso
@@ -4412,14 +4434,14 @@ Partial Public Class ThisAddIn
                                                 DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
                                                 SaveInkyState(continuationState, originatingChatId)
 
-                                                Dim inputRetryUnavailable As System.String = BuildLocalChatRetryInputsUnavailableNotice(localUserLanguage)
+                                                Dim inputRetryUnavailable As System.String = BuildLocalChatRetryInputsUnavailableNotice(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
                                                 If Not System.String.IsNullOrWhiteSpace(inputRetryUnavailable) Then
                                                     localOutput = If(localOutput, System.String.Empty).TrimEnd() & vbCrLf & vbCrLf & inputRetryUnavailable
                                                 End If
                                             Else
                                                 SaveInkyState(continuationState, originatingChatId)
 
-                                                Dim retryHint As System.String = BuildLocalChatRetryHint(localUserLanguage)
+                                                Dim retryHint As System.String = BuildLocalChatRetryHint(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
                                                 If Not System.String.IsNullOrWhiteSpace(retryHint) AndAlso
                                                    (localOutput Is Nothing OrElse localOutput.IndexOf("`retry`", System.StringComparison.OrdinalIgnoreCase) < 0) Then
                                                     localOutput = SharedLibrary.Agents.WorkflowContinuity.PrependContinuationNotice(localOutput, retryHint)
@@ -4538,9 +4560,9 @@ Partial Public Class ThisAddIn
                                                 SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
                                                 ClearLocalChatPendingContinuation(failureContinuationState)
                                                 DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
-                                                continuationFailureSuffix = BuildLocalChatRetryInputsUnavailableNotice(localUserLanguage)
+                                                continuationFailureSuffix = BuildLocalChatRetryInputsUnavailableNotice(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
                                             Else
-                                                continuationFailureSuffix = BuildLocalChatRetryHint(localUserLanguage)
+                                                continuationFailureSuffix = BuildLocalChatRetryHint(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
                                             End If
                                             SaveInkyState(failureContinuationState, originatingChatId)
                                         Else
@@ -5550,7 +5572,10 @@ Partial Public Class ThisAddIn
     Private Function SanitizeModelOutputForBrowser(ByVal raw As System.String) As System.String
         If raw Is Nothing Then Return System.String.Empty
 
-        Dim s As System.String = raw
+        ' Browser chat is an end-user boundary, not a tool-to-model payload.
+        ' Preserve quoted examples, but remove a real trailing protocol footer.
+        Dim s As System.String =
+            SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(raw)
 
         ' 1) Remove full role-only lines (e.g. "[ASSISTANT]" or "[USER]:")
         s = System.Text.RegularExpressions.Regex.Replace(

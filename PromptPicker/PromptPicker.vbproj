@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>PromptPicker</RootNamespace>
+    <StartupObject>PromptPicker.Program</StartupObject>
+    <OptionStrict>On</OptionStrict>
+    <OptionExplicit>On</OptionExplicit>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>Assets\RedInk.ico</ApplicationIcon>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Web\picker.html" LogicalName="PromptPicker.Web.picker.html" />
+    <EmbeddedResource Include="Web\picker.css" LogicalName="PromptPicker.Web.picker.css" />
+    <EmbeddedResource Include="Web\picker.js" LogicalName="PromptPicker.Web.picker.js" />
+    <EmbeddedResource Include="LICENSE.txt" LogicalName="PromptPicker.LICENSE.txt" />
+  </ItemGroup>
+  <!-- Authenticode signing: same certificate and publish workflow as Ask Inky. -->
+  <PropertyGroup>
+    <PromptPickerSignTool>C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe</PromptPickerSignTool>
+    <PromptPickerCertificateThumbprint>1EF41035D3AC9F8A9A678B845DA2F69C765D00E0</PromptPickerCertificateThumbprint>
+  </PropertyGroup>
+  <Target Name="SignPromptPicker" AfterTargets="Publish"
+          Condition="'$(Configuration)' == 'Release' and '$(PublishSingleFile)' == 'true' and '$(RuntimeIdentifier)' == 'win-x64'">
+    <PropertyGroup>
+      <PromptPickerPublishedExe>$(PublishDir)PromptPicker.exe</PromptPickerPublishedExe>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(PromptPickerSignTool)')" Text="Prompt Picker: SignTool.exe not found." />
+    <Error Condition="!Exists('$(PromptPickerPublishedExe)')" Text="Prompt Picker: Published EXE not found." />
+    <Exec Command="&quot;$(PromptPickerSignTool)&quot; sign /sha1 $(PromptPickerCertificateThumbprint) /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d &quot;Red Ink Prompt Picker&quot; /du &quot;https://redink.ai&quot; &quot;$(PromptPickerPublishedExe)&quot;" />
+    <Exec Command="&quot;$(PromptPickerSignTool)&quot; verify /pa /tw /v &quot;$(PromptPickerPublishedExe)&quot;" />
+    <Message Importance="high" Text="Prompt Picker: Authenticode signature verified successfully." />
+  </Target>
+</Project>

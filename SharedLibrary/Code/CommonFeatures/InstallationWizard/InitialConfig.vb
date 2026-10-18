@@ -4,7 +4,7 @@
 ' =============================================================================
 ' File: InitialConfig.vb
 ' Purpose: First-run installation wizard form for configuring Red Ink LLM API access.
-'          Provides provider-specific templates (OpenAI, Azure, Google Vertex, etc.),
+'          Provides provider-specific templates (OpenAI, Azure, Google Enterprise Agent Platform, etc.),
 '          validates user input, supports remote configuration updates, and generates
 '          INI files for Word/Excel/Outlook add-ins.
 '
@@ -15,21 +15,20 @@
 '
 ' Configuration Templates:
 ' ------------------------
-' Provider defaults are built into the form in PrepareConfigData() as a dictionary:
+' Provider defaults are loaded from the embedded redink-defaultconfig.ini in PrepareConfigData():
 '   providerConfigs(ProviderName) -> List(Of AppConfigurationVariable)
 ' plus optional providerNotes(ProviderName) displayed below the fields.
 '
 ' Remote Template Override (optional, user-confirmed):
 ' ---------------------------------------------------
-' TryOverrideDefaultsFromRemote() can download an updated template list from
-' RemoteDefaultsUrl (custom INI with pipe-delimited field definitions), parse it via
-' TryParseRemoteDefaults(), and compare it against built-in defaults via AreDifferent().
-' If differences are found, the user can load the remote defaults.
+' ProviderTemplateCatalog.OfferOnlineUpdate() is the shared opt-in workflow used by
+' both configuration wizards. It downloads, validates, compares, and offers remote
+' provider values without changing a saved user INI automatically.
 '
 ' Data Flow:
 ' ----------
 ' 1. InitializeComponent() builds the static wizard UI.
-' 2. PrepareConfigData() creates provider templates and calls TryOverrideDefaultsFromRemote().
+' 2. PrepareConfigData() loads the shared provider catalog and offers the same opt-in update as ConfigWizard.
 ' 3. Provider selection changes rebuild the dynamic UI via LoadConfigForSelectedProvider().
 '    Values are preserved across provider switching via SaveCurrentInputToSpecificConfig().
 ' 4. OK click: SaveCurrentInputToConfig() -> ValidateAllConfigs() -> map config variables to
@@ -41,9 +40,9 @@
 ' NotEmpty, E-Mail ("@" heuristic), Hyperlink (http/https prefix), >0 integer, 0.0-2.0 range,
 ' and max-value rules expressed as a decimal literal like "2.0" (accepts "." or "," separator).
 '
-' OAuth2 (Google Vertex):
+' OAuth2 (Google Enterprise Agent Platform):
 ' -----------------------
-' Google Vertex includes additional OAuth2 fields. INI_OAuth2ATExpiry is an integer value in
+' Google Enterprise Agent Platform includes additional OAuth2 fields. INI_OAuth2ATExpiry is an integer value in
 ' seconds (not milliseconds).
 '
 ' File Output:
@@ -60,8 +59,6 @@ Option Strict On
 Option Explicit On
 
 Imports System.Drawing
-Imports System.Net
-Imports System.Net.Http
 Imports System.Text
 Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary.SharedContext
@@ -117,6 +114,7 @@ Namespace SharedLibrary
 
         ''' <summary>Optional per-provider note displayed at the bottom of the provider field list.</summary>
         Private providerNotes As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+        Private providerOrder As New System.Collections.Generic.List(Of System.String)()
 
         ''' <summary>
         ''' Controls currently displayed in <c>panelConfig</c>.
@@ -295,24 +293,10 @@ Namespace SharedLibrary
             ' Build provider configuration data before populating combo
             PrepareConfigData()
 
-            ' Populate combo in preferred order (OpenAI, Azure, Google Gemini, Google Vertex), then alphabetical
-            Dim defaultOrder As New List(Of String) From {
-                    "OpenAI",
-                    "Microsoft Azure OpenAI Services",
-                    "Google Gemini",
-                    "Anthropic",
-                    "Google Vertex",
-                    "MTF",
-                    "SafeSwissCloud",
-                    "llama.cpp (local)",
-                    "Ollama (local)",
-                    "OpenWebUI (local)"
-                }
-            For Each providerName As String In defaultOrder
-                If providerConfigs.ContainsKey(providerName) Then cmbProvider.Items.Add(providerName)
-            Next
-            For Each providerName As String In providerConfigs.Keys
-                If cmbProvider.Items.IndexOf(providerName) = -1 Then cmbProvider.Items.Add(providerName)
+            ' Populate from the same ordered INI catalog as the Configuration Wizard.
+            ' Do not maintain a second hard-coded provider-name list here.
+            For Each providerName As System.String In providerOrder
+                cmbProvider.Items.Add(providerName)
             Next
             If cmbProvider.Items.Count > 0 Then
                 cmbProvider.SelectedIndex = 0
@@ -396,555 +380,21 @@ Namespace SharedLibrary
         ''' Builds provider configuration templates with default values and optional notes.
         ''' </summary>
         ''' <remarks>
-        ''' Creates templates for 6 providers (OpenAI, Azure, Google Gemini, Google Vertex, MTF, SafeSwissCloud).
-        ''' Each has 9-13 fields. Google Vertex includes 4 OAuth2 fields.
-        ''' Temperature validation is implemented either via explicit range rule "0.0-2.0" or via max-value literals (e.g., "2.0").
-        ''' Calls <see cref="TryOverrideDefaultsFromRemote"/> to optionally replace built-in defaults with remote defaults.
+        ''' Provider field definitions and order come entirely from the embedded INI catalog.
+        ''' Both wizards use the same opt-in online update workflow and field validation.
         ''' </remarks>
         Private Sub PrepareConfigData()
-            providerConfigs.Clear()
-            providerNotes.Clear()
-
-            Dim SubAdd As Action(Of String, List(Of AppConfigurationVariable)) =
-        Sub(name As String, vars As List(Of AppConfigurationVariable))
-            Dim clone As New List(Of AppConfigurationVariable)
-            For Each v In vars
-                clone.Add(New AppConfigurationVariable With {
-                    .DisplayName = v.DisplayName,
-                    .VarName = v.VarName,
-                    .VarType = v.VarType,
-                    .ValidationRule = v.ValidationRule,
-                    .DefaultValue = v.DefaultValue,
-                    .CurrentValue = v.DefaultValue
-                })
-            Next
-            providerConfigs(name) = clone
+            Dim embedded As ProviderTemplateCatalogSnapshot = ProviderTemplateCatalog.LoadEmbedded()
+            Dim selected As ProviderTemplateCatalogSnapshot
+            ' Same downloader, parser and comparison logic as ConfigWizard.
+            Using SharedMethods.PushDialogOwner(Me)
+                selected = ProviderTemplateCatalog.OfferOnlineUpdate(embedded, "Installation Wizard")
+            End Using
+            providerConfigs = selected.Configurations
+            providerNotes = selected.Notes
+            providerOrder = selected.ProviderOrder.ToList()
         End Sub
 
-            SubAdd("OpenAI",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your OpenAI API Key]]"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.4"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.openai.com/v1/responses"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"": ""{model}"", ""input"": [{""role"": ""developer"", ""content"": [{""type"": ""input_text"",""text"": ""{promptsystem}""}]},{""role"": ""user"",""content"": [{""type"": ""input_text"",""text"": ""{promptuser}""}{objectcall}]}],""reasoning"": {""effort"": ""low""}}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = "[application/pdf],{""type"": ""input_file"",""filename"": ""userfile.pdf"", ""file_data"": ""data:{mimetype};base64,{encodeddata}""}¦[image/png,image/jpeg,image/webp, image/gif],{""type"": ""input_image"",""image_url"": ""data:{mimetype};base64,{encodeddata}""}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text (rkmode_first)"}
-                })
-            providerNotes("OpenAI") = "Note: When generating the API key with OpenAI, make sure you have added a valid payment method (e.g., credit card), even if you use ChatGPT for free or with an already paid subscription. You still need the payment method and a budget to pay for the actual consumption (costs are in our experience low)."
-
-            SubAdd("Microsoft Azure OpenAI Services",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Azure OpenAI Services API Key]]"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.4"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"": ""{model}"", ""input"": [{""role"": ""developer"", ""content"": [{""type"": ""input_text"",""text"": ""{promptsystem}""}]},{""role"": ""user"",""content"": [{""type"": ""input_text"",""text"": ""{promptuser}""}{objectcall}]}]}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = "[application/pdf],{""type"": ""input_file"",""filename"": ""userfile.pdf"", ""file_data"": ""data:{mimetype};base64,{encodeddata}""}¦[image/png,image/jpeg,image/webp, image/gif],{""type"": ""input_image"",""image_url"": ""data:{mimetype};base64,{encodeddata}""}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text (rkmode_first)"}
-                })
-            providerNotes("Microsoft Azure OpenAI Services") = "These may not be the latest possible settings available in your environment. Check your documentation to update this."
-
-            SubAdd("Google Gemini",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Google API Key]]"},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gemini-3.7-flash"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "X-Goog-Api-Key"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "{apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""contents"": [{""role"": ""user"",""parts"": [{ ""text"": ""{promptsystem} {promptuser}"" }]}], ""generationConfig"": {""temperature"": {temperature}}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text"}
-                })
-            providerNotes("Google Gemini") = ""
-
-            SubAdd("Anthropic",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Anthropic API Key]]"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "claude-sonnet-4-6"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.anthropic.com/v1/messages"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "x-api-key¦anthropic-version"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "{apikey}¦2023-06-01"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"": ""{model}"",""max_tokens"": 64000, ""messages"": [{""role"": ""user"", ""content"": ""{promptsystem} {promptuser}""}]}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = "[image/png,image/jpeg,image/webp, image/gif],{""type"": ""image"", ""source"": {""type"": ""base64"", ""media_type"": ""{mimetype}"", ""data"": ""{encodeddata}""}}¦[application/pdf],{""type"": ""document"", ""source"": {""type"": ""base64"", ""media_type"": ""{mimetype}"", ""data"": ""{encodeddata}""}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text (rkmode_first)"},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "1.0"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"}
-                })
-            providerNotes("Anthropic") = ""
-
-            SubAdd("Google Vertex",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "Private Key (barebones, not PEM):", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Google private_key]]"},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gemini-3.7-flash"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://aiplatform.eu.rep.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""contents"": [{""role"": ""user"", ""parts"":[{""text"": ""{promptsystem} {promptuser}""}{objectcall}]}], ""generationConfig"": {""temperature"": {temperature},  ""thinking_config"": {""thinking_budget"": 128}}}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = ", {""inlineData"": {""mimeType"": ""{mimetype}"",""data"": ""{encodeddata}""}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text"},
-                    New AppConfigurationVariable With {.DisplayName = "OAuth2 'client_mail':", .VarName = "INI_OAuth2ClientMail", .VarType = "String", .ValidationRule = "E-Mail", .DefaultValue = "[[Your Google client_email]]"},
-                    New AppConfigurationVariable With {.DisplayName = "OAuth2 'scopes':", .VarName = "INI_OAuth2Scopes", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "https://www.googleapis.com/auth/cloud-platform"},
-                    New AppConfigurationVariable With {.DisplayName = "OAuth2 Endpoint:", .VarName = "INI_OAuth2Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://oauth2.googleapis.com/token"},
-                    New AppConfigurationVariable With {.DisplayName = "OAuth2 Access Token Expiry (seconds):", .VarName = "INI_OAuth2ATExpiry", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "3600"}
-                })
-            providerNotes("Google Vertex") = "Note: Requires OAuth2 service account to be configured via the GCP console. Private Key must be the raw key (not PEM)."
-
-            SubAdd("MTF",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "openai-gpt-oss-20b"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.ai.mtf.cloud/v1/chat/completions"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"":[{""role"":""system"",""content"":""{promptsystem}""},{""role"":""user"",""content"":""{promptuser}""}],""temperature"":{temperature}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"}
-                })
-            providerNotes("MTF") = ""
-
-            SubAdd("SafeSwissCloud",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-oss-120b"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"":[{""role"":""system"",""content"":""{promptsystem}""},{""role"":""user"",""content"":""{promptuser}""}],""temperature"":{temperature}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"}
-                })
-            providerNotes("SafeSwissCloud") = ""
-
-            SubAdd("llama.cpp (local)",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "dummy"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "http://localhost:8080/v1/chat/completions"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""messages"":[{""role"":""system"",""content"":""{promptsystem}""},{""role"":""user"",""content"":""{promptuser}""}], ""temperature"": {temperature}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "AnyModel"}
-                })
-            providerNotes("llama.cpp (local)") = ""
-
-            SubAdd("Ollama (local)",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "dummy"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"":[   {""role"":""system"",""content"":""{promptsystem}""},   {""role"":""user"",""content"":""{promptuser}""{objectcall}} ], ""stream"": false, ""think"": false, ""options"":{""temperature"": {temperature}}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Model]]"}
-                })
-            providerNotes("Ollama (local)") = ""
-
-            SubAdd("OpenWebUI (local)",
-                New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "dummy"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"": [{""role"":""system"",""content"":""{promptsystem}""}, {""role"":""user"",""content"":""{promptuser}""{objectcall}}],""stream"":false,""temperature"":{temperature}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Model]]"}
-                })
-            providerNotes("OpenWebUI (local)") = ""
-
-            TryOverrideDefaultsFromRemote()
-        End Sub
-
-        ''' <summary>
-        ''' Downloads text content from a URL with a timeout.
-        ''' </summary>
-        ''' <param name="url">URL to download.</param>
-        ''' <param name="timeoutMs">Timeout in milliseconds. A minimum timeout of 10 seconds is enforced.</param>
-        ''' <param name="content">On success, receives the downloaded text.</param>
-        ''' <returns>True when non-empty content was downloaded; otherwise False.</returns>
-        Private Function TryDownloadString(url As String, timeoutMs As Integer, ByRef content As String) As Boolean
-            content = Nothing
-            Try
-                ' Ensure TLS 1.2 for HTTPS endpoints (many servers reject TLS 1.0/1.1)
-                ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol Or SecurityProtocolType.Tls12
-
-                Dim handler As New HttpClientHandler() With {
-                .AutomaticDecompression = DecompressionMethods.GZip Or DecompressionMethods.Deflate
-            }
-
-                Using client As New System.Net.Http.HttpClient(handler)
-                    client.Timeout = TimeSpan.FromMilliseconds(Math.Max(10000, timeoutMs)) ' 10s minimum
-
-                    ' Use GetStringAsync for simplicity (auto-detects encoding from Content-Type header)
-                    Dim readTask = client.GetStringAsync(url)
-                    readTask.Wait()
-
-                    If readTask.Status = TaskStatus.RanToCompletion Then
-                        Dim s = readTask.Result
-                        If Not String.IsNullOrWhiteSpace(s) Then
-                            content = s
-                            Return True
-                        End If
-                    End If
-                End Using
-            Catch ex As Exception
-                ' Log error for diagnostics (visible in Output window during debugging)
-                System.Diagnostics.Debug.WriteLine($"TryDownloadString error for {url}: {ex}")
-            End Try
-            Return False
-        End Function
-
-        ''' <summary>
-        ''' Parses remote INI-format configuration text into provider dictionaries.
-        ''' </summary>
-        ''' <param name="ini">Remote INI text.</param>
-        ''' <param name="outConfigs">On success, receives provider configuration templates.</param>
-        ''' <param name="outNotes">On success, receives optional provider notes.</param>
-        ''' <returns>True on successful parse with at least one provider; otherwise False.</returns>
-        ''' <remarks>
-        ''' Format per section:
-        ''' <c>[ProviderName]</c>
-        ''' <c>FieldN = DisplayName|VarName|VarType|ValidationRule|DefaultValue</c>
-        ''' <c>Note = ...</c>
-        ''' Lines starting with <c>;</c> or <c>#</c> are ignored.
-        ''' </remarks>
-        Private Function TryParseRemoteDefaults(ini As String,
-                                            ByRef outConfigs As Dictionary(Of String, List(Of AppConfigurationVariable)),
-                                            ByRef outNotes As Dictionary(Of String, String)) As Boolean
-            outConfigs = Nothing
-            outNotes = Nothing
-            If String.IsNullOrWhiteSpace(ini) Then Return False
-
-            Try
-                Dim cfg As New Dictionary(Of String, List(Of AppConfigurationVariable))(StringComparer.OrdinalIgnoreCase)
-                Dim notes As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-
-                Dim lines = ini.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(New Char() {ChrW(10)}, StringSplitOptions.None)
-                Dim section As String = Nothing
-                Dim sectionFields As New List(Of KeyValuePair(Of String, String))()
-
-                Dim flushSection As Action =
-                Sub()
-                    If String.IsNullOrWhiteSpace(section) Then Return
-
-                    Dim vars As New List(Of AppConfigurationVariable)()
-
-                    ' Gather FieldN entries in numeric order (not alphabetical)
-                    Dim ordered = sectionFields.
-                        Where(Function(kv) kv.Key.StartsWith("Field", StringComparison.OrdinalIgnoreCase)).
-                        Select(Function(kv)
-                                   Dim numStr = New String(kv.Key.SkipWhile(Function(c) Not Char.IsDigit(c)).ToArray())
-                                   Dim n As Integer = 0
-                                   Integer.TryParse(numStr, n)
-                                   Return New With {.Num = n, .Val = kv.Value}
-                               End Function).
-                        OrderBy(Function(x) x.Num).
-                        ToList()
-
-                    For Each f In ordered
-                        Dim parts = (If(f.Val, "")).Split("|"c)
-                        ' Expected format: DisplayName|VarName|VarType|ValidationRule|DefaultValue
-                        If parts.Length >= 4 Then
-                            Dim v As New AppConfigurationVariable With {
-                                .DisplayName = parts(0).Trim(),
-                                .VarName = parts(1).Trim(),
-                                .VarType = parts(2).Trim(),
-                                .ValidationRule = parts(3).Trim(),
-                                .DefaultValue = If(parts.Length >= 5, parts(4), "")
-                            }
-                            v.CurrentValue = v.DefaultValue
-                            vars.Add(v)
-                        End If
-                    Next
-
-                    ' Extract optional Note entry
-                    Dim noteValue = sectionFields.
-                        FirstOrDefault(Function(kv) kv.Key.Equals("Note", StringComparison.OrdinalIgnoreCase)).Value
-                    If Not String.IsNullOrWhiteSpace(noteValue) Then
-                        notes(section) = noteValue.Trim()
-                    End If
-
-                    If vars.Count > 0 Then
-                        cfg(section) = vars
-                    End If
-
-                    sectionFields.Clear()
-                End Sub
-
-                For Each raw In lines
-                    Dim line = raw.Trim()
-                    If line.Length = 0 Then Continue For
-                    If line.StartsWith(";", StringComparison.Ordinal) OrElse line.StartsWith("#", StringComparison.Ordinal) Then Continue For
-
-                    If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                        flushSection()
-                        section = line.Substring(1, line.Length - 2).Trim()
-                        Continue For
-                    End If
-
-                    Dim eqIdx = line.IndexOf("="c)
-                    If eqIdx > 0 AndAlso section IsNot Nothing Then
-                        Dim key = line.Substring(0, eqIdx).Trim()
-                        Dim val = line.Substring(eqIdx + 1).Trim()
-                        sectionFields.Add(New KeyValuePair(Of String, String)(key, val))
-                    End If
-                Next
-
-                flushSection()
-
-                If cfg.Count > 0 Then
-                    outConfigs = cfg
-                    outNotes = notes
-                    Return True
-                End If
-            Catch
-                ' Parsing failure -> silently ignore, return False
-            End Try
-
-            Return False
-        End Function
-
-        ''' <summary>
-        ''' Compares two strings for equality using normalization suitable for JSON-like payloads.
-        ''' </summary>
-        ''' <param name="a">First string.</param>
-        ''' <param name="b">Second string.</param>
-        ''' <returns>True if values are considered equal; otherwise False.</returns>
-        Private Function StringsEqual(a As String, b As String) As Boolean
-            If Object.ReferenceEquals(a, b) Then Return True
-            If a Is Nothing OrElse b Is Nothing Then
-                Return String.IsNullOrEmpty(a) AndAlso String.IsNullOrEmpty(b)
-            End If
-
-            Dim sa = a.Replace(vbCrLf, vbLf).Trim()
-            Dim sb = b.Replace(vbCrLf, vbLf).Trim()
-
-            If String.Equals(sa, sb, StringComparison.Ordinal) Then Return True
-
-            ' Heuristic: if both strings look JSON-ish, compare ignoring whitespace outside quotes
-            Dim looksJsonA = (sa.IndexOf(":"c) >= 0) AndAlso (sa.Contains("{") OrElse sa.Contains("["))
-            Dim looksJsonB = (sb.IndexOf(":"c) >= 0) AndAlso (sb.Contains("{") OrElse sb.Contains("["))
-
-            If looksJsonA AndAlso looksJsonB Then
-                Return String.Equals(StripWsOutsideQuotes(sa), StripWsOutsideQuotes(sb), StringComparison.Ordinal)
-            End If
-
-            Return False
-        End Function
-
-        ''' <summary>
-        ''' Removes whitespace characters occurring outside of quoted strings.
-        ''' </summary>
-        ''' <param name="s">Input string.</param>
-        ''' <returns>Normalized string without whitespace outside quotes.</returns>
-        ''' <remarks>
-        ''' Used by <see cref="StringsEqual"/> to compare JSON-like text while ignoring formatting differences.
-        ''' </remarks>
-        Private Function StripWsOutsideQuotes(s As String) As String
-            Dim sb As New StringBuilder(s.Length)
-            Dim inStr As Boolean = False
-            Dim esc As Boolean = False
-
-            For i As Integer = 0 To s.Length - 1
-                Dim ch = s(i)
-                If inStr Then
-                    sb.Append(ch)
-                    If esc Then
-                        esc = False
-                    ElseIf ch = "\"c Then
-                        esc = True
-                    ElseIf ch = """"c Then
-                        inStr = False
-                    End If
-                Else
-                    If ch = """"c Then
-                        inStr = True
-                        sb.Append(ch)
-                    ElseIf Not Char.IsWhiteSpace(ch) Then
-                        sb.Append(ch)
-                    End If
-                End If
-            Next
-
-            Return sb.ToString()
-        End Function
-
-        ''' <summary>
-        ''' Performs deep comparison of local vs. remote provider configurations.
-        ''' </summary>
-        ''' <param name="localCfg">Local provider templates.</param>
-        ''' <param name="localNotes">Local provider notes.</param>
-        ''' <param name="remoteCfg">Remote provider templates.</param>
-        ''' <param name="remoteNotes">Remote provider notes.</param>
-        ''' <returns>True if differences are detected; otherwise False.</returns>
-        Private Function AreDifferent(localCfg As Dictionary(Of String, List(Of AppConfigurationVariable)),
-                                  localNotes As Dictionary(Of String, String),
-                                  remoteCfg As Dictionary(Of String, List(Of AppConfigurationVariable)),
-                                  remoteNotes As Dictionary(Of String, String)) As Boolean
-            If remoteCfg Is Nothing OrElse remoteNotes Is Nothing Then
-                System.Diagnostics.Debug.WriteLine("No remote config/notes available; treating as 'no differences'.")
-                Return False
-            End If
-
-            Dim foundDiff As Boolean = False
-            Dim S As Func(Of String, String) = Function(x) If(x, "<null>")
-
-            ' Check for providers added/removed
-            For Each p In remoteCfg.Keys
-                If Not localCfg.ContainsKey(p) Then
-                    System.Diagnostics.Debug.WriteLine($"Difference: provider present in remote but missing locally: '{p}'")
-                    foundDiff = True
-                End If
-            Next
-            For Each p In localCfg.Keys
-                If Not remoteCfg.ContainsKey(p) Then
-                    System.Diagnostics.Debug.WriteLine($"Difference: provider present locally but missing in remote: '{p}'")
-                    foundDiff = True
-                End If
-            Next
-
-            ' Per-provider comparison: check variables (added/removed/changed)
-            For Each p In remoteCfg.Keys
-                Dim rList = remoteCfg(p)
-                Dim lList As List(Of AppConfigurationVariable) = Nothing
-                If Not localCfg.TryGetValue(p, lList) Then
-                    System.Diagnostics.Debug.WriteLine($"Difference: provider '{p}' exists in remote but not found in local config map.")
-                    foundDiff = True
-                    Continue For
-                End If
-
-                Dim rByName = rList.ToDictionary(Function(v) v.VarName, StringComparer.OrdinalIgnoreCase)
-                Dim lByName = lList.ToDictionary(Function(v) v.VarName, StringComparer.OrdinalIgnoreCase)
-
-                ' Check variables added/removed
-                For Each k In rByName.Keys
-                    If Not lByName.ContainsKey(k) Then
-                        System.Diagnostics.Debug.WriteLine($"Difference[{p}]: variable added in remote: '{k}'")
-                        foundDiff = True
-                    End If
-                Next
-                For Each k In lByName.Keys
-                    If Not rByName.ContainsKey(k) Then
-                        System.Diagnostics.Debug.WriteLine($"Difference[{p}]: variable removed in remote: '{k}'")
-                        foundDiff = True
-                    End If
-                Next
-
-                ' Field-by-field comparison (including CurrentValue)
-                For Each k In rByName.Keys
-                    If Not lByName.ContainsKey(k) Then
-                        Continue For
-                    End If
-
-                    Dim r = rByName(k)
-                    Dim l = lByName(k)
-
-                    If Not StringsEqual(l.DisplayName, r.DisplayName) Then
-                        System.Diagnostics.Debug.WriteLine($"Difference[{p}.{k}]: DisplayName local='{S(l.DisplayName)}' remote='{S(r.DisplayName)}'")
-                        foundDiff = True
-                    End If
-                    If Not StringsEqual(l.VarType, r.VarType) Then
-                        System.Diagnostics.Debug.WriteLine($"Difference[{p}.{k}]: VarType local='{S(l.VarType)}' remote='{S(r.VarType)}'")
-                        foundDiff = True
-                    End If
-                    If Not StringsEqual(l.ValidationRule, r.ValidationRule) Then
-                        System.Diagnostics.Debug.WriteLine($"Difference[{p}.{k}]: ValidationRule local='{S(l.ValidationRule)}' remote='{S(r.ValidationRule)}'")
-                        foundDiff = True
-                    End If
-                    If Not StringsEqual(l.DefaultValue, r.DefaultValue) Then
-                        System.Diagnostics.Debug.WriteLine($"Difference[{p}.{k}]: DefaultValue local='{S(l.DefaultValue)}' remote='{S(r.DefaultValue)}'")
-                        foundDiff = True
-                    End If
-                    If Not StringsEqual(l.CurrentValue, r.CurrentValue) Then
-                        System.Diagnostics.Debug.WriteLine($"Difference[{p}.{k}]: CurrentValue local='{S(l.CurrentValue)}' remote='{S(r.CurrentValue)}'")
-                        foundDiff = True
-                    End If
-                Next
-            Next
-
-            ' Compare notes: check union of providers to catch added/removed notes
-            Dim allProviders = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-            For Each k In localCfg.Keys : allProviders.Add(k) : Next
-            For Each k In remoteCfg.Keys : allProviders.Add(k) : Next
-
-            For Each p In allProviders
-                Dim ln As String = Nothing
-                Dim rn As String = Nothing
-                localNotes.TryGetValue(p, ln)
-                remoteNotes.TryGetValue(p, rn)
-                If Not StringsEqual(ln, rn) Then
-                    System.Diagnostics.Debug.WriteLine($"Difference[{p}]: Provider note changed. localLen={If(ln, "").Length} remoteLen={If(rn, "").Length}")
-                    foundDiff = True
-                End If
-            Next
-
-            If Not foundDiff Then
-                System.Diagnostics.Debug.WriteLine("No differences detected between local and remote config/notes.")
-            End If
-
-            Return foundDiff
-        End Function
-
-        ''' <summary>
-        ''' Attempts to download and apply remote provider configuration defaults.
-        ''' </summary>
-        ''' <remarks>
-        ''' Uses <c>RemoteDefaultsUrl</c> as the remote source and asks the user before downloading.
-        ''' If remote defaults differ from built-in defaults, the user can choose to replace the built-in maps.
-        ''' Network and parsing failures are caught and ignored.
-        ''' </remarks>
-        Private Sub TryOverrideDefaultsFromRemote()
-
-            Dim answer = ShowCustomYesNoBox($"You are about to run the {SharedMethods.AN} Installation Wizard. Do you want to check on {RemoteDefaultsUrl} for updated default configuration information?", "Yes", "No, keep built-in")
-
-            If answer <> 1 Then Return
-
-            Try
-                Dim remoteText As String = Nothing
-                If Not TryDownloadString(RemoteDefaultsUrl, 10000, remoteText) Then Exit Sub
-
-                Dim rCfg As Dictionary(Of String, List(Of AppConfigurationVariable)) = Nothing
-                Dim rNotes As Dictionary(Of String, String) = Nothing
-                If Not TryParseRemoteDefaults(remoteText, rCfg, rNotes) Then Exit Sub
-
-                If rCfg Is Nothing OrElse rCfg.Count = 0 Then Exit Sub
-
-                If AreDifferent(providerConfigs, providerNotes, rCfg, rNotes) Then
-                    Dim choice = SharedMethods.ShowCustomYesNoBox(
-                    "Updated Default provider configurations are available online. Do you want To load and use those instead Of the built-In defaults now?",
-                    "Use online defaults",
-                    "Keep built-In")
-
-                    ' Convention: return 1 for first button ("Use online defaults")
-                    If choice = 1 Then
-                        providerConfigs = New Dictionary(Of String, List(Of AppConfigurationVariable))(rCfg, StringComparer.OrdinalIgnoreCase)
-                        providerNotes = New Dictionary(Of String, String)(rNotes, StringComparer.OrdinalIgnoreCase)
-                    End If
-                Else
-                    ShowCustomMessageBox("No updates found. Keeping built-in defaults.")
-
-                End If
-            Catch
-                ' Never fail the wizard on remote errors (network, parsing, comparison exceptions all ignored)
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Handles provider selection changes by saving current inputs, switching the active provider, and rebuilding the provider UI.
-        ''' </summary>
         Private Sub cmbProvider_SelectedIndexChanged(sender As Object, e As EventArgs) Handles cmbProvider.SelectedIndexChanged
             Try
                 ' Step 1: Save values into the previously displayed provider
@@ -1091,7 +541,7 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Retrieves a provider configuration list by provider name.
         ''' </summary>
-        ''' <param name="name">Provider name (e.g., "OpenAI", "Google Vertex").</param>
+        ''' <param name="name">Provider name (e.g., "OpenAI", "Google Enterprise Agent Platform").</param>
         ''' <returns>Provider variable list, or Nothing if provider is not found.</returns>
         Private Function GetConfigListByName(name As String) As List(Of AppConfigurationVariable)
             If String.IsNullOrEmpty(name) Then Return Nothing
@@ -1175,8 +625,8 @@ Namespace SharedLibrary
                     End Select
                 Next
 
-                ' Only Google Vertex requires OAuth2 by default
-                If String.Equals(_activeProvider, "Google Vertex", StringComparison.OrdinalIgnoreCase) Then
+                ' Only Google Enterprise Agent Platform requires OAuth2 by default
+                If String.Equals(_activeProvider, "Google Enterprise Agent Platform", StringComparison.OrdinalIgnoreCase) Then
                     _context.INI_OAuth2 = True
                 End If
 
