@@ -4,7 +4,7 @@
 ' =============================================================================
 ' File: GeminiTranscribeEngine.vb
 ' Purpose: File-based transcription using Google Gemini 3.5 Transcribe on
-'          Vertex AI / Gemini Enterprise Agent Platform.
+'          Google Enterprise Agent Platform.
 ' =============================================================================
 
 Option Explicit On

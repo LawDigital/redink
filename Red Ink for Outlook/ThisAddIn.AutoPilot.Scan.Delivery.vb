@@ -241,6 +241,8 @@ Partial Public Class ThisAddIn
         ' Revalidate the live authority before EVERY part. A changed register blocks pending parts.
         Dim current = ScanInbox.Registry.Load(GetScanRegisterPath())
         If ScanInbox.Registry.Hash(Newtonsoft.Json.JsonConvert.SerializeObject(current)) <> operation.ConfigurationHash AndAlso (operation.AuthorityHash = "" OrElse ScanInbox.Registry.DeliveryAuthorityHash(current) <> operation.AuthorityHash) Then Throw New System.IO.InvalidDataException("Scan register changed before submission.")
+        Dim currentRule = current.RuleSets.Single(Function(r) r.Active AndAlso r.Id = rule.Id)
+        Dim approvedAddresses = ScanInbox.Registry.DeliveryAddresses(current, currentRule, delivery, operation.Mailbox)
         Dim mail As Microsoft.Office.Interop.Outlook.MailItem = Nothing
         Dim accounts As Microsoft.Office.Interop.Outlook.Accounts = Nothing
         Dim account As Microsoft.Office.Interop.Outlook.Account = Nothing
@@ -272,25 +274,28 @@ Partial Public Class ThisAddIn
             If account Is Nothing Then Throw New System.IO.InvalidDataException("The monitored scan account cannot be resolved; delivery stopped.")
             mail.SendUsingAccount = account
             recipients = mail.Recipients
-            For Each id In delivery.ToIds.Concat(delivery.CcIds).Distinct()
-                Dim person = current.Recipients.Single(Function(p) p.Active AndAlso p.Id = id AndAlso rule.AllowedRecipientIds.Contains(id))
+            For Each address In approvedAddresses
                 Dim recipient As Microsoft.Office.Interop.Outlook.Recipient = Nothing
                 Try
-                    recipient = recipients.Add(ScanInbox.Registry.Address(person.SmtpAddress))
-                    recipient.Type = CInt(If(delivery.ToIds.Contains(id), Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo, Microsoft.Office.Interop.Outlook.OlMailRecipientType.olCC))
+                    recipient = recipients.Add(address.Key)
+                    recipient.Type = CInt(If(address.Value, Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo, Microsoft.Office.Interop.Outlook.OlMailRecipientType.olCC))
                 Finally
                     ReleaseScanCom(recipient)
                 End Try
             Next
             If delivery.ToIds.Count = 0 OrElse Not recipients.ResolveAll() Then Throw New System.IO.InvalidDataException("Scan recipients could not be resolved.")
+            Dim resolvedAddresses As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            If recipients.Count <> approvedAddresses.Count Then Throw New System.IO.InvalidDataException("Scan recipient count differs from the approved register.")
             For index As System.Int32 = 1 To recipients.Count
                 Dim recipient As Microsoft.Office.Interop.Outlook.Recipient = Nothing
                 Try
                     recipient = recipients.Item(index)
                     Dim resolved = ScanRecipientAddress(recipient)
-                    If Not delivery.ToIds.Concat(delivery.CcIds).Any(Function(id) current.Recipients.Single(Function(p) p.Id = id).SmtpAddress.Equals(resolved, System.StringComparison.OrdinalIgnoreCase)) Then
+                    If Not approvedAddresses.ContainsKey(resolved) OrElse Not resolvedAddresses.Add(resolved) Then
                         Throw New System.IO.InvalidDataException("Resolved scan address differs from the approved register.")
                     End If
+                    Dim expectedType = CInt(If(approvedAddresses(resolved), Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo, Microsoft.Office.Interop.Outlook.OlMailRecipientType.olCC))
+                    If recipient.Type <> expectedType Then Throw New System.IO.InvalidDataException("Resolved scan recipient type differs from the approved register.")
                 Finally
                     ReleaseScanCom(recipient)
                 End Try

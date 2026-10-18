@@ -6,7 +6,8 @@
     <Platform Condition="'$(Platform)' == ''">AnyCPU</Platform>
     <ProjectGuid>{D5234198-1D81-4ED3-AF98-04D6E7D12EE2}</ProjectGuid>
     <OutputType>Exe</OutputType>
-    <RootNamespace></RootNamespace>
+    <RootNamespace>
+    </RootNamespace>
     <AssemblyName>redink-sa-worker</AssemblyName>
     <StartupObject>SemanticArchiveWorker.Program</StartupObject>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
@@ -34,6 +35,12 @@
     <DefineTrace>true</DefineTrace>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup>
+    <SignManifests>true</SignManifests>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ManifestCertificateThumbprint>B3192C186D292F5D35CE353DDAE67C3EF92263A5</ManifestCertificateThumbprint>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="System" />
@@ -90,6 +97,9 @@
     </None>
     <None Include="App.config" />
   </ItemGroup>
+  <ItemGroup>
+    <Folder Include="My Project\" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
   <!-- System.ValueTuple is inbox on net48. Match the net471+ package target:
        do not generate a redirect to the net462 package implementation (4.0.5.0). -->
@@ -99,7 +109,6 @@
     </ItemGroup>
   </Target>
   <Target Name="ValidateWorkerRuntimeReferencePaths" BeforeTargets="ResolveAssemblyReferences" Condition="'$(DesignTimeBuild)' != 'true'">
-    <Error Condition="'%(Reference.HintPath)' != '' And !Exists('%(Reference.HintPath)')"
-           Text="Worker runtime reference is missing: %(Reference.HintPath). Restore the solution NuGet packages before building." />
+    <Error Condition="'%(Reference.HintPath)' != '' And !Exists('%(Reference.HintPath)')" Text="Worker runtime reference is missing: %(Reference.HintPath). Restore the solution NuGet packages before building." />
   </Target>
 </Project>

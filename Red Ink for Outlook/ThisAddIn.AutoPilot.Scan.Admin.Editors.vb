@@ -316,6 +316,7 @@ Namespace ScanInbox
         Private ReadOnly _value As RegisteredRecipient
         Private ReadOnly _name As System.Windows.Forms.TextBox
         Private ReadOnly _email As System.Windows.Forms.TextBox
+        Private ReadOnly _copyAddresses As AdminTextList
         Private ReadOnly _active As System.Windows.Forms.CheckBox
         Private ReadOnly _aliases As AdminTextList
         Private ReadOnly _organization As System.Windows.Forms.TextBox
@@ -338,12 +339,15 @@ Namespace ScanInbox
             Dim fields = AdminUi.Fields(Tabs, "Contact")
             _name = AdminUi.Text(_value.Name)
             _email = AdminUi.Text(_value.SmtpAddress)
+            _copyAddresses = New AdminTextList(_value.CopySmtpAddresses)
             _active = AdminUi.Check("Available for recipient sets", _value.Active)
             _organization = AdminUi.Text(_value.Organization)
             _location = AdminUi.Text(_value.Location)
             _aliases = New AdminTextList(_value.Aliases)
             AdminUi.Field(fields, "Full name *", _name)
             AdminUi.Field(fields, "Email address *", _email)
+            AdminUi.Field(fields, "Copy email addresses (CC)", _copyAddresses)
+            AdminUi.Help(_copyAddresses, "Optional: add one bare email address at a time. These addresses receive a CC of this recipient's scan messages, including personal content and attachment follow-ups. Copies do not create registered recipients, run extra tasks or grant follow-up access. Duplicates are sent only once per message.")
             AdminUi.Field(fields, "Status", _active)
             AdminUi.Field(fields, "Organization", _organization)
             AdminUi.Field(fields, "Location", _location)
@@ -383,10 +387,12 @@ Namespace ScanInbox
         End Sub
 
         Protected Overrides Sub Commit()
+            _copyAddresses.FlushPending()
             _aliases.FlushPending()
             _attributes.FlushPending()
             _value.Name = _name.Text
             _value.SmtpAddress = _email.Text
+            _value.CopySmtpAddresses = _copyAddresses.Values
             _value.Active = _active.Checked
             _value.Organization = _organization.Text.Trim()
             _value.Location = _location.Text.Trim()
@@ -456,7 +462,7 @@ Namespace ScanInbox
             ApplyButton.Enabled = False
             Dim fields = AdminUi.Fields(Tabs, "Names and addresses")
             AdminUi.Field(fields, "Columns", New System.Windows.Forms.Label With {.Text = "Name and Email required. Use headings to import all recipient settings.", .AutoSize = True})
-            AdminUi.Help(_header, "Supported headings: " & System.String.Join(", ", AdminSession.ImportColumns) & ". Separate aliases and attributes with |; escape a literal pipe as \| and a backslash as \\. Booleans: true/false, yes/no or 1/0. Empty switches preserve defaults/current values. Empty text/list cells clear that field. Absent columns preserve existing values. Inactive recipients are not assigned to sets.")
+            AdminUi.Help(_header, "Supported headings: " & System.String.Join(", ", AdminSession.ImportColumns) & ". Separate aliases, attributes and CopySmtpAddresses with |; escape a literal pipe as \| and a backslash as \\. Booleans: true/false, yes/no or 1/0. Empty switches preserve defaults/current values. Empty text/list cells clear that field. Absent columns preserve existing values. Inactive recipients are not assigned to sets.")
             _text.MinimumSize = New System.Drawing.Size(180, 180)
             _text.MaxLength = 2000000
             _text.AcceptsTab = True

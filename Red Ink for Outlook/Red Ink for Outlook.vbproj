@@ -82,7 +82,7 @@
     <DefineConstants>$(DefineConstants),HAS_WINRT</DefineConstants>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.7.57.700</ApplicationVersion>
+    <ApplicationVersion>1.7.59.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Develop%29</ProductName>
@@ -640,7 +640,7 @@
     <SignManifests>true</SignManifests>
   </PropertyGroup>
   <PropertyGroup>
-    <ManifestCertificateThumbprint>50229D23A3CA721BCA66C2ECC258074E6C6D6456</ManifestCertificateThumbprint>
+    <ManifestCertificateThumbprint>B3192C186D292F5D35CE353DDAE67C3EF92263A5</ManifestCertificateThumbprint>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <DebugSymbols>true</DebugSymbols>

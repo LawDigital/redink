@@ -1290,7 +1290,8 @@ Partial Public Class ThisAddIn
                         ex.Message,
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
-                        appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                        userLanguage:=ResolveBlockedFallbackUserLanguage(context),
+                        appendTaskStatusFooter:=False)
 
                 Catch ex As System.TimeoutException
                     context.FinalizationBlocked = True
@@ -1312,7 +1313,7 @@ Partial Public Class ThisAddIn
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                         context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                         userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                        appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                        appendTaskStatusFooter:=False)
 
                 Catch ex As System.OperationCanceledException
                     If subAgentMode Then Throw
@@ -4133,7 +4134,7 @@ Partial Public Class ThisAddIn
                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count(),
                 context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count(),
                 userLanguage:=ResolveBlockedFallbackUserLanguage(context),
-                appendTaskStatusFooter:=SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract))
+                appendTaskStatusFooter:=False)
 
         Catch ex As System.OperationCanceledException
             context.IsCancelled = True

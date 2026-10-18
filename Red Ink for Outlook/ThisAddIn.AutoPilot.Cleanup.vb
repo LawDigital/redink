@@ -285,7 +285,7 @@ Partial Public Class ThisAddIn
                 If Not acct.SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then Continue For
 
                 deliveryStore = acct.DeliveryStore
-                If deliveryStore Is Nothing Then Return False
+                If Not IsAutoDeleteStoreAlreadyOpen(deliveryStore, "configured monitored mailbox") Then Return False
 
                 storeId = If(deliveryStore.StoreID, "")
                 Return Not String.IsNullOrWhiteSpace(storeId)
@@ -299,14 +299,31 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    Private Function ShouldProcessAutoDeleteStore(store As Store,
-                                                  targetStoreId As String) As Boolean
+    ' Never activate an unopened provider from unattended maintenance. Outlook can display
+    ' a native data-file dialog before a GetRootFolder/GetDefaultFolder call throws.
+    ' Do not read DisplayName/StoreID/FilePath for diagnostics before this gate.
+    Private Function IsAutoDeleteStoreAlreadyOpen(store As Microsoft.Office.Interop.Outlook.Store,
+                                                   context As System.String) As System.Boolean
         If store Is Nothing Then Return False
-        If String.IsNullOrWhiteSpace(targetStoreId) Then Return True
+        Try
+            If store.IsOpen Then Return True
+            LogAutoDeleteErrorDiagnostic(context & ": store is not open; unattended maintenance deferred without opening it.")
+        Catch ex As System.Exception
+            LogAutoDeleteErrorDiagnostic(context & ": store open state unavailable; unattended maintenance deferred: " & ex.Message)
+        End Try
+        Return False
+    End Function
+
+    Private Function ShouldProcessAutoDeleteStore(store As Microsoft.Office.Interop.Outlook.Store,
+                                                  targetStoreId As System.String,
+                                                  context As System.String) As System.Boolean
+        If Not IsAutoDeleteStoreAlreadyOpen(store, context) Then Return False
+        If System.String.IsNullOrWhiteSpace(targetStoreId) Then Return True
 
         Try
-            Return store.StoreID.Equals(targetStoreId, StringComparison.OrdinalIgnoreCase)
-        Catch
+            Return store.StoreID.Equals(targetStoreId, System.StringComparison.OrdinalIgnoreCase)
+        Catch ex As System.Exception
+            LogAutoDeleteErrorDiagnostic(context & ": store identity unavailable; maintenance deferred: " & ex.Message)
             Return False
         End Try
     End Function
@@ -519,7 +536,7 @@ Partial Public Class ThisAddIn
 
                 Try
                     store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "Store " & i.ToString(System.Globalization.CultureInfo.InvariantCulture)) Then Continue For
 
                     Try
                         rootFolder = store.GetRootFolder()
@@ -751,7 +768,7 @@ Partial Public Class ThisAddIn
 
                 Try
                     store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "Store " & i.ToString(System.Globalization.CultureInfo.InvariantCulture)) Then Continue For
 
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)
@@ -819,7 +836,7 @@ Partial Public Class ThisAddIn
 
                 Try
                     store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "Store " & i.ToString(System.Globalization.CultureInfo.InvariantCulture)) Then Continue For
 
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)

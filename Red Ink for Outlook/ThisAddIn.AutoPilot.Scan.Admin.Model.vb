@@ -143,7 +143,7 @@ Namespace ScanInbox
             Registry.AtomicWrite(fileName, Newtonsoft.Json.JsonConvert.SerializeObject(snapshot, Newtonsoft.Json.Formatting.Indented))
         End Sub
 
-        Public Shared ReadOnly ImportColumns As System.String() = {"Name", "Email", "Organization", "Active", "Aliases", "Location", "Attributes", "Instruction", "MailLanguage", "TranslateAttachments", "TranslationLanguage", "DraftReply", "ReplyOnlyWhenAppropriate", "WebResearch", "TaskInstructions"}
+        Public Shared ReadOnly ImportColumns As System.String() = {"Name", "Email", "Organization", "Active", "Aliases", "Location", "Attributes", "Instruction", "MailLanguage", "TranslateAttachments", "TranslationLanguage", "DraftReply", "ReplyOnlyWhenAppropriate", "WebResearch", "TaskInstructions", "CopySmtpAddresses"}
 
         Private Shared Function CsvCell(value As System.String) As System.String
             Return """" & If(value, "").Replace("""", """""") & """"
@@ -186,7 +186,7 @@ Namespace ScanInbox
             Dim csv As New System.Text.StringBuilder()
             csv.AppendLine(System.String.Join(";", ImportColumns.Select(Function(c) CsvCell(c))))
             For Each person In snapshot.Recipients
-                Dim values As System.String() = {person.Name, person.SmtpAddress, person.Organization, person.Active.ToString(), ExportList(person.Aliases), person.Location, ExportList(person.Attributes), person.Instruction, person.MailLanguage, person.TranslateAttachments.ToString(), person.TranslationLanguage, person.DraftReply.ToString(), person.ReplyOnlyWhenAppropriate.ToString(), person.WebResearch.ToString(), person.TaskInstructions}
+                Dim values As System.String() = {person.Name, person.SmtpAddress, person.Organization, person.Active.ToString(), ExportList(person.Aliases), person.Location, ExportList(person.Attributes), person.Instruction, person.MailLanguage, person.TranslateAttachments.ToString(), person.TranslationLanguage, person.DraftReply.ToString(), person.ReplyOnlyWhenAppropriate.ToString(), person.WebResearch.ToString(), person.TaskInstructions, ExportList(person.CopySmtpAddresses)}
                 csv.AppendLine(System.String.Join(";", values.Select(Function(v) CsvCell(v))))
             Next
             ' BOM enables direct opening in Excel; the importer also accepts UTF-8 without BOM.
@@ -211,6 +211,7 @@ Namespace ScanInbox
                 Select Case columns(index).ToLowerInvariant()
                     Case "name" : person.Name = value
                     Case "email" : person.SmtpAddress = value
+                    Case "copysmtpaddresses" : person.CopySmtpAddresses = ImportList(fields(index))
                     Case "organization" : person.Organization = value
                     Case "active" : person.Active = ImportBoolean(value, columns(index))
                     Case "aliases" : person.Aliases = ImportList(fields(index))
@@ -229,6 +230,7 @@ Namespace ScanInbox
             If person.Name = "" OrElse person.Name.Any(Function(c) System.Char.IsControl(c)) OrElse person.Organization.Any(Function(c) System.Char.IsControl(c)) OrElse person.Location.Any(Function(c) System.Char.IsControl(c)) Then Throw New System.IO.InvalidDataException("Enter a name; name, organization and location must each use one line.")
             person.SmtpAddress = Registry.Address(person.SmtpAddress)
             Registry.ValidatePersonalSettings(person)
+            Registry.ValidateCopyRecipients(person)
             Return person
         End Function
 
@@ -271,7 +273,7 @@ Namespace ScanInbox
                             row.Name = row.Person.Name
                             row.Email = row.Person.SmtpAddress
                             row.Organization = row.Person.Organization
-                            If Configuration.RuleSets.Any(Function(r) r.ScannerSenders.Any(Function(a) a.Equals(row.Email, System.StringComparison.OrdinalIgnoreCase))) Then Throw New System.IO.InvalidDataException("A scanner sender cannot be a recipient.")
+                            If Configuration.RuleSets.Any(Function(r) r.ScannerSenders.Any(Function(a) a.Equals(row.Email, System.StringComparison.OrdinalIgnoreCase) OrElse row.Person.CopySmtpAddresses.Contains(a, System.StringComparer.OrdinalIgnoreCase))) Then Throw New System.IO.InvalidDataException("A scanner sender cannot be a recipient or copy recipient.")
                             If Not seen.Add(row.Email) Then
                                 row.Status = "Duplicate in import — skipped"
                             ElseIf existing IsNot Nothing Then

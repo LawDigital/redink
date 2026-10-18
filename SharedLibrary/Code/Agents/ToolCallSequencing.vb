@@ -6654,7 +6654,7 @@ Namespace Agents
                                                                 successCount As Integer,
                                                                 failedCount As Integer,
                                                                 Optional userLanguage As String = "",
-                                                                Optional appendTaskStatusFooter As Boolean = True) As String
+                                                                Optional appendTaskStatusFooter As Boolean = False) As String
             Dim deterministicMessage As System.String = System.String.Empty
             If TryBuildDeterministicHostFailureMessage(
                 errorCode,

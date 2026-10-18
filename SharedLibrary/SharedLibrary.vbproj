@@ -650,6 +650,7 @@
     <Compile Include="Code\Core\Clipboard\SharedMethods.StoreAndRestoreClipboard.vb" />
     <Compile Include="Code\Core\Config\ConfigurationResourceLoader.vb" />
     <Compile Include="Code\Core\Config\ConfigWizardEngine.vb" />
+    <Compile Include="Code\Core\Config\ProviderTemplateCatalog.vb" />
     <Compile Include="Code\Core\Config\ConfigWizardForm.Designer.vb">
       <DependentUpon>ConfigWizardForm.vb</DependentUpon>
     </Compile>
@@ -783,6 +784,7 @@
     <EmbeddedResource Include="Code\Core\Config\ConfigWizard.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </EmbeddedResource>
+    <EmbeddedResource Include="Code\Core\Config\redink-defaultconfig.ini" />
     <None Include="Code\Agents\Red_Ink_Tool_List.md" />
     <None Include="Code\Agents\skill-author.md" />
     <None Include="My Project\Application.myapp">

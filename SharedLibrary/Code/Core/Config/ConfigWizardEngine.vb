@@ -289,6 +289,7 @@ Namespace SharedLibrary
                     Dim json As String = reader.ReadToEnd()
                     Dim definition As WizardDefinition = JsonConvert.DeserializeObject(Of WizardDefinition)(json)
                     ResolveDefaultConstants(definition)
+                    ProviderTemplateCatalog.ApplyToWizard(definition, ProviderTemplateCatalog.LoadEmbedded())
                     Return definition
                 End Using
             End Using

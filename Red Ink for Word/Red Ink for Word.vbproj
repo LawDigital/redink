@@ -891,7 +891,7 @@
     <SignManifests>true</SignManifests>
   </PropertyGroup>
   <PropertyGroup>
-    <ManifestCertificateThumbprint>50229D23A3CA721BCA66C2ECC258074E6C6D6456</ManifestCertificateThumbprint>
+    <ManifestCertificateThumbprint>B3192C186D292F5D35CE353DDAE67C3EF92263A5</ManifestCertificateThumbprint>
   </PropertyGroup>
   <PropertyGroup>
     <ManifestTimestampUrl>http://timestamp.digicert.com</ManifestTimestampUrl>

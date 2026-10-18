@@ -34,6 +34,14 @@ Namespace ScanInbox
         Public Property Location As System.String = ""
         Public Property Attributes As New System.Collections.Generic.List(Of System.String)()
         Public Property SmtpAddress As System.String = ""
+        ' Administrator-approved, one-hop transport copies; no matching or personal-task authority.
+        Public Property CopySmtpAddresses As New System.Collections.Generic.List(Of System.String)()
+
+        ' Preserve the serialized authority/hash of existing registers when no copies are set.
+        ' Explicit null must remain visible so strict validation rejects it.
+        Public Function ShouldSerializeCopySmtpAddresses() As System.Boolean
+            Return CopySmtpAddresses Is Nothing OrElse CopySmtpAddresses.Count > 0
+        End Function
         Public Property Instruction As System.String = ""
         Public Property MailLanguage As System.String = ""
         Public Property TranslateAttachments As System.Boolean

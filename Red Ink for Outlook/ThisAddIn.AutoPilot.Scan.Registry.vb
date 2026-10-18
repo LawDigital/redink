@@ -249,6 +249,7 @@ Namespace ScanInbox
                 Require(person.Aliases IsNot Nothing AndAlso person.Attributes IsNot Nothing, "Recipient aliases/attributes must be arrays.")
                 ValidatePersonalSettings(person)
                 person.SmtpAddress = Address(person.SmtpAddress)
+                ValidateCopyRecipients(person)
                 Require(smtp.Add(person.SmtpAddress), "Duplicate register SMTP address.")
             Next
             Dim combinations As New System.Collections.Generic.List(Of System.Tuple(Of System.String, System.String))()
@@ -279,7 +280,7 @@ Namespace ScanInbox
                 For Each sender In rule.ScannerSenders
                     Dim normalized = Address(sender)
                     Require(ownSenders.Add(normalized), "Duplicate scanner sender in rule set.")
-                    Require(Not config.Recipients.Any(Function(p) Address(p.SmtpAddress) = normalized), "Scanner sender cannot also be a delivery recipient.")
+                    Require(Not config.Recipients.Any(Function(p) Address(p.SmtpAddress) = normalized OrElse p.CopySmtpAddresses.Contains(normalized)), "Scanner sender cannot also be a delivery or copy recipient.")
                     If rule.Active Then
                         Require(Not combinations.Any(Function(c) c.Item1 = normalized AndAlso (c.Item2 = mailbox OrElse c.Item2 = "" OrElse mailbox = "")), "Ambiguous scanner sender/mailbox combination.")
                         combinations.Add(System.Tuple.Create(normalized, mailbox))
@@ -287,6 +288,39 @@ Namespace ScanInbox
                 Next
             Next
         End Sub
+
+        Public Shared Sub ValidateCopyRecipients(person As RegisteredRecipient)
+            Require(person.CopySmtpAddresses IsNot Nothing, "Copy email addresses must be an array.")
+            person.CopySmtpAddresses = person.CopySmtpAddresses.Select(Function(value) Address(value)).
+                Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+        End Sub
+
+        ' Expand only the participants in this actual delivery (including personalised and split
+        ' deliveries). Copies never recursively expand other recipients or run their personal tasks.
+        ' True means To, False means CC; To always wins across duplicate SMTP addresses.
+        Public Shared Function DeliveryAddresses(config As Configuration, rule As RuleSet, delivery As Delivery,
+                                                 mailbox As System.String) As System.Collections.Generic.Dictionary(Of System.String, System.Boolean)
+            Require(delivery.ToIds IsNot Nothing AndAlso delivery.ToIds.Count > 0 AndAlso delivery.CcIds IsNot Nothing, "Scan delivery requires recipients.")
+            Dim result As New System.Collections.Generic.Dictionary(Of System.String, System.Boolean)(System.StringComparer.OrdinalIgnoreCase)
+            Dim people As New System.Collections.Generic.List(Of RegisteredRecipient)()
+            For Each id In delivery.ToIds.Concat(delivery.CcIds).Distinct()
+                Dim person = config.Recipients.SingleOrDefault(Function(p) p.Active AndAlso p.Id = id AndAlso rule.AllowedRecipientIds.Contains(id))
+                Require(person IsNot Nothing, "Scan delivery recipient is missing, inactive or not allowed: " & id)
+                people.Add(person)
+                Dim smtp = Address(person.SmtpAddress)
+                result(smtp) = delivery.ToIds.Contains(id) OrElse (result.ContainsKey(smtp) AndAlso result(smtp))
+            Next
+            For Each person In people
+                For Each value In person.CopySmtpAddresses
+                    Dim smtp = Address(value)
+                    Require(Not smtp.Equals(mailbox, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                        Not config.RuleSets.Any(Function(r) r.ScannerSenders.Contains(smtp, System.StringComparer.OrdinalIgnoreCase)),
+                        "A scan copy recipient cannot be the receiving mailbox or a scanner sender.")
+                    If Not result.ContainsKey(smtp) Then result.Add(smtp, False)
+                Next
+            Next
+            Return result
+        End Function
 
         Public Shared Sub ValidatePersonalSettings(person As RegisteredRecipient)
             For Each language In New System.String() {person.MailLanguage, person.TranslationLanguage}
