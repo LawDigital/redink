@@ -146,7 +146,7 @@ Partial Public Class ThisAddIn
                 System.IO.Directory.CreateDirectory(archiveDirectory)
             End If
 
-            PruneAutoPilotToolingLogArchives(archiveDirectory, AP_ToolingLogArchiveRetentionCount - 1)
+            ' Archive retention is pruned by the nightly AutoPilot maintenance pass.
 
             Dim safeUser As String = SanitizeAutoPilotToolingLogFileSegment(userLabel, "unknown-user")
             Dim safeSubject As String = SanitizeAutoPilotToolingLogFileSegment(subjectLabel, "no-subject")
@@ -430,6 +430,13 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     Private _apActive As Boolean = False
+    Private _apStopAfterCurrentRequested As System.Int32
+    Private _apDrainWaitRunning As System.Int32
+    Private ReadOnly _apJobAdmissionSync As New System.Object()
+
+    Private Function IsAutoPilotDrainRequested() As System.Boolean
+        Return System.Threading.Interlocked.CompareExchange(_apStopAfterCurrentRequested, 0, 0) <> 0
+    End Function
     Private _apConfig As AutoPilotConfig = Nothing
     Private _apCts As CancellationTokenSource = Nothing
     Private _apDashboard As LogWindow = Nothing
@@ -516,14 +523,12 @@ Partial Public Class ThisAddIn
     ''' <summary>Threshold (bytes) above which a PDF is considered heavy (likely OCR).</summary>
     Private Const AP_HeavyPdfThreshold As Long = 2 * 1024 * 1024
 
-    ''' <summary>
-    ''' Internal time seeds per mail category (seconds). Used solely to decide whether
-    ''' the 60-second notification threshold is crossed — never exposed to the sender.
-    ''' </summary>
-    Private Const AP_SeedSeconds_TextOnly As Double = 15.0
-    Private Const AP_SeedSeconds_LightAttachments As Double = 30.0
-    Private Const AP_SeedSeconds_HeavyDoc As Double = 300.0
-    Private Const AP_SeedSeconds_HeavyPdf As Double = 600.0
+    ''' <summary>Conservative initial total-duration estimates for the monitoring heartbeat.
+    ''' Notifications retain their independent elapsed-time thresholds.</summary>
+    Private Const AP_SeedSeconds_TextOnly As Double = 120.0
+    Private Const AP_SeedSeconds_LightAttachments As Double = 180.0
+    Private Const AP_SeedSeconds_HeavyDoc As Double = 900.0
+    Private Const AP_SeedSeconds_HeavyPdf As Double = 1200.0
 
     ''' <summary>Tracks when each queued mail was first seen in the queue (EntryId → UTC enqueue time).</summary>
     Private ReadOnly _apQueueEnqueueTimes As New ConcurrentDictionary(Of String, DateTime)()
@@ -531,8 +536,8 @@ Partial Public Class ThisAddIn
     ''' <summary>Entry IDs that have received a queue holding notification, with the UTC time of the last notification.</summary>
     Private ReadOnly _apQueueNotifiedEntryIds As New ConcurrentDictionary(Of String, DateTime)()
 
-    ''' <summary>Rolling average processing time per mail category. Key = category tag, Value = (avg, count).</summary>
-    Private ReadOnly _apCategoryTimings As New ConcurrentDictionary(Of String, (AvgSeconds As Double, SampleCount As Integer))(StringComparer.OrdinalIgnoreCase)
+    ' Only substantive completed jobs train the durable timing history.
+    Private _apCurrentJobTimingCompleted As System.Boolean = False
 
     ''' <summary>Stopwatch tracking the current mail's processing time.</summary>
     Private _apCurrentProcessingStopwatch As Stopwatch = Nothing
@@ -608,17 +613,31 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Stops AutoPilot processing and clears runtime state.</summary>
     Public Sub StopAutoPilot()
+        StopAutoPilotCore(preservePendingQueue:=False, showConfirmation:=True)
+    End Sub
+
+    Private Sub StopAutoPilotCore(preservePendingQueue As System.Boolean, showConfirmation As System.Boolean)
         ' Disable persistence before any cancellation/cleanup. This closes the race
         ' where an in-flight pump Finally block could otherwise recreate the journal
         ' after an explicit operator Stop had just deleted it. Outlook shutdown does
         ' NOT call this switch and therefore remains resumable.
-        SetAutoPilotQueueJournalPersistenceEnabled(False)
+        If preservePendingQueue Then
+            ' Commit the final queue snapshot before disabling persistence; a failed save
+            ' leaves AutoPilot paused with its in-memory queue and allows an operator retry.
+            SyncLock _apQueueJournalSyncRoot
+                PersistAutoPilotQueueJournal(throwOnFailure:=True)
+                SetAutoPilotQueueJournalPersistenceEnabled(False)
+            End SyncLock
+        Else
+            SetAutoPilotQueueJournalPersistenceEnabled(False)
+        End If
 
         If Not _apActive Then
-            ClearAutoPilotQueueJournal()
+            If Not preservePendingQueue Then ClearAutoPilotQueueJournal()
             Return
         End If
         _apActive = False
+        If Not preservePendingQueue Then System.Threading.Interlocked.Exchange(_apStopAfterCurrentRequested, 0)
         StopScanInbox()
         Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
         Try : SaveAutoPilotDashboardBounds(_apDashboard) : Catch : End Try
@@ -626,6 +645,7 @@ Partial Public Class ThisAddIn
             If _apDashboard IsNot Nothing Then
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 RemoveHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                RemoveHandler _apDashboard.StopAfterCurrentRequested, AddressOf AutoPilot_DashboardStopAfterCurrentRequested
                 RemoveHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
             End If
         Catch : End Try
@@ -658,7 +678,8 @@ Partial Public Class ThisAddIn
         _apQueueEnqueueTimes.Clear()
         _apQueueStates.Clear()
         _apQueuedOrProcessingEntryIds.Clear()
-        _apCategoryTimings.Clear()
+        _apCurrentJobTimingCompleted = False
+        System.Threading.Interlocked.Exchange(Of System.String)(_apCurrentJobEffortClass, Nothing)
         _apCurrentProcessingStopwatch = Nothing
         _apCurrentProcessingCategory = Nothing
         _apHelpMeManualCache = Nothing
@@ -671,9 +692,9 @@ Partial Public Class ThisAddIn
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
         _apVoicemailCallerIdMap = Nothing
-        ClearAutoPilotQueueJournal()
+        If Not preservePendingQueue Then ClearAutoPilotQueueJournal()
 
-        If INI_WebServerBlock <> 4 Then
+        If Not preservePendingQueue AndAlso INI_WebServerBlock <> 4 Then
             EnsureLocalSchedulerTimerStarted()
         End If
 
@@ -681,7 +702,7 @@ Partial Public Class ThisAddIn
         WriteAutoPilotHeartbeat("stopped")
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
-        ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
+        If showConfirmation Then ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
     End Sub
 
     ''' <summary>Shows the AutoPilot dashboard if it is available.</summary>
@@ -759,11 +780,13 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"[AutoPilot] Failed to persist config on start: {ex.Message}")
         End Try
 
-        PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
         InitializeAutoPilotLogDiagnosticTopicPolicy()
+        EnsureAutoPilotTimingHistoryLoaded()
 
         StopLocalSchedulerRuntime()
         SetAutoPilotQueueJournalPersistenceEnabled(True)
+        System.Threading.Interlocked.Exchange(_apStopAfterCurrentRequested, 0)
+        System.Threading.Interlocked.Exchange(_apDrainWaitRunning, 0)
         _apActive = True
         _apCts = New CancellationTokenSource()
         _apSessionReplyCount = 0
@@ -819,8 +842,10 @@ Partial Public Class ThisAddIn
                 _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
                 AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                AddHandler _apDashboard.StopAfterCurrentRequested, AddressOf AutoPilot_DashboardStopAfterCurrentRequested
                 AddHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
                 _apDashboard.ShowAbortJobButton(True)
+                _apDashboard.ShowStopAfterCurrentButton(True)
                 RestoreAutoPilotDashboardBounds()
                 _apDashboard.Show()
                 EnsureAutoPilotDashboardVisible()
@@ -1025,31 +1050,15 @@ Partial Public Class ThisAddIn
         $"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).",
         "info")
 
-            StartAutoDeleteTimer()
 
-            If AP_RunAutoDeleteCleanupOnStartup Then
-                ApDashboardLog(
-            "🗑 Auto-delete startup cleanup enabled — running initial pass.",
-            "step")
-
-                RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
-            Else
-                ApDashboardLog(
-            "🗑 Auto-delete startup cleanup disabled — cleanup runs on the periodic timer only.",
-            "step")
-            End If
         Else
             ApDashboardLog("🗑 Auto-delete disabled.", "info")
         End If
 
+        ' File retention also needs its nightly slot when mail deletion is disabled.
+        StartAutoDeleteTimer()
         If config.ThreadRetentionDays > 0 Then
-            ApDashboardLog($"🗂 Conversation attachment retention enabled ({config.ThreadRetentionDays} day(s), whitelisted senders only).", "info")
-            Task.Run(Sub()
-                         Try
-                             PurgeExpiredThreadRetention()
-                         Catch
-                         End Try
-                     End Sub)
+            ApDashboardLog($"🗂 Conversation attachment retention enabled ({config.ThreadRetentionDays} day(s), whitelisted senders only); expired folders are purged nightly.", "info")
         End If
 
         ' Start a periodic timer for queue holding notifications.
@@ -1072,6 +1081,56 @@ Partial Public Class ThisAddIn
     ''' <summary>Handles a dashboard stop request.</summary>
     Private Sub AutoPilot_DashboardCancelRequested(sender As Object, e As EventArgs)
         StopAutoPilot()
+    End Sub
+
+    Private Async Sub AutoPilot_DashboardStopAfterCurrentRequested(sender As System.Object, e As System.EventArgs)
+        If Not _apActive OrElse _apCts Is Nothing Then Return
+        If System.Threading.Interlocked.CompareExchange(_apDrainWaitRunning, 1, 0) <> 0 Then Return
+        Dim sessionCts As System.Threading.CancellationTokenSource = _apCts
+        Dim ct As System.Threading.CancellationToken = sessionCts.Token
+        Dim ownsProcessingSlot As System.Boolean = False
+        SyncLock _apJobAdmissionSync
+            System.Threading.Interlocked.Exchange(_apStopAfterCurrentRequested, 1)
+        End SyncLock
+        ApDashboardLog("⏸ Stop after current job requested. Finishing active work and delivery; no further jobs will start. Pending work will be retained for the next start.", "info")
+        Try
+            StopSchedulerTimer()
+            StopScanInbox()
+            StopAutoDeleteTimer()
+            Try : _apNotificationTimer?.Dispose() : Catch : End Try
+            _apNotificationTimer = Nothing
+            CancelAutoPilotLogDiagnosticsForForegroundWork()
+
+            ' The slot is released only after the complete mail/scheduled job, including
+            ' source finalization and durable queue bookkeeping. Never cancel its token.
+            Await _apProcessingSemaphore.WaitAsync(ct)
+            ownsProcessingSlot = True
+            While System.Threading.Interlocked.CompareExchange(_scanSweepRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apNightlyMaintenanceRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apNotificationCheckRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apLogDiagnosticsRunning, 0, 0) <> 0
+                Await System.Threading.Tasks.Task.Delay(100, ct)
+            End While
+            ct.ThrowIfCancellationRequested()
+            Await SwitchToUi(
+                Sub()
+                    If _apActive AndAlso System.Object.ReferenceEquals(_apCts, sessionCts) Then
+                        StopAutoPilotCore(preservePendingQueue:=True, showConfirmation:=False)
+                        ApDashboardLog("AutoPilot stopped after active work completed. Pending work is retained; ready for maintenance.", "info")
+                    End If
+                End Sub)
+        Catch ex As System.OperationCanceledException
+            ' An explicit immediate Stop still takes precedence.
+        Catch ex As System.Exception
+            ApDashboardLog("Controlled stop could not finish: " & ex.Message & ". AutoPilot remains paused; pending work is retained in memory. Retry Stop After Job after resolving the error.", "error")
+            If _apDashboard IsNot Nothing AndAlso Not _apDashboard.IsDisposed Then _apDashboard.SetStopAfterCurrentPending(False)
+        Finally
+            If ownsProcessingSlot Then _apProcessingSemaphore.Release()
+            If System.Object.ReferenceEquals(_apCts, sessionCts) OrElse Not _apActive Then
+                System.Threading.Interlocked.Exchange(_apDrainWaitRunning, 0)
+            End If
+        End Try
     End Sub
 
     ''' <summary>Handles a dashboard abort-current-job request (does NOT stop AutoPilot).</summary>
@@ -1974,10 +2033,13 @@ Partial Public Class ThisAddIn
     ''' opaque Outlook EntryIDs, queue state, and timestamps are stored. Mail bodies,
     ''' subjects, addresses, attachment names, and model/tool content are never persisted.
     ''' </summary>
-    Private Sub PersistAutoPilotQueueJournal()
+    Private Sub PersistAutoPilotQueueJournal(Optional throwOnFailure As System.Boolean = False)
         Try
             SyncLock _apQueueJournalSyncRoot
-                If Not _apQueueJournalPersistenceEnabled Then Return
+                If Not _apQueueJournalPersistenceEnabled Then
+                    If throwOnFailure Then Throw New System.InvalidOperationException("Queue persistence is disabled; controlled stop cannot commit pending work.")
+                    Return
+                End If
 
                 Dim queuedIds As String() = _apMailQueue.ToArray()
                 Dim processingId As String = If(_apCurrentProcessingEntryId, "").Trim()
@@ -2017,6 +2079,7 @@ Partial Public Class ThisAddIn
                     Try
                         If File.Exists(journalPath) Then File.Delete(journalPath)
                     Catch
+                        If throwOnFailure Then Throw
                     End Try
                     Return
                 End If
@@ -2088,6 +2151,7 @@ Partial Public Class ThisAddIn
             End SyncLock
         Catch ex As System.Exception
             Debug.WriteLine("[AutoPilot] PersistAutoPilotQueueJournal error: " & ex.Message)
+            If throwOnFailure Then Throw
         End Try
     End Sub
 
@@ -2324,11 +2388,12 @@ Partial Public Class ThisAddIn
     ''' Uses Interlocked to prevent overlapping executions.
     ''' </summary>
     Private Async Sub NotificationTimerCallback(state As Object)
-        ' Guard: skip if AutoPilot is not active or already checking
-        If Not _apActive Then Return
+        ' Guard: skip if AutoPilot is not active, draining or already checking
+        If Not _apActive OrElse IsAutoPilotDrainRequested() Then Return
         If Interlocked.CompareExchange(_apNotificationCheckRunning, 1, 0) <> 0 Then Return
 
         Try
+            If IsAutoPilotDrainRequested() Then Return
             WriteAutoPilotHeartbeat("running")
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
@@ -2355,6 +2420,10 @@ Partial Public Class ThisAddIn
     Private Async Function AutoPilotProcessingPump(ct As CancellationToken) As Task
         Try
             While Not ct.IsCancellationRequested
+                If IsAutoPilotDrainRequested() Then
+                    Await System.Threading.Tasks.Task.Delay(100, ct)
+                    Continue While
+                End If
                 If _apMailQueue.IsEmpty Then
                     Await Task.Delay(1000, ct)
                     Continue While
@@ -2366,8 +2435,13 @@ Partial Public Class ThisAddIn
                 End If
 
                 Try
+                    If IsAutoPilotDrainRequested() Then Continue While
                     Dim entryId As String = Nothing
-                    If _apMailQueue.TryDequeue(entryId) Then
+                    Dim admitted As System.Boolean = False
+                    SyncLock _apJobAdmissionSync
+                        If Not IsAutoPilotDrainRequested() Then admitted = _apMailQueue.TryDequeue(entryId)
+                    End SyncLock
+                    If admitted Then
 
                         Dim enqueueUtcForTiming As DateTime
                         If _apQueueEnqueueTimes.TryGetValue(entryId, enqueueUtcForTiming) Then
@@ -2424,6 +2498,9 @@ Partial Public Class ThisAddIn
                         _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
                         Dim jobCt = _apCurrentJobCts.Token
 
+                        _apCurrentJobTimingCompleted = False
+                        System.Threading.Interlocked.Exchange(Of System.String)(_apCurrentJobEffortClass, Nothing)
+                        Dim timingRunReturned As System.Boolean = False
                         _apCurrentProcessingStopwatch = Stopwatch.StartNew()
                         Try
                             ' The entire unattended mail job owns one provider-agnostic transport
@@ -2434,13 +2511,20 @@ Partial Public Class ThisAddIn
                                     Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
 
                                 Await ProcessIncomingMailAsync(entryId, jobCt)
+                                timingRunReturned = True
                             End Using
                         Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
                             ' Job-level abort (not session-level) — log and continue to next mail
                             ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
                         Finally
                             _apCurrentProcessingStopwatch.Stop()
-                            UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
+                            If timingRunReturned AndAlso _apCurrentJobTimingCompleted AndAlso
+                               Not jobCt.IsCancellationRequested Then
+                                UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds,
+                                                     System.Threading.Volatile.Read(Of System.String)(_apCurrentJobEffortClass))
+                            End If
+                            _apCurrentJobTimingCompleted = False
+                            System.Threading.Interlocked.Exchange(Of System.String)(_apCurrentJobEffortClass, Nothing)
                             ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
                             _apCurrentProcessingStopwatch = Nothing
                             _apCurrentProcessingCategory = Nothing
@@ -2652,36 +2736,6 @@ Partial Public Class ThisAddIn
         End Try
         Return AP_Cat_TextOnly
     End Function
-
-    ''' <summary>Returns the estimated seconds for a category, using learned data or seed defaults.</summary>
-    Private Function GetCategoryEstimate(category As String) As Double
-        Dim timing As (AvgSeconds As Double, SampleCount As Integer) = Nothing
-        If _apCategoryTimings.TryGetValue(category, timing) AndAlso timing.SampleCount > 0 Then
-            Return timing.AvgSeconds
-        End If
-        Select Case category
-            Case AP_Cat_HeavyPdf : Return AP_SeedSeconds_HeavyPdf
-            Case AP_Cat_HeavyDoc : Return AP_SeedSeconds_HeavyDoc
-            Case AP_Cat_Light : Return AP_SeedSeconds_LightAttachments
-            Case Else : Return AP_SeedSeconds_TextOnly
-        End Select
-    End Function
-
-    ''' <summary>Updates the rolling average for a category after processing completes.</summary>
-    Private Sub UpdateCategoryTiming(category As String, elapsedSeconds As Double)
-        _apCategoryTimings.AddOrUpdate(
-            category,
-            addValueFactory:=Function(k) (elapsedSeconds, 1),
-            updateValueFactory:=Function(k, existing)
-                                    Dim newCount = existing.SampleCount + 1
-                                    If newCount <= 2 Then
-                                        Return (((existing.AvgSeconds * existing.SampleCount) + elapsedSeconds) / newCount, newCount)
-                                    Else
-                                        Const alpha As Double = 0.3
-                                        Return (alpha * elapsedSeconds + (1.0 - alpha) * existing.AvgSeconds, newCount)
-                                    End If
-                                End Function)
-    End Sub
 
     ''' <summary>
     ''' Builds the "system status" sentence containing the configured monitor link,
@@ -3566,6 +3620,7 @@ Partial Public Class ThisAddIn
                             toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
                                 If(String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
                                 mailInfo.Subject),
+                            effortEstimateSink:=Sub(value As System.String) RecordAutoPilotJobEffort(entryId, value),
                             resumeWorkflowFromCheckpoint:=resumeBlockedWorkflow,
                             workflowContinuationKey:=workflowContinuationKey,
                             workflowContinuationRetentionDays:=workflowContinuationRetentionDays,
@@ -3795,6 +3850,7 @@ Partial Public Class ThisAddIn
                         ClearAutoPilotError()
 
                         ApDashboardLog($"Reply for {mailInfo.SenderEmail} is awaiting operator approval — queue continues.", "info")
+                        _apCurrentJobTimingCompleted = True
                     Else
                         If requiresApproval AndAlso _apConfig.IsUnattended Then
                             ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
@@ -3832,6 +3888,7 @@ Partial Public Class ThisAddIn
                         Dim dummyBool As Boolean
                         _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
                         ApDashboardLog($"✓ SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
+                        _apCurrentJobTimingCompleted = True
                     End If
                 Finally
                 ' ── SECURITY / RECOVERY: clean only after a successful handoff/discard,
@@ -6999,6 +7056,7 @@ Partial Public Class ThisAddIn
     Private Sub ApDashboardLog(message As String,
                                level As String,
                                Optional mirrorToLocalToolingLog As Boolean = False)
+        message = SharedLibrary.Agents.SubAgentLogScope.FormatMessage(message)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
 
         MarkAutoPilotJobActivity()
@@ -7169,13 +7227,18 @@ Partial Public Class ThisAddIn
                     If(_apCurrentProcessingCategory, AP_Cat_TextOnly))
 
                 payload("jobElapsedSeconds") = Math.Round(elapsedSeconds, 1)
-                payload("jobEstimateSeconds") = Math.Round(estimateSeconds, 1)
+                Dim effortClass As System.String = System.Threading.Volatile.Read(Of System.String)(_apCurrentJobEffortClass)
+                payload("jobEffortClass") = If(effortClass, System.String.Empty)
+                payload("jobEstimateSeconds") = Math.Round(GetEffortAdjustedEstimate(
+                    If(_apCurrentProcessingCategory, AP_Cat_TextOnly), effortClass, estimateSeconds), 1)
+                ' Model metadata changes the displayed forecast only; preserve existing liveness diagnostics.
                 payload("jobSecondsSinceActivity") = Math.Round(sinceActivitySeconds, 1)
                 payload("jobStalled") = (sinceActivitySeconds >= AP_JobStallThresholdSeconds)
                 payload("jobOverrun") = (estimateSeconds > 0 AndAlso elapsedSeconds > (estimateSeconds * 5))
             Else
                 payload("jobElapsedSeconds") = 0
                 payload("jobEstimateSeconds") = 0
+                payload("jobEffortClass") = System.String.Empty
                 payload("jobSecondsSinceActivity") = 0
                 payload("jobStalled") = False
                 payload("jobOverrun") = False

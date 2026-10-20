@@ -392,7 +392,7 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Function IsAutoPilotLogDiagnosticsMailIdle() As System.Boolean
-        Return _apMailQueue.IsEmpty AndAlso
+        Return Not IsAutoPilotDrainRequested() AndAlso _apMailQueue.IsEmpty AndAlso
                System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) AndAlso
                _apProcessingSemaphore.CurrentCount > 0
     End Function
@@ -402,7 +402,7 @@ Partial Public Class ThisAddIn
             LogAutoPilotLogDiagnosticsStatus("idle", "disabled: no report e-mail address configured.")
             Return
         End If
-        If sessionToken.IsCancellationRequested Then Return
+        If sessionToken.IsCancellationRequested OrElse IsAutoPilotDrainRequested() Then Return
         If Not IsAutoPilotLogDiagnosticsMailIdle() Then Return
         ' Idle means no AutoPilot mail queued/processing and no scheduled task executing.
         ' Scheduler polling and WebExtension job counters do not define mail idle.
@@ -485,7 +485,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 If bundle.IsPending Then DeletePendingAutoPilotLogDiagnosticBundle(bundle.RunKey)
-                CleanupAutoPilotLogDiagnosticResults()
+                ' Result-cache retention is handled by the nightly AutoPilot pass.
 
                 Await MaybeSendImmediateAutoPilotSecurityDiagnosticsForResultAsync(GetAutoPilotLogDiagnosticResultPath(bundle.RunKey), ct).ConfigureAwait(False)
                 Await MaybeSendAutoPilotLogDiagnosticsReportAsync(ct).ConfigureAwait(False)
@@ -494,7 +494,7 @@ Partial Public Class ThisAddIn
             ct.ThrowIfCancellationRequested()
             If IsAutoPilotLogDiagnosticsMailIdle() Then
                 Await MaybeSendAutoPilotLogDiagnosticsReportAsync(ct).ConfigureAwait(False)
-                CleanupAutoPilotLogDiagnosticResults()
+                ' Result-cache retention is handled by the nightly AutoPilot pass.
             End If
         Catch ex As System.OperationCanceledException
             System.Diagnostics.Debug.WriteLine("AutoPilot log diagnostics interrupted: mail/scheduler work or shutdown. Unfinished runs remain available for retry.")

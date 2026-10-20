@@ -365,7 +365,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Deletes expired thread retention directories across all senders. Best-effort;
-    ''' invoked at AutoPilot start when retention is enabled.
+    ''' invoked after the nightly AutoPilot mail-deletion pass.
     ''' </summary>
     Private Sub PurgeExpiredThreadRetention()
         Try

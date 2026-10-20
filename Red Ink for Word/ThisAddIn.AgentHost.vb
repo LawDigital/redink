@@ -117,6 +117,9 @@ Partial Public Class ThisAddIn
 
         Dim isolatedFailureBudgetScope As System.IDisposable =
             Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.PushIsolatedFailureBudget()
+        Dim subAgentLogIdentity As SharedLibrary.Agents.SubAgentLogScope =
+            SharedLibrary.Agents.SubAgentLogScope.Enter(request.AgentName)
+        Dim subAgentLogClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
 
         Try
             If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
@@ -567,9 +570,14 @@ Partial Public Class ThisAddIn
                 "subagent_host_exception", "subagent_execution", ex.Message, retryable:=True,
                 completedResults:=retainedToolResults)
         Finally
-            If isolatedFailureBudgetScope IsNot Nothing Then isolatedFailureBudgetScope.Dispose()
-            If attemptCts IsNot Nothing Then attemptCts.Dispose()
-            RestoreModelConfigScope(_context, scope)
+            Try
+                subAgentLogClock.Stop()
+                If isolatedFailureBudgetScope IsNot Nothing Then isolatedFailureBudgetScope.Dispose()
+                If attemptCts IsNot Nothing Then attemptCts.Dispose()
+                RestoreModelConfigScope(_context, scope)
+            Finally
+                subAgentLogIdentity.Dispose()
+            End Try
         End Try
     End Function
 

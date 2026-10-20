@@ -681,7 +681,7 @@ Partial Public Class ThisAddIn
             _apLocalSchedulerCts = New CancellationTokenSource()
         End If
 
-        SchedulerPurgeOrphanDirectories()
+        If Not _apActive Then SchedulerPurgeOrphanDirectories()
         StartSchedulerTimer()
     End Sub
 
@@ -703,6 +703,7 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Function IsLocalSchedulerEnabled() As Boolean
+        If IsAutoPilotDrainRequested() Then Return False
         If INI_WebServerBlock = 2 OrElse INI_WebServerBlock = 4 Then Return False
         If _apActive Then Return False
 
@@ -754,7 +755,7 @@ Partial Public Class ThisAddIn
     Friend Sub SchedulerCatchUp()
         Try
             ' Purge orphan directories from manually deleted tasks
-            SchedulerPurgeOrphanDirectories()
+            If Not _apActive Then SchedulerPurgeOrphanDirectories()
 
             Dim schedule = ReadScheduleFile()
             Dim now = DateTime.UtcNow
@@ -804,7 +805,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Checks for due tasks and executes them sequentially.</summary>
     Private Async Function CheckAndExecuteDueTasks(ct As CancellationToken) As Task
-        If Not IsSchedulerRuntimeAvailable() Then Return
+        If Not IsSchedulerRuntimeAvailable() OrElse IsAutoPilotDrainRequested() Then Return
 
         Dim schedule = ReadScheduleFile()
         Dim now = DateTime.UtcNow
@@ -834,11 +835,15 @@ Partial Public Class ThisAddIn
                 Continue For
             End If
 
+            If IsAutoPilotDrainRequested() Then Return
             If Not _apProcessingSemaphore.Wait(0) Then
                 Return
             End If
 
             Try
+                SyncLock _apJobAdmissionSync
+                    If IsAutoPilotDrainRequested() Then Return
+                End SyncLock
                 ' A real due task (including local interactive tasks) pre-empts diagnostics.
                 CancelAutoPilotLogDiagnosticsForForegroundWork()
                 If isLocalInteractiveTask Then

@@ -130,8 +130,12 @@ Partial Public Class ThisAddIn
         ' one bounded child budget.
         Dim isolatedFailureBudgetScope As System.IDisposable =
             Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.PushIsolatedFailureBudget()
+        Dim subAgentLogIdentity As SharedLibrary.Agents.SubAgentLogScope =
+            SharedLibrary.Agents.SubAgentLogScope.Enter(request.AgentName)
+        Dim subAgentLogClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
 
         Try
+            If _apActive Then ApDashboardLog("Subagent starting (attempt " & (request.RunnerRetryIndex + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) & ").", "info")
             If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
                 Throw New InvalidOperationException(
                     $"Sub-agent model '{modelKey}' could not be resolved because INI_AlternateModelPath is empty.")
@@ -577,9 +581,15 @@ Partial Public Class ThisAddIn
                 "subagent_host_exception", "subagent_execution", ex.Message, retryable:=True,
                 completedResults:=retainedToolResults)
         Finally
-            If isolatedFailureBudgetScope IsNot Nothing Then isolatedFailureBudgetScope.Dispose()
-            If attemptCts IsNot Nothing Then attemptCts.Dispose()
-            RestoreModelConfigScope(_context, scope)
+            Try
+                subAgentLogClock.Stop()
+                If _apActive Then ApDashboardLog("Subagent run ended after " & subAgentLogClock.Elapsed.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) & "s.", "info")
+                If isolatedFailureBudgetScope IsNot Nothing Then isolatedFailureBudgetScope.Dispose()
+                If attemptCts IsNot Nothing Then attemptCts.Dispose()
+                RestoreModelConfigScope(_context, scope)
+            Finally
+                subAgentLogIdentity.Dispose()
+            End Try
         End Try
     End Function
 

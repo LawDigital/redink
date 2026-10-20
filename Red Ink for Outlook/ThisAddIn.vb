@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 18.10.2026
+' 20.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -77,7 +77,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.181026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.201026" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20

@@ -1800,13 +1800,13 @@ Partial Public Class ThisAddIn
 
     Private Shared Function ValidateAutoPilotWordTableOptions(arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object), ByRef errorMessage As System.String) As System.Boolean
         errorMessage = System.String.Empty
-        Dim borders As System.String = GetArgString(arguments, "table_borders").Trim().ToLowerInvariant()
+        Dim borders As System.String = If(GetArgString(arguments, "table_borders"), System.String.Empty).Trim().ToLowerInvariant()
         If borders <> System.String.Empty AndAlso borders <> "preserve" AndAlso borders <> "none" AndAlso borders <> "grid" Then
             errorMessage = "table_borders must be preserve, none or grid."
             Return False
         End If
         For Each key As System.String In New System.String() {"table_header_shading", "table_body_shading"}
-            Dim value As System.String = GetArgString(arguments, key).Trim()
+            Dim value As System.String = If(GetArgString(arguments, key), System.String.Empty).Trim()
             If value <> System.String.Empty AndAlso Not System.String.Equals(value, "none", System.StringComparison.OrdinalIgnoreCase) AndAlso
                Not System.Text.RegularExpressions.Regex.IsMatch(value, "^#?[0-9A-Fa-f]{6}$") Then
                 errorMessage = key & " must be none or a six-digit RGB hex color."
@@ -1832,9 +1832,9 @@ Partial Public Class ThisAddIn
             arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
             genericDocument As System.Boolean, ByRef errorMessage As System.String) As System.Boolean
         If Not ValidateAutoPilotWordTableOptions(arguments, errorMessage) Then Return False
-        Dim borders As System.String = GetArgString(arguments, "table_borders").Trim().ToLowerInvariant()
-        Dim headerFill As System.String = GetArgString(arguments, "table_header_shading").Trim().TrimStart("#"c).ToUpperInvariant()
-        Dim bodyFill As System.String = GetArgString(arguments, "table_body_shading").Trim().TrimStart("#"c).ToUpperInvariant()
+        Dim borders As System.String = If(GetArgString(arguments, "table_borders"), System.String.Empty).Trim().ToLowerInvariant()
+        Dim headerFill As System.String = If(GetArgString(arguments, "table_header_shading"), System.String.Empty).Trim().TrimStart("#"c).ToUpperInvariant()
+        Dim bodyFill As System.String = If(GetArgString(arguments, "table_body_shading"), System.String.Empty).Trim().TrimStart("#"c).ToUpperInvariant()
         Dim changeBorders As System.Boolean = borders = "none" OrElse borders = "grid"
         If Not genericDocument AndAlso Not changeBorders AndAlso headerFill = System.String.Empty AndAlso bodyFill = System.String.Empty Then Return True
         Try

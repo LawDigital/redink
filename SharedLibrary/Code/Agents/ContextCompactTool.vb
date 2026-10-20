@@ -30,7 +30,7 @@ Namespace Agents
         Public Shared Function Build() As SharedLibrary.ModelConfig
             Dim def As String =
                 "{""name"":""" & ToolName & """," &
-                """description"":""Voluntarily compact older tool results out of the active context to free space when you no longer need them in full. The full text stays retrievable via context_expand using each result's result_ref. Optionally set keep_recent to control how many of the most recent results remain fully visible (default 0).""," &
+                """description"":""Request one compaction of existing older tool results when you no longer need them in full. This is not a persistent retention setting; do not alternate compaction with reloading the same evidence. The full text stays retrievable via context_expand using each result's result_ref. Optionally set keep_recent to control how many of the most recent results remain fully visible (default 0).""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """keep_recent"":{""type"":""integer"",""description"":""How many of the most recent tool results to keep fully visible; older ones are moved to the drawer. Defaults to 0.""}" &
                 "},""required"":[],""additionalProperties"":false}}"
@@ -38,7 +38,7 @@ Namespace Agents
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = ToolName,
                 .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolName & ": Compact older tool results out of the active context when they are no longer needed in full (they remain retrievable via context_expand). Optional keep_recent controls how many recent results stay fully visible (default 0).",
+                .ToolInstructionsPrompt = ToolName & ": Request one compaction of existing older tool results when they are no longer needed in full; keep verified findings and exact supporting evidence before shelving sources (they remain retrievable via context_expand). Optional keep_recent controls how many recent results stay fully visible (default 0).",
                 .ModelDescription = "Context compactor (internal)",
                 .Tool = True,
                 .ToolPriority = 939,
@@ -65,7 +65,7 @@ Namespace Agents
                 New JProperty("ok", True),
                 New JProperty("tool", ToolName),
                 New JProperty("keep_recent", keepRecent),
-                New JProperty("note", "Compaction was requested, not proof that it succeeded. The host replaces content only when the complete stored result is retrievable; on storage failure it keeps the full body. Every resulting stub is incomplete: retrieve all task-required ranges with context_expand, or use an exposed isolated analyzer accepting input_result_ref, before relying on omitted content.")
+                New JProperty("note", "One compaction was requested for the next replay rebuild, not proof that it succeeded. It does not apply to future results. Do not repeatedly shelve and reload the same evidence; prefer an exposed full-source analyzer accepting input_result_ref when appropriate. The host replaces content only when the complete stored result is retrievable; on storage failure it keeps the full body. Every resulting stub is incomplete: retrieve all task-required ranges with context_expand, or use an exposed isolated analyzer accepting input_result_ref, before relying on omitted content.")
             ).ToString(Newtonsoft.Json.Formatting.None)
         End Function
 
