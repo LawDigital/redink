@@ -1704,8 +1704,12 @@ Partial Public Class ThisAddIn
                     Dim slideLabel As String = If(slideNum.Length > 0, $"Slide {slideNum}", Path.GetFileNameWithoutExtension(slideFile))
 
                     ApDashboardLog($"DocProcessor: processing {slideLabel}", "step")
-                    Await APProcessPptxXmlPart(slideFile, instruction, ct,
-                                               slideCount, slideNum, outlineBuilder.ToString())
+                    Dim slideSucceeded As System.Boolean = Await APProcessPptxXmlPart(
+                        slideFile, instruction, ct, slideCount, slideNum, outlineBuilder.ToString())
+                    If Not slideSucceeded Then
+                        ApDashboardLog($"DocProcessor: {slideLabel} failed; refusing to publish a partially processed presentation", "error")
+                        Return False
+                    End If
                 Next
             End If
 
@@ -1718,8 +1722,12 @@ Partial Public Class ThisAddIn
                     Dim notesLabel As String = If(notesNum.Length > 0, $"Notes {notesNum}", Path.GetFileNameWithoutExtension(notesFile))
 
                     ApDashboardLog($"DocProcessor: processing {notesLabel}", "step")
-                    ' Notes slides: no slide-level context needed, use standard batching
-                    Await APProcessPptxXmlPart(notesFile, instruction, ct)
+                    ' Notes slides: no slide-level context needed, use standard batching.
+                    Dim notesSucceeded As System.Boolean = Await APProcessPptxXmlPart(notesFile, instruction, ct)
+                    If Not notesSucceeded Then
+                        ApDashboardLog($"DocProcessor: {notesLabel} failed; refusing to publish a partially processed presentation", "error")
+                        Return False
+                    End If
                 Next
             End If
 

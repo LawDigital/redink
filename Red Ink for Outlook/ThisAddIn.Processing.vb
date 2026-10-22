@@ -588,7 +588,11 @@ Partial Public Class ThisAddIn
             lines(i) = line
         Next
 
-        Return String.Join(newline, lines)
+        ' Move whitespace captured inside Word formatting runs outside Markdown markers.
+        ' E.g. "long-awaited** new Pro model**" -> "long-awaited **new Pro model**".
+        ' The shared HTML insertion path applies the same rule to model output.
+        Return Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownEmphasisWhitespace(
+            String.Join(newline, lines))
     End Function
 
 

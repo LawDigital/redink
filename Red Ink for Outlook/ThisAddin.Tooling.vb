@@ -5890,7 +5890,8 @@ Partial Public Class ThisAddIn
                                                             userLanguage As String,
                                                             useSecondAPI As Boolean,
                                                             hideSplash As Boolean,
-                                                            cancellationToken As System.Threading.CancellationToken) As Task(Of String)
+                                                            cancellationToken As System.Threading.CancellationToken,
+                                                            Optional strictTranslation As System.Boolean = False) As System.Threading.Tasks.Task(Of System.String)
         Dim baseMessage As String =
             SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
                 If(message, "").Trim())
@@ -5898,6 +5899,7 @@ Partial Public Class ThisAddIn
         Dim targetLanguage As String = If(userLanguage, "").Trim()
 
         If baseMessage = "" OrElse targetLanguage = "" Then
+            If strictTranslation Then Throw New System.InvalidOperationException("Host message cannot be localized without text and explicit language.")
             Return baseMessage
         End If
 
@@ -5909,6 +5911,7 @@ Partial Public Class ThisAddIn
         Dim systemPrompt As String =
             "Translate the provided short end-user office-assistant message into the requested language. " &
             "Do not add explanations, quotes, code fences, markdown, technical detail, or any TASK_STATUS block. " &
+            "Preserve literal placeholders enclosed in double curly braces exactly, including their spelling and number of occurrences. " &
             "Return only the final localized message."
 
         Dim userPrompt As String =
@@ -5929,11 +5932,19 @@ Partial Public Class ThisAddIn
                 False)
 
             If String.IsNullOrWhiteSpace(localized) Then
+                If strictTranslation Then Throw New System.InvalidOperationException("LLM returned an empty required host translation.")
                 Return baseMessage
             End If
 
-            Return SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(localized.Trim())
+            Dim translatedText As System.String = SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(localized.Trim())
+            If strictTranslation AndAlso System.String.IsNullOrWhiteSpace(translatedText) Then
+                Throw New System.InvalidOperationException("LLM returned an unusable required host translation.")
+            End If
+            Return translatedText
+        Catch ex As System.OperationCanceledException
+            Throw
         Catch
+            If strictTranslation Then Throw
             Return baseMessage
         End Try
     End Function

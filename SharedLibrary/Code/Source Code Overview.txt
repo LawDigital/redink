@@ -35,13 +35,13 @@
 ' Purpose:
 '   Current architectural inventory of all hand-authored VB source files and
 '   the embedded Markdown editor in this package, with supporting project/assets
-'   described separately. Paths and project memberships were checked on 2026-10-05.
+'   described separately. Paths and project memberships were checked on 2026-10-22.
 '
 ' Language: VB.NET (.NET Framework 4.8); embedded HTML/CSS/JavaScript where noted.
 ' Targets:  Word, Outlook and Excel VSTO add-ins, SharedLibrary, and the optional
 '           SemanticArchive.Worker console executable.
-' Scope:    417 hand-authored VB files plus MarkdownEditor.html (418 active entries).
-'           All 443 Compile items across the five project files resolve to source.
+' Scope:    441 hand-authored VB source files in this source package plus MarkdownEditor.html;
+'           generated Designer/My Project files are tracked separately below.
 '           The 26 generated designer/My Project VB files are accounted for below,
 '           not expanded as hand-authored architectural entries.
 ' Headers:  File-purpose/architecture comments orient developers; existing proper
@@ -49,18 +49,21 @@
 '           Historical references absent from this package are explicitly separated.
 ' =============================================================================
 '
-' Project inventory (Compile counts are project declarations, not a build result):
-'   SharedLibrary                 - 253 hand-authored + 6 generated/My Project = 259.
-'   Red Ink for Word              - 76 hand-authored + 7 generated/My Project = 83.
-'   Red Ink for Outlook           - 66 hand-authored + 6 generated/My Project = 72.
-'   Red Ink for Excel             - 18 hand-authored + 7 generated/My Project = 25.
-'   SemanticArchive.Worker        - 4 hand-authored + 0 generated/My Project = 4.
+' Project inventory (source counts are checked against current project files):
+'   SharedLibrary                  - 260 hand-authored + 6 generated = 266 Compile sources.
+'   Red Ink for Word               - 77 hand-authored + 7 generated = 84 Compile sources.
+'   Red Ink for Outlook            - 81 hand-authored + 6 generated = 87 Compile sources.
+'   Red Ink for Excel              - 18 hand-authored + 7 generated = 25 Compile sources.
+'   SemanticArchive.Worker         - 4 hand-authored + 0 generated = 4 Compile sources.
 '
 ' =============================================================================
 ' SHAREDLIBRARY
 ' =============================================================================
 '
 ' [Agents]
+'   ContextProgressPolicy.vb                     - Per-execution context-management progress; coverage is delivery history, NOT proof of
+'   RunEffortEstimate.vb                         - Source module for RunEffortEstimate.
+'   SubAgentLogScope.vb                          - Implements System.IDisposable
 '   ActionPromiseValidator.vb                   - Validates promised follow-up actions emitted by agent responses.
 '   AgentGate.vb                                - Runtime gating, serialization, and reentrancy protection for agent execution.
 '   AgentResources.vb                           - Discovers agent/skill resources such as `Inky.md`, `SKILL.md`, and `AGENT.md`.
@@ -258,6 +261,8 @@
 '   SharedMethods.StoreAndRestoreClipboard.vb   - RAII-style clipboard state preservation and restore helper.
 '
 ' [Core\Config]
+'   ProviderTemplateCatalog.vb                   - Canonical embedded provider templates shared by the Installation Wizard and ConfigWizard.
+'   SharedMethods.License.Identifiers.vb         - Windows NetGetAadJoinInformation API, never inferred from configuration/cache text.
 '   ConfigurationResourceLoader.vb              - Read-only configuration resource resolution for filesystem sources and HTTPS process-local snapshots.
 '   ConfigWizardEngine.vb                       - Engine for declarative configuration-wizard flows.
 '   ConfigWizardForm.vb                         - WinForms UI for the declarative configuration wizard.
@@ -324,6 +329,7 @@
 '   SharedMethods.TextHandlingExcel.vb          - Excel-specific range and worksheet text-extraction helpers.
 '
 ' [Core\UI]
+'   WebView2DpiHost.vb                           - Do not change Office process awareness, HTML zoom or controller rasterization.
 '   DPIProgressForm.vb                          - DPI-aware progress form with custom scaling behavior.
 '   LogWindow.vb                                - Shared persistent non-activating log window with thread-safe append API.
 '   MCPOAuthBrowserForm.vb                      - Browser form used for MCP OAuth and interactive auth flows.
@@ -339,6 +345,7 @@
 '   SplashScreenWorks.vb                        - Alternative splash-screen implementation.
 '
 ' [Core\Various]
+'   SharedMethods.OcrMarkdownCleaner.vb          - Source module for SharedMethods OcrMarkdownCleaner.
 '   Crashlogger.vb                              - Crash logging and emergency diagnostic capture.
 '   OfficeWindowWatchdog.vb                     - Office window tracking and recovery/watchdog helpers.
 '   SharedLogger.vb                             - Lightweight privacy-preserving async file logger.
@@ -361,6 +368,8 @@
 ' =============================================================================
 '
 ' [Red Ink for Word]
+'   ThisAddIn.OcrMarkdownCleanup.vb              - New SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Keep extracted Markdown unchanged (default)", 1),
+'   TranscriptionOptionsDialog.vb                - File: TranscriptionOptionsDialog.vb
 '   BridgeSubs.vb                               - COM-visible automation bridge exposing selected Word add-in commands.
 '   ComparisonHtmlViewerForm.vb                 - WebView2 viewer for prepared Word comparison HTML, revision formatting and action-button callbacks.
 '   DiscussInky.vb                              - Multi-persona discussion UI with knowledge loading and tool integration.
@@ -459,6 +468,21 @@
 '   ThisAddIn.vb                                - Excel VSTO entry point, startup/shutdown, and COM automation bridge.
 '
 ' [Red Ink for Outlook]
+'   ThisAddIn.AutoPilot.Scan.Admin.Dashboard.vb  - Administration dashboard for Outlook scan operations.
+'   ThisAddIn.AutoPilot.Scan.Admin.Editors.vb    - Editors for scan administrative configuration.
+'   ThisAddIn.AutoPilot.Scan.Admin.Model.vb      - Scan administration model and state.
+'   ThisAddIn.AutoPilot.Scan.Admin.RuleEditor.vb - Scan rule editing UI and validation.
+'   ThisAddIn.AutoPilot.Scan.Contracts.vb        - Shared contracts for the scan workflow.
+'   ThisAddIn.AutoPilot.Scan.Decisions.vb        - Scan decision and classification logic.
+'   ThisAddIn.AutoPilot.Scan.Delivery.vb         - Scan result delivery and notifications.
+'   ThisAddIn.AutoPilot.Scan.Management.vb       - Scan lifecycle management.
+'   ThisAddIn.AutoPilot.Scan.Naming.Host.vb      - Outlook-specific scan naming integration.
+'   ThisAddIn.AutoPilot.Scan.Naming.vb           - Scan naming and identifiers.
+'   ThisAddIn.AutoPilot.Scan.Personal.vb         - Personal scan workflow.
+'   ThisAddIn.AutoPilot.Scan.Registry.vb         - Registry of scan definitions.
+'   ThisAddIn.AutoPilot.Scan.Retention.vb        - Scan retention management.
+'   ThisAddIn.AutoPilot.Scan.Runtime.vb          - Scan execution runtime.
+'   ThisAddIn.AutoPilot.Timing.vb                - Source module for ThisAddIn AutoPilot Timing.
 '   DragDropForm.vb                             - File/folder drag-and-drop selector used by Outlook workflows.
 '   LogWindow.vb                                - Outlook-local logging and review window.
 '   ReviewChangesDialog.vb                      - Review UI for accepting or rejecting generated change sets.
@@ -470,6 +494,7 @@
 '   ThisAddIn.Autopilot.CompleteTables.vb       - AutoPilot helpers for table-completion and structured attachment output.
 '   ThisAddIn.AutoPilot.Config.vb               - AutoPilot configuration data class and startup dialog logic.
 '   ThisAddIn.AutoPilot.DocProcessor.vb         - OpenXML attachment processor for DOCX, PPTX, and XLSX files.
+'   ThisAddIn.AutoPilot.HostNotices.vb          - Immutable host-owned notices for AutoPilot replies, approval previews and deterministic HTML assembly.
 '   ThisAddIn.AutoPilot.LogDiagnostics.vb       - Idle-time AutoPilot log analysis with bounded queues, normalized findings and privacy-redacted reports.
 '   ThisAddIn.AutoPilot.OutgoingDelivery.vb     - Size-aware AutoPilot delivery planning and attachment follow-up mail batching.
 '   ThisAddIn.AutoPilot.PDFCommentProcessor.vb  - Adds PDF highlight/comment annotations using PdfPig/PDFsharp.
@@ -577,6 +602,9 @@
 ' NOTES
 ' =============================================================================
 '
+' - Inventory checked against 466 VB files on disk, including 26 generated files.
+' - On case-sensitive hosts, Outlook project reference ThisAddIn.Tooling.vb
+'   differs in case from on-disk ThisAddin.Tooling.vb; Windows lookup is case-insensitive.
 ' - Shared logic stays independent of Office host, organization, template and model;
 '   host entry points compose capabilities and provide the required native context.
 ' - Knowledge Store and Semantic Archive are distinct source/retrieval systems; cached

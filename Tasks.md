@@ -7,6 +7,15 @@
 - Product invariant: no integrated/runtime self-tests are to be added. Regression checks stay external/manual or in separate tooling and must not run during Red Ink startup.
 - Architecture invariant: shared behavior remains model-, provider-, tool-, skill-, organization-, template-, document- and language-agnostic. Outlook and Word use the same shared implementation wherever the concern is common.
 
+## Completed 2026-10-22 — LLM-based localization for Outlook AutoPilot host notices
+
+- Input checkpoint: latest cumulative Gen2 host-notices ZIP from 2026-10-22, reconstructed over the original 2026-10-22 Gen2 archive; current sources and existing `LocalizeHostMessageIfNeededAsync` reviewed.
+- Root cause: previous notice fix introduced five-language hard-coded translations and separate localized holding/rejection/abort builders, although the Outlook host already has an LLM-based translator.
+- Fix: preserve the explicit language contract and immutable attachment facts; reuse the existing translator with an opt-in strict mode for mandatory notices, localizing prose before handoff to approval and sending. Preserve actual limit, filenames, add-in identity, the host URL and signature via validated placeholders and deterministic substitution. Remove all newly added language-specific branches. Other callers retain the existing best-effort translator behavior.
+- Permanent architecture rule in `CONTRIBUTING.md`: no language allowlists or fixed translations; reuse existing LLM localization, explicit target language, strict required outputs, no text-language heuristics, immutable host response obligations.
+- Regression invariants: success/approval/holding/rejection/abort/failure paths still carry notices; deferred approval reuses immutable snapshot; all-oversized fast path and all existing non-mixed replies unchanged; Word and shared orchestration untouched. If strict translation fails, do not silently send a corrupted or mislabeled translation.
+- Outstanding native tests: Visual Studio 2022/VSTO build and Outlook sends/approval/abort in languages not previously included, translation failures, retry/recovery behavior. Static validation cannot prove native runtime execution.
+
 ## Completed 2026-10-19 — optional model workload estimates, fixed license-dialog footer and nightly AutoPilot file purging
 
 - Input checkpoint: `RedInk_Dialog_Timing_Cumulative_ChangedOnly_20261019.zip`, reconstructed over `RI_Gen2_261019_0951.zip`; also distributed inside `RedInk_Dialog_Timing_Updatepaket_20261019.zip`. Re-read current source, CONTRIBUTING and Tasks. The active requests are cumulative: add a slim optional model effort estimate without regressions; make the Offline License Manager taller with buttons visible at startup; move AutoPilot file purging to the 01:00 deletion slot. The last scope clarification limits file-purge changes to AutoPilot.

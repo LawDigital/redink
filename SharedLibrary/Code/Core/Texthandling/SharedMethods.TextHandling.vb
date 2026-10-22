@@ -214,6 +214,219 @@ Namespace SharedLibrary
             Return NormalizeKnownLatexCodesPreservingMarkdownLinks(markdown)
         End Function
 
+        ''' <summary>
+        ''' Moves Word-exported leading/trailing whitespace outside paired Markdown emphasis
+        ''' delimiters. Markdown requires an opening * / ** / *** / ~~ delimiter to touch
+        ''' content and a closing delimiter to follow content without whitespace. Word
+        ''' formatting runs can include spaces, producing e.g. "** revised text**", which
+        ''' Markdig correctly renders as literal asterisks rather than bold text.
+        ''' Only paired delimiters on one logical line are touched. Escapes, inline code,
+        ''' fenced/indented code and list bullets are left intact. No visible character is
+        ''' added or removed: the whitespace is merely moved across the delimiter.
+        ''' </summary>
+        Public Shared Function NormalizeMarkdownEmphasisWhitespace(markdown As System.String) As System.String
+            If System.String.IsNullOrEmpty(markdown) Then Return If(markdown, System.String.Empty)
+
+            Dim parts As System.String() = System.Text.RegularExpressions.Regex.Split(markdown, "(\r\n|\r|\n)")
+            Dim result As New System.Text.StringBuilder(markdown.Length)
+            Dim fenceCharacter As System.Char = ControlChars.NullChar
+            Dim fenceLength As System.Int32 = 0
+
+            For partIndex As System.Int32 = 0 To parts.Length - 1 Step 2
+                Dim line As System.String = parts(partIndex)
+                Dim fenceMatch As System.Text.RegularExpressions.Match =
+                    System.Text.RegularExpressions.Regex.Match(line, "^ {0,3}(`{3,}|~{3,})")
+
+                If fenceCharacter <> ControlChars.NullChar Then
+                    result.Append(line)
+                    If fenceMatch.Success AndAlso
+                       fenceMatch.Groups(1).Value(0) = fenceCharacter AndAlso
+                       fenceMatch.Groups(1).Length >= fenceLength AndAlso
+                       System.String.IsNullOrWhiteSpace(line.Substring(fenceMatch.Length)) Then
+                        fenceCharacter = ControlChars.NullChar
+                        fenceLength = 0
+                    End If
+                ElseIf fenceMatch.Success Then
+                    fenceCharacter = fenceMatch.Groups(1).Value(0)
+                    fenceLength = fenceMatch.Groups(1).Length
+                    result.Append(line)
+                ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^(?: {4}|\t)") AndAlso
+                       Not System.Text.RegularExpressions.Regex.IsMatch(line, "^\s{4,}(?:[-+*]|\d+[.)])\s+") Then
+                    ' An indented code block, not a nested Markdown list.
+                    result.Append(line)
+                Else
+                    result.Append(NormalizeMarkdownEmphasisWhitespaceInLine(line))
+                End If
+
+                If partIndex + 1 < parts.Length Then result.Append(parts(partIndex + 1))
+            Next
+
+            Return result.ToString()
+        End Function
+
+        Private Shared Function NormalizeMarkdownEmphasisWhitespaceInLine(line As System.String) As System.String
+            If line.Length = 0 OrElse
+               (line.IndexOf("*"c) < 0 AndAlso line.IndexOf("~"c) < 0) Then Return line
+
+            Dim result As New System.Text.StringBuilder(line.Length)
+            Dim index As System.Int32 = 0
+            Dim listBullet As System.Text.RegularExpressions.Match =
+                System.Text.RegularExpressions.Regex.Match(line, "^ {0,3}\*\s")
+
+            While index < line.Length
+                If line(index) = "\"c AndAlso index + 1 < line.Length Then
+                    ' Escaped delimiter sequences may themselves be followed by delimiter-looking text.
+                    ' Keep the entire escaped sequence inert; do not reinterpret its closer as an opener.
+                    Dim escapedMarker As System.String = MarkdownEmphasisMarkerAt(line, index + 1)
+                    If escapedMarker.Length > 0 Then
+                        Dim escapedClose As System.Int32 = FindMarkdownEmphasisClose(
+                            line, index + 1 + escapedMarker.Length, escapedMarker)
+                        If escapedClose >= 0 Then
+                            result.Append(line, index, escapedClose + escapedMarker.Length - index)
+                            index = escapedClose + escapedMarker.Length
+                            Continue While
+                        End If
+                    End If
+                    result.Append(line, index, 2)
+                    index += 2
+                    Continue While
+                End If
+
+                If line(index) = "`"c Then
+                    Dim afterCode As System.Int32 = SkipMarkdownCodeSpan(line, index)
+                    result.Append(line, index, afterCode - index)
+                    index = afterCode
+                    Continue While
+                End If
+
+                ' An asterisk at the start of a Markdown bullet is not an italic opener.
+                If listBullet.Success AndAlso index = listBullet.Index + listBullet.Length - 2 Then
+                    result.Append(line(index))
+                    index += 1
+                    Continue While
+                End If
+
+                Dim marker As System.String = MarkdownEmphasisMarkerAt(line, index)
+                If marker.Length > 0 Then
+                    Dim closeIndex As System.Int32 = FindMarkdownEmphasisClose(line, index + marker.Length, marker)
+                    If closeIndex >= 0 Then
+                        Dim content As System.String = line.Substring(index + marker.Length, closeIndex - index - marker.Length)
+                        Dim leadingCount As System.Int32 = 0
+                        While leadingCount < content.Length AndAlso
+                              (content(leadingCount) = " "c OrElse content(leadingCount) = ControlChars.Tab)
+                            leadingCount += 1
+                        End While
+                        Dim trailingCount As System.Int32 = 0
+                        While trailingCount < content.Length - leadingCount AndAlso
+                              (content(content.Length - trailingCount - 1) = " "c OrElse
+                               content(content.Length - trailingCount - 1) = ControlChars.Tab)
+                            trailingCount += 1
+                        End While
+
+                        ' Do not turn arithmetic operators surrounded by whitespace into Markdown italics.
+                        ' A numeric double-asterisk pair can likewise be an exponent expression.
+                        ' Ambiguous operator-shaped text is deliberately left unchanged.
+                        Dim looksLikeOperator As System.Boolean =
+                            leadingCount > 0 AndAlso trailingCount > 0 AndAlso
+                            index > 0 AndAlso closeIndex + marker.Length < line.Length AndAlso
+                            (line(index - 1) = " "c OrElse line(index - 1) = ControlChars.Tab) AndAlso
+                            (line(closeIndex + marker.Length) = " "c OrElse
+                             line(closeIndex + marker.Length) = ControlChars.Tab) AndAlso
+                            (marker = "*" OrElse
+                             (marker = "**" AndAlso
+                              System.Text.RegularExpressions.Regex.IsMatch(content.Trim(), "^[0-9]+(?:[.,][0-9]+)?$")))
+                        If looksLikeOperator Then
+                            result.Append(line, index, closeIndex + marker.Length - index)
+                            index = closeIndex + marker.Length
+                            Continue While
+                        End If
+
+                        If content.Length > leadingCount + trailingCount Then
+                            ' Advance over every paired delimiter, even when no whitespace needs moving:
+                            ' otherwise its closing delimiter could be misidentified as a new opener.
+                            Dim innerContent As System.String = content.Substring(
+                                leadingCount, content.Length - leadingCount - trailingCount)
+                            result.Append(content, 0, leadingCount)
+                            result.Append(marker)
+                            result.Append(NormalizeMarkdownEmphasisWhitespaceInLine(innerContent))
+                            result.Append(marker)
+                            result.Append(content, content.Length - trailingCount, trailingCount)
+                            index = closeIndex + marker.Length
+                            Continue While
+                        End If
+                    End If
+                End If
+
+                result.Append(line(index))
+                index += 1
+            End While
+
+            Return result.ToString()
+        End Function
+
+        Private Shared Function MarkdownEmphasisMarkerAt(line As System.String, index As System.Int32) As System.String
+            Dim markerCharacter As System.Char = line(index)
+            If markerCharacter <> "*"c AndAlso markerCharacter <> "~"c Then Return System.String.Empty
+            If index > 0 AndAlso line(index - 1) = markerCharacter Then Return System.String.Empty
+
+            Dim runEnd As System.Int32 = index
+            While runEnd < line.Length AndAlso line(runEnd) = markerCharacter
+                runEnd += 1
+            End While
+            Dim runLength As System.Int32 = runEnd - index
+            If markerCharacter = "*"c AndAlso runLength >= 1 AndAlso runLength <= 3 Then
+                Return New System.String(markerCharacter, runLength)
+            End If
+            If markerCharacter = "~"c AndAlso runLength = 2 Then Return "~~"
+            Return System.String.Empty
+        End Function
+
+        Private Shared Function FindMarkdownEmphasisClose(line As System.String,
+                                                         startIndex As System.Int32,
+                                                         marker As System.String) As System.Int32
+            Dim index As System.Int32 = startIndex
+            While index < line.Length
+                If line(index) = "\"c AndAlso index + 1 < line.Length Then
+                    index += 2
+                    Continue While
+                End If
+                If line(index) = "`"c Then
+                    index = SkipMarkdownCodeSpan(line, index)
+                    Continue While
+                End If
+                If index + marker.Length <= line.Length AndAlso
+                   System.String.CompareOrdinal(line, index, marker, 0, marker.Length) = 0 AndAlso
+                   (index = 0 OrElse line(index - 1) <> marker(0)) AndAlso
+                   (index + marker.Length = line.Length OrElse line(index + marker.Length) <> marker(0)) Then
+                    Return index
+                End If
+                index += 1
+            End While
+            Return -1
+        End Function
+
+        Private Shared Function SkipMarkdownCodeSpan(line As System.String, startIndex As System.Int32) As System.Int32
+            Dim runEnd As System.Int32 = startIndex
+            While runEnd < line.Length AndAlso line(runEnd) = "`"c
+                runEnd += 1
+            End While
+            Dim openingLength As System.Int32 = runEnd - startIndex
+            Dim searchIndex As System.Int32 = runEnd
+            While searchIndex < line.Length
+                If line(searchIndex) <> "`"c Then
+                    searchIndex += 1
+                    Continue While
+                End If
+                Dim closingEnd As System.Int32 = searchIndex
+                While closingEnd < line.Length AndAlso line(closingEnd) = "`"c
+                    closingEnd += 1
+                End While
+                If closingEnd - searchIndex = openingLength Then Return closingEnd
+                searchIndex = closingEnd
+            End While
+            Return runEnd
+        End Function
+
         Private Shared Function NormalizeKnownLatexCodesPreservingMarkdownLinks(value As String) As String
             If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
 
@@ -1185,8 +1398,12 @@ Namespace SharedLibrary
             Dim pipeline As Markdig.MarkdownPipeline =
                 CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
+            ' Word and Outlook may supply formatting runs containing adjacent whitespace.
+            ' Normalize those generated emphasis boundaries before the CommonMark parser sees them.
             Dim htmlResult As System.String =
-                Markdig.Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(normalizedMarkdown), pipeline)
+                Markdig.Markdown.ToHtml(
+                    NormalizeMarkdownForHtmlDisplay(NormalizeMarkdownEmphasisWhitespace(normalizedMarkdown)),
+                    pipeline)
 
             ' Renderer-only line breaks are removed for stable CF_HTML, but literal line
             ' boundaries inside <pre> blocks are opaque source content and must survive.

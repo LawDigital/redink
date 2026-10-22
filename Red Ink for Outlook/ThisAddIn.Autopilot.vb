@@ -3073,6 +3073,10 @@ Partial Public Class ThisAddIn
         Dim failureReplyAllowed As System.Boolean = False
         Dim primaryReplySubmitted As System.Boolean = False
         Dim outcomeHandoffEstablished As System.Boolean = False
+        ' Per-request host-owned obligations; never stored in the mutable tool context.
+        Dim mandatoryHostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice) =
+            System.Array.Empty(Of AutoPilotHostNotice)()
+        Dim hostNoticeLanguage As System.String = System.String.Empty
         Dim processingException As System.Exception = Nothing
         Dim workflowContinuationKey As System.String = System.String.Empty
         Dim continuationWorkflowId As System.String = System.String.Empty
@@ -3411,28 +3415,15 @@ Partial Public Class ThisAddIn
                     Return
                 End If
 
-                ' ── Partial oversized: warn about skipped attachments in the prompt ──
-                ' When some attachments are processable but others exceed the limit,
-                ' build the prompt using only the processable ones. The oversized files
-                ' are mentioned as a brief note so the LLM can inform the sender, but
-                ' WITHOUT the [OVER SIZE LIMIT] tag that causes the LLM to generate
-                ' unwanted tool/service recommendations.
+                ' ── Mixed attachment intake: capture required host notices as an immutable
+                ' per-mail snapshot. The model receives input availability context only;
+                ' the Outlook host, not a particular model/skill, owns sender disclosure.
                 Dim processableAttachments = attachmentPaths.Where(Function(a) Not a.IsOverSizeLimit).ToList()
-                Dim oversizedNote As String = Nothing
                 If oversizedAttachments.Count > 0 AndAlso processableAttachments.Count > 0 Then
-                    Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
-                    Dim noteSb As New StringBuilder()
-                    noteSb.AppendLine()
-                    noteSb.AppendLine("[NOTE TO ASSISTANT — include this information in your reply to the sender]")
-                    noteSb.AppendLine($"The following attachment(s) could NOT be processed because they exceed the {limitMB:F0} MB size limit:")
-                    For Each att In oversizedAttachments
-                        noteSb.AppendLine($"  - {att.OriginalFileName} ({att.SizeBytes / 1024.0 / 1024.0:F1} MB)")
-                    Next
-                    noteSb.AppendLine($"Tell the sender to split these files into smaller parts and resend them, or to use the {AN} add-in locally.")
-                    noteSb.AppendLine("Do NOT suggest any other tools, services, or workarounds for the oversized files.")
-                    noteSb.AppendLine("[/NOTE]")
-                    oversizedNote = noteSb.ToString()
-                    ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit", "info")
+                    mandatoryHostNotices = BuildAutoPilotOversizedAttachmentNotices(
+                        oversizedAttachments, _apConfig.MaxAttachmentBytes)
+                    ' Keep notice facts immutable; translation follows explicit language resolution.
+                    ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit; {mandatoryHostNotices.Count} mandatory host notice(s) captured", "info")
                 End If
 
                 ' ── Inject retained files from an earlier message in this conversation ──
@@ -3471,10 +3462,33 @@ Partial Public Class ThisAddIn
                         _context, archiveAuthoritativeRequest, archiveScope,
                         allowInteractiveSelection:=False, cancellationToken:=ct)
                 Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments,
-                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing),
+                    maxAttachmentBytes:=_apConfig.MaxAttachmentBytes)
                 If archivePrepared.HasTrigger Then userPrompt &= System.Environment.NewLine & archivePrepared.ContextText
-                If oversizedNote IsNot Nothing Then
-                    userPrompt &= oversizedNote
+                userPrompt &= BuildAutoPilotHostNoticeModelContext(mandatoryHostNotices)
+                If mandatoryHostNotices.Count > 0 Then
+                    ' Resolve an explicit response-language code via the existing model-based
+                    ' language contract. No language inference from prose, sender address,
+                    ' attachment name, Office UI locale or model-specific behaviour.
+                    Dim declaredLanguage As System.String = System.String.Empty
+                    Try
+                        declaredLanguage = Await ResolveToolingUserLanguageAsync(
+                            If(mailInfo.Body, System.String.Empty), System.String.Empty,
+                            System.String.Empty, _apUseSecondApi, True, ct)
+                    Catch ex As System.OperationCanceledException
+                        Throw
+                    Catch ex As System.Exception
+                        ApDashboardLog("Host notice language resolution failed: " & ex.Message, "warn")
+                    End Try
+                    hostNoticeLanguage = If(declaredLanguage, System.String.Empty).Trim()
+                    If System.String.IsNullOrWhiteSpace(hostNoticeLanguage) Then
+                        Throw New System.InvalidOperationException("Mandatory attachment notice cannot be sent without an explicit language contract.")
+                    End If
+                    mandatoryHostNotices = Await LocalizeAutoPilotHostNoticesAsync(
+                        mandatoryHostNotices, hostNoticeLanguage, ct)
+                    ApDashboardLog("Mandatory host notices localized via the existing LLM translation function; " &
+                        mandatoryHostNotices.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " validated notice(s).", "info")
+                    failureNoticeLanguage = hostNoticeLanguage
                 End If
                 LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
                 Dim senderDesignAccess As AutoPilotSenderDesignAccess = ResolveDesignAccessForSender(mailInfo.SenderEmail)
@@ -3610,6 +3624,7 @@ Partial Public Class ThisAddIn
                         response = Await ExecuteToolingLoop(
                             systemPrompt, userPrompt,
                             senderTools, _apUseSecondApi,
+                            userLanguage:=hostNoticeLanguage,
                             enforceSelectedToolScope:=scanSettingsOnly,
                             hideSplash:=True, hideLogWindow:=True,
                             cancellationToken:=ct,
@@ -3629,6 +3644,10 @@ Partial Public Class ThisAddIn
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
+                        If mandatoryHostNotices.Count > 0 Then
+                            effectiveSystemPrompt &= System.Environment.NewLine &
+                                SharedLibrary.Agents.LanguageContract.BuildSystemPromptFragment(hostNoticeLanguage)
+                        End If
                         response = Await LLM(effectiveSystemPrompt, userPrompt,
                                              UseSecondAPI:=_apUseSecondApi,
                                              HideSplash:=True, EnsureUI:=False,
@@ -3720,9 +3739,12 @@ Partial Public Class ThisAddIn
                             $"Please resend your request if you would like it to be fully processed. " &
                             $"If you need immediate assistance, you can also use the {AN} add-in's Local Chat feature directly in Outlook or Word. " &
                             $"— {AN6}"
+                        If mandatoryHostNotices.Count > 0 Then
+                            abortMessage = Await LocalizeAutoPilotRequiredMessageAsync(abortMessage, hostNoticeLanguage, ct)
+                        End If
 
                         Dim attachmentsToSend = If(hasPartialOutput, resultAttachmentsAbort, Nothing)
-                        Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                        Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                         outcomeHandoffEstablished = True
                         deliverableHandoffCompletedOrDiscarded = True
                         Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
@@ -3742,9 +3764,17 @@ Partial Public Class ThisAddIn
 
                 If String.IsNullOrWhiteSpace(response) Then
                     ApDashboardLog("WARNING: LLM returned empty response for: " & mailInfo.Subject, "warn")
-                    Dim errorMessage = Await GenerateHelpfulFailureResponseAsync(
-                        mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    ' With mixed attachments, the host already owns the exact skipped-file
+                    ' notice. Do not generate a second, potentially contradictory LLM warning.
+                    Dim errorMessage As System.String
+                    If mandatoryHostNotices.Count > 0 Then
+                        errorMessage = Await LocalizeAutoPilotRequiredMessageAsync(
+                            BuildAutoPilotProcessingFailureNotice(), hostNoticeLanguage, ct)
+                    Else
+                        errorMessage = Await GenerateHelpfulFailureResponseAsync(
+                            mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
+                    End If
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                     outcomeHandoffEstablished = True
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
@@ -3800,6 +3830,7 @@ Partial Public Class ThisAddIn
                 If requiresApproval AndAlso Not _apConfig.IsUnattended Then
                     Dim holdingResponse As String = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", "")
                     Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
+                    Dim validatedMonitorLink As System.String = System.String.Empty
 
                     If Not String.IsNullOrWhiteSpace(monitorLink) Then
                         ' Accept scheme-less values (e.g. "www.example.com/status") by defaulting
@@ -3813,6 +3844,7 @@ Partial Public Class ThisAddIn
                         If System.Uri.TryCreate(normalizedMonitorLink, System.UriKind.Absolute, monitorUri) AndAlso
                            (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
                             String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+                            validatedMonitorLink = normalizedMonitorLink
                             Dim statusMessage As String = SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", normalizedMonitorLink)
                             holdingResponse = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", " " & statusMessage)
                         Else
@@ -3820,7 +3852,16 @@ Partial Public Class ThisAddIn
                         End If
                     End If
 
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    ' Resolve every text needed for the detached approval path while
+                    ' this mail still owns the AutoPilot model/context scope.
+                    Dim deferredRejectionMessage As System.String = SP_AutoPilot_RejectionResponse
+                    If mandatoryHostNotices.Count > 0 Then
+                        holdingResponse = Await LocalizeAutoPilotRequiredMessageAsync(
+                            holdingResponse, hostNoticeLanguage, ct, validatedMonitorLink)
+                        deferredRejectionMessage = Await LocalizeAutoPilotRequiredMessageAsync(
+                            deferredRejectionMessage, hostNoticeLanguage, ct)
+                    End If
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                     outcomeHandoffEstablished = True
                     Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
@@ -3839,9 +3880,13 @@ Partial Public Class ThisAddIn
                     Dim deferredSourcesHtml As String = sourcesHtml
                     Dim deferredEntryId As String = entryId
                     Dim deferredMailSentUtc As DateTime = mailSentUtc
+                    Dim deferredHostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice) = mandatoryHostNotices
+                    Dim deferredHostNoticeLanguage As System.String = hostNoticeLanguage
 
                     RunDeferredApprovalAsync(deferredEntryId, deferredMailInfo, deferredResponse,
-                                             deferredAttachments, deferredSourcesHtml, deferredMailSentUtc)
+                                             deferredAttachments, deferredSourcesHtml, deferredMailSentUtc,
+                                             deferredHostNotices, deferredHostNoticeLanguage,
+                                             deferredRejectionMessage)
 
                         ' The per-mail originals can now be cleaned: every prepared deliverable
                         ' has been copied into the deferred-approval staging directory, whose own
@@ -3855,7 +3900,7 @@ Partial Public Class ThisAddIn
                         If requiresApproval AndAlso _apConfig.IsUnattended Then
                             ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
                         End If
-                        Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                        Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                         MarkAutoPilotQueueDeliveryCommitted(entryId)
                         outcomeHandoffEstablished = True
                         deliverableHandoffCompletedOrDiscarded = True
@@ -3941,12 +3986,20 @@ Partial Public Class ThisAddIn
                         If(primaryReplySubmitted,
                            BuildAutoPilotPostSendFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)),
                            BuildAutoPilotProcessingFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)))
+                    If mandatoryHostNotices.Count > 0 Then
+                        failureNotice = Await LocalizeAutoPilotRequiredMessageAsync(
+                            If(primaryReplySubmitted,
+                               BuildAutoPilotPostSendFailureNotice(),
+                               BuildAutoPilotProcessingFailureNotice()),
+                            hostNoticeLanguage, System.Threading.CancellationToken.None)
+                    End If
                     Await SwitchToUi(
                         Sub() SendReplyToSender(
                             mi,
                             failureNotice,
                             Nothing,
-                            tagAsAutoReply:=True))
+                            tagAsAutoReply:=True,
+                            hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                     outcomeHandoffEstablished = True
                     System.Threading.Interlocked.Increment(_apSessionReplyCount)
                     If mailSentUtc <> System.DateTime.MinValue Then
@@ -4120,7 +4173,10 @@ Partial Public Class ThisAddIn
                                                     response As String,
                                                     resultAttachments As List(Of String),
                                                     sourcesHtml As String,
-                                                    mailSentUtc As DateTime) As Task
+                                                    mailSentUtc As DateTime,
+                                                    hostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice),
+                                                    hostNoticeLanguage As System.String,
+                                                    rejectionResponse As System.String) As Task
         Dim stagingDir As String = Nothing
         If resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0 Then
             Try : stagingDir = Path.GetDirectoryName(resultAttachments(0)) : Catch : End Try
@@ -4131,7 +4187,8 @@ Partial Public Class ThisAddIn
         Dim cleanupDeferredStaging As Boolean = String.IsNullOrWhiteSpace(stagingDir)
 
         Try
-            Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
+            Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(
+                mailInfo, AppendAutoPilotHostNoticesToPreview(response, hostNotices, hostNoticeLanguage), resultAttachments))
 
             If Not approved Then
                 cleanupDeferredStaging = True
@@ -4152,7 +4209,8 @@ Partial Public Class ThisAddIn
                                                                   End Function)
                     If rejectMail IsNot Nothing Then
                         Try
-                            Await SwitchToUi(Sub() SendReplyToSender(rejectMail, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True))
+                            Dim rejectionMessage As System.String = rejectionResponse
+                            Await SwitchToUi(Sub() SendReplyToSender(rejectMail, rejectionMessage, Nothing, tagAsAutoReply:=True, hostNotices:=hostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                             MarkAutoPilotQueueDeliveryCommitted(entryId)
                             Dim rejectionSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(rejectMail))
                             If rejectionSourceFinalized Then
@@ -4197,7 +4255,7 @@ Partial Public Class ThisAddIn
             End If
 
             Try
-                Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, hostNotices:=hostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                 MarkAutoPilotQueueDeliveryCommitted(entryId)
                 cleanupDeferredStaging = True
                 Dim approvedSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
@@ -6235,7 +6293,8 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Builds the user prompt from the mail content and attachments.</summary>
     Private Shared Function BuildUserPromptFromMail(info As AutoPilotMailInfo, attachments As List(Of AutoPilotAttachmentInfo),
-                                                   Optional authoritativeBodyOverride As System.String = Nothing) As System.String
+                                                   Optional authoritativeBodyOverride As System.String = Nothing,
+                                                   Optional maxAttachmentBytes As System.Int64 = 0) As System.String
         Dim sb As New StringBuilder()
         sb.AppendLine("[INCOMING EMAIL]")
         sb.AppendLine($"From: {info.SenderName} <{info.SenderEmail}>")
@@ -6277,8 +6336,13 @@ Partial Public Class ThisAddIn
             For i As Integer = 0 To attachments.Count - 1
                 Dim att = attachments(i)
                 Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
-                Dim statusStr = If(att.IsOverSizeLimit,
-                    $" [OVER SIZE LIMIT — max {AP_DefaultMaxAttachmentBytes / 1024 / 1024:F0} MB, cannot process]", "")
+                Dim statusStr As System.String = System.String.Empty
+                If att.IsOverSizeLimit Then
+                    If maxAttachmentBytes <= 0 Then
+                        Throw New System.InvalidOperationException("The configured attachment size limit was not provided to the mail prompt builder.")
+                    End If
+                    statusStr = $" [OVER SIZE LIMIT — max {maxAttachmentBytes / (1024.0R * 1024.0R):F0} MB, cannot process]"
+                End If
                 If att.IsRetentionLoaded Then
                     statusStr &= " [RETAINED FROM EARLIER MESSAGE IN THIS CONVERSATION — not attached to the current e-mail]"
                 End If
@@ -6319,7 +6383,9 @@ Partial Public Class ThisAddIn
                               Optional tagAsAutoReply As Boolean = True,
                               Optional sourcesHtml As String = "",
                               Optional isHoldingOnly As Boolean = False,
-                              Optional onPrimarySubmitted As System.Action = Nothing)
+                              Optional onPrimarySubmitted As System.Action = Nothing,
+                              Optional hostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice) = Nothing,
+                              Optional hostNoticeLanguage As System.String = "")
 
         Dim reply As MailItem = Nothing
         Dim sendAccount As Microsoft.Office.Interop.Outlook.Account = Nothing
@@ -6391,7 +6457,10 @@ Partial Public Class ThisAddIn
             reply.BodyFormat = OlBodyFormat.olFormatHTML
 
             Dim originalThread As String = If(reply.HTMLBody, "")
+            ' Compose all mandatory host notices independent of model/skill wording.
+            ' A missing/inconsistent notice fails the delivery before Outlook.Send().
             Dim contentHtml As String = ConvertResponseToHtml(responseText)
+            contentHtml &= RenderAutoPilotHostNoticesHtml(hostNotices, hostNoticeLanguage)
 
             If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
                 contentHtml &= sourcesHtml
@@ -8000,6 +8069,37 @@ Partial Public Class ThisAddIn
     '  HELPFUL FAILURE RESPONSE
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ' Use the existing shared host-message LLM localization for every language;
+    ' retain URLs as host-owned literals and fail closed if an LLM drops placeholders.
+    Private Async Function LocalizeAutoPilotRequiredMessageAsync(
+            sourceText As System.String,
+            targetLanguage As System.String,
+            cancellationToken As System.Threading.CancellationToken,
+            Optional protectedUrl As System.String = "") As System.Threading.Tasks.Task(Of System.String)
+
+        Dim source As System.String = If(sourceText, System.String.Empty)
+        Dim signatureSuffix As System.String = "— " & AN6
+        Dim hasSignature As System.Boolean = source.Contains(signatureSuffix)
+        If hasSignature Then source = source.Replace(signatureSuffix, "— {{HOST_SIGNATURE}}")
+        If Not System.String.IsNullOrWhiteSpace(protectedUrl) Then
+            If Not source.Contains(protectedUrl) Then
+                Throw New System.InvalidOperationException("Required host response does not contain its expected URL.")
+            End If
+            source = source.Replace(protectedUrl, "{{HOST_URL}}")
+        End If
+        Dim localized As System.String = Await LocalizeHostMessageIfNeededAsync(
+            source, targetLanguage, _apUseSecondApi, True, cancellationToken, strictTranslation:=True)
+        If hasSignature Then
+            VerifyAutoPilotHostNoticeToken(localized, "{{HOST_SIGNATURE}}")
+            localized = localized.Replace("{{HOST_SIGNATURE}}", AN6)
+        End If
+        If Not System.String.IsNullOrWhiteSpace(protectedUrl) Then
+            VerifyAutoPilotHostNoticeToken(localized, "{{HOST_URL}}")
+            localized = localized.Replace("{{HOST_URL}}", protectedUrl)
+        End If
+        Return localized
+    End Function
+
     Private Function BuildAutoPilotProcessingFailureNotice(Optional userLanguage As System.String = "") As System.String
         Return BuildAutoPilotDeliveryFailureNotice(userLanguage, False)
     End Function
@@ -8022,6 +8122,9 @@ Partial Public Class ThisAddIn
             Case "it"
                 first = If(submitted, "Una risposta alla richiesta è stata inoltrata per l’invio, ma si è verificato un errore interno durante le restanti fasi di consegna.", "Un errore interno ha impedito di completare la richiesta in modo sicuro.")
                 second = If(submitted, "Potrebbero quindi mancare alcuni file richiesti. Invia nuovamente la richiesta o contatta il gestore per ottenere il risultato completo.", "Non sono stati inviati file di risultato incompleti o non verificati. Invia nuovamente la richiesta o contatta il gestore se il problema persiste.")
+            Case "es"
+                first = If(submitted, "Se ha enviado una respuesta a su solicitud, pero se produjo un error interno durante los pasos restantes de la entrega.", "Un error interno ha impedido completar su solicitud de forma segura.")
+                second = If(submitted, "Por lo tanto, es posible que falten algunos archivos solicitados. Vuelva a enviar su solicitud o póngase en contacto con el operador si necesita los resultados completos.", "No se han enviado archivos de resultado incompletos ni sin validar. Vuelva a enviar su solicitud o contacte al operador si el problema persiste.")
             Case Else
                 first = If(submitted, "A reply to your request was submitted, but an internal error occurred while completing the remaining delivery steps.", "I'm sorry, but an internal error prevented me from completing your request safely.")
                 second = If(submitted, "One or more requested result files may therefore be missing. Please resend your request or contact the operator if you need the complete result set.", "No incomplete or unvalidated result files have been sent. Please resend your request or contact the operator if the problem persists.")

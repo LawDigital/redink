@@ -1383,6 +1383,23 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
+    ''' Keeps Sum-up list styling without hiding the content from the shared HTML viewer's
+    ''' fragment styling (font, background and horizontal inset). A full HTML wrapper
+    ''' is intentionally not used: the viewer preserves full Word-exported documents.
+    ''' </summary>
+    Private Shared Function BuildSumupHtmlFragment(ByVal contentHtml As System.String) As System.String
+        ' These rules provide a stable list indentation even when the embedded HTML
+        ' browser uses its legacy IE rendering mode. Keep native Markdown <strong>
+        ' and <em> semantics; never impose bold on the complete summary.
+        Return "<style type=""text/css"">" &
+               "html, body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 9pt; font-weight: normal; }" &
+               "ul, ol { margin: 0.65em 0 0.8em 0; padding-left: 2em; list-style-position: outside; }" &
+               "li { margin: 0.2em 0; padding-left: 0.15em; }" &
+               "li ul, li ol { margin-top: 0.25em; margin-bottom: 0.25em; }" &
+               "</style>" & If(contentHtml, System.String.Empty)
+    End Function
+
+    ''' <summary>
     ''' Generates summary HTML for a mail chain: calls LLM with SP_MailSumup, optional post-correction, Markdown to HTML conversion, displays result.
     ''' </summary>
     Private Async Sub ShowSumup(selectedtext As String)
@@ -1402,20 +1419,12 @@ Partial Public Class ThisAddIn
 
         Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
-        Dim fullHtml As String =
-              "<!DOCTYPE html>" &
-              "<html><head>" &
-              "  <meta charset=""utf-8"" />" &
-              "  <style>" &
-              "    ul { margin-left: 0.5em; padding-left: 0; list-style-position: outside; }" &
-              "    ul ul { margin-left: 1em; padding-left: 0; list-style-type: circle; }" &
-              "    ul ul ul { margin-left: 1.5em; padding-left: 0; list-style-type: square; }" &
-              "  </style>" &
-              "</head><body>" &
-                htmlText &
-              "</body></html>"
+        ' Pass a fragment rather than a full HTML document. The common HTML viewer
+        ' applies its 20px content inset, Segoe UI font and form background only to
+        ' fragments; complete Word-exported HTML retains its own native styles.
+        Dim htmlFragment As String = BuildSumupHtmlFragment(htmlText)
 
-        ShowHTMLCustomMessageBox(fullHtml, $"{AN} Sum-up")
+        ShowHTMLCustomMessageBox(htmlFragment, $"{AN} Sum-up")
 
     End Sub
 
@@ -1468,20 +1477,12 @@ Partial Public Class ThisAddIn
 
         Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
-        Dim fullHtml As String =
-              "<!DOCTYPE html>" &
-              "<html><head>" &
-              "  <meta charset=""utf-8"" />" &
-              "  <style>" &
-              "    ul { margin-left: 0.5em; padding-left: 0; list-style-position: outside; }" &
-              "    ul ul { margin-left: 1em; padding-left: 0; list-style-type: circle; }" &
-              "    ul ul ul { margin-left: 1.5em; padding-left: 0; list-style-type: square; }" &
-              "  </style>" &
-              "</head><body>" &
-                htmlText &
-              "</body></html>"
+        ' Pass a fragment rather than a full HTML document. The common HTML viewer
+        ' applies its 20px content inset, Segoe UI font and form background only to
+        ' fragments; complete Word-exported HTML retains its own native styles.
+        Dim htmlFragment As String = BuildSumupHtmlFragment(htmlText)
 
-        ShowHTMLCustomMessageBox(fullHtml, $"{AN} Sum-up (of unanswered/unread mails)")
+        ShowHTMLCustomMessageBox(htmlFragment, $"{AN} Sum-up (of unanswered/unread mails)")
 
     End Sub
 
