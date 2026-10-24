@@ -138,6 +138,16 @@ Public Class frmAIChat
     ''' Prevents the chat input box from immediately stealing focus back.
     ''' </summary>
     Private _keepFocusOnDocumentAfterCommands As Boolean = False
+    ' Form-lifetime cancellation prevents completed model calls from manipulating
+    ' a disposed chat window or an Office host that has already exited.
+    Private ReadOnly _chatLifetimeCts As New System.Threading.CancellationTokenSource()
+
+    Private ReadOnly Property ChatLifetimeEnded As System.Boolean
+        Get
+            Return _chatLifetimeCts.IsCancellationRequested OrElse Me.IsDisposed OrElse Me.Disposing
+        End Get
+    End Property
+
     Private _dialogOwnerScope As System.IDisposable = Nothing
 
     ' =========================================================================
@@ -400,7 +410,7 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' True when secondary API model is active (either toggled or alternate selected).
-    ''' When true, UpdateDocumentCheckboxesState() disables document/selection/command checkboxes.
+    ''' The active model is tracked independently of document/selection/write-access preferences.
     ''' </summary>
     Private _useSecondApi As Boolean = False
 
@@ -722,6 +732,7 @@ Public Class frmAIChat
         End If
 
         Await RestoreLoadedContextAsync()
+        If ChatLifetimeEnded Then Return
         UpdateLoadContextButtonText()
 
         RestoreAlternateModelFromSettings()
@@ -735,6 +746,7 @@ Public Class frmAIChat
             txtChatHistory.ScrollToCaret()
         Else
             Dim result = Await WelcomeMessage()
+            If ChatLifetimeEnded Then Return
         End If
 
 
@@ -808,7 +820,8 @@ Public Class frmAIChat
     ''' captures the current state, alternate config is applied only for the duration
     ''' of the LLM call, then original config is restored in the Finally block.
     ''' </remarks>
-    Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, fullPrompt As String) As Task(Of String)
+    Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, fullPrompt As String,
+                                                         Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of String)
         Dim backupConfig As ModelConfig = Nothing
         Dim appliedAlternate As Boolean = False
 
@@ -827,7 +840,7 @@ Public Class frmAIChat
             End If
 
             ' Execute the LLM call with current (possibly modified) config
-            Return Await SharedMethods.LLM(_context, systemPrompt, fullPrompt, "", "", 0, _useSecondApi, True)
+            Return Await SharedMethods.LLM(_context, systemPrompt, fullPrompt, "", "", 0, _useSecondApi, True, cancellationToken:=cancellationToken)
 
         Finally
             ' Always restore the original config so the rest of the add-in sees pristine state
@@ -860,6 +873,7 @@ Public Class frmAIChat
     ''' 10. Report any errors via ReportCommandExecutionError
     ''' </remarks>
     Private Async Sub btnSend_Click(sender As Object, e As EventArgs)
+        If ChatLifetimeEnded Then Return
         Dim userPrompt As String = txtUserInput.Text.Trim()
         If userPrompt = "" Then Return
 
@@ -913,6 +927,27 @@ Public Class frmAIChat
             End If
         Catch
         End Try
+
+        ' The checkbox represents a persistent selection-scope preference, not a
+        ' cached range. Never reuse a previous document's selection when the active
+        ' document changes: require a real selection in the current document.
+        If chkIncludeselection.Checked Then
+            Dim hasCurrentSelection As Boolean = False
+            Try
+                Dim currentSelection As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
+                hasCurrentSelection = currentSelection IsNot Nothing AndAlso
+                    requestTargetSelectionStart >= 0 AndAlso
+                    requestTargetSelectionEnd > requestTargetSelectionStart AndAlso
+                    Not System.String.IsNullOrWhiteSpace(currentSelection.Text)
+            Catch ex As System.Exception
+                hasCurrentSelection = False
+            End Try
+
+            If Not hasCurrentSelection Then
+                ShowCustomMessageBox("'Include selection' is enabled, but no text is currently selected in the active Word document. Select the text and try again; your chat access preferences have been preserved.")
+                Return
+            End If
+        End If
 
         Try
             My.Settings.LastPromptChat = promptToRestore
@@ -989,8 +1024,10 @@ Public Class frmAIChat
             If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(userPrompt) Then
                 archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
                     _context, userPrompt, Globals.ThisAddIn.CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                If ChatLifetimeEnded Then Return
                 SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
             End If
+            If ChatLifetimeEnded Then Return
             Dim retrievalUserPrompt As System.String = If(archivePrepared Is Nothing, userPrompt, archivePrepared.CleanPrompt)
 
             Dim conversationSoFar As String = BuildConversationString(_chatHistory)
@@ -1287,6 +1324,7 @@ Public Class frmAIChat
                         End Try
                     End Sub)
 
+                If ChatLifetimeEnded Then Return
                 If Not String.IsNullOrWhiteSpace(indexExcerpt) Then
                     fullPrompt.AppendLine("The user loaded a searchable index. The following are the most relevant original excerpts for this message:")
                     fullPrompt.AppendLine("<INDEX_EXCERPTS>")
@@ -1312,6 +1350,7 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
 
 
+            If ChatLifetimeEnded Then Return
             If useTooling AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
                 ' Apply model config temporarily for the tooling call
                 Dim backupConfig As ModelConfig = Nothing
@@ -1355,7 +1394,8 @@ Public Class frmAIChat
                         pinnedWordDocumentFullName:=requestTargetDocumentFullName,
                         pinnedWordSelectionStart:=requestTargetSelectionStart,
                         pinnedWordSelectionEnd:=requestTargetSelectionEnd,
-                        semanticArchivePrepared:=archivePrepared)
+                        semanticArchivePrepared:=archivePrepared,
+                        cancellationToken:=_chatLifetimeCts.Token)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -1368,8 +1408,10 @@ Public Class frmAIChat
                     "Calling LLM (standard, useSecondApi=" &
                     _useSecondApi.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
 
-                aiResponseOriginal = Await CallLlmWithSelectedModelAsync(SystemPrompt, fullPrompt.ToString())
+                aiResponseOriginal = Await CallLlmWithSelectedModelAsync(SystemPrompt, fullPrompt.ToString(), _chatLifetimeCts.Token)
             End If
+
+            If ChatLifetimeEnded Then Return
 
             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
                 "WordChat",
@@ -1531,7 +1573,7 @@ Public Class frmAIChat
         ' ──────────────────────────────────────────────────────────────
         ' STEP 12: Handle Errors Outside Try-Catch
         ' ──────────────────────────────────────────────────────────────
-        If errorOccurred Then
+        If errorOccurred AndAlso Not ChatLifetimeEnded Then
             Await UpdateUIAsync(Sub()
                                     ReportCommandExecutionError(errorMessage)
                                     ' Restore user input so they can try again
@@ -1674,7 +1716,9 @@ Public Class frmAIChat
             ' Request localized greeting from LLM based on time of day
             Dim aiResponseRaw As String = Await CallLlmWithSelectedModelAsync(
                 SystemPrompt,
-                $"Welcome the user in {UserLanguage} by (1) referring to the time of day based on the current time in {UserLanguage}, such as in 'good morning', and (2) asking in {UserLanguage} what you can do, but do not say your name.")
+                $"Welcome the user in {UserLanguage} by (1) referring to the time of day based on the current time in {UserLanguage}, such as in 'good morning', and (2) asking in {UserLanguage} what you can do, but do not say your name.",
+                _chatLifetimeCts.Token)
+            If ChatLifetimeEnded Then Return ""
 
             ' Keep Markdown for HTML display (filter bot-commands if any)
             Dim aiDisplayMd As String = RemoveCommands(If(aiResponseRaw, ""))
@@ -1734,9 +1778,24 @@ Public Class frmAIChat
     ''' If already on UI thread, executes action directly.
     ''' </remarks>
     Private Async Function UpdateUIAsync(action As System.Action) As System.Threading.Tasks.Task
+        If ChatLifetimeEnded Then Return
         If InvokeRequired Then
-            Await System.Threading.Tasks.Task.Run(Sub() Me.Invoke(action))
-        Else
+            Try
+                Await System.Threading.Tasks.Task.Run(
+                    Sub()
+                        If Not ChatLifetimeEnded Then
+                            Me.Invoke(New System.Action(
+                                Sub()
+                                    If Not ChatLifetimeEnded Then action()
+                                End Sub))
+                        End If
+                    End Sub)
+            Catch ex As System.ObjectDisposedException
+                ' The host has already closed the chat while an async operation completed.
+            Catch ex As System.InvalidOperationException When ChatLifetimeEnded
+                ' The form handle was destroyed after the UI work was queued.
+            End Try
+        ElseIf Not ChatLifetimeEnded Then
             action()
         End If
     End Function
@@ -1835,12 +1894,15 @@ Public Class frmAIChat
     ''' Setting persisted to My.Settings.DoCommands.
     ''' </remarks>
     Private Sub chkPermitCommands_Click(sender As Object, e As EventArgs)
-        My.Settings.DoCommands = Not My.Settings.DoCommands
+        ' Persist the actual UI state rather than inverting the last saved value.
+        My.Settings.DoCommands = chkPermitCommands.Checked
 
-        ' Auto-enable document inclusion if commands enabled without context
-        If My.Settings.DoCommands And Not chkIncludeselection.Checked Then
+        ' Commands require an active content scope; preserve the existing
+        ' behavior of choosing the document when selection mode is not active.
+        If chkPermitCommands.Checked AndAlso Not chkIncludeselection.Checked Then
             chkIncludeDocText.Checked = True
-            My.Settings.IncludeDocument = chkIncludeDocText.Checked
+            My.Settings.IncludeDocument = True
+            My.Settings.IncludeSelection = False
         End If
 
         My.Settings.Save()
@@ -1848,31 +1910,28 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' Handles chkIncludeSelection checkbox click. Manages mutual exclusivity with document checkbox.
-    ''' Validates that selection exists before allowing checkbox to remain checked.
+    ''' Selection existence is checked per request, not when choosing the mode.
     ''' </summary>
     ''' <remarks>
     ''' Checkbox state logic:
-    ''' - If selection is empty/whitespace, unchecks itself automatically
+    ''' - Keeps the selected scope mode even when no text is currently selected
+    '''   (an actual selection is validated when sending a request)
     ''' - If document checkbox is checked, unchecks document (mutually exclusive)
     ''' - If neither selection nor document checked, disables commands
     ''' Setting persisted to My.Settings.IncludeSelection.
     ''' </remarks>
     Private Sub chkIncludeselection_Click(sender As Object, e As EventArgs)
-        Dim activeDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
-        Dim sel As Microsoft.Office.Interop.Word.Selection = activeDoc.Application.Selection
-
-        ' Validate selection exists
-        If String.IsNullOrWhiteSpace(sel.Text) Then
-            chkIncludeselection.Checked = False
-        ElseIf chkIncludeDocText.Checked Then
-            ' Enforce mutual exclusivity
+        ' This is a preference for the scope of future requests. The actual
+        ' Word selection belongs to the current document and is validated on Send.
+        If chkIncludeselection.Checked Then
             chkIncludeDocText.Checked = False
         End If
 
         My.Settings.IncludeSelection = chkIncludeselection.Checked
+        My.Settings.IncludeDocument = chkIncludeDocText.Checked
 
         ' Auto-disable commands if no context available
-        If Not chkIncludeselection.Checked And Not chkIncludeDocText.Checked Then
+        If Not chkIncludeselection.Checked AndAlso Not chkIncludeDocText.Checked Then
             My.Settings.DoCommands = False
             chkPermitCommands.Checked = False
         End If
@@ -1896,9 +1955,10 @@ Public Class frmAIChat
         End If
 
         My.Settings.IncludeDocument = chkIncludeDocText.Checked
+        My.Settings.IncludeSelection = chkIncludeselection.Checked
 
         ' Auto-disable commands if no context available
-        If Not chkIncludeselection.Checked And Not chkIncludeDocText.Checked Then
+        If Not chkIncludeselection.Checked AndAlso Not chkIncludeDocText.Checked Then
             My.Settings.DoCommands = False
             chkPermitCommands.Checked = False
         End If
@@ -2093,9 +2153,10 @@ Public Class frmAIChat
     ''' All model switches trigger:
     '''   - UpdateModelButtonText() to reflect new state
     '''   - UpdateTitle() to show active model in window title
-    '''   - UpdateDocumentCheckboxesState() to disable checkboxes if secondary/alternate active
+    '''   - UpdateDocumentCheckboxesState() to reset access only if the selected model changes
     ''' </remarks>
     Private Sub btnSwitchModel_Click(sender As Object, e As EventArgs)
+        Dim previousModelKey As System.String = GetChatModelSelectionKey()
         If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
             ' ─────────────────────────────────────────────────────────────
             ' Alternate Model Path Configured
@@ -2109,7 +2170,7 @@ Public Class frmAIChat
                 _useSecondApi = False
                 UpdateModelButtonText()
                 UpdateTitle()
-                UpdateDocumentCheckboxesState()
+                UpdateDocumentCheckboxesState(resetForModelChange:=Not System.String.Equals(previousModelKey, GetChatModelSelectionKey(), System.StringComparison.OrdinalIgnoreCase))
                 PersistAlternateModelToSettings()
                 Return
             End If
@@ -2168,7 +2229,7 @@ Public Class frmAIChat
 
             UpdateModelButtonText()
             UpdateTitle()
-            UpdateDocumentCheckboxesState()
+            UpdateDocumentCheckboxesState(resetForModelChange:=Not System.String.Equals(previousModelKey, GetChatModelSelectionKey(), System.StringComparison.OrdinalIgnoreCase))
             PersistAlternateModelToSettings()
         Else
             ' ─────────────────────────────────────────────────────────────
@@ -2180,7 +2241,7 @@ Public Class frmAIChat
             _alternateModelDisplayName = Nothing
             UpdateModelButtonText()
             UpdateTitle()
-            UpdateDocumentCheckboxesState()
+            UpdateDocumentCheckboxesState(resetForModelChange:=Not System.String.Equals(previousModelKey, GetChatModelSelectionKey(), System.StringComparison.OrdinalIgnoreCase))
             PersistAlternateModelToSettings()
         End If
     End Sub
@@ -2295,42 +2356,44 @@ Public Class frmAIChat
     End Sub
 
     ''' <summary>
-    ''' Updates checkbox states when secondary or alternate API is active.
-    ''' Disables document-related checkboxes for secondary/alternate models.
+    ''' Returns the selected chat model's stable UI identity. This distinguishes
+    ''' an explicit model change from restoring that same model on form load.
     ''' </summary>
-    ''' <remarks>
-    ''' When _useSecondApi = True:
-    ''' - Unchecks and saves: chkIncludeDocText, chkIncludeSelection, 
-    '''   chkPermitCommands, chkIncludeOtherDocs
-    ''' - Updates My.Settings accordingly
-    ''' 
-    ''' When _useSecondApi = False:
-    ''' - Re-enables checkboxes
-    ''' - Does NOT automatically restore previous checked states (commented out)
-    ''' 
-    ''' Rationale: Secondary/alternate models may not support document context features.
-    ''' </remarks>
-    Private Sub UpdateDocumentCheckboxesState()
-        If _useSecondApi Then
-            ' Disable document-related features for secondary/alternate models
+    Private Function GetChatModelSelectionKey() As System.String
+        If _alternateModelSelected Then
+            Return "alternate:" & If(_alternateModelDisplayName, System.String.Empty)
+        End If
+        Return If(_useSecondApi, "secondary", "primary")
+    End Function
+
+    ''' <summary>
+    ''' Synchronizes the document/selection/write-access UI with the selected model.
+    ''' Access preferences survive form reopening and active-document changes, even
+    ''' for alternate models. Only a real user-initiated model change clears them.
+    ''' </summary>
+    Private Sub UpdateDocumentCheckboxesState(Optional resetForModelChange As System.Boolean = False)
+        If resetForModelChange Then
+            ' Do not implicitly carry content or write authorization to another
+            ' model. Restore of the SAME saved alternate model never enters here.
             chkIncludeDocText.Checked = False
             chkIncludeselection.Checked = False
             chkPermitCommands.Checked = False
             chkIncludeOtherDocs.Checked = False
 
-            ' Persist disabled state
             My.Settings.IncludeDocument = False
             My.Settings.IncludeSelection = False
             My.Settings.DoCommands = False
+            My.Settings.ChatIncludeOtherOpenWordDocs = False
             My.Settings.Save()
-        Else
-            ' Re-enable checkboxes when switching back to primary model
-            chkIncludeDocText.Enabled = True
-            chkIncludeselection.Enabled = True
-            chkPermitCommands.Enabled = True
         End If
 
-        ' Update tooling controls based on new model
+        ' Both primary and alternate models use the same Word-chat context and
+        ' command contract. Capability checks remain in the existing send/tool paths.
+        chkIncludeDocText.Enabled = True
+        chkIncludeselection.Enabled = True
+        chkPermitCommands.Enabled = True
+        chkIncludeOtherDocs.Enabled = True
+
         UpdateToolingControlsState()
     End Sub
 
@@ -2436,6 +2499,11 @@ Public Class frmAIChat
     ''' RestoreBounds ensures correct position/size restored when user maximized/minimized.
     ''' </remarks>
     Private Sub frmAIChat_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+        Try
+        If Not _chatLifetimeCts.IsCancellationRequested Then _chatLifetimeCts.Cancel()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Form lifetime cancellation failed: " & ex.Message)
+        End Try
 
         Try
             RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
@@ -2638,7 +2706,7 @@ Public Class frmAIChat
     ''' <returns>Selection text with optional comments, or empty string if no selection or error</returns>
     ''' <remarks>
     ''' Behavior:
-    ''' - If selection is empty/null: unchecks chkIncludeSelection and returns empty string
+    ''' - If selection is empty/null: returns empty text without changing scope preferences
     ''' - If selection exists: extracts text in Final view mode (no deletions)
     ''' - Attempts to extract comments/bubbles from selection range
     ''' - Appends bubbles inline (space-separated) if available
@@ -2653,8 +2721,7 @@ Public Class frmAIChat
             Dim sel As Microsoft.Office.Interop.Word.Selection = activeDoc.Application.Selection
 
             ' Validate selection exists
-            If String.IsNullOrEmpty(sel.Text) Then
-                chkIncludeselection.Checked = False
+            If sel Is Nothing OrElse System.String.IsNullOrEmpty(sel.Text) Then
                 Return ""
             Else
                 ' Capture the specific window we modify so the Finally restore targets the SAME
@@ -2868,7 +2935,7 @@ Public Class frmAIChat
     ''' backslashes intentionally mean visible backslash text. This distinction preserves
     ''' standard JSON string semantics.
     ''' </summary>
-    Private Function CleanJsonArgument(arg As String) As String
+    Private Function CleanJsonArgument(arg As String, Optional preserveOuterWhitespace As Boolean = False) As String
         If arg Is Nothing Then Return ""
 
         ' Newtonsoft.Json already decoded JSON newline escapes. Normalize only actual
@@ -2877,8 +2944,11 @@ Public Class frmAIChat
         arg = Regex.Replace(arg, "\^p", vbCr, RegexOptions.IgnoreCase)
         arg = Regex.Replace(arg, "\^0*13", vbCr, RegexOptions.IgnoreCase)
 
-        ' Keep the same table-cell and accidental outer whitespace cleanup as legacy commands.
+        ' Never pass a cell-end marker as inserted text: it is structural Word metadata.
         arg = arg.TrimStart(ChrW(7)).TrimEnd(ChrW(7))
+        ' JSON text values are document content; their outer spaces/tabs are significant.
+        ' Search and control arguments retain the established tolerant cleanup.
+        If preserveOuterWhitespace Then Return arg
         Return Regex.Replace(arg, "^[ \t]+|[ \t]+$", "")
     End Function
 
@@ -2998,6 +3068,12 @@ Public Class frmAIChat
         Public Property FormatSpec As ParsedCommandFormat
         Public Property MatchFormatSpec As ParsedCommandFormat
         Public Property MatchSpec As ParsedCommandMatchSpec
+        ' Optional insertion-boundary intent. Nothing keeps the original verbatim behavior.
+        Public Property JoinBefore As System.String
+        Public Property JoinAfter As System.String
+        ' Transport compatibility belongs at parsing, not in shared navigation logic.
+        ' Old bracket-protocol find commands retain their historic document highlight.
+        Public Property IsLegacyCommand As Boolean
 
         ' Host-side compatibility normalization only. A value >= 2 means that this
         ' command represents that many identical occurrence=1 replace/delete commands
@@ -3411,7 +3487,7 @@ Public Class frmAIChat
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "replace"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
                     parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
@@ -3424,23 +3500,32 @@ Public Class frmAIChat
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "insert"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "text")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "text", "join_before", "join_after", "as_paragraph")
                     parsed.Command = "insert"
-                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
+                    parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
+                    ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
 
                 Case "insert_before"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format", "join_before", "join_after", "as_paragraph")
                     parsed.Command = "insertbefore"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
+                    parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
+                    ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
                     parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
                 Case "insert_after"
-                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format", "join_before", "join_after", "as_paragraph")
                     parsed.Command = "insertafter"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
+                    parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
+                    ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
                     parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
@@ -3448,7 +3533,7 @@ Public Class frmAIChat
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "addcomment"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
                     parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
@@ -3456,7 +3541,7 @@ Public Class frmAIChat
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "comment_id", "text")
                     parsed.Command = "replycomment"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "comment_id", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
 
                 Case "format"
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence", "max_matches", "format", "match_format")
@@ -3500,6 +3585,67 @@ Public Class frmAIChat
         Next
 
         Return results
+    End Function
+
+    ''' <summary>
+    ''' Applies a single explicit paragraph-level insertion intent to BOTH edges.
+    ''' This does not infer intention from punctuation, content, anchors or provider.
+    ''' Existing JSON without this flag and all legacy commands remain unchanged.
+    ''' </summary>
+    Private Sub ApplyJsonParagraphInsertionIntent(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        parsed As ParsedCommand,
+        commandIndex As Integer)
+
+        Dim paragraphToken As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue("as_paragraph", System.StringComparison.OrdinalIgnoreCase)
+        If paragraphToken Is Nothing Then Return
+        If paragraphToken.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property 'as_paragraph' must be a JSON boolean.")
+        End If
+        If Not paragraphToken.ToObject(Of Boolean)() Then Return
+
+        ' Conflicting instructions must not silently change the document. In particular,
+        ' a caller explicitly requesting a literal edge cannot simultaneously request
+        ' a standalone paragraph at that edge.
+        If (Not System.String.IsNullOrEmpty(parsed.JoinBefore) AndAlso
+            parsed.JoinBefore <> "paragraph_if_needed") OrElse
+           (Not System.String.IsNullOrEmpty(parsed.JoinAfter) AndAlso
+            parsed.JoinAfter <> "paragraph_if_needed") Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} cannot combine 'as_paragraph': true with conflicting join modes.")
+        End If
+
+        parsed.JoinBefore = "paragraph_if_needed"
+        parsed.JoinAfter = "paragraph_if_needed"
+    End Sub
+
+    ''' <summary>
+    ''' Validates optional, model-independent insertion-boundary intent. An omitted field
+    ''' preserves existing commands. The host applies the requested boundary only when needed.
+    ''' </summary>
+    Private Function ParseJsonInsertJoinMode(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        propertyName As System.String,
+        commandIndex As Integer) As System.String
+
+        Dim token As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue(propertyName, System.StringComparison.OrdinalIgnoreCase)
+        If token Is Nothing Then Return Nothing
+        If token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON string.")
+        End If
+
+        Dim mode As System.String = token.ToObject(Of System.String)().Trim().ToLowerInvariant()
+        Select Case mode
+            Case "verbatim", "none", "space_if_needed", "paragraph_if_needed"
+                Return mode
+            Case Else
+                Throw New System.InvalidOperationException(
+                    $"Word command #{commandIndex} property '{propertyName}' must be verbatim, none, space_if_needed, or paragraph_if_needed.")
+        End Select
     End Function
 
     ''' <summary>
@@ -4004,6 +4150,8 @@ Public Class frmAIChat
                        existing.Argument1 = parsed.Argument1 AndAlso
                        existing.Argument2 = parsed.Argument2 AndAlso
                        existing.Target = parsed.Target AndAlso
+                       existing.JoinBefore = parsed.JoinBefore AndAlso
+                       existing.JoinAfter = parsed.JoinAfter AndAlso
                        existingFormatKey = parsedFormatKey AndAlso
                        existingMatchFormatKey = parsedMatchFormatKey AndAlso
                        existingMatchKey = parsedMatchKey
@@ -4061,6 +4209,7 @@ Public Class frmAIChat
 
             For Each matchItem As Match In regex.Matches(If(input, ""))
                 Dim parsed As New ParsedCommand() With {
+                    .IsLegacyCommand = True,
                     .Command = matchItem.Groups("cmd").Value.Trim(),
                     .Argument1 = CleanArgument(matchItem.Groups("arg1").Value),
                     .Argument2 = CleanArgument(If(matchItem.Groups("arg2") IsNot Nothing, matchItem.Groups("arg2").Value, ""))
@@ -5514,7 +5663,14 @@ Public Class frmAIChat
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
+                    If pc.IsLegacyCommand Then
+                        ' Preserve the legacy search-as-highlight contract only for old
+                        ' bracket-protocol commands. JSON find is non-mutating navigation.
+                        commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
+                    Else
+                        commandSuccess = ExecuteGotoCommand(pc.Argument1, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
+                        activateDocumentAfterCommands = activateDocumentAfterCommands OrElse commandSuccess
+                    End If
 
                 Case "addcomment"
                     commandDescription = $"Adding comment '{pc.Argument2}' to the text '{pc.Argument1}'"
@@ -5548,7 +5704,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, False, pc.MatchSpec, pc.MatchFormatSpec)
+                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, False, pc.MatchSpec, pc.MatchFormatSpec, pc.JoinBefore, pc.JoinAfter)
 
                 Case "insertbefore"
                     commandDescription = $"Inserting '{pc.Argument2}' before '{pc.Argument1}'"
@@ -5556,7 +5712,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, True, pc.MatchSpec, pc.MatchFormatSpec)
+                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, True, pc.MatchSpec, pc.MatchFormatSpec, pc.JoinBefore, pc.JoinAfter)
 
                 Case "insert"
                     commandDescription = $"Inserting '{pc.Argument1}'"
@@ -5565,7 +5721,7 @@ Public Class frmAIChat
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     Debug.WriteLine("ExecuteInsert")
-                    commandSuccess = ExecuteInsertCommand(pc.Argument1)
+                    commandSuccess = ExecuteInsertCommand(pc.Argument1, pc.JoinBefore, pc.JoinAfter)
 
                 Case "goto", "jump", "show", "select"
                     commandDescription = If(
@@ -6912,6 +7068,131 @@ Public Class frmAIChat
     End Function
 
 
+    ''' <summary>
+    ''' Materializes an explicit JSON insertion-boundary request against the actual Word
+    ''' characters immediately outside the collapsed insertion range. Unspecified or
+    ''' verbatim boundaries preserve the source text exactly. Never infer intent from dots,
+    ''' language, document template or filename extensions.
+    ''' </summary>
+    Private Function PrepareWordInsertionText(
+        doc As Microsoft.Office.Interop.Word.Document,
+        insertPosition As Integer,
+        sourceText As System.String,
+        joinBefore As System.String,
+        joinAfter As System.String,
+        ByRef replacementStart As Integer,
+        ByRef replacementEnd As Integer) As System.String
+
+        ' The default mutation remains a collapsed insertion. When an explicitly
+        ' requested paragraph boundary meets an existing manual line break, replace
+        ' that one character atomically with the paragraph mark in the new text.
+        ' Leaving the manual break outside the insertion would create a blank line.
+        replacementStart = insertPosition
+        replacementEnd = insertPosition
+        Dim result As System.String = If(sourceText, System.String.Empty)
+        If result.Length = 0 OrElse
+           ((System.String.IsNullOrEmpty(joinBefore) OrElse joinBefore = "verbatim") AndAlso
+            (System.String.IsNullOrEmpty(joinAfter) OrElse joinAfter = "verbatim")) Then
+            Return result
+        End If
+
+        ' With explicit semantics, incidental model-supplied spaces/tabs must not create
+        ' extra whitespace at paragraph starts or double the requested separator.
+        If Not System.String.IsNullOrEmpty(joinBefore) AndAlso joinBefore <> "verbatim" Then
+            result = result.TrimStart(" "c, ChrW(9))
+        End If
+        If Not System.String.IsNullOrEmpty(joinAfter) AndAlso joinAfter <> "verbatim" Then
+            result = result.TrimEnd(" "c, ChrW(9))
+        End If
+        If result.Length = 0 Then Return result
+
+        Dim leftCharacter As System.String = System.String.Empty
+        Dim rightCharacter As System.String = System.String.Empty
+        Dim adjacentRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Try
+            If insertPosition > doc.Content.Start AndAlso
+               joinBefore <> "verbatim" AndAlso
+               Not System.String.IsNullOrEmpty(joinBefore) Then
+                adjacentRange = doc.Range(insertPosition - 1, insertPosition)
+                leftCharacter = If(adjacentRange.Text, System.String.Empty)
+                ReleaseWordRange(adjacentRange)
+                adjacentRange = Nothing
+            End If
+            If insertPosition < doc.Content.End AndAlso
+               joinAfter <> "verbatim" AndAlso
+               Not System.String.IsNullOrEmpty(joinAfter) Then
+                adjacentRange = doc.Range(insertPosition, insertPosition + 1)
+                rightCharacter = If(adjacentRange.Text, System.String.Empty)
+            End If
+        Finally
+            If adjacentRange IsNot Nothing Then ReleaseWordRange(adjacentRange)
+        End Try
+
+        ' A soft line break is not a paragraph boundary. If it is exactly adjacent
+        ' and a real paragraph is explicitly required, consume ONLY the soft break
+        ' in the same Word Range replacement. Other breaks and literal text stay put.
+        ' A single mutation also prevents partial insertion/deletion on failure.
+        If joinBefore = "paragraph_if_needed" AndAlso leftCharacter = ChrW(11) Then
+            replacementStart = insertPosition - 1
+        End If
+        If joinAfter = "paragraph_if_needed" AndAlso rightCharacter = ChrW(11) Then
+            replacementEnd = insertPosition + 1
+        End If
+
+        ' For an explicitly requested single paragraph boundary, do not retain two
+        ' identical paragraph marks when the text and adjacent Word paragraph both
+        ' supply that boundary. Verbatim mode still preserves deliberate blank lines.
+        If joinBefore = "paragraph_if_needed" AndAlso
+           leftCharacter = vbCr AndAlso result.StartsWith(vbCr, System.StringComparison.Ordinal) Then
+            result = result.Substring(1)
+        End If
+        If result.Length = 0 Then Return result
+        If joinAfter = "paragraph_if_needed" AndAlso
+           rightCharacter = vbCr AndAlso result.EndsWith(vbCr, System.StringComparison.Ordinal) Then
+            result = result.Substring(0, result.Length - 1)
+        End If
+        If result.Length = 0 Then Return result
+
+        Select Case joinBefore
+            Case "space_if_needed"
+                If leftCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionBoundarySeparator(leftCharacter(leftCharacter.Length - 1)) AndAlso
+                   Not IsWordInsertionBoundarySeparator(result(0)) Then
+                    result = " " & result
+                End If
+            Case "paragraph_if_needed"
+                If leftCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionParagraphBoundary(leftCharacter(leftCharacter.Length - 1)) AndAlso
+                   Not IsWordInsertionParagraphBoundary(result(0)) Then
+                    result = vbCr & result
+                End If
+        End Select
+
+        Select Case joinAfter
+            Case "space_if_needed"
+                If rightCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionBoundarySeparator(result(result.Length - 1)) AndAlso
+                   Not IsWordInsertionBoundarySeparator(rightCharacter(0)) Then
+                    result &= " "
+                End If
+            Case "paragraph_if_needed"
+                If rightCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionParagraphBoundary(result(result.Length - 1)) AndAlso
+                   Not IsWordInsertionParagraphBoundary(rightCharacter(0)) Then
+                    result &= vbCr
+                End If
+        End Select
+        Return result
+    End Function
+
+    Private Function IsWordInsertionParagraphBoundary(value As System.Char) As Boolean
+        Return value = ChrW(13) OrElse value = ChrW(10) OrElse value = ChrW(7)
+    End Function
+
+    Private Function IsWordInsertionBoundarySeparator(value As System.Char) As Boolean
+        Return System.Char.IsWhiteSpace(value) OrElse value = ChrW(7)
+    End Function
+
     ' =========================================================================
     ' Insert Before/After Command
     ' =========================================================================
@@ -6947,7 +7228,9 @@ Public Class frmAIChat
         Optional OnlySelection As Boolean = False,
         Optional InsertBefore As Boolean = False,
         Optional matchSpec As ParsedCommandMatchSpec = Nothing,
-        Optional matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing,
+        Optional joinBefore As System.String = Nothing,
+        Optional joinAfter As System.String = Nothing) As Boolean
 
         Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled As Boolean = doc.TrackRevisions
@@ -7069,20 +7352,26 @@ Public Class frmAIChat
                                 If insertPosition >= docContentEnd AndAlso Not InsertBefore Then insertPosition = docContentEnd - 1
                                 insertPosition = System.Math.Max(doc.Content.Start, System.Math.Min(insertPosition, docContentEnd - 1))
 
+                                Dim replacementStart As Integer = insertPosition
+                                Dim replacementEnd As Integer = insertPosition
+                                Dim actualText As System.String = PrepareWordInsertionText(
+                                    doc, insertPosition, newText, joinBefore, joinAfter,
+                                    replacementStart, replacementEnd)
+                                Dim netInsertedLength As Integer = actualText.Length - (replacementEnd - replacementStart)
                                 Dim insertionSucceeded As Boolean = False
                                 Dim insertRange As Microsoft.Office.Interop.Word.Range = Nothing
                                 Try
-                                    insertRange = doc.Range(insertPosition, insertPosition)
+                                    insertRange = doc.Range(replacementStart, replacementEnd)
                                     ' Do not assign Font/Style here. A collapsed Word Range inherits
                                     ' the native formatting at the insertion point; explicit deviations
                                     ' are applied separately through the JSON format operation.
-                                    insertRange.Text = newText
+                                    insertRange.Text = actualText
                                     insertionSucceeded = True
                                 Catch rangeEx As System.Exception
                                     System.Diagnostics.Debug.WriteLine($"Range insertion failed at {insertPosition}: {rangeEx.Message}; trying Selection fallback")
                                     Try
-                                        doc.Application.Selection.SetRange(insertPosition, insertPosition)
-                                        doc.Application.Selection.Text = newText
+                                        doc.Application.Selection.SetRange(replacementStart, replacementEnd)
+                                        doc.Application.Selection.Text = actualText
                                         insertionSucceeded = True
                                     Catch altEx As System.Exception
                                         System.Diagnostics.Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
@@ -7094,12 +7383,12 @@ Public Class frmAIChat
                                 If insertionSucceeded Then
                                     insertedAny = True
                                     insertedCount += 1
-                                    RememberLastActionRange(insertPosition, System.Math.Min(insertPosition + newText.Length, doc.Content.End))
+                                    RememberLastActionRange(replacementStart, System.Math.Min(replacementStart + actualText.Length, doc.Content.End))
 
-                                    If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                                    If chkConvertMarkdown.Checked AndAlso actualText.Length > 0 Then
                                         Try
-                                            Dim conversionStart As Integer = insertPosition
-                                            Dim conversionEnd As Integer = System.Math.Min(insertPosition + newText.Length, doc.Content.End)
+                                            Dim conversionStart As Integer = replacementStart
+                                            Dim conversionEnd As Integer = System.Math.Min(replacementStart + actualText.Length, doc.Content.End)
                                             doc.Range(conversionStart, conversionEnd).Select()
                                             Globals.ThisAddIn.ConvertMarkdownToWord()
                                         Catch
@@ -7107,12 +7396,12 @@ Public Class frmAIChat
                                         End Try
                                     End If
 
-                                    If OnlySelection Then selectionEnd += newText.Length
+                                    If OnlySelection Then selectionEnd += netInsertedLength
 
                                     If InsertBefore Then
-                                        continuePosition = insertPosition + newText.Length + (foundEnd - foundStart)
+                                        continuePosition = insertPosition + netInsertedLength + (foundEnd - foundStart)
                                     Else
-                                        continuePosition = insertPosition + newText.Length
+                                        continuePosition = insertPosition + netInsertedLength
                                     End If
 
                                     If HasReachedSelectedMatchLimit(insertedCount, matchSpec, System.Int32.MaxValue) Then Exit Do
@@ -7191,7 +7480,10 @@ Public Class frmAIChat
     ''' Normalizes line breaks to vbCr (Word's internal format).
     ''' Restores original TrackRevisions state in Finally block.
     ''' </remarks>
-    Private Function ExecuteInsertCommand(newText As String) As Boolean
+    Private Function ExecuteInsertCommand(
+        newText As String,
+        Optional joinBefore As System.String = Nothing,
+        Optional joinAfter As System.String = Nothing) As Boolean
         Dim doc = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled = doc.TrackRevisions
 
@@ -7205,11 +7497,19 @@ Public Class frmAIChat
                 selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
 
                 Dim insertStart As Integer = selection.Start
-                ' Preserve Word's native insertion-point formatting. Explicit emphasis or
-                ' structural formatting is a separate JSON format command.
-                selection.Text = newText
+                Dim replacementStart As Integer = insertStart
+                Dim replacementEnd As Integer = insertStart
+                Dim actualText As System.String = PrepareWordInsertionText(
+                    doc, insertStart, newText, joinBefore, joinAfter,
+                    replacementStart, replacementEnd)
+                ' Preserve Word's native insertion-point formatting. Only an explicit
+                ' paragraph request can widen the range to an adjacent soft break.
+                If replacementStart <> insertStart OrElse replacementEnd <> insertStart Then
+                    selection.SetRange(replacementStart, replacementEnd)
+                End If
+                selection.Text = actualText
 
-                RememberLastActionRange(insertStart, System.Math.Min(insertStart + newText.Length, doc.Content.End))
+                RememberLastActionRange(replacementStart, System.Math.Min(replacementStart + actualText.Length, doc.Content.End))
 
                 If chkConvertMarkdown.Checked Then
                     Globals.ThisAddIn.ConvertMarkdownToWord()

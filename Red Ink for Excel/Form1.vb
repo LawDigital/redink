@@ -177,6 +177,16 @@ Public Class frmAIChat
     Private _loadedContextDocuments As New List(Of ContextDocument)
 
     Private _isUpdatingPersistContextCheckbox As Boolean = False
+    ' Form-lifetime cancellation prevents completed model calls from manipulating
+    ' a disposed chat window or an Office host that has already exited.
+    Private ReadOnly _chatLifetimeCts As New System.Threading.CancellationTokenSource()
+
+    Private ReadOnly Property ChatLifetimeEnded As System.Boolean
+        Get
+            Return _chatLifetimeCts.IsCancellationRequested OrElse Me.IsDisposed OrElse Me.Disposing
+        End Get
+    End Property
+
     Private _dialogOwnerScope As System.IDisposable = Nothing
     Private ReadOnly _toolTip As New System.Windows.Forms.ToolTip()
 
@@ -380,10 +390,12 @@ Public Class frmAIChat
         End If
 
         Await RestoreLoadedContextAsync()
+        If ChatLifetimeEnded Then Return
         UpdateLoadContextButtonText()
 
         If String.IsNullOrWhiteSpace(txtChatHistory.Text) Then
             Dim result = Await WelcomeMessage()
+            If ChatLifetimeEnded Then Return
         Else
             txtChatHistory.SelectionStart = txtChatHistory.Text.Length
             txtChatHistory.ScrollToCaret()
@@ -424,6 +436,7 @@ Public Class frmAIChat
     ''' Sends user prompt: builds context, includes worksheet/selection, calls LLM, appends response, executes commands if allowed.
     ''' </summary>
     Private Async Sub btnSend_Click(sender As Object, e As EventArgs)
+        If ChatLifetimeEnded Then Return
         Dim userPrompt As String = txtUserInput.Text.Trim()
         If userPrompt = "" Then Return
 
@@ -590,7 +603,8 @@ Public Class frmAIChat
                                 End Sub)
 
             ' Call the LLM function asynchronously
-            Dim aiResponseOriginal As String = Await SharedMethods.LLM(_context, SystemPrompt, fullPrompt.ToString(), "", "", 0, _useSecondApi, True)
+            Dim aiResponseOriginal As String = Await SharedMethods.LLM(_context, SystemPrompt, fullPrompt.ToString(), "", "", 0, _useSecondApi, True, cancellationToken:=_chatLifetimeCts.Token)
+            If ChatLifetimeEnded Then Return
 
             ' Guard against an empty/whitespace response so the chat does not render a
             ' bare "Inky:" line. Surface it as an error and restore the prompt so the
@@ -638,7 +652,7 @@ Public Class frmAIChat
             _chatHistory.Add(("assistant", aiResponse.TrimEnd()))
 
         Catch ex As System.Exception
-            ShowCustomMessageBox("Error in btnSend_Click: " & ex.Message)
+            If Not ChatLifetimeEnded Then ShowCustomMessageBox("Error in btnSend_Click: " & ex.Message)
         End Try
     End Sub
 
@@ -655,7 +669,8 @@ Public Class frmAIChat
             ' Call the LLM function asynchronously
             Dim aiResponse As String = Await SharedMethods.LLM(_context, SystemPrompt,
                 $"Welcome the user in {UserLanguage} by (1) referring to the time of day based on the current time in {UserLanguage} , such as in 'good morning', and (2) asking in {UserLanguage} what you can do, but do not say your name.",
-                "", "", 0, _useSecondApi, True)
+                "", "", 0, _useSecondApi, True, cancellationToken:=_chatLifetimeCts.Token)
+            If ChatLifetimeEnded Then Return ""
 
             aiResponse = aiResponse.Replace(vbLf, "").Replace(vbCr, "").Replace(vbCrLf, "") & vbCrLf
             aiResponse = aiResponse.Replace("**", "").Replace("_", "").Replace("`", "")
@@ -679,9 +694,24 @@ Public Class frmAIChat
     ''' Safely executes a UI update action on the UI thread.
     ''' </summary>
     Private Async Function UpdateUIAsync(action As System.Action) As System.Threading.Tasks.Task
+        If ChatLifetimeEnded Then Return
         If InvokeRequired Then
-            Await System.Threading.Tasks.Task.Run(Sub() Me.Invoke(action))
-        Else
+            Try
+                Await System.Threading.Tasks.Task.Run(
+                    Sub()
+                        If Not ChatLifetimeEnded Then
+                            Me.Invoke(New System.Action(
+                                Sub()
+                                    If Not ChatLifetimeEnded Then action()
+                                End Sub))
+                        End If
+                    End Sub)
+            Catch ex As System.ObjectDisposedException
+                ' The host has already closed the chat while an async operation completed.
+            Catch ex As System.InvalidOperationException When ChatLifetimeEnded
+                ' The form handle was destroyed after the UI work was queued.
+            End Try
+        ElseIf Not ChatLifetimeEnded Then
             action()
         End If
     End Function
@@ -886,6 +916,11 @@ Public Class frmAIChat
     ''' Persists chat snippet, window bounds, and settings on form closing.
     ''' </summary>
     Private Sub frmAIChat_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+        Try
+        If Not _chatLifetimeCts.IsCancellationRequested Then _chatLifetimeCts.Cancel()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Form lifetime cancellation failed: " & ex.Message)
+        End Try
 
         Try
             RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged

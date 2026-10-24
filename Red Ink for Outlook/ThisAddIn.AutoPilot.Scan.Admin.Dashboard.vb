@@ -400,10 +400,14 @@ Namespace ScanInbox
         End Sub
 
         Private Sub HandleClosing(sender As System.Object, args As System.Windows.Forms.FormClosingEventArgs)
-            If _busy Then
+            ' User-initiated close may be deferred while editing; Office shutdown must
+            ' not leave this modeless Red Ink window (and its refresh timer) running.
+            If _busy AndAlso Not Globals.ThisAddIn.IsHostModelessClosing Then
                 args.Cancel = True
                 SetStatus("Wait for the current operation to finish.")
+                Return
             End If
+            _closing = True
         End Sub
     End Class
 

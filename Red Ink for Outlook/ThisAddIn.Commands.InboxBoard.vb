@@ -1935,7 +1935,7 @@ Partial Public Class ThisAddIn
                                   End Try
                               End Sub
 
-        frm.Show()
+        ShowHostModelessForm(frm)
     End Sub
 
     ''' <summary>

@@ -1730,6 +1730,7 @@ Namespace SharedLibrary
                                     ShowHTMLCustomMessageBoxInternal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose)
                                 End Sub)
             t.SetApartmentState(System.Threading.ApartmentState.STA)
+            t.IsBackground = True
             t.Start()
         End Sub
 

@@ -61,6 +61,18 @@ Partial Public Class ThisAddIn
 
     Private _activeToolingContext As ToolExecutionContext = Nothing
 
+    ''' <summary>Cooperatively cancels the current tooling run before Office COM/UI teardown.</summary>
+    Private Sub CancelActiveToolingForHostExit()
+        Dim active As ToolExecutionContext = _activeToolingContext
+        If active Is Nothing Then Return
+        Dim root As ToolExecutionContext = active
+        While root.ParentToolingContext IsNot Nothing
+            root = root.ParentToolingContext
+        End While
+        root.RequestCancellation()
+        If active IsNot root Then active.RequestCancellation()
+    End Sub
+
     ''' <summary>Per-session staging/temp directory for the current Word tooling run.</summary>
     Private _wordAgentTempDir As String = Nothing
 
@@ -163,9 +175,9 @@ Partial Public Class ThisAddIn
                             End If
                         Next
                     End If
-                    createdForm.Show()
+                    ShowHostModelessForm(createdForm)
                 Else
-                    rootContext.LogWindowForm.Show()
+                    ShowHostModelessForm(rootContext.LogWindowForm)
                     rootContext.LogWindowForm.BringToFront()
                     rootContext.LogWindowForm.Activate()
                 End If
@@ -802,7 +814,7 @@ Partial Public Class ThisAddIn
                 Sub()
                     Try
                         createdForm = New LogWindow()
-                        createdForm.Show()
+                        ShowHostModelessForm(createdForm)
                         AddHandler createdForm.CancelRequested, Sub() context.IsCancelled = True
                     Catch ex As Exception
                         createError = ex
@@ -1391,7 +1403,7 @@ Partial Public Class ThisAddIn
                                 "Your previous turn was empty after intermediate data was produced, but the requested output file is still missing."
                             context.PendingRejectedAssistantTurn = ""
 
-                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModelBudgeted(
                                 context.AllToolResponses,
                                 context.ToolingModel,
                                 currentIteration:=context.CurrentIteration)
@@ -1436,7 +1448,7 @@ Partial Public Class ThisAddIn
                                 "Your previous turn was empty after successful partial progress."
                             context.PendingRejectedAssistantTurn = ""
 
-                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModelBudgeted(
                                 context.AllToolResponses,
                                 context.ToolingModel,
                                 currentIteration:=context.CurrentIteration)
@@ -1463,7 +1475,7 @@ Partial Public Class ThisAddIn
                             "Your previous turn was empty after successful partial progress."
                         context.PendingRejectedAssistantTurn = ""
 
-                        INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                        INI_APICall_ToolResponses_2 = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             currentIteration:=context.CurrentIteration)

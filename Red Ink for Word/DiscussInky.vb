@@ -316,6 +316,13 @@ Public Class DiscussInky
     Private _alternateModelConfig As ModelConfig = Nothing
     Private _alternateModelDisplayName As String = Nothing
     Private ReadOnly _modelSemaphore As New Threading.SemaphoreSlim(1, 1)
+    Private ReadOnly _formLifetimeCts As New System.Threading.CancellationTokenSource()
+
+    Private ReadOnly Property FormLifetimeEnded As System.Boolean
+        Get
+            Return _formLifetimeCts.IsCancellationRequested OrElse Me.IsDisposed OrElse Me.Disposing
+        End Get
+    End Property
 
     ''' <summary>
     ''' Reference to an attached semantic-search index for the current session.
@@ -597,10 +604,16 @@ Public Class DiscussInky
     ''' </summary>
     ''' <param name="action">Action to execute on the UI thread.</param>
     Private Sub Ui(action As System.Action)
-        If Me.IsDisposed Then Return
+        If FormLifetimeEnded Then Return
         If Me.InvokeRequired Then
-            Try : Me.BeginInvoke(action) : Catch : End Try
-        Else
+            Try
+                Me.BeginInvoke(New System.Windows.Forms.MethodInvoker(Sub()
+                    If Not FormLifetimeEnded Then action.Invoke()
+                End Sub))
+            Catch
+                ' Form handle was destroyed while a background continuation queued UI work.
+            End Try
+        ElseIf Not FormLifetimeEnded Then
             action.Invoke()
         End If
     End Sub
@@ -1823,10 +1836,18 @@ Public Class DiscussInky
     Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
         Try
             If e.CloseReason = CloseReason.UserClosing AndAlso
+               Not Globals.ThisAddIn.IsHostModelessClosing AndAlso
                Not ConfirmCloseWhenKnowledgePersisted() Then
                 e.Cancel = True
                 Return
             End If
+
+            Try
+            If Not _formLifetimeCts.IsCancellationRequested Then _formLifetimeCts.Cancel()
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Form lifetime cancellation failed: " & ex.Message)
+            End Try
+            _autoRespondCancelled = True
 
             Dim scope = _ownerScope
             _ownerScope = Nothing
@@ -1967,12 +1988,13 @@ Public Class DiscussInky
     ''' </summary>
     Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, userPrompt As String,
                                                           Optional archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing) As System.Threading.Tasks.Task(Of System.String)
+        _formLifetimeCts.Token.ThrowIfCancellationRequested()
         ' Capture UI state before leaving the UI thread
         Dim hideLog As Boolean = Not _chkShowToolingLog.Checked
         Dim shouldUseTool As Boolean = ShouldUseTooling()
         Dim toolsReady As Boolean = If(shouldUseTool, EnsureToolsSelected(), False)
 
-        Await _modelSemaphore.WaitAsync().ConfigureAwait(False)
+        Await _modelSemaphore.WaitAsync(_formLifetimeCts.Token).ConfigureAwait(False)
         Dim backupConfig As ModelConfig = Nothing
         Dim appliedAlternate As Boolean = False
         Dim useSecondApi As Boolean = False
@@ -2006,7 +2028,8 @@ Public Class DiscussInky
                     hideSplash:=True,
                     hideLogWindow:=hideLog,
                     progressSink:=Sub(status) UpdateAssistantThinking(status),
-                    semanticArchivePrepared:=archivePrepared).ConfigureAwait(False)
+                    semanticArchivePrepared:=archivePrepared,
+                    cancellationToken:=_formLifetimeCts.Token).ConfigureAwait(False)
             Else
                 ' Standard LLM call
                 Return Await LLM(_context,
@@ -2016,7 +2039,8 @@ Public Class DiscussInky
                                  "",
                                  0,
                                  useSecondApi,
-                                 True).ConfigureAwait(False)
+                                 True,
+                                 cancellationToken:=_formLifetimeCts.Token).ConfigureAwait(False)
             End If
 
         Finally
@@ -5214,6 +5238,7 @@ Public Class DiscussInky
             ShowSessionInfo()
             Await GenerateWelcomeAsync()
         Catch ex As Exception
+            If FormLifetimeEnded Then Return
             RemoveAssistantThinking()
             AppendAssistantMarkdown("*(Welcome failed: " & System.Security.SecurityElement.Escape(ex.Message) & ")*")
         Finally
@@ -5336,6 +5361,7 @@ Public Class DiscussInky
             answer = $"Good {partOfDay.ToLower()}! How can I help you today?"
         End Try
 
+        If FormLifetimeEnded Then Return
         answer = If(answer, "").Trim()
         AppendAssistantMarkdown(answer)
         _history.Add(("assistant", answer))
@@ -5357,6 +5383,7 @@ Public Class DiscussInky
     ''' <param name="userText">User's message text.</param>
     ''' <param name="toolTriggerDetected">True if the user included "(t)" in their prompt.</param>
     Private Async Function SendAsync(userText As String, Optional toolTriggerDetected As Boolean = False) As Task
+        If FormLifetimeEnded Then Return
         Try
             Dim explicitToolTriggerDetected As Boolean = toolTriggerDetected
             Dim restoreUserText As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userText}".Trim(), userText)
@@ -5415,6 +5442,7 @@ Public Class DiscussInky
             If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(userText) Then
                 archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
                     _context, userText, Globals.ThisAddIn.CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                If FormLifetimeEnded Then Return
                 cleanedUserText = archivePrepared.CleanPrompt
                 systemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
                 AppendSystemMessage("Semantic Archives: " & archivePrepared.Status)
@@ -5470,6 +5498,7 @@ Public Class DiscussInky
                             End If
                         End Try
 
+                        If FormLifetimeEnded Then Return
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
                             kbContext = kbResolved.Content
 
@@ -5526,6 +5555,7 @@ Public Class DiscussInky
             Else
                 indexExcerpts = Await BuildIndexExcerptsAsync(cleanedUserText, BuildConversationForAutoResponder())
             End If
+            If FormLifetimeEnded Then Return
             If Not String.IsNullOrWhiteSpace(indexExcerpts) Then
                 sb.AppendLine("<Indexed Sources>")
                 sb.AppendLine("The following are the most relevant excerpts retrieved from attached indexed documents for this message. " &
@@ -5607,7 +5637,7 @@ Public Class DiscussInky
 
                 ' Execute via tooling loop with one-shot ToolDefaultModel config
                 Dim hideLog As Boolean = Not _chkShowToolingLog.Checked
-                Await _modelSemaphore.WaitAsync().ConfigureAwait(False)
+                Await _modelSemaphore.WaitAsync(_formLifetimeCts.Token).ConfigureAwait(False)
                 Dim backupConfig As ModelConfig = Nothing
                 Try
                     backupConfig = SharedMethods.GetCurrentConfig(_context)
@@ -5621,8 +5651,10 @@ Public Class DiscussInky
                         fullPromptOverride:=sb.ToString(),
                         hideSplash:=True,
                         hideLogWindow:=hideLog,
-                        semanticArchivePrepared:=archivePrepared).ConfigureAwait(False)
+                        semanticArchivePrepared:=archivePrepared,
+                        cancellationToken:=_formLifetimeCts.Token).ConfigureAwait(False)
 
+                    If FormLifetimeEnded Then Return
                     answer = If(answer, "").Trim()
 
                     If Await TryHandleKnowledgeCompactionOpportunityAsync(answer, userText, toolTriggerDetected) Then
@@ -5671,6 +5703,7 @@ Public Class DiscussInky
             ' ──────────────────────────────────────────────────────────────
             Dim sw = Stopwatch.StartNew()
             Dim stdAnswer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString(), archivePrepared)
+            If FormLifetimeEnded Then Return
             sw.Stop()
 
             stdAnswer = If(stdAnswer, "").Trim()
@@ -5706,6 +5739,7 @@ Public Class DiscussInky
             PersistTranscriptLimited()
 
         Catch ex As Exception
+            If FormLifetimeEnded Then Return
             RemoveAssistantThinking()
             AppendAssistantMarkdown("*(Error: " & System.Security.SecurityElement.Escape(ex.Message) & ")*")
         End Try
@@ -7378,7 +7412,7 @@ Public Class DiscussInky
 
             ' Call LLM directly WITHOUT tooling - summary is a simple text task
             ' that should never go through the tooling loop to avoid JSON responses
-            Await _modelSemaphore.WaitAsync().ConfigureAwait(False)
+            Await _modelSemaphore.WaitAsync(_formLifetimeCts.Token).ConfigureAwait(False)
             Dim backupConfig As ModelConfig = Nothing
             Dim appliedAlternate As Boolean = False
             Dim useSecondApi As Boolean = False

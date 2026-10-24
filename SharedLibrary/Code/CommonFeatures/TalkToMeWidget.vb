@@ -274,7 +274,7 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        Public Sub ShowWidget()
+        Public Sub ShowWidget(Optional owner As System.Windows.Forms.IWin32Window = Nothing)
             ApplyCalculatedMinimumSize()
             EnsureWidgetVisible()
 
@@ -282,7 +282,8 @@ Namespace SharedLibrary
                 Me.BringToFront()
                 Me.Activate()
             Else
-                Me.Show()
+                Dim safeOwner As System.Windows.Forms.IWin32Window = SharedMethods.IfOwnerOnCurrentThread(owner)
+                If safeOwner IsNot Nothing Then Me.Show(safeOwner) Else Me.Show()
             End If
         End Sub
 

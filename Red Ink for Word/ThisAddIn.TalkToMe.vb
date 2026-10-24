@@ -4748,7 +4748,7 @@ Partial Public Class ThisAddIn
         End If
 
         _talkToMeWidget.SetReturnFocusAfterStart(effectiveReturnFocusAfterStart)
-        _talkToMeWidget.ShowWidget()
+        _talkToMeWidget.ShowWidget(RegisterHostModelessForm(_talkToMeWidget))
     End Sub
 
     Private Sub RestoreWordFocusAfterTalkToMeStart()

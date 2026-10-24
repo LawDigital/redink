@@ -714,7 +714,7 @@ Partial Public Class ThisAddIn
                 Try
                     If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
                     EnsureAutoPilotDashboardVisible()
-                    _apDashboard.Show()
+                    ShowHostModelessForm(_apDashboard)
                     EnsureAutoPilotDashboardVisible()
                     _apDashboard.BringToFront()
                     _apDashboard.Activate()
@@ -847,7 +847,7 @@ Partial Public Class ThisAddIn
                 _apDashboard.ShowAbortJobButton(True)
                 _apDashboard.ShowStopAfterCurrentButton(True)
                 RestoreAutoPilotDashboardBounds()
-                _apDashboard.Show()
+                ShowHostModelessForm(_apDashboard)
                 EnsureAutoPilotDashboardVisible()
 
                 Try

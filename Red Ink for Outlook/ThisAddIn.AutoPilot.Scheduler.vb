@@ -2678,14 +2678,14 @@ Partial Public Class ThisAddIn
     Friend Sub ShowSchedulerDashboard()
         If _apSchedulerDashboard IsNot Nothing AndAlso Not _apSchedulerDashboard.IsDisposed Then
             RefreshSchedulerDashboard()
-            _apSchedulerDashboard.Show()
+            ShowHostModelessForm(_apSchedulerDashboard)
             _apSchedulerDashboard.BringToFront()
             Return
         End If
 
         _apSchedulerDashboard = CreateSchedulerDashboardForm()
         RefreshSchedulerDashboard()
-        _apSchedulerDashboard.Show()
+        ShowHostModelessForm(_apSchedulerDashboard)
     End Sub
 
     ''' <summary>Creates the scheduler dashboard form with a DataGridView and action buttons.</summary>
@@ -2820,7 +2820,7 @@ Partial Public Class ThisAddIn
 
         ' Hide instead of closing
         AddHandler frm.FormClosing, Sub(s As Object, e As FormClosingEventArgs)
-                                        If e.CloseReason = CloseReason.UserClosing Then
+                                        If e.CloseReason = CloseReason.UserClosing AndAlso Not IsHostModelessClosing Then
                                             e.Cancel = True
                                             frm.Hide()
                                         End If

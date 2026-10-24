@@ -4453,7 +4453,9 @@ Partial Public Class ThisAddIn
             If _uiContext IsNot Nothing Then
                 _uiContext.Post(
                     Sub(state)
-                        ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+                        If Not IsHostModelessClosing Then
+                            ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+                        End If
                     End Sub, Nothing)
             Else
                 ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
@@ -4461,6 +4463,7 @@ Partial Public Class ThisAddIn
 
         Catch ex As Exception
             Debug.WriteLine($"OpenDrawioWithWebView2 error: {ex.Message}")
+            If IsHostModelessClosing Then Return
             ShowCustomMessageBox(
                 $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
                 $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
@@ -4471,6 +4474,7 @@ Partial Public Class ThisAddIn
     ''' Shows the draw.io editor form with WebView2.
     ''' </summary>
     Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String, ByVal disableInternetAfterLoad As Boolean)
+        If IsHostModelessClosing Then Return
         Try
             ' Create standalone HWNDs in a consistent context; restore Office immediately.
             Using dpiScope As System.IDisposable = Global.SharedLibrary.SharedLibrary.WebView2DpiHost.StandaloneWindow()
@@ -4481,10 +4485,18 @@ Partial Public Class ThisAddIn
             '                                editorForm.ExportPdfToDevice()
             '                            End Sub
 
-                editorForm.Show()
+                ' Show via the registry so the validated Office owner is actually
+                ' assigned; registration alone does not establish HWND ownership.
+                Try
+                    ShowHostModelessForm(editorForm)
+                Catch
+                    If Not editorForm.IsDisposed Then editorForm.Dispose()
+                    Throw
+                End Try
             End Using
         Catch ex As System.Exception
             Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")
+            If IsHostModelessClosing Then Return
             ShowCustomMessageBox(
                 $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
                 $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")

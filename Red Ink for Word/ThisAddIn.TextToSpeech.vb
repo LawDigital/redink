@@ -475,6 +475,7 @@ Partial Public Class ThisAddIn
                                                 ShowCustomMessageBox("Audio generation has started and runs in the background. Press 'Esc' to abort.).", "", 3, "", True)
                                             End Sub)
                         t.SetApartmentState(ApartmentState.STA)
+                        t.IsBackground = True
                         t.Start()
                     End If
 
@@ -649,6 +650,7 @@ Partial Public Class ThisAddIn
                                         "", 3, "", True)
                                     End Sub)
                 t.SetApartmentState(ApartmentState.STA)
+                t.IsBackground = True
                 t.Start()
 
                 ' Generate audio for each speaker segment in conversation

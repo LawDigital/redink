@@ -4019,7 +4019,7 @@ End Class
 Public Module M365SearchTest
     Public Sub Show(context As ISharedContext)
         Dim f As New M365SearchTestForm(context)
-        f.Show()
+        Globals.ThisAddIn.ShowHostModelessForm(f)
     End Sub
 End Module
 

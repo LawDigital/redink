@@ -128,6 +128,11 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Function PerformSearchGrounding(SGTerms As String, ISearch_URL As String, ISearch_ResponseMask1 As String, ISearch_ResponseMask2 As String, ISearch_Tries As Integer, ISearch_MaxDepth As Integer) As Task(Of List(Of String))
         Dim tcs As New TaskCompletionSource(Of List(Of String))()
+        Dim hostExitToken As System.Threading.CancellationToken = HostWindowLifetimeToken
+        If hostExitToken.IsCancellationRequested Then
+            tcs.TrySetCanceled()
+            Return tcs.Task
+        End If
         Dim results As New List(Of String)
 
         Using httpClient As New HttpClient()
@@ -144,10 +149,14 @@ Partial Public Class ThisAddIn
                 ' Use polling instead of Await
                 Dim httpTask As Task(Of String) = httpClient.GetStringAsync(searchUrl)
 
-                While Not httpTask.IsCompleted
+                While Not httpTask.IsCompleted AndAlso Not hostExitToken.IsCancellationRequested
                     System.Windows.Forms.Application.DoEvents()
                     System.Threading.Thread.Sleep(50)
                 End While
+                If hostExitToken.IsCancellationRequested Then
+                    tcs.TrySetCanceled()
+                    Return tcs.Task
+                End If
 
                 Dim searchResponse As String = ""
                 If httpTask.Status = TaskStatus.RanToCompletion Then
@@ -179,6 +188,10 @@ Partial Public Class ThisAddIn
 
                 ' Visit each extracted URL and retrieve content
                 For Each url In extractedUrls
+                    If hostExitToken.IsCancellationRequested Then
+                        tcs.TrySetCanceled()
+                        Return tcs.Task
+                    End If
                     Try
                         Dim content As String = ""
 
@@ -186,10 +199,14 @@ Partial Public Class ThisAddIn
                             ' Use polling for WebView2
                             Dim webViewTask As Task(Of String) = RetrieveWebsiteContent_WebView2(url, 0)
 
-                            While Not webViewTask.IsCompleted
+                            While Not webViewTask.IsCompleted AndAlso Not hostExitToken.IsCancellationRequested
                                 System.Windows.Forms.Application.DoEvents()
                                 System.Threading.Thread.Sleep(50)
                             End While
+                            If hostExitToken.IsCancellationRequested Then
+                                tcs.TrySetCanceled()
+                                Return tcs.Task
+                            End If
 
                             If webViewTask.Status = TaskStatus.RanToCompletion Then
                                 content = webViewTask.Result
@@ -198,10 +215,14 @@ Partial Public Class ThisAddIn
                             ' Use polling for HttpClient crawl
                             Dim crawlTask As Task(Of String) = RetrieveWebsiteContent(url, ISearch_MaxDepth, httpClient)
 
-                            While Not crawlTask.IsCompleted
+                            While Not crawlTask.IsCompleted AndAlso Not hostExitToken.IsCancellationRequested
                                 System.Windows.Forms.Application.DoEvents()
                                 System.Threading.Thread.Sleep(50)
                             End While
+                            If hostExitToken.IsCancellationRequested Then
+                                tcs.TrySetCanceled()
+                                Return tcs.Task
+                            End If
 
                             If crawlTask.Status = TaskStatus.RanToCompletion Then
                                 content = crawlTask.Result
@@ -461,7 +482,12 @@ Partial Public Class ThisAddIn
                                                          Optional includeLinks As Boolean = False,
                                                          Optional linkExtensions As System.Collections.Generic.List(Of String) = Nothing) As System.Threading.Tasks.Task(Of WebRetrievalResult)
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of WebRetrievalResult)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of WebRetrievalResult)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim hostExitToken As System.Threading.CancellationToken = HostWindowLifetimeToken
+        If hostExitToken.IsCancellationRequested Then
+            tcs.TrySetCanceled()
+            Return tcs.Task
+        End If
 
         Dim normalizedExtensions As System.Collections.Generic.List(Of String) =
         If(linkExtensions, New System.Collections.Generic.List(Of String)()).
@@ -514,7 +540,7 @@ Partial Public Class ThisAddIn
                     System.Diagnostics.Debug.WriteLine($"[WebView2] Blocked unsafe URL: {baseUrl}")
                     navigationFailed = True
                     result.TextContent = $"Blocked unsafe URL: {baseUrl}"
-                    Return
+                    Throw New System.InvalidOperationException(result.TextContent)
                 End If
 
                 userDataFolder = SharedLibrary.SharedLibrary.SharedMethods.CreateWebView2TransientFolder()
@@ -750,7 +776,8 @@ Partial Public Class ThisAddIn
                         End Try
                     End Sub)
 
-                While Not contentExtracted AndAlso Not navigationFailed AndAlso (System.DateTime.Now - startTime) < timeout
+                While Not contentExtracted AndAlso Not navigationFailed AndAlso
+                      Not hostExitToken.IsCancellationRequested AndAlso (System.DateTime.Now - startTime) < timeout
                     System.Windows.Forms.Application.DoEvents()
                     System.Threading.Thread.Sleep(50)
                 End While
@@ -802,10 +829,15 @@ Partial Public Class ThisAddIn
             System.Diagnostics.Debug.WriteLine(
                 $"[WebView2] Loop ended. Content: {If(result.TextContent, "").Length} chars, elapsed: {(System.DateTime.Now - startTime).TotalSeconds:F1}s")
 
-            tcs.TrySetResult(result)
+            If hostExitToken.IsCancellationRequested Then
+                tcs.TrySetCanceled()
+            Else
+                tcs.TrySetResult(result)
+            End If
         End Sub)
 
         thread.SetApartmentState(System.Threading.ApartmentState.STA)
+        thread.IsBackground = True
         thread.Start()
 
         Return tcs.Task
