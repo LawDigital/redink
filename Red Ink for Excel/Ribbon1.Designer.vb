@@ -67,6 +67,7 @@ Partial Class Ribbon1
         Me.RI_CSVAnalyze = Me.Factory.CreateRibbonButton
         Me.RI_TXTAnalyze = Me.Factory.CreateRibbonButton
         Me.RI_Extractor = Me.Factory.CreateRibbonButton
+        Me.RI_CollectionAnalyzer = Me.Factory.CreateRibbonButton
         Me.RI_Renamer = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleNM = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleAM = Me.Factory.CreateRibbonButton
@@ -218,6 +219,7 @@ Partial Class Ribbon1
         Me.Menu3.Items.Add(Me.RI_CSVAnalyze)
         Me.Menu3.Items.Add(Me.RI_TXTAnalyze)
         Me.Menu3.Items.Add(Me.RI_Extractor)
+        Me.Menu3.Items.Add(Me.RI_CollectionAnalyzer)
         Me.Menu3.Items.Add(Me.RI_Renamer)
         Me.Menu3.Label = "Analyze Tools"
         Me.Menu3.Name = "Menu3"
@@ -244,6 +246,11 @@ Partial Class Ribbon1
         '
         'RI_Extractor
         '
+        Me.RI_CollectionAnalyzer.Label = "Collection Analyzer"
+        Me.RI_CollectionAnalyzer.Name = "RI_CollectionAnalyzer"
+        Me.RI_CollectionAnalyzer.OfficeImageId = "WhatIfAnalysisMenu"
+        Me.RI_CollectionAnalyzer.ScreenTip = "Analyze a folder of documents as one evidence-based collection"
+        Me.RI_CollectionAnalyzer.ShowImage = True
         Me.RI_Extractor.Label = "Data Extractor"
         Me.RI_Extractor.Name = "RI_Extractor"
         Me.RI_Extractor.OfficeImageId = "ExportSavedExports"
@@ -585,6 +592,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_CSVAnalyze As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton
     Friend WithEvents RI_Extractor As RibbonButton
+    Friend WithEvents RI_CollectionAnalyzer As RibbonButton
     Friend WithEvents Menu3 As RibbonMenu
     Friend WithEvents RI_Renamer As RibbonButton
     Friend WithEvents RI_RIRemove As RibbonButton

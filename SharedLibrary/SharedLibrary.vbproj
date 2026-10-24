@@ -460,6 +460,7 @@
     <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchiveQueueIndex.vb" />
     <Compile Include="Code\Agents\SemanticArchiveTools.vb" />
     <Compile Include="Code\Agents\TextExportService.vb" />
+    <Compile Include="Code\Agents\CollectionAnalysisService.vb" />
     <Compile Include="Code\CommonFeatures\Maintenance\BackgroundMaintenanceCoordinator.vb" />
     <Compile Include="Code\CommonFeatures\Maintenance\OfficeMaintenanceService.vb" />
     <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.Access.vb" />
