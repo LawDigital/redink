@@ -199,9 +199,10 @@ Namespace SharedLibrary
 
 
         ''' <summary>
-        ''' Normalizes lightweight LaTeX-style notation emitted by LLMs before Markdown-to-HTML rendering.
-        ''' Embedded Red Ink viewers do not run MathJax, so wrappers such as \(\rightarrow\) would otherwise
-        ''' remain visible verbatim. Only a bounded allow-list is substituted; Markdown link destinations remain unchanged.
+        ''' Normalizes lightweight LaTeX notation and structurally separated Markdown list items
+        ''' before HTML rendering. Embedded viewers do not run MathJax, and CommonMark treats
+        ''' indented content after an isolated list marker as code rather than a list label.
+        ''' Link destinations and normal Markdown code/list structures are preserved.
         ''' </summary>
         Public Shared Function NormalizeMarkdownForHtmlDisplay(markdown As String) As String
             If String.IsNullOrEmpty(markdown) Then Return If(markdown, String.Empty)
@@ -211,7 +212,105 @@ Namespace SharedLibrary
             ' identifiers and paths such as report_9.docx or %appdata%\Microsoft\Word must
             ' therefore remain unchanged. Explicit math is scanned deterministically below;
             ' no regular expression is used to guess mathematical content.
-            Return NormalizeKnownLatexCodesPreservingMarkdownLinks(markdown)
+            Return NormalizeKnownLatexCodesPreservingMarkdownLinks(NormalizeSeparatedMarkdownListItems(markdown))
+        End Function
+
+        ''' <summary>
+        ''' Rejoins an isolated Markdown list marker with a following indented text line
+        ''' separated by blank lines. In CommonMark, such a sequence otherwise becomes
+        ''' an empty list item followed by an indented code block. Mail translations can
+        ''' carry this layout from plain-text list extraction or generated Markdown.
+        ''' Only the explicit marker/blank-line/indented-text pattern is normalized;
+        ''' normal lists, fenced code, raw HTML code/pre, and intentional nested lists
+        ''' retain their existing Markdown semantics.
+        ''' </summary>
+        Private Shared Function NormalizeSeparatedMarkdownListItems(markdown As System.String) As System.String
+            If System.String.IsNullOrEmpty(markdown) Then Return If(markdown, System.String.Empty)
+
+            Dim lines As System.String() = System.Text.RegularExpressions.Regex.Split(markdown, "(\r\n|\r|\n)")
+            Dim output As New System.Text.StringBuilder(markdown.Length)
+            Dim markerPattern As New System.Text.RegularExpressions.Regex("^( {0,3})([-+*]|[0-9]{1,9}[.)])[ \t]*$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            Dim indentedTextPattern As New System.Text.RegularExpressions.Regex("^([ \t]+)(\S.*)$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            Dim nestedListPattern As New System.Text.RegularExpressions.Regex("^(?:[-+*]|[0-9]{1,9}[.)])[ \t]+", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            Dim fencePattern As New System.Text.RegularExpressions.Regex("^ {0,3}(`{3,}|~{3,})", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            Dim htmlLiteralOpenPattern As New System.Text.RegularExpressions.Regex("<(pre|code|script|style)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            Dim fenceCharacter As System.Char = ControlChars.NullChar
+            Dim fenceLength As System.Int32 = 0
+            Dim htmlLiteralTag As System.String = System.String.Empty
+            Dim index As System.Int32 = 0
+
+            While index < lines.Length
+                Dim line As System.String = lines(index)
+                Dim fence As System.Text.RegularExpressions.Match = fencePattern.Match(line)
+                Dim protectedLine As System.Boolean = False
+
+                If fenceCharacter <> ControlChars.NullChar Then
+                    protectedLine = True
+                    If fence.Success AndAlso fence.Groups(1).Value(0) = fenceCharacter AndAlso
+                       fence.Groups(1).Length >= fenceLength AndAlso
+                       System.String.IsNullOrWhiteSpace(line.Substring(fence.Length)) Then
+                        fenceCharacter = ControlChars.NullChar
+                        fenceLength = 0
+                    End If
+                ElseIf Not System.String.IsNullOrEmpty(htmlLiteralTag) Then
+                    protectedLine = True
+                ElseIf fence.Success Then
+                    protectedLine = True
+                    fenceCharacter = fence.Groups(1).Value(0)
+                    fenceLength = fence.Groups(1).Length
+                End If
+
+                If Not System.String.IsNullOrEmpty(htmlLiteralTag) AndAlso
+                   line.IndexOf("</" & htmlLiteralTag, System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    htmlLiteralTag = System.String.Empty
+                ElseIf System.String.IsNullOrEmpty(htmlLiteralTag) Then
+                    Dim htmlOpen As System.Text.RegularExpressions.Match = htmlLiteralOpenPattern.Match(line)
+                    If htmlOpen.Success Then
+                        Dim tag As System.String = htmlOpen.Groups(1).Value
+                        If line.IndexOf("</" & tag, System.StringComparison.OrdinalIgnoreCase) < 0 Then
+                            htmlLiteralTag = tag
+                        End If
+                        protectedLine = True
+                    End If
+                End If
+
+                If Not protectedLine Then
+                    Dim marker As System.Text.RegularExpressions.Match = markerPattern.Match(line)
+                    If marker.Success Then
+                        Dim contentIndex As System.Int32 = index + 2
+                        Dim blankCount As System.Int32 = 0
+                        While contentIndex < lines.Length AndAlso System.String.IsNullOrWhiteSpace(lines(contentIndex))
+                            blankCount += 1
+                            contentIndex += 2
+                        End While
+                        If blankCount >= 1 AndAlso blankCount <= 2 AndAlso contentIndex < lines.Length Then
+                            Dim content As System.Text.RegularExpressions.Match = indentedTextPattern.Match(lines(contentIndex))
+                            Dim indentWidth As System.Int32 = 0
+                            If content.Success Then
+                                For Each indentCharacter As System.Char In content.Groups(1).Value
+                                    indentWidth += If(indentCharacter = ControlChars.Tab,
+                                                      4 - (indentWidth Mod 4), 1)
+                                Next
+                            End If
+                            If content.Success AndAlso indentWidth >= 4 AndAlso
+                               Not nestedListPattern.IsMatch(content.Groups(2).Value) AndAlso
+                               Not fencePattern.IsMatch(content.Groups(2).Value) AndAlso
+                               Not htmlLiteralOpenPattern.IsMatch(content.Groups(2).Value) Then
+                                output.Append(marker.Groups(1).Value).Append(marker.Groups(2).Value).Append(" ").Append(content.Groups(2).Value)
+                                If contentIndex + 1 < lines.Length Then output.Append(lines(contentIndex + 1))
+                                index = contentIndex + 2
+                                Continue While
+                            End If
+                        End If
+                    End If
+                End If
+
+                output.Append(line)
+                If index + 1 < lines.Length Then output.Append(lines(index + 1))
+                index += 2
+            End While
+
+            Return output.ToString()
         End Function
 
         ''' <summary>

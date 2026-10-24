@@ -88,6 +88,17 @@ Public Class frmAIChat
 
     Const ToolTrigger As String = "(ag)"
 
+    ' English-only host-owned feedback; independent of the selected chat language or model.
+    ' Never expose parser internals or raw exception text in the Word chat UI.
+    Private Const InvalidWordCommandUserMessage As String =
+        "The selected AI model did not provide the instructions in the format required to edit this Word document. " &
+        "No changes were made to the document. Please try sending your request again. " &
+        "If the problem continues, select a different AI model and try again."
+
+    Private Const WordEditFailureUserMessage As String =
+        "Word could not complete the requested document action. " &
+        "Some changes may already have been applied. Please review the document before trying again."
+
     ''' <summary>
     ''' Special Unicode private-use character (U+E000) inserted during text replacement.
     ''' Acts as temporary marker to prevent infinite loops when searching for replaced text.
@@ -1246,7 +1257,7 @@ Public Class frmAIChat
 
                     Await UpdateUIAsync(Sub()
                                             ReportCommandExecutionError(
-                                                $"The {ToolTrigger} trigger was requested, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                                                "No AI model is configured for the requested tools. Please choose a model that supports tools or ask your administrator to check the model settings.")
                                             txtUserInput.Text = promptToRestore
                                         End Sub)
                     Return
@@ -1255,7 +1266,7 @@ Public Class frmAIChat
                 If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
                     Await UpdateUIAsync(Sub()
                                             ReportCommandExecutionError(
-                                                $"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                                                "The configured AI model cannot use the tools required for this request. Please choose a tool-enabled model or ask your administrator to check the model settings.")
                                             txtUserInput.Text = promptToRestore
                                         End Sub)
                     Return
@@ -1482,7 +1493,7 @@ Public Class frmAIChat
                                         RemoveLastLineFromChatHistory()
                                         RemoveAssistantThinking()
                                         ReportCommandExecutionError(
-                                            "The model returned invalid Word command data. No document changes were applied. " & commandParseException.Message)
+                                            InvalidWordCommandUserMessage)
                                         txtUserInput.Text = promptToRestore
                                     End Sub)
                 Return
@@ -1545,7 +1556,9 @@ Public Class frmAIChat
                                                 "ExecuteAnyCommands error: " & cmdEx.Message)
 
                                             ' Report command execution error to chat
-                                            ReportCommandExecutionError(cmdEx.Message)
+                                            ReportCommandExecutionError(
+                                                "Word could not finish the requested document actions. " &
+                                                "Some changes may already have been applied. Please review the document before trying again.")
                                         End Try
                                     End If
 
@@ -1567,7 +1580,10 @@ Public Class frmAIChat
                 "btnSend_Click exception: " & ex.GetType().Name & ": " & ex.Message)
 
             errorOccurred = True
-            errorMessage = $"Error processing request: {ex.Message}"
+            errorMessage =
+                "Your request could not be completed. Please try again. " &
+                "If the issue continues, check your connection or try another AI model. " &
+                "If you requested document changes, review the document before retrying because some changes may already have been applied."
         End Try
 
         ' ──────────────────────────────────────────────────────────────
@@ -1617,6 +1633,19 @@ Public Class frmAIChat
 
         ' Add to chat history so AI can see the error in future context
         _chatHistory.Add(("assistant", $"System Error: {errorMessage}"))
+    End Sub
+
+    ''' <summary>
+    ''' Shows an English, action-oriented Word-chat error while keeping the original
+    ''' exception type, message and stack in diagnostics. No exception text reaches the UI.
+    ''' </summary>
+    Private Sub ShowWordChatOperationError(operation As String,
+                                           ex As System.Exception,
+                                           userMessage As String)
+        System.Diagnostics.Debug.WriteLine("WordChat " & operation & ": " & ex.ToString())
+        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+            "WordChat", operation & " failed: " & ex.GetType().FullName & ": " & ex.Message)
+        ShowCustomMessageBox(userMessage)
     End Sub
 
     ' =========================================================================
@@ -4219,7 +4248,10 @@ Public Class frmAIChat
             Next
         Catch ex As System.Exception
             ' Preserve the former parser's failure behavior during the compatibility window.
-            ShowCustomMessageBox("Error in ParseCommands: " & ex.Message)
+            ShowWordChatOperationError(
+                "ParseLegacyCommands", ex,
+                "The model's document-editing instructions could not be read reliably. " &
+                "Please try the request again. If the problem continues, choose a different AI model.")
         End Try
 
         Return results
@@ -4353,7 +4385,9 @@ Public Class frmAIChat
             Return Regex.Replace(input, commandPattern, "", RegexOptions.Singleline)
         Catch ex As System.Exception
             ' Preserve the former RemoveCommands behavior during the compatibility window.
-            ShowCustomMessageBox("Error in RemoveCommands: " & ex.Message)
+            ShowWordChatOperationError(
+                "RemoveLegacyCommands", ex,
+                "The model response could not be displayed correctly. Please try your request again.")
             Return input
         End Try
     End Function
@@ -5489,7 +5523,7 @@ Public Class frmAIChat
         Catch ex As System.Exception
             ' Preserve the old public entry point's non-throwing parser behavior. The normal
             ' chat path validates JSON earlier and reports invalid command data in-chat.
-            ShowCustomMessageBox("Error in ParseCommands: " & ex.Message)
+            ShowWordChatOperationError("ExecuteAnyCommands.ParseCommands", ex, InvalidWordCommandUserMessage)
             Return
         End Try
 
@@ -5544,8 +5578,8 @@ Public Class frmAIChat
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
         Dim doc As Microsoft.Office.Interop.Word.Document = ResolveChatCommandTargetDocument(targetDocumentName, targetDocumentFullName)
         If doc Is Nothing Then
-            FailedCommandsList.Add("Failed: The Word document that was active when this request started is no longer open.")
-            ReportFailedCommands()
+            FailedCommandsList.Add("The Word document selected for this request is no longer open. Open or activate it and try again.")
+            ReportFailedCommands(noChangesMade:=True)
             Me.TopMost = topmost
             Return
         End If
@@ -5579,8 +5613,8 @@ Public Class frmAIChat
         End Try
 
         If Not targetContextEstablished Then
-            FailedCommandsList.Add("Failed: Could not establish the Word document that was active when this request started.")
-            ReportFailedCommands()
+            FailedCommandsList.Add("Word could not access the document selected for this request. Activate that document and try again.")
+            ReportFailedCommands(noChangesMade:=True)
             Try
                 If focusLeaseActive AndAlso userWindowBeforeCommands IsNot Nothing Then userWindowBeforeCommands.Activate()
             Catch ex As System.Exception
@@ -5907,13 +5941,17 @@ Public Class frmAIChat
     ''' Error rendered with red styling (#d93025) to distinguish from warnings (orange).
     ''' Failures formatted as bulleted list in HTML view.
     ''' </remarks>
-    Private Sub ReportFailedCommands()
+    Private Sub ReportFailedCommands(Optional noChangesMade As Boolean = False)
         If FailedCommandsList Is Nothing OrElse FailedCommandsList.Count = 0 Then Return
 
+        Dim userSummary As String = If(
+            noChangesMade,
+            "The requested Word actions could not start. No changes were made. Please check the document and try again.",
+            "Not all requested Word actions could be completed. Some changes may already have been applied. Please review the document before trying again.")
         Dim errorMessage As New System.Text.StringBuilder()
         errorMessage.AppendLine()
         errorMessage.AppendLine("─────────────────────────────────────")
-        errorMessage.AppendLine("⚠ Some commands could not be executed:")
+        errorMessage.AppendLine("⚠ " & userSummary)
         errorMessage.AppendLine()
 
         For Each failedCmd In FailedCommandsList
@@ -5931,7 +5969,7 @@ Public Class frmAIChat
             <span class='who' style='color: #d93025;'>System:</span>
             <div class='content'>
                 <hr style='border: none; border-top: 1px solid #d93025; margin: 8px 0;' />
-                <strong>⚠ Some commands could not be executed:</strong><br/>
+                <strong>⚠ {HtmlEncode(userSummary)}</strong><br/>
                 <ul style='margin: 8px 0;'>"
 
         For Each failedCmd In FailedCommandsList
@@ -5944,7 +5982,7 @@ Public Class frmAIChat
         PersistChatHtml()
 
         ' Add to chat history so AI can see failures in future context
-        _chatHistory.Add(("assistant", $"System: Some commands failed - {String.Join("; ", FailedCommandsList)}"))
+        _chatHistory.Add(("assistant", "System: " & userSummary & " Details: " & String.Join("; ", FailedCommandsList)))
     End Sub
 
 
@@ -5989,7 +6027,9 @@ Public Class frmAIChat
                 End With
             End Using
         Catch ex As Exception
-            ShowCustomMessageBox("Error in ReplaceSpecialCharacter: " & ex.Message)
+            ShowWordChatOperationError(
+                "ReplaceSpecialCharacter", ex,
+                "Word could not finish cleaning up the document changes. Please review the document before continuing.")
         Finally
             doc.TrackRevisions = trackChangesEnabled
         End Try
@@ -6467,7 +6507,9 @@ Public Class frmAIChat
             Return found
 
         Catch ex As System.Exception
-            ShowCustomMessageBox("Error in ExecuteFindCommand: " & ex.Message)
+            ShowWordChatOperationError(
+                "ExecuteFindCommand", ex,
+                "Word could not complete the requested search. Please check the document and try again.")
             Return False
 
         Finally
@@ -6991,7 +7033,7 @@ Public Class frmAIChat
 #If DEBUG Then
             System.Diagnostics.Debugger.Break()
 #End If
-            ShowCustomMessageBox("Error in ExecuteReplaceCommand: " & ex.Message)
+            ShowWordChatOperationError("ExecuteReplaceCommand", ex, WordEditFailureUserMessage)
             Return False
 
         Finally
@@ -7456,7 +7498,7 @@ Public Class frmAIChat
             System.Diagnostics.Debug.WriteLine("Stacktrace: " & ex.StackTrace)
             System.Diagnostics.Debugger.Break()
 #End If
-            ShowCustomMessageBox("Error in ExecuteInsertBeforeAfterCommand: " & ex.Message)
+            ShowWordChatOperationError("ExecuteInsertBeforeAfterCommand", ex, WordEditFailureUserMessage)
             Return False
 
         Finally
@@ -7518,7 +7560,7 @@ Public Class frmAIChat
 
             Return True
         Catch ex As Exception
-            ShowCustomMessageBox("Error in ExecuteInsertCommand: " & ex.Message)
+            ShowWordChatOperationError("ExecuteInsertCommand", ex, WordEditFailureUserMessage)
             Return False
         Finally
             doc.TrackRevisions = trackChangesEnabled
