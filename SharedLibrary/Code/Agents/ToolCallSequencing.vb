@@ -64,6 +64,66 @@ Namespace Agents
             Return True
         End Function
 
+        ''' <summary>
+        ''' Validates the binding between model-supplied arguments and the external API template.
+        ''' A schema may allow additional properties, but an unbound supplied value must never
+        ''' disappear while the transport silently applies broad default filters instead.
+        ''' Empty-argument calls and omitted optional template fields keep their prior semantics.
+        ''' </summary>
+        Public Shared Function TryPrepareExternalToolApiArguments(
+            apiCallTemplate As System.String,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            ByRef boundArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+            ByRef failureMessage As System.String) As System.Boolean
+
+            boundArguments = New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.OrdinalIgnoreCase)
+            failureMessage = System.String.Empty
+
+            Dim templateNames As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim matches As System.Text.RegularExpressions.MatchCollection =
+                System.Text.RegularExpressions.Regex.Matches(
+                    If(apiCallTemplate, System.String.Empty),
+                    "\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+            For Each match As System.Text.RegularExpressions.Match In matches
+                Dim name As System.String = match.Groups(1).Value
+                Dim existingName As System.String = Nothing
+
+                If templateNames.TryGetValue(name, existingName) Then
+                    If Not System.String.Equals(existingName, name, System.StringComparison.Ordinal) Then
+                        failureMessage = "The tool API template has ambiguous parameter names differing only by letter case."
+                        Return False
+                    End If
+                Else
+                    templateNames.Add(name, name)
+                End If
+            Next
+
+            If arguments Is Nothing Then
+                Return True
+            End If
+
+            For Each argument As System.Collections.Generic.KeyValuePair(Of System.String, System.Object) In arguments
+                Dim placeholderName As System.String = Nothing
+                If Not templateNames.TryGetValue(argument.Key, placeholderName) Then
+                    failureMessage = "Parameter '" & argument.Key &
+                        "' is not used by the configured tool API template. " &
+                        "Call the tool again using the supported parameter names; no API request was sent."
+                    Return False
+                End If
+
+                If boundArguments.ContainsKey(placeholderName) Then
+                    failureMessage = "The same tool API parameter was supplied more than once with different letter casing."
+                    Return False
+                End If
+
+                ' Use the template's exact spelling: String.Replace in the hosts is case-sensitive.
+                boundArguments.Add(placeholderName, argument.Value)
+            Next
+
+            Return True
+        End Function
+
         Public Const TaskStatusReasonMaxChars As Integer = 160
 
         Private Sub New()

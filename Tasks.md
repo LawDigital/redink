@@ -1,5 +1,16 @@
 ﻿# Tasks
 
+## Completed 2026-10-25 — Agnostic external-tool API argument binding guard (R21)
+
+- Baseline: exact cumulative R20 source archive (688 entries). All pre-existing R7–R20 changes, tool/INI declarations, model profiles, `.inky` files, Outlook and Word workflows retained.
+- Verified defect: external execution replaced only `{argumentName}` placeholders present in the configured APICall template; when schema accepted additional model arguments, unreferenced arguments disappeared before optional default substitution. This could silently turn a filtered request into a broad unfiltered request.
+- Shared generic contract: `ToolCallSequencing.TryPrepareExternalToolApiArguments` validates that every supplied external-tool argument has a matching API-template placeholder before transport. Placeholder casing is deterministically normalized to actual template spelling. Duplicate/ambiguous case variants and unused arguments return a structured invalid-tool-arguments failure without dispatch. No domain aliases, default-query assumptions or provider-specific rules added.
+- Word and Outlook: the same shared binding check runs in `ExecuteExternalTool` after selecting the configured API template and before OAuth, SSE, streamable MCP or HTTP/LLM transport. Both hosts use their existing `BuildInvalidToolArgumentsResponse`, allowing the normal tool-failure recovery path. Existing optional/default placeholder resolution is untouched for requests without unbound supplied arguments.
+- Compatibility: correctly bound requests, independent parameterless tools, intentionally allowed optional defaults, schema validation and `ToolCallArgumentNormalizer` continue on existing paths; no changed definitions, `.inky`, Excel, Data Extractor, or Outlook export. Existing structured error payloads and technical logs remain available.
+- QA: 20 independent behavioral-contract simulations plus static symmetry, placement, BOM/CRLF, changed-only and cumulative file-integrity checks. This environment cannot run native Windows/Visual Studio/VSTO builds or real authenticated tool requests, so those remain required for release acceptance.
+- Native follow-up: compile SharedLibrary, Outlook and Word; exercise a correctly filtered external call, optional defaults/list-only call, case-variant argument, unknown supplied argument, combined known+unknown filters, and validate that blocked calls dispatch no network requests while the model can correct the argument name. Exercise previously working Word/Outlook internal tools unchanged.
+
+
 ## Completed 2026-10-25 — Explicit Collection Analyzer recovery selection (R18)
 
 - Starting point: exact R17 cumulative source tree (688 files). Modified only `CollectionAnalysisService.vb`, Excel `ThisAddIn.CollectionAnalyzer.vb` and cumulative `Tasks.md`; all previous Data Extractor, Outlook export, Word/Excel tools, model selection, UI styling, `.inky` and recovery implementation retained.
@@ -2449,3 +2460,22 @@ Cumulative H24d source ZIP contains exactly15 genuinely changed VB files; increm
 - Actual cause: a `For Each path As String` loop variable shadowed the case-insensitive `Path` type name. Rename it to `excludedRelativePath` and use `System.IO.Path.Combine` for that path. Preserve the complete source-inventory/exclusion rendering, original filenames and evidence contracts.
 - Follow-on diagnosis: `SharedLibrary.vbproj` includes `CollectionAnalysisService.vb` and `SharedMethods.PrimaryModelManager.vb`; Excel has a project reference to SharedLibrary and already imports the appropriate namespaces. The four Excel errors are consistent with an unsuccessful SharedLibrary build or stale assembly; no placeholder types or renamed APIs have been introduced. If these survive a successful full rebuild, inspect the actual resolved project reference and diagnostics before further changes.
 - Static QA: confirmed the precise name collision is gone; referenced public declarations and `.vbproj` includes/project reference exist; UTF-8 BOM count is exactly one; no unrelated source edits; R14 cumulative baseline preserved. No native Windows VS2022/VSTO compilation was run in this environment. Rebuild SharedLibrary then Excel; report any remaining compiler diagnostics with file/line.
+
+
+## 2026-10-25 — Transient empty configuration source diagnosis (CP-CONFIG-SOURCE-R19)
+
+- Baseline: complete cumulative R18 checkpoint; all prior Word/Outlook/Excel code and `.inky` artifacts preserved.
+- Observed: Outlook displayed `The configuration could not be loaded from '': The configuration source is invalid` twice during an unattended overnight session, whereas subsequent normal Outlook startup loads the configuration successfully. Exact triggering call stack was not captured by R18.
+- Code-level cause of possible empty-source conversion: `ExpandEnvironmentVariables` eagerly evaluated all replacement expressions, including `%WINDIR%` and `%HOMEPATH%` even when those placeholders were absent; a single exception was silently converted to an empty string. The active source resolver therefore could receive empty default paths. This is a demonstrated contract defect, not proof that the specific overnight incidents had this exception.
+- Change: only expand each known placeholder if it is present; preserve replacement rules, path normalization and existing fallback on an actual expansion failure. No registry/default-source priority, retry, or license changes.
+- Diagnostics: bounded per-user `RedInk\Diagnostics\ConfigurationPath.log` records failing config-reload call sites, empty-source candidate-presence flags, exception types and environmental presence flags. No API keys, configuration contents, raw paths or HTTPS queries logged. Failed diagnostics never affect normal execution.
+- Regression invariants: valid main config and registry priorities unchanged; normal paths, optional placeholders, UNC/relative paths preserved; no false source substitution when expansion fails; headless loading behavior unchanged; no added dialogs or automated reload attempts.
+- QA: static contract and changed-only diff checks; no Windows/VSTO compilation or overnight live reproduction. Inspect the diagnostic log from the next affected run to attribute its actual caller and exception.
+
+
+## 2026-10-25 — Configuration path diagnostics log location (CP-CONFIG-LOG-R20)
+
+- Baseline: cumulative R19; existing resolution diagnostics and environment expansion fix preserved.
+- Changed only the diagnostic log destination to `%LOCALAPPDATA%\RedInk\RI_ConfigurationPath.log` as requested. Rotation of `.previous` files remains in the same directory, and the nonblocking logging behavior is unchanged.
+- No changes to source-selection priority, loading, retry, or message behavior. Existing logs in the former folder are not moved or deleted.
+- QA: exact replacement verified, full cumulative archive compared, changed-only archive checked; actual Windows/VSTO build not performed.
