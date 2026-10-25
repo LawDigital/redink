@@ -51,7 +51,7 @@
     <FriendlyName>Red Ink for Excel %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.7.15.200</ApplicationVersion>
+    <ApplicationVersion>1.7.16.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/excel/</InstallUrl>
     <ProductName>Red Ink for Excel %28Preview%29</ProductName>
@@ -324,6 +324,7 @@
     <Compile Include="ThisAddIn.DirectoryAnalyzer.vb" />
     <Compile Include="ThisAddIn.ExcelHelpers.vb" />
     <Compile Include="ThisAddIn.FactExtractor.vb" />
+    <Compile Include="ThisAddIn.CollectionAnalyzer.vb" />
     <Compile Include="ThisAddIn.FileHelpers.vb" />
     <Compile Include="ThisAddIn.FileRenamer.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />

@@ -238,6 +238,9 @@ Partial Public Class ThisAddIn
         ''' <summary>Bounded number of no-op attempts against the same target before the edit is marked unresolved.</summary>
         Public Const ZeroChangeOperationAbortThreshold As Integer = 3
 
+        ''' <summary>Per-execution coverage and bounded context-management recovery.</summary>
+        Public ReadOnly Property ContextProgress As New SharedLibrary.Agents.ContextProgressPolicy()
+
         ''' <summary>Per-run set of already-expanded (ref + range) keys used to suppress repeated no-progress reads.</summary>
         Public Property ExpandedContextKeys As HashSet(Of String) =
             New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
@@ -358,7 +361,7 @@ Partial Public Class ThisAddIn
         Public Sub Log(message As String, Optional level As String = "step")
             Dim normalizedPrefix As String = If(LogPrefix, "").Trim()
             Dim isSubAgent As Boolean =
-                normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
+                IsSubAgentRun OrElse normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
             Dim leadingMarker As String = If(isSubAgent, "[subagent]", "")
             Dim humanMessage As String = If(message, "").Trim()
 
@@ -397,7 +400,7 @@ Partial Public Class ThisAddIn
             If normalizedLevel = "diag" Then Return
 
             Dim visibleMessage As String =
-                If(isSubAgent, "  [sub-agent] " & humanMessage, humanMessage)
+                If(isSubAgent, SharedLibrary.Agents.SubAgentLogScope.FormatMessage(humanMessage, subAgentFallback:=True), humanMessage)
 
             AppendVisibleLogInternal(visibleMessage, normalizedLevel)
         End Sub

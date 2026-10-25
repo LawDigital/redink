@@ -1309,6 +1309,24 @@ Partial Public Class ThisAddIn
                     LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
                 End If
 
+                ' Freestyle prose policy is scoped by a runtime marker, not by model/provider.
+                ' Keep intact source lines byte-identical when a chunk is returned unchanged.
+                If SysCommand.IndexOf("RED_INK_FREESTYLE_TYPOGRAPHY_R22", System.StringComparison.Ordinal) >= 0 AndAlso
+                   Not System.String.IsNullOrEmpty(LLMResult) AndAlso
+                   Not DoMarkup AndAlso Not DoTPMarkup AndAlso
+                   System.String.IsNullOrEmpty(SlideDeck) AndAlso DoChart = 0 AndAlso Not CreatePodcast Then
+                    Dim generatedLines As System.String() = System.Text.RegularExpressions.Regex.Split(LLMResult, "(?<=\n)|(?<=\r)(?!\n)")
+                    For lineNumber As Integer = 0 To generatedLines.Length - 1
+                        Dim originalLine As System.String = generatedLines(lineNumber).TrimEnd(ChrW(13), ChrW(10))
+                        If Not System.String.IsNullOrEmpty(originalLine) AndAlso
+                           (System.String.IsNullOrEmpty(SelectedText) OrElse
+                            SelectedText.IndexOf(originalLine, System.StringComparison.Ordinal) < 0) Then
+                            generatedLines(lineNumber) = Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeGeneratedProseTypography(generatedLines(lineNumber))
+                        End If
+                    Next
+                    LLMResult = System.String.Concat(generatedLines)
+                End If
+
                 Debug.WriteLine($"LLMResult 0 = '{LLMResult}'")
 
                 ' Remove horizontal whitespace (incl. NBSP) between real newline tokens (CRLF/CR/LF)
@@ -4453,7 +4471,9 @@ Partial Public Class ThisAddIn
             If _uiContext IsNot Nothing Then
                 _uiContext.Post(
                     Sub(state)
-                        ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+                        If Not IsHostModelessClosing Then
+                            ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+                        End If
                     End Sub, Nothing)
             Else
                 ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
@@ -4461,6 +4481,7 @@ Partial Public Class ThisAddIn
 
         Catch ex As Exception
             Debug.WriteLine($"OpenDrawioWithWebView2 error: {ex.Message}")
+            If IsHostModelessClosing Then Return
             ShowCustomMessageBox(
                 $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
                 $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
@@ -4471,6 +4492,7 @@ Partial Public Class ThisAddIn
     ''' Shows the draw.io editor form with WebView2.
     ''' </summary>
     Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String, ByVal disableInternetAfterLoad As Boolean)
+        If IsHostModelessClosing Then Return
         Try
             ' Create standalone HWNDs in a consistent context; restore Office immediately.
             Using dpiScope As System.IDisposable = Global.SharedLibrary.SharedLibrary.WebView2DpiHost.StandaloneWindow()
@@ -4481,10 +4503,18 @@ Partial Public Class ThisAddIn
             '                                editorForm.ExportPdfToDevice()
             '                            End Sub
 
-                editorForm.Show()
+                ' Show via the registry so the validated Office owner is actually
+                ' assigned; registration alone does not establish HWND ownership.
+                Try
+                    ShowHostModelessForm(editorForm)
+                Catch
+                    If Not editorForm.IsDisposed Then editorForm.Dispose()
+                    Throw
+                End Try
             End Using
         Catch ex As System.Exception
             Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")
+            If IsHostModelessClosing Then Return
             ShowCustomMessageBox(
                 $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
                 $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")

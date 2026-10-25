@@ -192,9 +192,25 @@ Partial Public Class ThisAddIn
                                                  Optional maxChars As Integer = 0,
                                                  Optional includeLinks As Boolean = False,
                                                  Optional linkExtensions As System.Collections.Generic.List(Of String) = Nothing,
-                                                 Optional expandInteractiveSections As Boolean = False) As System.Threading.Tasks.Task(Of WebRetrievalResult)
+                                                 Optional expandInteractiveSections As Boolean = False,
+                                                 Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of WebRetrievalResult)
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of WebRetrievalResult)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of WebRetrievalResult)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim hostExitToken As System.Threading.CancellationToken = HostWindowLifetimeToken
+        If cancellationToken.IsCancellationRequested OrElse hostExitToken.IsCancellationRequested Then
+            tcs.TrySetCanceled()
+            Return tcs.Task
+        End If
+        If Not IsSafeWebUrl(baseUrl) Then
+            Dim blocked As New WebRetrievalResult() With {
+                .FinalUrl = baseUrl,
+                .LinksJson = "[]",
+                .ErrorMessage = $"Blocked unsafe URL: {baseUrl}",
+                .TextContent = $"Blocked unsafe URL: {baseUrl}"
+            }
+            tcs.TrySetResult(blocked)
+            Return tcs.Task
+        End If
         Dim normalizedExtensions As System.Collections.Generic.List(Of String) = NormalizeLinkExtensions(linkExtensions)
 
         Dim thread As New System.Threading.Thread(
@@ -223,7 +239,7 @@ Partial Public Class ThisAddIn
                     result.ErrorMessage = $"Blocked unsafe URL: {baseUrl}"
                     result.TextContent = result.ErrorMessage
                     navigationFailed = True
-                    Return
+                    Throw New System.InvalidOperationException(result.ErrorMessage)
                 End If
 
                 userDataFolder = SharedLibrary.SharedLibrary.SharedMethods.CreateWebView2TransientFolder()
@@ -470,7 +486,9 @@ Partial Public Class ThisAddIn
                         End Try
                     End Sub)
 
-                While Not contentExtracted AndAlso Not navigationFailed AndAlso (System.DateTime.Now - startTime) < timeout
+                While Not contentExtracted AndAlso Not navigationFailed AndAlso
+                      Not cancellationToken.IsCancellationRequested AndAlso Not hostExitToken.IsCancellationRequested AndAlso
+                      (System.DateTime.Now - startTime) < timeout
                     System.Windows.Forms.Application.DoEvents()
                     System.Threading.Thread.Sleep(50)
                 End While
@@ -485,7 +503,8 @@ Partial Public Class ThisAddIn
                     System.String.IsNullOrWhiteSpace(result.TextContent) OrElse
                     result.TextContent = result.ErrorMessage
 
-                If onlyErrorOrTimeout AndAlso Not includeLinks Then
+                If onlyErrorOrTimeout AndAlso Not includeLinks AndAlso
+                   Not cancellationToken.IsCancellationRequested AndAlso Not hostExitToken.IsCancellationRequested Then
                     Try
                         System.Diagnostics.Debug.WriteLine("[WebView2] Empty rendered content; trying HTTP fallback.")
 
@@ -605,10 +624,15 @@ Partial Public Class ThisAddIn
             End If
 
             result.TextContent = finalText
-            tcs.TrySetResult(result)
+            If cancellationToken.IsCancellationRequested OrElse hostExitToken.IsCancellationRequested Then
+                tcs.TrySetCanceled()
+            Else
+                tcs.TrySetResult(result)
+            End If
         End Sub)
 
         thread.SetApartmentState(System.Threading.ApartmentState.STA)
+        thread.IsBackground = True
         thread.Start()
 
         Return tcs.Task
@@ -1590,7 +1614,8 @@ Partial Public Class ThisAddIn
                             0,
                             includeLinks,
                             linkExtensions,
-                            expandInteractiveSections)
+                            expandInteractiveSections,
+                            cancellationToken)
 
                         Dim resolvedUrl As String = If(pageResult?.FinalUrl, requestedUrl)
                         Dim content As String = If(pageResult?.TextContent, "")

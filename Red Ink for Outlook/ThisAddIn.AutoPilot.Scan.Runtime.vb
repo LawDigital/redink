@@ -156,13 +156,14 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Async Sub ScanSweepCallback(state As System.Object)
-        If Not _apActive OrElse _apConfig Is Nothing OrElse Not _apConfig.EnableScanProcessing Then Return
+        If IsAutoPilotDrainRequested() OrElse Not _apActive OrElse _apConfig Is Nothing OrElse Not _apConfig.EnableScanProcessing Then Return
         If System.Threading.Interlocked.CompareExchange(_scanSweepRunning, 1, 0) <> 0 Then Return
         Try
+            If IsAutoPilotDrainRequested() Then Return
             Dim ct = _apCts.Token
             Dim config = ScanInbox.Registry.Load(GetScanRegisterPath())
             CacheScanClassification(config)
-            PurgeExpiredThreadRetention()
+            ' Expired retention folders are purged by the nightly AutoPilot pass.
             Dim root = GetScanStateRoot()
             ' Retry registered failures independently of the historical search window.
             For Each directory In System.IO.Directory.GetDirectories(root)

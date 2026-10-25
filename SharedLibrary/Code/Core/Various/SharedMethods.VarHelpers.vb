@@ -1140,20 +1140,48 @@ Namespace SharedLibrary
                 expandedPath = expandedPath.Trim(""""c)
 
                 ' Expand known variables using Environment.GetEnvironmentVariable and ensure proper path format
-                expandedPath = Regex.Replace(expandedPath, "%APPDATA%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%LOCALAPPDATA%", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%PROGRAMDATA%", Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%USERPROFILE%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%WINDIR%", Path.Combine(Environment.GetEnvironmentVariable("WINDIR")), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%TEMP%", Path.Combine(Path.GetTempPath()), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%HOMEPATH%", Path.Combine(Environment.GetEnvironmentVariable("HOMEPATH")), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%APPSTARTUPPATH%", Path.Combine(System.Windows.Forms.Application.StartupPath), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%DESKTOP%", Environment.GetFolderPath(Environment.SpecialFolder.Desktop), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%DOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%MYDOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%DOWNLOADS%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%PROGRAMFILES%", Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), RegexOptions.IgnoreCase)
-                expandedPath = Regex.Replace(expandedPath, "%COMMONDOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments), RegexOptions.IgnoreCase)
+                If expandedPath.IndexOf("%APPDATA%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%APPDATA%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%LOCALAPPDATA%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%LOCALAPPDATA%", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%PROGRAMDATA%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%PROGRAMDATA%", Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%USERPROFILE%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%USERPROFILE%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%WINDIR%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%WINDIR%", Path.Combine(Environment.GetEnvironmentVariable("WINDIR")), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%TEMP%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%TEMP%", Path.Combine(Path.GetTempPath()), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%HOMEPATH%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%HOMEPATH%", Path.Combine(Environment.GetEnvironmentVariable("HOMEPATH")), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%APPSTARTUPPATH%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%APPSTARTUPPATH%", Path.Combine(System.Windows.Forms.Application.StartupPath), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%DESKTOP%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%DESKTOP%", Environment.GetFolderPath(Environment.SpecialFolder.Desktop), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%DOCUMENTS%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%DOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%MYDOCUMENTS%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%MYDOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%DOWNLOADS%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%DOWNLOADS%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%PROGRAMFILES%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%PROGRAMFILES%", Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), RegexOptions.IgnoreCase)
+                End If
+                If expandedPath.IndexOf("%COMMONDOCUMENTS%", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    expandedPath = Regex.Replace(expandedPath, "%COMMONDOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments), RegexOptions.IgnoreCase)
+                End If
 
                 ' Clean up any potential double backslashes (but preserve UNC paths)
                 If Not expandedPath.StartsWith("\\") Then
@@ -1171,11 +1199,71 @@ Namespace SharedLibrary
                 End If
 
             Catch ex As System.Exception
-                ' Return empty string on failure
+                ' Preserve the legacy failure result, but record why a non-empty path became empty.
+                WritePathResolutionDiagnostic("path_expansion_failed",
+                                              "inputLength=" & filePath.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), ex)
                 Return ""
             End Try
 
         End Function
+
+
+        ' Path-resolution diagnostics are intentionally independent of the configured INI source.
+        ' Never include configuration content, source URLs, or resolved paths in these records.
+        Private Shared ReadOnly _pathResolutionDiagnosticsSync As New System.Object()
+
+        Friend Shared Sub WritePathResolutionDiagnostic(ByVal stage As System.String,
+                                                       Optional ByVal details As System.String = Nothing,
+                                                       Optional ByVal failure As System.Exception = Nothing)
+            Try
+                Dim diagnosticRoot As System.String = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData)
+                If System.String.IsNullOrWhiteSpace(diagnosticRoot) Then diagnosticRoot = System.IO.Path.GetTempPath()
+                Dim diagnosticDirectory As System.String = System.IO.Path.Combine(diagnosticRoot, "RedInk")
+                System.IO.Directory.CreateDirectory(diagnosticDirectory)
+                Dim diagnosticFile As System.String = System.IO.Path.Combine(diagnosticDirectory, "RI_ConfigurationPath.log")
+
+                Dim callerNames As New System.Collections.Generic.List(Of System.String)()
+                Dim callFrames As System.Diagnostics.StackFrame() = New System.Diagnostics.StackTrace(1, False).GetFrames()
+                If callFrames IsNot Nothing Then
+                    For Each frame As System.Diagnostics.StackFrame In callFrames
+                        Dim method As System.Reflection.MethodBase = frame.GetMethod()
+                        If method Is Nothing Then Continue For
+                        Dim typeName As System.String = If(method.DeclaringType Is Nothing, "unknown", method.DeclaringType.FullName)
+                        callerNames.Add(typeName & "." & method.Name)
+                        If callerNames.Count >= 12 Then Exit For
+                    Next
+                End If
+
+                Dim failureType As System.String = If(failure Is Nothing, "none", failure.GetType().FullName)
+                Dim argumentError As System.ArgumentException = TryCast(failure, System.ArgumentException)
+                Dim parameterName As System.String = If(argumentError Is Nothing, "", If(argumentError.ParamName, ""))
+                Dim processName As System.String = System.Diagnostics.Process.GetCurrentProcess().ProcessName
+                Dim diagnosticLine As System.String =
+                    "utc=" & System.DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture) &
+                    ";process=" & processName &
+                    ";thread=" & System.Threading.Thread.CurrentThread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    ";stage=" & If(stage, "") &
+                    ";details=" & If(details, "") &
+                    ";errorType=" & failureType &
+                    ";errorParameter=" & parameterName &
+                    ";hasWINDIR=" & (Not System.String.IsNullOrWhiteSpace(System.Environment.GetEnvironmentVariable("WINDIR"))).ToString() &
+                    ";hasHOMEPATH=" & (Not System.String.IsNullOrWhiteSpace(System.Environment.GetEnvironmentVariable("HOMEPATH"))).ToString() &
+                    ";hasAPPDATA=" & (Not System.String.IsNullOrWhiteSpace(System.Environment.GetEnvironmentVariable("APPDATA"))).ToString() &
+                    ";callers=" & System.String.Join(" <- ", callerNames)
+
+                SyncLock _pathResolutionDiagnosticsSync
+                    If System.IO.File.Exists(diagnosticFile) AndAlso
+                       New System.IO.FileInfo(diagnosticFile).Length > 524288L Then
+                        Dim previousFile As System.String = diagnosticFile & ".previous"
+                        If System.IO.File.Exists(previousFile) Then System.IO.File.Delete(previousFile)
+                        System.IO.File.Move(diagnosticFile, previousFile)
+                    End If
+                    System.IO.File.AppendAllText(diagnosticFile, diagnosticLine & System.Environment.NewLine, New System.Text.UTF8Encoding(False))
+                End SyncLock
+            Catch
+                ' Diagnostics must never create a new initialization failure.
+            End Try
+        End Sub
 
 
         ''' <summary>

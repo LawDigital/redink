@@ -397,7 +397,7 @@ Partial Public Class ThisAddIn
         }
         Dim pAutoDeleteAfterHours As New InputParameter() With {
             .Name = "Delete answered mail (hours)",
-            .ToolTipText = "Auto-delete answered mails after N hours (0 = disabled; also empties Deleted Items for tagged mails)",
+            .ToolTipText = "Retention in hours (0 = disabled). Expired AutoPilot mails are deleted daily at 01:00 local time from account mailbox folders and Deleted Items; no daytime catch-up.",
             .Value = saved.AutoDeleteAfterHours.ToString()
         }
         Dim pEnableWebGrounding As New InputParameter() With {

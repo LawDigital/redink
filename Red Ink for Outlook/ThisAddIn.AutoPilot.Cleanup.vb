@@ -12,12 +12,12 @@
 '  - Uses hidden MAPI properties to group an incoming mail with all AutoPilot
 '    replies and follow-up notices.
 '  - Starts the retention clock only after a substantive reply is sent.
-'  - Runs a periodic cleanup timer alongside the AutoPilot session.
+'  - Schedules one cleanup at 01:00 local time per day while AutoPilot is running.
 '  - Scans mailbox folders and Deleted Items to remove expired tagged items.
 '  - Keeps Outlook COM access on the UI thread via `SwitchToUi`.
 '
 ' Retention Model:
-'  - `AutoDeleteAfterHours = 0` disables cleanup.
+'  - `AutoDeleteAfterHours = 0` disables mail deletion; nightly file retention still runs.
 '  - When enabled, the original mail and all AutoPilot replies in the same group
 '    are eligible for deletion after the configured retention window.
 '  - Cleanup includes normal folders and Deleted Items.
@@ -52,12 +52,12 @@ Partial Public Class ThisAddIn
     Private Const AP_CleanupDeleteAfterUtcProperty As String =
         "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoDeleteAfterUtc"
 
-    ' When True, an auto-delete cleanup pass runs immediately at AutoPilot startup.
-    ' Default False: cleanup runs only on the periodic timer.
-    Private Const AP_RunAutoDeleteCleanupOnStartup As Boolean = False
+    Private Const AP_AutoDeleteLocalHour As System.Int32 = 1
+    Private Const AP_AutoDeleteStartWindowMinutes As System.Int32 = 5
+    Private ReadOnly _apAutoDeleteTimerLock As New System.Object()
+    Private _apAutoDeleteTimerGeneration As System.Int32
+    Private _apAutoDeleteLastRunLocalDate As System.DateTime = System.DateTime.MinValue
 
-    Private Const AP_AutoDeleteTimerIntervalSeconds As Integer = 15 * 60
-    Private Const AP_AutoDeleteFirstCheckSeconds As System.Int32 = 60
     Private Const AP_AutoDeleteUiYieldItemInterval As Integer = 100
     Private Const AP_AutoDeleteUiYieldFolderInterval As Integer = 10
     Private Const AP_AutoDeleteProgressItemInterval As Integer = 500
@@ -67,6 +67,7 @@ Partial Public Class ThisAddIn
 
     Private _apAutoDeleteTimer As System.Threading.Timer = Nothing
     Private _apAutoDeleteCheckRunning As Integer = 0
+    Private _apNightlyMaintenanceRunning As System.Int32 = 0
     Private _apAutoDeleteDiagnosticRejectLogCount As Integer = 0
     Private _apAutoDeleteDiagnosticErrorLogCount As Integer = 0
     Private _apAutoDeleteProtectedGroups As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
@@ -81,37 +82,121 @@ Partial Public Class ThisAddIn
         Public LastProgressLogFolderCount As Integer
     End Structure
 
+    ' Calendar scheduling, not a 24-hour period: UTC offset changes must not shift 01:00.
+    Friend Shared Function GetNextAutoDeleteDelay(nowUtc As System.DateTime,
+                                                 zone As System.TimeZoneInfo) As System.TimeSpan
+        Dim localNow As System.DateTime = System.TimeZoneInfo.ConvertTimeFromUtc(nowUtc, zone)
+        Dim nextLocal As System.DateTime = System.DateTime.SpecifyKind(
+            localNow.Date.AddHours(AP_AutoDeleteLocalHour), System.DateTimeKind.Unspecified)
+        If nextLocal <= localNow Then nextLocal = nextLocal.AddDays(1)
+        ' A timezone with a skipped 01:00 gets no catch-up run at another local hour.
+        While zone.IsInvalidTime(nextLocal)
+            nextLocal = nextLocal.AddDays(1)
+        End While
+        Return System.TimeZoneInfo.ConvertTimeToUtc(nextLocal, zone) - nowUtc
+    End Function
+
     Friend Sub StartAutoDeleteTimer()
         StopAutoDeleteTimer()
+        If _apConfig Is Nothing Then Return
 
-        If _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return
-
-        _apAutoDeleteTimer = New System.Threading.Timer(
-            AddressOf AutoDeleteTimerCallback,
-            Nothing,
-            dueTime:=TimeSpan.FromSeconds(AP_AutoDeleteFirstCheckSeconds),
-            period:=TimeSpan.FromSeconds(AP_AutoDeleteTimerIntervalSeconds))
-
-        ApDashboardLog($"🗑 Auto-delete timer started ({_apConfig.AutoDeleteAfterHours}h retention, including Deleted Items; first check in 60s, then every 15min).", "info")
+        SyncLock _apAutoDeleteTimerLock
+            _apAutoDeleteTimer = New System.Threading.Timer(
+                AddressOf AutoDeleteTimerCallback, _apAutoDeleteTimerGeneration,
+                System.Threading.Timeout.InfiniteTimeSpan, System.Threading.Timeout.InfiniteTimeSpan)
+            _apAutoDeleteTimer.Change(GetNextAutoDeleteDelay(System.DateTime.UtcNow, System.TimeZoneInfo.Local),
+                                      System.Threading.Timeout.InfiniteTimeSpan)
+        End SyncLock
+        ApDashboardLog($"🗑 AutoPilot maintenance scheduled daily at 01:00 local time: mail deletion ({_apConfig.AutoDeleteAfterHours}h; 0 = disabled), then file retention purge; no startup or daytime catch-up run.", "info")
     End Sub
 
     Friend Sub StopAutoDeleteTimer()
-        Try : _apAutoDeleteTimer?.Dispose() : Catch : End Try
-        _apAutoDeleteTimer = Nothing
+        SyncLock _apAutoDeleteTimerLock
+            _apAutoDeleteTimerGeneration += 1
+            Try : _apAutoDeleteTimer?.Dispose() : Catch : End Try
+            _apAutoDeleteTimer = Nothing
+        End SyncLock
     End Sub
 
-    Private Async Sub AutoDeleteTimerCallback(state As Object)
-        If Not _apActive Then Return
-
+    Private Async Sub AutoDeleteTimerCallback(state As System.Object)
+        Dim generation As System.Int32 = System.Convert.ToInt32(state, System.Globalization.CultureInfo.InvariantCulture)
+        Dim ct As System.Threading.CancellationToken
+        Dim ownsMaintenance As System.Boolean = False
         Try
-            Dim ct = _apCts?.Token
-            If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
-
-            Await RunAutoDeleteCleanupAsync(ct.Value, "timer")
-        Catch ex As OperationCanceledException
-            ' Expected during shutdown
+            SyncLock _apAutoDeleteTimerLock
+                If generation <> _apAutoDeleteTimerGeneration OrElse _apAutoDeleteTimer Is Nothing OrElse
+                   Not _apActive OrElse IsAutoPilotDrainRequested() OrElse _apCts Is Nothing OrElse _apCts.IsCancellationRequested Then Return
+                ct = _apCts.Token
+                Dim localNow As System.DateTime = System.DateTime.Now
+                Dim start As System.DateTime = localNow.Date.AddHours(AP_AutoDeleteLocalHour)
+                ' A resumed/suspended process must not perform last night's sweep during the day.
+                If localNow < start OrElse localNow >= start.AddMinutes(AP_AutoDeleteStartWindowMinutes) OrElse
+                   _apAutoDeleteLastRunLocalDate >= localNow.Date Then Return
+                If System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 0, 0) <> 0 Then Return
+                If System.Threading.Interlocked.CompareExchange(_apNightlyMaintenanceRunning, 1, 0) <> 0 Then Return
+                ownsMaintenance = True
+                _apAutoDeleteLastRunLocalDate = localNow.Date
+            End SyncLock
+            Await RunAutoDeleteCleanupAsync(ct, "daily 01:00")
+            ct.ThrowIfCancellationRequested()
+            If _apActive AndAlso Not IsAutoPilotDrainRequested() Then RunAutoPilotNightlyFilePurge(ct)
+        Catch ex As System.OperationCanceledException
+            ' Expected during shutdown.
         Catch ex As System.Exception
             ApDashboardLog($"🗑 Auto-delete timer error: {ex.Message}", "warn")
+        Finally
+            If ownsMaintenance Then System.Threading.Interlocked.Exchange(_apNightlyMaintenanceRunning, 0)
+            SyncLock _apAutoDeleteTimerLock
+                If generation = _apAutoDeleteTimerGeneration AndAlso _apAutoDeleteTimer IsNot Nothing AndAlso _apActive Then
+                    Try
+                        _apAutoDeleteTimer.Change(GetNextAutoDeleteDelay(System.DateTime.UtcNow, System.TimeZoneInfo.Local),
+                                                  System.Threading.Timeout.InfiniteTimeSpan)
+                    Catch ex As System.Exception
+                        ApDashboardLog($"🗑 Auto-delete scheduling error: {ex.Message}", "warn")
+                    End Try
+                End If
+            End SyncLock
+        End Try
+    End Sub
+
+    ' Bulk retention is maintenance, never a startup/per-message side effect.
+    ' Do not race active mail/scheduler work, scan maintenance or diagnostic file readers.
+    Private Sub RunAutoPilotNightlyFilePurge(ct As System.Threading.CancellationToken)
+        If ct.IsCancellationRequested OrElse Not _apActive OrElse IsAutoPilotDrainRequested() Then Return
+        If Not _apProcessingSemaphore.Wait(0) Then
+            ApDashboardLog("🗂 Nightly file purge skipped: an active job owns the files; next attempt is tomorrow at 01:00.", "step")
+            Return
+        End If
+        Dim ownsScan As System.Boolean = False
+        Dim ownsDiagnostics As System.Boolean = False
+        Dim ownsDeletion As System.Boolean = False
+        Try
+            ownsScan = System.Threading.Interlocked.CompareExchange(_scanSweepRunning, 1, 0) = 0
+            If ownsScan Then ownsDiagnostics = System.Threading.Interlocked.CompareExchange(_apLogDiagnosticsRunning, 1, 0) = 0
+            If ownsDiagnostics Then ownsDeletion = System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 1, 0) = 0
+            If Not ownsScan OrElse Not ownsDiagnostics OrElse Not ownsDeletion Then
+                ApDashboardLog("🗂 Nightly file purge skipped: scan, diagnostics or mail deletion is active; next attempt is tomorrow at 01:00.", "step")
+                Return
+            End If
+            ct.ThrowIfCancellationRequested()
+            If IsAutoPilotDrainRequested() OrElse Not _apActive Then Return
+            ApDashboardLog("🗂 AutoPilot nightly file purge started after the mail-deletion pass.", "info")
+            PurgeExpiredThreadRetention()
+            ct.ThrowIfCancellationRequested()
+            Dim archiveDirectory As System.String = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "RedInk", "autopilot-logs")
+            If System.IO.Directory.Exists(archiveDirectory) Then PruneAutoPilotToolingLogArchives(archiveDirectory, AP_ToolingLogArchiveRetentionCount)
+            ct.ThrowIfCancellationRequested()
+            PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
+            CleanupAutoPilotLogDiagnosticResults()
+            ct.ThrowIfCancellationRequested()
+            If _apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler Then SchedulerPurgeOrphanDirectories()
+            ApDashboardLog("🗂 AutoPilot nightly file purge finished.", "info")
+        Finally
+            If ownsDeletion Then System.Threading.Interlocked.Exchange(_apAutoDeleteCheckRunning, 0)
+            If ownsDiagnostics Then System.Threading.Interlocked.Exchange(_apLogDiagnosticsRunning, 0)
+            If ownsScan Then System.Threading.Interlocked.Exchange(_scanSweepRunning, 0)
+            _apProcessingSemaphore.Release()
         End Try
     End Sub
 
@@ -267,36 +352,40 @@ Partial Public Class ThisAddIn
         Return DateTime.UtcNow.AddHours(_apConfig.AutoDeleteAfterHours)
     End Function
 
-    Private Function TryGetAutoDeleteTargetStoreId(session As Microsoft.Office.Interop.Outlook.NameSpace,
-                                                   ByRef storeId As String) As Boolean
-        storeId = ""
-
-        If session Is Nothing Then Return False
-        If _apConfig Is Nothing OrElse String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then Return True
-
-        For i As Integer = 1 To session.Accounts.Count
-            Dim acct As Account = Nothing
-            Dim deliveryStore As Store = Nothing
-
-            Try
-                acct = session.Accounts(i)
-                If acct Is Nothing Then Continue For
-                If String.IsNullOrWhiteSpace(acct.SmtpAddress) Then Continue For
-                If Not acct.SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then Continue For
-
-                deliveryStore = acct.DeliveryStore
-                If Not IsAutoDeleteStoreAlreadyOpen(deliveryStore, "configured monitored mailbox") Then Return False
-
-                storeId = If(deliveryStore.StoreID, "")
-                Return Not String.IsNullOrWhiteSpace(storeId)
-            Catch
-            Finally
-                If deliveryStore IsNot Nothing Then Try : Marshal.ReleaseComObject(deliveryStore) : Catch : End Try
-                If acct IsNot Nothing Then Try : Marshal.ReleaseComObject(acct) : Catch : End Try
-            End Try
-        Next
-
-        Return False
+    ' Only real account delivery stores are eligible. Never enumerate every store in
+    ' the profile: public folders, archive PSTs and stale mounted providers are unrelated.
+    Private Function TryGetAutoDeleteTargetStoreIds(session As Microsoft.Office.Interop.Outlook.NameSpace,
+                                                    ByRef storeIds As System.Collections.Generic.HashSet(Of System.String)) As System.Boolean
+        storeIds = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If session Is Nothing OrElse _apConfig Is Nothing Then Return False
+        Dim monitored As System.String = If(_apConfig.MonitoredMailbox, System.String.Empty).Trim()
+        Dim accounts As Microsoft.Office.Interop.Outlook.Accounts = Nothing
+        Try
+            accounts = session.Accounts
+            For index As System.Int32 = 1 To accounts.Count
+                Dim account As Microsoft.Office.Interop.Outlook.Account = Nothing
+                Dim deliveryStore As Microsoft.Office.Interop.Outlook.Store = Nothing
+                Try
+                    account = accounts.Item(index)
+                    If account Is Nothing Then Continue For
+                    If monitored <> System.String.Empty AndAlso
+                       Not System.String.Equals(account.SmtpAddress, monitored, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    deliveryStore = account.DeliveryStore
+                    If Not IsAutoDeleteStoreAlreadyOpen(deliveryStore, "account delivery store") Then Continue For
+                    If deliveryStore.ExchangeStoreType = Microsoft.Office.Interop.Outlook.OlExchangeStoreType.olExchangePublicFolder Then Continue For
+                    Dim storeId As System.String = deliveryStore.StoreID
+                    If Not System.String.IsNullOrWhiteSpace(storeId) Then storeIds.Add(storeId)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Auto-delete account scope unavailable; skipped without opening a store: " & ex.Message)
+                Finally
+                    If deliveryStore IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(deliveryStore)
+                    If account IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(account)
+                End Try
+            Next
+        Finally
+            If accounts IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(accounts)
+        End Try
+        Return storeIds.Count > 0
     End Function
 
     ' Never activate an unopened provider from unattended maintenance. Outlook can display
@@ -307,9 +396,9 @@ Partial Public Class ThisAddIn
         If store Is Nothing Then Return False
         Try
             If store.IsOpen Then Return True
-            LogAutoDeleteErrorDiagnostic(context & ": store is not open; unattended maintenance deferred without opening it.")
+            System.Diagnostics.Debug.WriteLine(context & ": store is not open; unattended maintenance skipped without opening it.")
         Catch ex As System.Exception
-            LogAutoDeleteErrorDiagnostic(context & ": store open state unavailable; unattended maintenance deferred: " & ex.Message)
+            System.Diagnostics.Debug.WriteLine(context & ": store open state unavailable; unattended maintenance skipped: " & ex.Message)
         End Try
         Return False
     End Function
@@ -318,9 +407,10 @@ Partial Public Class ThisAddIn
                                                   targetStoreId As System.String,
                                                   context As System.String) As System.Boolean
         If Not IsAutoDeleteStoreAlreadyOpen(store, context) Then Return False
-        If System.String.IsNullOrWhiteSpace(targetStoreId) Then Return True
+        If System.String.IsNullOrWhiteSpace(targetStoreId) Then Return False
 
         Try
+            If store.ExchangeStoreType = Microsoft.Office.Interop.Outlook.OlExchangeStoreType.olExchangePublicFolder Then Return False
             Return store.StoreID.Equals(targetStoreId, System.StringComparison.OrdinalIgnoreCase)
         Catch ex As System.Exception
             LogAutoDeleteErrorDiagnostic(context & ": store identity unavailable; maintenance deferred: " & ex.Message)
@@ -527,16 +617,16 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
-            Dim targetStoreId As String = ""
-            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then Return
+            Dim targetStoreIds As System.Collections.Generic.HashSet(Of System.String) = Nothing
+            If Not TryGetAutoDeleteTargetStoreIds(session, targetStoreIds) Then Return
 
-            For i As Integer = 1 To session.Stores.Count
+            For Each targetStoreId As System.String In targetStoreIds
                 Dim store As Store = Nothing
                 Dim rootFolder As MAPIFolder = Nothing
 
                 Try
-                    store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "Store " & i.ToString(System.Globalization.CultureInfo.InvariantCulture)) Then Continue For
+                    store = session.GetStoreFromID(targetStoreId)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "account delivery store") Then Continue For
 
                     Try
                         rootFolder = store.GetRootFolder()
@@ -751,24 +841,24 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
-            Dim targetStoreId As String = ""
-            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then
+            Dim targetStoreIds As System.Collections.Generic.HashSet(Of System.String) = Nothing
+            If Not TryGetAutoDeleteTargetStoreIds(session, targetStoreIds) Then
                 stats.ErrorCount += 1
-                LogAutoDeleteErrorDiagnostic("Configured monitored mailbox could not be resolved; cleanup scope was not broadened.")
+                LogAutoDeleteErrorDiagnostic("No open account delivery store matched the monitored scope; cleanup scope was not broadened.")
                 Return stats
             End If
 
-            For i As Integer = 1 To session.Stores.Count
+            For Each targetStoreId As System.String In targetStoreIds
                 ThrowIfAutoDeleteCancelled(ct)
 
                 Dim store As Store = Nothing
                 Dim root As MAPIFolder = Nothing
                 Dim deletedItems As MAPIFolder = Nothing
-                Dim storeLabel As String = $"Store {i}"
+                Dim storeLabel As String = "account delivery store"
 
                 Try
-                    store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "Store " & i.ToString(System.Globalization.CultureInfo.InvariantCulture)) Then Continue For
+                    store = session.GetStoreFromID(targetStoreId)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "account delivery store") Then Continue For
 
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)
@@ -820,23 +910,23 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
-            Dim targetStoreId As String = ""
-            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then
+            Dim targetStoreIds As System.Collections.Generic.HashSet(Of System.String) = Nothing
+            If Not TryGetAutoDeleteTargetStoreIds(session, targetStoreIds) Then
                 stats.ErrorCount += 1
-                LogAutoDeleteErrorDiagnostic("Configured monitored mailbox could not be resolved; cleanup scope was not broadened.")
+                LogAutoDeleteErrorDiagnostic("No open account delivery store matched the monitored scope; cleanup scope was not broadened.")
                 Return stats
             End If
 
-            For i As Integer = 1 To session.Stores.Count
+            For Each targetStoreId As System.String In targetStoreIds
                 ThrowIfAutoDeleteCancelled(ct)
 
                 Dim store As Store = Nothing
                 Dim deletedItems As MAPIFolder = Nothing
-                Dim storeLabel As String = $"Store {i}"
+                Dim storeLabel As String = "account delivery store"
 
                 Try
-                    store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "Store " & i.ToString(System.Globalization.CultureInfo.InvariantCulture)) Then Continue For
+                    store = session.GetStoreFromID(targetStoreId)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "account delivery store") Then Continue For
 
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)

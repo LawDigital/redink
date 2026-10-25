@@ -126,7 +126,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 
 | Tool | Description | Word | Outlook | AutoPilot |
 |---|---|---:|---:|---:|
-| `process_word_document` | Processes a Word document or attachment through the document-processing pipeline. | No | Yes | Yes |
+| `process_word_document` | Transforms an existing DOCX, PPTX or XLSX while preserving native formatting and structure; preferred for translating, correcting, shortening or applying one textual instruction across a whole presentation. | No | Yes | Yes |
 | `comment_word_document` | Adds comment bubbles to a Word document. | No | Yes | Yes |
 | `extract_pdf_text` | Extracts readable text from a PDF file. | No | Yes | Yes |
 | `merge_pdfs` | Merges multiple PDFs into one output PDF. | No | Yes | Yes |

@@ -89,7 +89,7 @@
     <FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.7.15.200</ApplicationVersion>
+    <ApplicationVersion>1.7.16.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Preview%29</ProductName>
@@ -505,6 +505,7 @@
     <Compile Include="ThisAddIn.AutoPilot.Config.vb" />
     <Compile Include="ThisAddIn.AutoPilot.LogDiagnostics.vb" />
     <Compile Include="ThisAddIn.AutoPilot.DocProcessor.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.HostNotices.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PDFCommentProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.OutgoingDelivery.vb" />
@@ -537,6 +538,7 @@
     <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorageDashboard.vb" />
     <Compile Include="ThisAddIn.Autopilot.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Timing.vb" />
     <Compile Include="ThisAddIn.ChatAgentScope.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />

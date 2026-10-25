@@ -424,32 +424,42 @@ Public Module WordSearchHelper
 
                         LogHelperDiag($"STRATEGY 3 iter={s3Iter} canSliceLen={canSlice.Length} canonNeedleLen={canonNeedle.Length} idx={idx}")
 
-                        If idx >= 0 Then
+                        ' A canonical backmap can regress at Word table-cell boundaries.
+                        ' Accept only hits inside the range requested by the caller;
+                        ' continue through later candidates in the same slice if one is stale.
+                        While idx >= 0
                             Dim endIdx As System.Int32 = System.Math.Min(idx + canonNeedle.Length - 1, backCanon.Count - 1)
+                            Dim candidateStart As System.Int32 = backCanon(idx)
+                            Dim candidateEnd As System.Int32 = backCanon(endIdx) + 1
 
-                            ' Debug backmap integrity check
-                            If System.Diagnostics.Debugger.IsAttached Then
-                                For z As Integer = 1 To backCanon.Count - 1
-                                    If backCanon(z) < backCanon(z - 1) Then
-                                        System.Diagnostics.Debug.WriteLine(
-                                                    "BACKMAP BREAK: index=" & z &
-                                                    "  prev=" & backCanon(z - 1) &
-                                                    "  curr=" & backCanon(z) &
-                                                    "  Δ=" & (backCanon(z) - backCanon(z - 1))
-                                                )
-                                        Exit For
-                                    End If
-                                Next
+                            If candidateStart >= area.Start AndAlso candidateEnd <= area.End AndAlso candidateEnd > candidateStart Then
+                                ' Debug backmap integrity check
+                                If System.Diagnostics.Debugger.IsAttached Then
+                                    For z As Integer = 1 To backCanon.Count - 1
+                                        If backCanon(z) < backCanon(z - 1) Then
+                                            System.Diagnostics.Debug.WriteLine(
+                                                        "BACKMAP BREAK: index=" & z &
+                                                        "  prev=" & backCanon(z - 1) &
+                                                        "  curr=" & backCanon(z) &
+                                                        "  Δ=" & (backCanon(z) - backCanon(z - 1))
+                                                    )
+                                            Exit For
+                                        End If
+                                    Next
 
-                                System.Diagnostics.Debug.WriteLine("HIT idx=" & idx &
-                                        " maps to Start=" & backCanon(idx) &
-                                        " End=" & backCanon(endIdx))
+                                    System.Diagnostics.Debug.WriteLine("HIT idx=" & idx &
+                                            " maps to Start=" & candidateStart &
+                                            " End=" & (candidateEnd - 1))
+                                End If
+
+                                LogHelperDiag($"STRATEGY 3 HIT area=[{area.Start},{area.End}] hit=[{candidateStart},{candidateEnd}] posStart={posStart}")
+                                foundRange = doc.Range(candidateStart, candidateEnd)
+                                Return True
                             End If
 
-                            LogHelperDiag($"STRATEGY 3 HIT area=[{area.Start},{area.End}] hit=[{backCanon(idx)},{backCanon(endIdx) + 1}] posStart={posStart}")
-                            foundRange = doc.Range(backCanon(idx), backCanon(endIdx) + 1)
-                            Return True
-                        End If
+                            LogHelperDiag($"STRATEGY 3 REJECTED out-of-range backmap area=[{area.Start},{area.End}] hit=[{candidateStart},{candidateEnd}]")
+                            idx = canSlice.IndexOf(canonNeedle, idx + 1, System.StringComparison.Ordinal)
+                        End While
                     End If
 
                     ' Move to next start pattern occurrence
@@ -485,45 +495,49 @@ Public Module WordSearchHelper
                 Dim idx As System.Int32 = canSlice.IndexOf(canonNeedle, System.StringComparison.Ordinal)
                 LogHelperDiag($"STRATEGY 4 window#{s4Window} p={p} len={len} canSliceLen={canSlice.Length} idx={idx}")
 
-                ' Production code with boundary checking
-                If idx >= 0 Then
+                ' As in strategies 0 and 1, no hit may escape the caller's area.
+                ' A backmap generated across Word table cells can point *before*
+                ' the requested start. Check the mapped coordinates (not just
+                ' document bounds) and continue with later hits in this window.
+                While idx >= 0
                     Dim endIdx As System.Int32 = System.Math.Min(idx + canonNeedle.Length - 1, backCanon.Count - 1)
-
                     Dim selStart As System.Int32 = backCanon(idx)
-                    Dim selEnd As System.Int32 = backCanon(endIdx)
+                    Dim selEnd As System.Int32 = backCanon(endIdx) + 1
 
-                    ' Enforce document boundaries
-                    selStart = System.Math.Max(selStart, doc.Content.Start)
-                    selEnd = System.Math.Min(selEnd + 1, doc.Content.End)
+                    If selStart < area.Start OrElse selEnd > area.End OrElse selEnd <= selStart Then
+                        LogHelperDiag($"STRATEGY 4 REJECTED out-of-range backmap area=[{area.Start},{area.End}] window p={p} hit=[{selStart},{selEnd}]")
+                    Else
+                        Dim testRange As Microsoft.Office.Interop.Word.Range = Nothing
+                        Try
+                            testRange = doc.Range(selStart, selEnd)
 
-                    ' Validate range before selection
-                    If selEnd <= selStart Then
-                        Continue While
+                            ' Preserve the existing extension for normalized text,
+                            ' but never extend beyond the caller's search scope.
+                            While testRange.Text.Length < findText.Length AndAlso testRange.End < area.End
+                                testRange.End = testRange.End + 1
+                            End While
+
+                            If testRange.Start >= area.Start AndAlso testRange.End <= area.End Then
+                                LogHelperDiag($"STRATEGY 4 HIT area=[{area.Start},{area.End}] window p={p} hit=[{testRange.Start},{testRange.End}]")
+                                foundRange = testRange.Duplicate
+                                Return True
+                            End If
+
+                            LogHelperDiag($"STRATEGY 4 REJECTED adjusted range area=[{area.Start},{area.End}] hit=[{testRange.Start},{testRange.End}]")
+                        Catch ex As System.Runtime.InteropServices.COMException
+                            ' Continue searching on COM errors
+                            If System.Diagnostics.Debugger.IsAttached Then
+                                System.Diagnostics.Debug.WriteLine($"Range error at Start={selStart}, End={selEnd}: {ex.Message}")
+                            End If
+                        Finally
+                            If testRange IsNot Nothing Then
+                                System.Runtime.InteropServices.Marshal.ReleaseComObject(testRange)
+                            End If
+                        End Try
                     End If
 
-                    Try
-                        Dim testRange As Microsoft.Office.Interop.Word.Range = doc.Range(selStart, selEnd)
-
-                        ' Extend range if necessary to capture full text
-                        While testRange.Text.Length < findText.Length AndAlso testRange.End < doc.Content.End - 1
-                            testRange.End = testRange.End + 1
-                        End While
-
-                        If testRange.Start >= doc.Content.Start AndAlso testRange.End <= doc.Content.End Then
-                            LogHelperDiag($"STRATEGY 4 HIT area=[{area.Start},{area.End}] window p={p} hit=[{testRange.Start},{testRange.End}]")
-                            foundRange = testRange.Duplicate
-                            System.Runtime.InteropServices.Marshal.ReleaseComObject(testRange)
-                            Return True
-                        End If
-
-                        System.Runtime.InteropServices.Marshal.ReleaseComObject(testRange)
-                    Catch ex As System.Runtime.InteropServices.COMException
-                        ' Continue searching on COM errors
-                        If System.Diagnostics.Debugger.IsAttached Then
-                            System.Diagnostics.Debug.WriteLine($"Range error at Start={selStart}, End={selEnd}: {ex.Message}")
-                        End If
-                    End Try
-                End If
+                    idx = canSlice.IndexOf(canonNeedle, idx + 1, System.StringComparison.Ordinal)
+                End While
 
                 ' Move to next window with overlap
                 p += System.Math.Max(1, winSize - overlap)

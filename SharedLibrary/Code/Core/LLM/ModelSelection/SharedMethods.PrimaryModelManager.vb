@@ -130,6 +130,23 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Creates a private call context for any configured primary model without changing
+        ''' the selected Excel model or writing the persisted global model preference.
+        ''' Each analysis job can use a stable snapshot throughout all its model calls.
+        ''' </summary>
+        Public Shared Function CreateIsolatedPrimaryModelContext(context As ISharedContext,
+                                                                  modelNumber As Integer) As ISharedContext
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            If Not _availableModels.ContainsKey(modelNumber) Then
+                Throw New System.ArgumentException("The selected primary model is no longer configured.", NameOf(modelNumber))
+            End If
+            Dim isolated As ISharedContext = SharedMethods.CreateIsolatedModelCallContext(context)
+            CopyPropertiesToContext(isolated, _availableModels(modelNumber))
+            UpdateDecodedAPI(isolated)
+            Return isolated
+        End Function
+
+        ''' <summary>
         ''' Selects a model by copying its configuration into the primary INI_* fields.
         ''' </summary>
         ''' <param name="context">Shared context to update.</param>

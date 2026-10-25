@@ -708,7 +708,7 @@ Partial Public Class ThisAddIn
         If INILoadFail() Then Return
 
         Dim TranscriptionForm = New TranscriptionForm()
-        TranscriptionForm.Show()
+        ShowHostModelessForm(TranscriptionForm)
     End Sub
 
     Private chatForm As frmAIChat
@@ -737,7 +737,7 @@ Partial Public Class ThisAddIn
         End If
 
         ' Show and bring the form to the front
-        chatForm.Show()
+        ShowHostModelessForm(chatForm)
         chatForm.BringToFront()
     End Sub
 
@@ -1021,7 +1021,7 @@ Partial Public Class ThisAddIn
             End Sub,
             _context)
         End If
-        _quickTranslateWidget.ShowWidget()
+        _quickTranslateWidget.ShowWidget(RegisterHostModelessForm(_quickTranslateWidget))
     End Sub
 
     Private _win As HelpMeInky = Nothing
@@ -1036,8 +1036,8 @@ Partial Public Class ThisAddIn
         If _win Is Nothing OrElse _win.IsDisposed Then
             _win = New HelpMeInky(_context, RDV, Globals.ThisAddIn.GetWordDefaultInterfaceLanguage())
         End If
-        ' No owner needed
-        _win.ShowRaised()
+        ' Track this Red Ink window across the Word host lifetime.
+        _win.ShowRaised(RegisterHostModelessForm(_win))
     End Sub
 
     Private _win2 As DiscussInky = Nothing
@@ -1052,8 +1052,8 @@ Partial Public Class ThisAddIn
         If _win2 Is Nothing OrElse _win2.IsDisposed Then
             _win2 = New DiscussInky(_context)
         End If
-        ' No owner needed
-        _win2.ShowRaised()
+        ' Track this Red Ink window across the Word host lifetime.
+        _win2.ShowRaised(RegisterHostModelessForm(_win2))
     End Sub
 
     Public Shared Sub SelectModel(modelNumber As Integer)

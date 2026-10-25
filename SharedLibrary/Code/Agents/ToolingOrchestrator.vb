@@ -41,6 +41,24 @@ Namespace Agents
         Public Property Reason As String
     End Class
 
+    ' Per-run state; candidate discovery and tool exposure remain unchanged. Once the model
+    ' has reviewed a candidate, its continued presence alone cannot force another review.
+    Public NotInheritable Class FallbackReviewState
+        Private ReadOnly _reviewed As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+        Public Function TakeUnreviewed(candidates As System.Collections.Generic.IReadOnlyList(Of System.String)) As System.Collections.Generic.IReadOnlyList(Of System.String)
+            Dim pending As New System.Collections.Generic.List(Of System.String)()
+            If candidates IsNot Nothing Then
+                For Each candidate As System.String In candidates
+                    If System.String.IsNullOrWhiteSpace(candidate) Then Continue For
+                    Dim name As System.String = candidate.Trim()
+                    If _reviewed.Add(name) Then pending.Add(name)
+                Next
+            End If
+            Return pending.AsReadOnly()
+        End Function
+    End Class
+
     Public Module ToolingOrchestrator
 
         ' ---------------------------------------------------------------------
@@ -86,7 +104,8 @@ Namespace Agents
                                           requestRequiresCreatedDeliverable As Boolean,
                                           hasProducedUserDeliverable As Boolean,
                                           availableUntriedFallbackToolNames As IReadOnlyList(Of String),
-                                          Optional hasValidatedFinalDeliverable As Boolean = True) As FinalTurnEvaluation
+                                          Optional hasValidatedFinalDeliverable As Boolean = True,
+                                          Optional fallbackReview As FallbackReviewState = Nothing) As FinalTurnEvaluation
 
             Dim result As New FinalTurnEvaluation()
 
@@ -125,11 +144,15 @@ Namespace Agents
                AndAlso availableUntriedFallbackToolNames IsNot Nothing _
                AndAlso availableUntriedFallbackToolNames.Count > 0 Then
 
-                result.Decision = FinalTurnDecision.RejectDeliverableFallbackRequired
-                result.GuardTitle = "blocked_before_attempting_authorized_fallback"
-                result.Reason = "blocked_without_attempting_available_fallback_tools"
-                result.GuardPrompt = BuildFallbackRequiredGuardPrompt(availableUntriedFallbackToolNames)
-                Return result
+                Dim candidates As System.Collections.Generic.IReadOnlyList(Of System.String) =
+                    If(fallbackReview Is Nothing, availableUntriedFallbackToolNames, fallbackReview.TakeUnreviewed(availableUntriedFallbackToolNames))
+                If candidates.Count > 0 Then
+                    result.Decision = FinalTurnDecision.RejectDeliverableFallbackRequired
+                    result.GuardTitle = "blocked_before_reviewing_possible_fallback"
+                    result.Reason = "blocked_without_attempting_available_fallback_tools"
+                    result.GuardPrompt = BuildFallbackRequiredGuardPrompt(candidates)
+                    Return result
+                End If
             End If
 
             ' (d) Deliverable-existence gate. Applies to COMPLETE finals:
@@ -231,19 +254,15 @@ Namespace Agents
 
         Private Function BuildFallbackRequiredGuardPrompt(untriedFallbackToolNames As IReadOnlyList(Of String)) As String
             Dim sb As New StringBuilder()
-            sb.AppendLine("HOST FALLBACK GUARD: You declared 'blocked' but the user's request requires a created deliverable that has not yet been produced, and at least one authorized fallback tool has not yet been attempted.")
-            sb.AppendLine("Before declaring 'blocked' you MUST attempt at least one of the following fallback tools via a tool call:")
+            sb.AppendLine("HOST FALLBACK REVIEW: No requested deliverable has been produced. The following untried tools are possible alternatives; their presence does not prove suitability or current exposure.")
+            sb.AppendLine("Review these candidates. Invoke an authorized suitable alternative if one can satisfy the remaining requirement; use the normal loader if needed. If none is usable, return blocked with the concrete limitation. Do not claim completion or promise future work.")
 
-            Dim cap As Integer = ToolingConstants.MaxFallbackToolsListedInGuard
-            Dim count As Integer = 0
             For Each name As String In untriedFallbackToolNames
                 If String.IsNullOrWhiteSpace(name) Then Continue For
                 sb.AppendLine("  - " & name)
-                count += 1
-                If count >= cap Then Exit For
             Next
 
-            sb.AppendLine("Call the most appropriate fallback now. If the fallback also fails with a structured error, THEN you may declare 'blocked' — and at that point your prose MUST NOT promise any further attempts.")
+            sb.AppendLine("Candidate metadata may be incomplete. This review does not remove any tool, require unrelated tool calls, or authorize a degraded deliverable. Preserve the user's requirements and existing successful work.")
             Return sb.ToString().TrimEnd()
         End Function
 

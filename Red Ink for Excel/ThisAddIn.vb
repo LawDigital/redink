@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 18.10.2026
+' 25.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -71,7 +71,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.181026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.251026" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -173,7 +173,37 @@ Partial Public Class ThisAddIn
         Return automationObject
     End Function
 
+    Private _hostModelessWindows As Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry
+
+    Friend Function RegisterHostModelessForm(form As System.Windows.Forms.Form) As System.Windows.Forms.IWin32Window
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        Return _hostModelessWindows.Register(form)
+    End Function
+
+    Friend Sub ShowHostModelessForm(form As System.Windows.Forms.Form)
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        _hostModelessWindows.Show(form)
+    End Sub
+
+    Private Sub CloseHostModelessWindows()
+        Try
+            If _hostModelessWindows IsNot Nothing Then _hostModelessWindows.CloseAll()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink modeless host shutdown failed: " & ex.Message)
+            Try
+                Global.SharedLibrary.SharedLibrary.RiCrashLogger.LogMarker("MODELESS_HOST_SHUTDOWN_FAILED", ex.ToString())
+            Catch
+            End Try
+        End Try
+    End Sub
+
     Private Sub ThisAddIn_Startup() Handles Me.Startup
+        _hostModelessWindows = New Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry()
+
 
         ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
         ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
@@ -262,6 +292,7 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        CloseHostModelessWindows()
         Try
             RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
         Catch

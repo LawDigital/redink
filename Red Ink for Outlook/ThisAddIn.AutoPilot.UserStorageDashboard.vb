@@ -35,14 +35,14 @@ Partial Public Class ThisAddIn
     Friend Sub ShowUserStorageDashboard()
         If _apUserStorageDashboard IsNot Nothing AndAlso Not _apUserStorageDashboard.IsDisposed Then
             RefreshUserStorageDashboard()
-            _apUserStorageDashboard.Show()
+            ShowHostModelessForm(_apUserStorageDashboard)
             _apUserStorageDashboard.BringToFront()
             Return
         End If
 
         _apUserStorageDashboard = CreateUserStorageDashboardForm()
         RefreshUserStorageDashboard()
-        _apUserStorageDashboard.Show()
+        ShowHostModelessForm(_apUserStorageDashboard)
     End Sub
 
     ''' <summary>Closes the user storage dashboard if it is open.</summary>
@@ -182,7 +182,7 @@ Partial Public Class ThisAddIn
 
         ' Hide instead of closing
         AddHandler frm.FormClosing, Sub(s As Object, e As FormClosingEventArgs)
-                                        If e.CloseReason = CloseReason.UserClosing Then
+                                        If e.CloseReason = CloseReason.UserClosing AndAlso Not IsHostModelessClosing Then
                                             e.Cancel = True
                                             frm.Hide()
                                         End If

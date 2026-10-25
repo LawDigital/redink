@@ -567,6 +567,11 @@ Public Class Ribbon1
         Globals.ThisAddIn.FactExtraction()
     End Sub
 
+    Private Sub RI_CollectionAnalyzer_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_CollectionAnalyzer.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "CollectionAnalyzer_Excel invoked")
+        Globals.ThisAddIn.OpenCollectionAnalyzer()
+    End Sub
+
     Private Sub RI_Renamer_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Renamer.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Renamer_Excel invoked")
         Globals.ThisAddIn.RenameDocumentsWithAi()

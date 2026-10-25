@@ -726,11 +726,14 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Shows the widget or brings it to front if already visible.
         ''' </summary>
-        Public Sub ShowWidget()
+        Public Sub ShowWidget(Optional owner As System.Windows.Forms.IWin32Window = Nothing)
             ' Resolve only a same-thread Office/dialog owner as required by
-            ' SharedMethods.DialogOwner.vb. The owner is used as the screen anchor only;
-            ' this modeless widget is deliberately not assigned a foreign/unverified owner.
-            Dim safeOwner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
+            ' SharedMethods.DialogOwner.vb. The validated owner determines both screen
+            ' placement and modeless lifetime; foreign owners are always rejected.
+            Dim safeOwner As System.Windows.Forms.IWin32Window =
+                If(owner IsNot Nothing,
+                   SharedMethods.IfOwnerOnCurrentThread(owner),
+                   SharedMethods.ResolveSameThreadDialogOwner())
 
             If Not Me.Visible AndAlso Not _hasPersistedBounds Then
                 PositionOnScreen(safeOwner)
@@ -742,7 +745,7 @@ Namespace SharedLibrary
                 Me.BringToFront()
                 Me.Activate()
             Else
-                Me.Show()
+                If safeOwner IsNot Nothing Then Me.Show(safeOwner) Else Me.Show()
             End If
 
             txtInput.Focus()
