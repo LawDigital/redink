@@ -118,11 +118,29 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            ' Validate the effective transport binding, not only the advertised JSON schema.
+            ' In particular, additionalProperties=True must not cause supplied filters to be ignored.
+            Dim boundArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object) = Nothing
+            Dim bindingValidationError As System.String = System.String.Empty
+
+            If Not SharedLibrary.Agents.ToolCallSequencing.TryPrepareExternalToolApiArguments(
+                apiCallTemplate,
+                toolCall.Arguments,
+                boundArguments,
+                bindingValidationError) Then
+
+                ToolingFileLogger.LogWarn(
+                    "External tool request blocked before dispatch because argument binding failed.",
+                    details:="ToolName='" & toolCall.ToolName & "'; Reason='" & bindingValidationError & "'")
+
+                Return BuildInvalidToolArgumentsResponse(toolCall, bindingValidationError)
+            End If
+
             Dim apiCall = apiCallTemplate
             Dim parameterSchemas = GetToolParameterSchemas(toolConfig)
             Dim requiredParameters = GetToolRequiredParameters(toolConfig)
 
-            For Each kvp In toolCall.Arguments
+            For Each kvp In boundArguments
                 Dim placeholder = "{" & kvp.Key & "}"
                 Dim schemaToken As JToken = Nothing
                 parameterSchemas.TryGetValue(kvp.Key, schemaToken)

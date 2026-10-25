@@ -74,6 +74,9 @@ Namespace SharedLibrary
 
             If context.INIloaded AndAlso Not Reload Then Return
 
+            ' Preserve the original loaded state for diagnostics if source resolution fails.
+            Dim wasConfigLoaded As System.Boolean = context.INIloaded
+
             context.GPTSetupError = True
 
             context.INIloaded = False
@@ -93,6 +96,17 @@ Namespace SharedLibrary
                     DefaultPath = GetDefaultINIPath(context.RDV)
                     DefaultPath2 = GetDefaultINIPath("Word")
                     configSource = GetActiveConfigSource(context)
+                End If
+                If System.String.IsNullOrWhiteSpace(configSource) Then
+                    WritePathResolutionDiagnostic("config_source_empty",
+                                                  "registryPresent=" & (Not System.String.IsNullOrWhiteSpace(RegFilePath)).ToString() &
+                                                  ";defaultAppPresent=" & (Not System.String.IsNullOrWhiteSpace(DefaultPath)).ToString() &
+                                                  ";defaultWordPresent=" & (Not System.String.IsNullOrWhiteSpace(DefaultPath2)).ToString() &
+                                                  ";explicitSource=" & (Not System.String.IsNullOrWhiteSpace(explicitSource)).ToString() &
+                                                  ";wasLoaded=" & wasConfigLoaded.ToString() &
+                                                  ";reload=" & Reload.ToString() &
+                                                  ";firstTime=" & FirstTime.ToString() &
+                                                  ";contextHost=" & If(context.RDV, ""))
                 End If
                 Dim sourceKind As ConfigurationSourceKind = ConfigurationResourceLoader.ClassifyConfigurationSource(configSource)
 
@@ -129,6 +143,12 @@ Namespace SharedLibrary
                 Try
                     IniFilePath = ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")
                 Catch ex As System.Exception
+                    WritePathResolutionDiagnostic("config_source_resolve_failed",
+                                                  "sourceKind=" & sourceKind.ToString() &
+                                                  ";sourceLength=" & If(configSource, "").Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                                  ";wasLoaded=" & wasConfigLoaded.ToString() &
+                                                  ";reload=" & Reload.ToString() &
+                                                  ";contextHost=" & If(context.RDV, ""), ex)
                     ShowCustomMessageBox("The configuration could not be loaded from '" & ConfigurationResourceLoader.GetSafeSourceIdentifier(configSource) & "': " & ex.Message)
                     Return
                 End Try

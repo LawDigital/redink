@@ -283,7 +283,8 @@ Partial Public Class ThisAddIn
                 Dim readingReport As System.Boolean = False
                 Try
                     ApplyModelConfig(_context, _apBaseModelConfig)
-                    Dim input = BuildUserPromptFromMail(_apCurrentMailInfo, _apCurrentAttachments)
+                    Dim input = BuildUserPromptFromMail(_apCurrentMailInfo, _apCurrentAttachments,
+                        maxAttachmentBytes:=_apConfig.MaxAttachmentBytes)
                     If attempt > 1 Then input &= System.Environment.NewLine & "Repair only the incomplete deliverables/report from the previous attempt. Existing registered outputs: " & System.String.Join(", ", delivered.Select(Function(f) System.IO.Path.GetFileName(f))) & ". Failure: " & taskError
                     Dim response = Await ExecuteToolingLoop(prompt, input, selected, _apUseSecondApi,
                         hideSplash:=True, hideLogWindow:=True, cancellationToken:=ct, binaryOutputDirectory:=work,

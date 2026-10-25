@@ -22,7 +22,7 @@ Partial Public Class ThisAddIn
 
     Friend Sub ShowScanInboxDashboard()
         If _scanDashboard IsNot Nothing AndAlso Not _scanDashboard.IsDisposed Then
-            _scanDashboard.Show()
+            ShowHostModelessForm(_scanDashboard)
             _scanDashboard.BringToFront()
             Return
         End If
@@ -33,7 +33,7 @@ Partial Public Class ThisAddIn
             .ReadActivity = Function() System.Threading.Tasks.Task.Run(Function() ReadScanAdminActivity()),
             .ReadSearchProgress = Function() System.Threading.Tasks.Task.Run(Function() ReadScanAdminSearchProgress())}
         _scanDashboard = New ScanInbox.AdminDashboard(GetScanRegisterPath(), host)
-        _scanDashboard.Show()
+        ShowHostModelessForm(_scanDashboard)
     End Sub
 
     Private Function GetScanAdminMailboxes() As System.Collections.Generic.List(Of System.String)

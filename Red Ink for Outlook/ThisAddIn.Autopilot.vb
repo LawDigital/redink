@@ -146,7 +146,7 @@ Partial Public Class ThisAddIn
                 System.IO.Directory.CreateDirectory(archiveDirectory)
             End If
 
-            PruneAutoPilotToolingLogArchives(archiveDirectory, AP_ToolingLogArchiveRetentionCount - 1)
+            ' Archive retention is pruned by the nightly AutoPilot maintenance pass.
 
             Dim safeUser As String = SanitizeAutoPilotToolingLogFileSegment(userLabel, "unknown-user")
             Dim safeSubject As String = SanitizeAutoPilotToolingLogFileSegment(subjectLabel, "no-subject")
@@ -430,6 +430,13 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     Private _apActive As Boolean = False
+    Private _apStopAfterCurrentRequested As System.Int32
+    Private _apDrainWaitRunning As System.Int32
+    Private ReadOnly _apJobAdmissionSync As New System.Object()
+
+    Private Function IsAutoPilotDrainRequested() As System.Boolean
+        Return System.Threading.Interlocked.CompareExchange(_apStopAfterCurrentRequested, 0, 0) <> 0
+    End Function
     Private _apConfig As AutoPilotConfig = Nothing
     Private _apCts As CancellationTokenSource = Nothing
     Private _apDashboard As LogWindow = Nothing
@@ -516,14 +523,12 @@ Partial Public Class ThisAddIn
     ''' <summary>Threshold (bytes) above which a PDF is considered heavy (likely OCR).</summary>
     Private Const AP_HeavyPdfThreshold As Long = 2 * 1024 * 1024
 
-    ''' <summary>
-    ''' Internal time seeds per mail category (seconds). Used solely to decide whether
-    ''' the 60-second notification threshold is crossed — never exposed to the sender.
-    ''' </summary>
-    Private Const AP_SeedSeconds_TextOnly As Double = 15.0
-    Private Const AP_SeedSeconds_LightAttachments As Double = 30.0
-    Private Const AP_SeedSeconds_HeavyDoc As Double = 300.0
-    Private Const AP_SeedSeconds_HeavyPdf As Double = 600.0
+    ''' <summary>Conservative initial total-duration estimates for the monitoring heartbeat.
+    ''' Notifications retain their independent elapsed-time thresholds.</summary>
+    Private Const AP_SeedSeconds_TextOnly As Double = 120.0
+    Private Const AP_SeedSeconds_LightAttachments As Double = 180.0
+    Private Const AP_SeedSeconds_HeavyDoc As Double = 900.0
+    Private Const AP_SeedSeconds_HeavyPdf As Double = 1200.0
 
     ''' <summary>Tracks when each queued mail was first seen in the queue (EntryId → UTC enqueue time).</summary>
     Private ReadOnly _apQueueEnqueueTimes As New ConcurrentDictionary(Of String, DateTime)()
@@ -531,8 +536,8 @@ Partial Public Class ThisAddIn
     ''' <summary>Entry IDs that have received a queue holding notification, with the UTC time of the last notification.</summary>
     Private ReadOnly _apQueueNotifiedEntryIds As New ConcurrentDictionary(Of String, DateTime)()
 
-    ''' <summary>Rolling average processing time per mail category. Key = category tag, Value = (avg, count).</summary>
-    Private ReadOnly _apCategoryTimings As New ConcurrentDictionary(Of String, (AvgSeconds As Double, SampleCount As Integer))(StringComparer.OrdinalIgnoreCase)
+    ' Only substantive completed jobs train the durable timing history.
+    Private _apCurrentJobTimingCompleted As System.Boolean = False
 
     ''' <summary>Stopwatch tracking the current mail's processing time.</summary>
     Private _apCurrentProcessingStopwatch As Stopwatch = Nothing
@@ -608,17 +613,31 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Stops AutoPilot processing and clears runtime state.</summary>
     Public Sub StopAutoPilot()
+        StopAutoPilotCore(preservePendingQueue:=False, showConfirmation:=True)
+    End Sub
+
+    Private Sub StopAutoPilotCore(preservePendingQueue As System.Boolean, showConfirmation As System.Boolean)
         ' Disable persistence before any cancellation/cleanup. This closes the race
         ' where an in-flight pump Finally block could otherwise recreate the journal
         ' after an explicit operator Stop had just deleted it. Outlook shutdown does
         ' NOT call this switch and therefore remains resumable.
-        SetAutoPilotQueueJournalPersistenceEnabled(False)
+        If preservePendingQueue Then
+            ' Commit the final queue snapshot before disabling persistence; a failed save
+            ' leaves AutoPilot paused with its in-memory queue and allows an operator retry.
+            SyncLock _apQueueJournalSyncRoot
+                PersistAutoPilotQueueJournal(throwOnFailure:=True)
+                SetAutoPilotQueueJournalPersistenceEnabled(False)
+            End SyncLock
+        Else
+            SetAutoPilotQueueJournalPersistenceEnabled(False)
+        End If
 
         If Not _apActive Then
-            ClearAutoPilotQueueJournal()
+            If Not preservePendingQueue Then ClearAutoPilotQueueJournal()
             Return
         End If
         _apActive = False
+        If Not preservePendingQueue Then System.Threading.Interlocked.Exchange(_apStopAfterCurrentRequested, 0)
         StopScanInbox()
         Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
         Try : SaveAutoPilotDashboardBounds(_apDashboard) : Catch : End Try
@@ -626,6 +645,7 @@ Partial Public Class ThisAddIn
             If _apDashboard IsNot Nothing Then
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 RemoveHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                RemoveHandler _apDashboard.StopAfterCurrentRequested, AddressOf AutoPilot_DashboardStopAfterCurrentRequested
                 RemoveHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
             End If
         Catch : End Try
@@ -658,7 +678,8 @@ Partial Public Class ThisAddIn
         _apQueueEnqueueTimes.Clear()
         _apQueueStates.Clear()
         _apQueuedOrProcessingEntryIds.Clear()
-        _apCategoryTimings.Clear()
+        _apCurrentJobTimingCompleted = False
+        System.Threading.Interlocked.Exchange(Of System.String)(_apCurrentJobEffortClass, Nothing)
         _apCurrentProcessingStopwatch = Nothing
         _apCurrentProcessingCategory = Nothing
         _apHelpMeManualCache = Nothing
@@ -671,9 +692,9 @@ Partial Public Class ThisAddIn
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
         _apVoicemailCallerIdMap = Nothing
-        ClearAutoPilotQueueJournal()
+        If Not preservePendingQueue Then ClearAutoPilotQueueJournal()
 
-        If INI_WebServerBlock <> 4 Then
+        If Not preservePendingQueue AndAlso INI_WebServerBlock <> 4 Then
             EnsureLocalSchedulerTimerStarted()
         End If
 
@@ -681,7 +702,7 @@ Partial Public Class ThisAddIn
         WriteAutoPilotHeartbeat("stopped")
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
-        ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
+        If showConfirmation Then ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
     End Sub
 
     ''' <summary>Shows the AutoPilot dashboard if it is available.</summary>
@@ -693,7 +714,7 @@ Partial Public Class ThisAddIn
                 Try
                     If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
                     EnsureAutoPilotDashboardVisible()
-                    _apDashboard.Show()
+                    ShowHostModelessForm(_apDashboard)
                     EnsureAutoPilotDashboardVisible()
                     _apDashboard.BringToFront()
                     _apDashboard.Activate()
@@ -759,11 +780,13 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"[AutoPilot] Failed to persist config on start: {ex.Message}")
         End Try
 
-        PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
         InitializeAutoPilotLogDiagnosticTopicPolicy()
+        EnsureAutoPilotTimingHistoryLoaded()
 
         StopLocalSchedulerRuntime()
         SetAutoPilotQueueJournalPersistenceEnabled(True)
+        System.Threading.Interlocked.Exchange(_apStopAfterCurrentRequested, 0)
+        System.Threading.Interlocked.Exchange(_apDrainWaitRunning, 0)
         _apActive = True
         _apCts = New CancellationTokenSource()
         _apSessionReplyCount = 0
@@ -819,10 +842,12 @@ Partial Public Class ThisAddIn
                 _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
                 AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                AddHandler _apDashboard.StopAfterCurrentRequested, AddressOf AutoPilot_DashboardStopAfterCurrentRequested
                 AddHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
                 _apDashboard.ShowAbortJobButton(True)
+                _apDashboard.ShowStopAfterCurrentButton(True)
                 RestoreAutoPilotDashboardBounds()
-                _apDashboard.Show()
+                ShowHostModelessForm(_apDashboard)
                 EnsureAutoPilotDashboardVisible()
 
                 Try
@@ -1025,31 +1050,15 @@ Partial Public Class ThisAddIn
         $"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).",
         "info")
 
-            StartAutoDeleteTimer()
 
-            If AP_RunAutoDeleteCleanupOnStartup Then
-                ApDashboardLog(
-            "🗑 Auto-delete startup cleanup enabled — running initial pass.",
-            "step")
-
-                RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
-            Else
-                ApDashboardLog(
-            "🗑 Auto-delete startup cleanup disabled — cleanup runs on the periodic timer only.",
-            "step")
-            End If
         Else
             ApDashboardLog("🗑 Auto-delete disabled.", "info")
         End If
 
+        ' File retention also needs its nightly slot when mail deletion is disabled.
+        StartAutoDeleteTimer()
         If config.ThreadRetentionDays > 0 Then
-            ApDashboardLog($"🗂 Conversation attachment retention enabled ({config.ThreadRetentionDays} day(s), whitelisted senders only).", "info")
-            Task.Run(Sub()
-                         Try
-                             PurgeExpiredThreadRetention()
-                         Catch
-                         End Try
-                     End Sub)
+            ApDashboardLog($"🗂 Conversation attachment retention enabled ({config.ThreadRetentionDays} day(s), whitelisted senders only); expired folders are purged nightly.", "info")
         End If
 
         ' Start a periodic timer for queue holding notifications.
@@ -1072,6 +1081,56 @@ Partial Public Class ThisAddIn
     ''' <summary>Handles a dashboard stop request.</summary>
     Private Sub AutoPilot_DashboardCancelRequested(sender As Object, e As EventArgs)
         StopAutoPilot()
+    End Sub
+
+    Private Async Sub AutoPilot_DashboardStopAfterCurrentRequested(sender As System.Object, e As System.EventArgs)
+        If Not _apActive OrElse _apCts Is Nothing Then Return
+        If System.Threading.Interlocked.CompareExchange(_apDrainWaitRunning, 1, 0) <> 0 Then Return
+        Dim sessionCts As System.Threading.CancellationTokenSource = _apCts
+        Dim ct As System.Threading.CancellationToken = sessionCts.Token
+        Dim ownsProcessingSlot As System.Boolean = False
+        SyncLock _apJobAdmissionSync
+            System.Threading.Interlocked.Exchange(_apStopAfterCurrentRequested, 1)
+        End SyncLock
+        ApDashboardLog("⏸ Stop after current job requested. Finishing active work and delivery; no further jobs will start. Pending work will be retained for the next start.", "info")
+        Try
+            StopSchedulerTimer()
+            StopScanInbox()
+            StopAutoDeleteTimer()
+            Try : _apNotificationTimer?.Dispose() : Catch : End Try
+            _apNotificationTimer = Nothing
+            CancelAutoPilotLogDiagnosticsForForegroundWork()
+
+            ' The slot is released only after the complete mail/scheduled job, including
+            ' source finalization and durable queue bookkeeping. Never cancel its token.
+            Await _apProcessingSemaphore.WaitAsync(ct)
+            ownsProcessingSlot = True
+            While System.Threading.Interlocked.CompareExchange(_scanSweepRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apNightlyMaintenanceRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apNotificationCheckRunning, 0, 0) <> 0 OrElse
+                  System.Threading.Interlocked.CompareExchange(_apLogDiagnosticsRunning, 0, 0) <> 0
+                Await System.Threading.Tasks.Task.Delay(100, ct)
+            End While
+            ct.ThrowIfCancellationRequested()
+            Await SwitchToUi(
+                Sub()
+                    If _apActive AndAlso System.Object.ReferenceEquals(_apCts, sessionCts) Then
+                        StopAutoPilotCore(preservePendingQueue:=True, showConfirmation:=False)
+                        ApDashboardLog("AutoPilot stopped after active work completed. Pending work is retained; ready for maintenance.", "info")
+                    End If
+                End Sub)
+        Catch ex As System.OperationCanceledException
+            ' An explicit immediate Stop still takes precedence.
+        Catch ex As System.Exception
+            ApDashboardLog("Controlled stop could not finish: " & ex.Message & ". AutoPilot remains paused; pending work is retained in memory. Retry Stop After Job after resolving the error.", "error")
+            If _apDashboard IsNot Nothing AndAlso Not _apDashboard.IsDisposed Then _apDashboard.SetStopAfterCurrentPending(False)
+        Finally
+            If ownsProcessingSlot Then _apProcessingSemaphore.Release()
+            If System.Object.ReferenceEquals(_apCts, sessionCts) OrElse Not _apActive Then
+                System.Threading.Interlocked.Exchange(_apDrainWaitRunning, 0)
+            End If
+        End Try
     End Sub
 
     ''' <summary>Handles a dashboard abort-current-job request (does NOT stop AutoPilot).</summary>
@@ -1974,10 +2033,13 @@ Partial Public Class ThisAddIn
     ''' opaque Outlook EntryIDs, queue state, and timestamps are stored. Mail bodies,
     ''' subjects, addresses, attachment names, and model/tool content are never persisted.
     ''' </summary>
-    Private Sub PersistAutoPilotQueueJournal()
+    Private Sub PersistAutoPilotQueueJournal(Optional throwOnFailure As System.Boolean = False)
         Try
             SyncLock _apQueueJournalSyncRoot
-                If Not _apQueueJournalPersistenceEnabled Then Return
+                If Not _apQueueJournalPersistenceEnabled Then
+                    If throwOnFailure Then Throw New System.InvalidOperationException("Queue persistence is disabled; controlled stop cannot commit pending work.")
+                    Return
+                End If
 
                 Dim queuedIds As String() = _apMailQueue.ToArray()
                 Dim processingId As String = If(_apCurrentProcessingEntryId, "").Trim()
@@ -2017,6 +2079,7 @@ Partial Public Class ThisAddIn
                     Try
                         If File.Exists(journalPath) Then File.Delete(journalPath)
                     Catch
+                        If throwOnFailure Then Throw
                     End Try
                     Return
                 End If
@@ -2088,6 +2151,7 @@ Partial Public Class ThisAddIn
             End SyncLock
         Catch ex As System.Exception
             Debug.WriteLine("[AutoPilot] PersistAutoPilotQueueJournal error: " & ex.Message)
+            If throwOnFailure Then Throw
         End Try
     End Sub
 
@@ -2324,11 +2388,12 @@ Partial Public Class ThisAddIn
     ''' Uses Interlocked to prevent overlapping executions.
     ''' </summary>
     Private Async Sub NotificationTimerCallback(state As Object)
-        ' Guard: skip if AutoPilot is not active or already checking
-        If Not _apActive Then Return
+        ' Guard: skip if AutoPilot is not active, draining or already checking
+        If Not _apActive OrElse IsAutoPilotDrainRequested() Then Return
         If Interlocked.CompareExchange(_apNotificationCheckRunning, 1, 0) <> 0 Then Return
 
         Try
+            If IsAutoPilotDrainRequested() Then Return
             WriteAutoPilotHeartbeat("running")
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
@@ -2355,6 +2420,10 @@ Partial Public Class ThisAddIn
     Private Async Function AutoPilotProcessingPump(ct As CancellationToken) As Task
         Try
             While Not ct.IsCancellationRequested
+                If IsAutoPilotDrainRequested() Then
+                    Await System.Threading.Tasks.Task.Delay(100, ct)
+                    Continue While
+                End If
                 If _apMailQueue.IsEmpty Then
                     Await Task.Delay(1000, ct)
                     Continue While
@@ -2366,8 +2435,13 @@ Partial Public Class ThisAddIn
                 End If
 
                 Try
+                    If IsAutoPilotDrainRequested() Then Continue While
                     Dim entryId As String = Nothing
-                    If _apMailQueue.TryDequeue(entryId) Then
+                    Dim admitted As System.Boolean = False
+                    SyncLock _apJobAdmissionSync
+                        If Not IsAutoPilotDrainRequested() Then admitted = _apMailQueue.TryDequeue(entryId)
+                    End SyncLock
+                    If admitted Then
 
                         Dim enqueueUtcForTiming As DateTime
                         If _apQueueEnqueueTimes.TryGetValue(entryId, enqueueUtcForTiming) Then
@@ -2424,6 +2498,9 @@ Partial Public Class ThisAddIn
                         _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
                         Dim jobCt = _apCurrentJobCts.Token
 
+                        _apCurrentJobTimingCompleted = False
+                        System.Threading.Interlocked.Exchange(Of System.String)(_apCurrentJobEffortClass, Nothing)
+                        Dim timingRunReturned As System.Boolean = False
                         _apCurrentProcessingStopwatch = Stopwatch.StartNew()
                         Try
                             ' The entire unattended mail job owns one provider-agnostic transport
@@ -2434,13 +2511,20 @@ Partial Public Class ThisAddIn
                                     Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
 
                                 Await ProcessIncomingMailAsync(entryId, jobCt)
+                                timingRunReturned = True
                             End Using
                         Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
                             ' Job-level abort (not session-level) — log and continue to next mail
                             ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
                         Finally
                             _apCurrentProcessingStopwatch.Stop()
-                            UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
+                            If timingRunReturned AndAlso _apCurrentJobTimingCompleted AndAlso
+                               Not jobCt.IsCancellationRequested Then
+                                UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds,
+                                                     System.Threading.Volatile.Read(Of System.String)(_apCurrentJobEffortClass))
+                            End If
+                            _apCurrentJobTimingCompleted = False
+                            System.Threading.Interlocked.Exchange(Of System.String)(_apCurrentJobEffortClass, Nothing)
                             ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
                             _apCurrentProcessingStopwatch = Nothing
                             _apCurrentProcessingCategory = Nothing
@@ -2652,36 +2736,6 @@ Partial Public Class ThisAddIn
         End Try
         Return AP_Cat_TextOnly
     End Function
-
-    ''' <summary>Returns the estimated seconds for a category, using learned data or seed defaults.</summary>
-    Private Function GetCategoryEstimate(category As String) As Double
-        Dim timing As (AvgSeconds As Double, SampleCount As Integer) = Nothing
-        If _apCategoryTimings.TryGetValue(category, timing) AndAlso timing.SampleCount > 0 Then
-            Return timing.AvgSeconds
-        End If
-        Select Case category
-            Case AP_Cat_HeavyPdf : Return AP_SeedSeconds_HeavyPdf
-            Case AP_Cat_HeavyDoc : Return AP_SeedSeconds_HeavyDoc
-            Case AP_Cat_Light : Return AP_SeedSeconds_LightAttachments
-            Case Else : Return AP_SeedSeconds_TextOnly
-        End Select
-    End Function
-
-    ''' <summary>Updates the rolling average for a category after processing completes.</summary>
-    Private Sub UpdateCategoryTiming(category As String, elapsedSeconds As Double)
-        _apCategoryTimings.AddOrUpdate(
-            category,
-            addValueFactory:=Function(k) (elapsedSeconds, 1),
-            updateValueFactory:=Function(k, existing)
-                                    Dim newCount = existing.SampleCount + 1
-                                    If newCount <= 2 Then
-                                        Return (((existing.AvgSeconds * existing.SampleCount) + elapsedSeconds) / newCount, newCount)
-                                    Else
-                                        Const alpha As Double = 0.3
-                                        Return (alpha * elapsedSeconds + (1.0 - alpha) * existing.AvgSeconds, newCount)
-                                    End If
-                                End Function)
-    End Sub
 
     ''' <summary>
     ''' Builds the "system status" sentence containing the configured monitor link,
@@ -3019,6 +3073,10 @@ Partial Public Class ThisAddIn
         Dim failureReplyAllowed As System.Boolean = False
         Dim primaryReplySubmitted As System.Boolean = False
         Dim outcomeHandoffEstablished As System.Boolean = False
+        ' Per-request host-owned obligations; never stored in the mutable tool context.
+        Dim mandatoryHostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice) =
+            System.Array.Empty(Of AutoPilotHostNotice)()
+        Dim hostNoticeLanguage As System.String = System.String.Empty
         Dim processingException As System.Exception = Nothing
         Dim workflowContinuationKey As System.String = System.String.Empty
         Dim continuationWorkflowId As System.String = System.String.Empty
@@ -3357,28 +3415,15 @@ Partial Public Class ThisAddIn
                     Return
                 End If
 
-                ' ── Partial oversized: warn about skipped attachments in the prompt ──
-                ' When some attachments are processable but others exceed the limit,
-                ' build the prompt using only the processable ones. The oversized files
-                ' are mentioned as a brief note so the LLM can inform the sender, but
-                ' WITHOUT the [OVER SIZE LIMIT] tag that causes the LLM to generate
-                ' unwanted tool/service recommendations.
+                ' ── Mixed attachment intake: capture required host notices as an immutable
+                ' per-mail snapshot. The model receives input availability context only;
+                ' the Outlook host, not a particular model/skill, owns sender disclosure.
                 Dim processableAttachments = attachmentPaths.Where(Function(a) Not a.IsOverSizeLimit).ToList()
-                Dim oversizedNote As String = Nothing
                 If oversizedAttachments.Count > 0 AndAlso processableAttachments.Count > 0 Then
-                    Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
-                    Dim noteSb As New StringBuilder()
-                    noteSb.AppendLine()
-                    noteSb.AppendLine("[NOTE TO ASSISTANT — include this information in your reply to the sender]")
-                    noteSb.AppendLine($"The following attachment(s) could NOT be processed because they exceed the {limitMB:F0} MB size limit:")
-                    For Each att In oversizedAttachments
-                        noteSb.AppendLine($"  - {att.OriginalFileName} ({att.SizeBytes / 1024.0 / 1024.0:F1} MB)")
-                    Next
-                    noteSb.AppendLine($"Tell the sender to split these files into smaller parts and resend them, or to use the {AN} add-in locally.")
-                    noteSb.AppendLine("Do NOT suggest any other tools, services, or workarounds for the oversized files.")
-                    noteSb.AppendLine("[/NOTE]")
-                    oversizedNote = noteSb.ToString()
-                    ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit", "info")
+                    mandatoryHostNotices = BuildAutoPilotOversizedAttachmentNotices(
+                        oversizedAttachments, _apConfig.MaxAttachmentBytes)
+                    ' Keep notice facts immutable; translation follows explicit language resolution.
+                    ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit; {mandatoryHostNotices.Count} mandatory host notice(s) captured", "info")
                 End If
 
                 ' ── Inject retained files from an earlier message in this conversation ──
@@ -3417,10 +3462,33 @@ Partial Public Class ThisAddIn
                         _context, archiveAuthoritativeRequest, archiveScope,
                         allowInteractiveSelection:=False, cancellationToken:=ct)
                 Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments,
-                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing),
+                    maxAttachmentBytes:=_apConfig.MaxAttachmentBytes)
                 If archivePrepared.HasTrigger Then userPrompt &= System.Environment.NewLine & archivePrepared.ContextText
-                If oversizedNote IsNot Nothing Then
-                    userPrompt &= oversizedNote
+                userPrompt &= BuildAutoPilotHostNoticeModelContext(mandatoryHostNotices)
+                If mandatoryHostNotices.Count > 0 Then
+                    ' Resolve an explicit response-language code via the existing model-based
+                    ' language contract. No language inference from prose, sender address,
+                    ' attachment name, Office UI locale or model-specific behaviour.
+                    Dim declaredLanguage As System.String = System.String.Empty
+                    Try
+                        declaredLanguage = Await ResolveToolingUserLanguageAsync(
+                            If(mailInfo.Body, System.String.Empty), System.String.Empty,
+                            System.String.Empty, _apUseSecondApi, True, ct)
+                    Catch ex As System.OperationCanceledException
+                        Throw
+                    Catch ex As System.Exception
+                        ApDashboardLog("Host notice language resolution failed: " & ex.Message, "warn")
+                    End Try
+                    hostNoticeLanguage = If(declaredLanguage, System.String.Empty).Trim()
+                    If System.String.IsNullOrWhiteSpace(hostNoticeLanguage) Then
+                        Throw New System.InvalidOperationException("Mandatory attachment notice cannot be sent without an explicit language contract.")
+                    End If
+                    mandatoryHostNotices = Await LocalizeAutoPilotHostNoticesAsync(
+                        mandatoryHostNotices, hostNoticeLanguage, ct)
+                    ApDashboardLog("Mandatory host notices localized via the existing LLM translation function; " &
+                        mandatoryHostNotices.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " validated notice(s).", "info")
+                    failureNoticeLanguage = hostNoticeLanguage
                 End If
                 LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
                 Dim senderDesignAccess As AutoPilotSenderDesignAccess = ResolveDesignAccessForSender(mailInfo.SenderEmail)
@@ -3556,6 +3624,7 @@ Partial Public Class ThisAddIn
                         response = Await ExecuteToolingLoop(
                             systemPrompt, userPrompt,
                             senderTools, _apUseSecondApi,
+                            userLanguage:=hostNoticeLanguage,
                             enforceSelectedToolScope:=scanSettingsOnly,
                             hideSplash:=True, hideLogWindow:=True,
                             cancellationToken:=ct,
@@ -3566,6 +3635,7 @@ Partial Public Class ThisAddIn
                             toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
                                 If(String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
                                 mailInfo.Subject),
+                            effortEstimateSink:=Sub(value As System.String) RecordAutoPilotJobEffort(entryId, value),
                             resumeWorkflowFromCheckpoint:=resumeBlockedWorkflow,
                             workflowContinuationKey:=workflowContinuationKey,
                             workflowContinuationRetentionDays:=workflowContinuationRetentionDays,
@@ -3574,6 +3644,10 @@ Partial Public Class ThisAddIn
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
+                        If mandatoryHostNotices.Count > 0 Then
+                            effectiveSystemPrompt &= System.Environment.NewLine &
+                                SharedLibrary.Agents.LanguageContract.BuildSystemPromptFragment(hostNoticeLanguage)
+                        End If
                         response = Await LLM(effectiveSystemPrompt, userPrompt,
                                              UseSecondAPI:=_apUseSecondApi,
                                              HideSplash:=True, EnsureUI:=False,
@@ -3665,9 +3739,12 @@ Partial Public Class ThisAddIn
                             $"Please resend your request if you would like it to be fully processed. " &
                             $"If you need immediate assistance, you can also use the {AN} add-in's Local Chat feature directly in Outlook or Word. " &
                             $"— {AN6}"
+                        If mandatoryHostNotices.Count > 0 Then
+                            abortMessage = Await LocalizeAutoPilotRequiredMessageAsync(abortMessage, hostNoticeLanguage, ct)
+                        End If
 
                         Dim attachmentsToSend = If(hasPartialOutput, resultAttachmentsAbort, Nothing)
-                        Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                        Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                         outcomeHandoffEstablished = True
                         deliverableHandoffCompletedOrDiscarded = True
                         Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
@@ -3687,9 +3764,17 @@ Partial Public Class ThisAddIn
 
                 If String.IsNullOrWhiteSpace(response) Then
                     ApDashboardLog("WARNING: LLM returned empty response for: " & mailInfo.Subject, "warn")
-                    Dim errorMessage = Await GenerateHelpfulFailureResponseAsync(
-                        mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    ' With mixed attachments, the host already owns the exact skipped-file
+                    ' notice. Do not generate a second, potentially contradictory LLM warning.
+                    Dim errorMessage As System.String
+                    If mandatoryHostNotices.Count > 0 Then
+                        errorMessage = Await LocalizeAutoPilotRequiredMessageAsync(
+                            BuildAutoPilotProcessingFailureNotice(), hostNoticeLanguage, ct)
+                    Else
+                        errorMessage = Await GenerateHelpfulFailureResponseAsync(
+                            mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
+                    End If
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                     outcomeHandoffEstablished = True
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
@@ -3745,6 +3830,7 @@ Partial Public Class ThisAddIn
                 If requiresApproval AndAlso Not _apConfig.IsUnattended Then
                     Dim holdingResponse As String = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", "")
                     Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
+                    Dim validatedMonitorLink As System.String = System.String.Empty
 
                     If Not String.IsNullOrWhiteSpace(monitorLink) Then
                         ' Accept scheme-less values (e.g. "www.example.com/status") by defaulting
@@ -3758,6 +3844,7 @@ Partial Public Class ThisAddIn
                         If System.Uri.TryCreate(normalizedMonitorLink, System.UriKind.Absolute, monitorUri) AndAlso
                            (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
                             String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+                            validatedMonitorLink = normalizedMonitorLink
                             Dim statusMessage As String = SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", normalizedMonitorLink)
                             holdingResponse = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", " " & statusMessage)
                         Else
@@ -3765,7 +3852,16 @@ Partial Public Class ThisAddIn
                         End If
                     End If
 
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    ' Resolve every text needed for the detached approval path while
+                    ' this mail still owns the AutoPilot model/context scope.
+                    Dim deferredRejectionMessage As System.String = SP_AutoPilot_RejectionResponse
+                    If mandatoryHostNotices.Count > 0 Then
+                        holdingResponse = Await LocalizeAutoPilotRequiredMessageAsync(
+                            holdingResponse, hostNoticeLanguage, ct, validatedMonitorLink)
+                        deferredRejectionMessage = Await LocalizeAutoPilotRequiredMessageAsync(
+                            deferredRejectionMessage, hostNoticeLanguage, ct)
+                    End If
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                     outcomeHandoffEstablished = True
                     Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
@@ -3784,9 +3880,13 @@ Partial Public Class ThisAddIn
                     Dim deferredSourcesHtml As String = sourcesHtml
                     Dim deferredEntryId As String = entryId
                     Dim deferredMailSentUtc As DateTime = mailSentUtc
+                    Dim deferredHostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice) = mandatoryHostNotices
+                    Dim deferredHostNoticeLanguage As System.String = hostNoticeLanguage
 
                     RunDeferredApprovalAsync(deferredEntryId, deferredMailInfo, deferredResponse,
-                                             deferredAttachments, deferredSourcesHtml, deferredMailSentUtc)
+                                             deferredAttachments, deferredSourcesHtml, deferredMailSentUtc,
+                                             deferredHostNotices, deferredHostNoticeLanguage,
+                                             deferredRejectionMessage)
 
                         ' The per-mail originals can now be cleaned: every prepared deliverable
                         ' has been copied into the deferred-approval staging directory, whose own
@@ -3795,11 +3895,12 @@ Partial Public Class ThisAddIn
                         ClearAutoPilotError()
 
                         ApDashboardLog($"Reply for {mailInfo.SenderEmail} is awaiting operator approval — queue continues.", "info")
+                        _apCurrentJobTimingCompleted = True
                     Else
                         If requiresApproval AndAlso _apConfig.IsUnattended Then
                             ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
                         End If
-                        Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                        Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                         MarkAutoPilotQueueDeliveryCommitted(entryId)
                         outcomeHandoffEstablished = True
                         deliverableHandoffCompletedOrDiscarded = True
@@ -3832,6 +3933,7 @@ Partial Public Class ThisAddIn
                         Dim dummyBool As Boolean
                         _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
                         ApDashboardLog($"✓ SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
+                        _apCurrentJobTimingCompleted = True
                     End If
                 Finally
                 ' ── SECURITY / RECOVERY: clean only after a successful handoff/discard,
@@ -3884,12 +3986,20 @@ Partial Public Class ThisAddIn
                         If(primaryReplySubmitted,
                            BuildAutoPilotPostSendFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)),
                            BuildAutoPilotProcessingFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)))
+                    If mandatoryHostNotices.Count > 0 Then
+                        failureNotice = Await LocalizeAutoPilotRequiredMessageAsync(
+                            If(primaryReplySubmitted,
+                               BuildAutoPilotPostSendFailureNotice(),
+                               BuildAutoPilotProcessingFailureNotice()),
+                            hostNoticeLanguage, System.Threading.CancellationToken.None)
+                    End If
                     Await SwitchToUi(
                         Sub() SendReplyToSender(
                             mi,
                             failureNotice,
                             Nothing,
-                            tagAsAutoReply:=True))
+                            tagAsAutoReply:=True,
+                            hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                     outcomeHandoffEstablished = True
                     System.Threading.Interlocked.Increment(_apSessionReplyCount)
                     If mailSentUtc <> System.DateTime.MinValue Then
@@ -4063,7 +4173,10 @@ Partial Public Class ThisAddIn
                                                     response As String,
                                                     resultAttachments As List(Of String),
                                                     sourcesHtml As String,
-                                                    mailSentUtc As DateTime) As Task
+                                                    mailSentUtc As DateTime,
+                                                    hostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice),
+                                                    hostNoticeLanguage As System.String,
+                                                    rejectionResponse As System.String) As Task
         Dim stagingDir As String = Nothing
         If resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0 Then
             Try : stagingDir = Path.GetDirectoryName(resultAttachments(0)) : Catch : End Try
@@ -4074,7 +4187,8 @@ Partial Public Class ThisAddIn
         Dim cleanupDeferredStaging As Boolean = String.IsNullOrWhiteSpace(stagingDir)
 
         Try
-            Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
+            Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(
+                mailInfo, AppendAutoPilotHostNoticesToPreview(response, hostNotices, hostNoticeLanguage), resultAttachments))
 
             If Not approved Then
                 cleanupDeferredStaging = True
@@ -4095,7 +4209,8 @@ Partial Public Class ThisAddIn
                                                                   End Function)
                     If rejectMail IsNot Nothing Then
                         Try
-                            Await SwitchToUi(Sub() SendReplyToSender(rejectMail, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True))
+                            Dim rejectionMessage As System.String = rejectionResponse
+                            Await SwitchToUi(Sub() SendReplyToSender(rejectMail, rejectionMessage, Nothing, tagAsAutoReply:=True, hostNotices:=hostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                             MarkAutoPilotQueueDeliveryCommitted(entryId)
                             Dim rejectionSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(rejectMail))
                             If rejectionSourceFinalized Then
@@ -4140,7 +4255,7 @@ Partial Public Class ThisAddIn
             End If
 
             Try
-                Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, hostNotices:=hostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                 MarkAutoPilotQueueDeliveryCommitted(entryId)
                 cleanupDeferredStaging = True
                 Dim approvedSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
@@ -6178,7 +6293,8 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Builds the user prompt from the mail content and attachments.</summary>
     Private Shared Function BuildUserPromptFromMail(info As AutoPilotMailInfo, attachments As List(Of AutoPilotAttachmentInfo),
-                                                   Optional authoritativeBodyOverride As System.String = Nothing) As System.String
+                                                   Optional authoritativeBodyOverride As System.String = Nothing,
+                                                   Optional maxAttachmentBytes As System.Int64 = 0) As System.String
         Dim sb As New StringBuilder()
         sb.AppendLine("[INCOMING EMAIL]")
         sb.AppendLine($"From: {info.SenderName} <{info.SenderEmail}>")
@@ -6220,8 +6336,13 @@ Partial Public Class ThisAddIn
             For i As Integer = 0 To attachments.Count - 1
                 Dim att = attachments(i)
                 Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
-                Dim statusStr = If(att.IsOverSizeLimit,
-                    $" [OVER SIZE LIMIT — max {AP_DefaultMaxAttachmentBytes / 1024 / 1024:F0} MB, cannot process]", "")
+                Dim statusStr As System.String = System.String.Empty
+                If att.IsOverSizeLimit Then
+                    If maxAttachmentBytes <= 0 Then
+                        Throw New System.InvalidOperationException("The configured attachment size limit was not provided to the mail prompt builder.")
+                    End If
+                    statusStr = $" [OVER SIZE LIMIT — max {maxAttachmentBytes / (1024.0R * 1024.0R):F0} MB, cannot process]"
+                End If
                 If att.IsRetentionLoaded Then
                     statusStr &= " [RETAINED FROM EARLIER MESSAGE IN THIS CONVERSATION — not attached to the current e-mail]"
                 End If
@@ -6262,7 +6383,9 @@ Partial Public Class ThisAddIn
                               Optional tagAsAutoReply As Boolean = True,
                               Optional sourcesHtml As String = "",
                               Optional isHoldingOnly As Boolean = False,
-                              Optional onPrimarySubmitted As System.Action = Nothing)
+                              Optional onPrimarySubmitted As System.Action = Nothing,
+                              Optional hostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice) = Nothing,
+                              Optional hostNoticeLanguage As System.String = "")
 
         Dim reply As MailItem = Nothing
         Dim sendAccount As Microsoft.Office.Interop.Outlook.Account = Nothing
@@ -6334,7 +6457,10 @@ Partial Public Class ThisAddIn
             reply.BodyFormat = OlBodyFormat.olFormatHTML
 
             Dim originalThread As String = If(reply.HTMLBody, "")
+            ' Compose all mandatory host notices independent of model/skill wording.
+            ' A missing/inconsistent notice fails the delivery before Outlook.Send().
             Dim contentHtml As String = ConvertResponseToHtml(responseText)
+            contentHtml &= RenderAutoPilotHostNoticesHtml(hostNotices, hostNoticeLanguage)
 
             If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
                 contentHtml &= sourcesHtml
@@ -6999,6 +7125,7 @@ Partial Public Class ThisAddIn
     Private Sub ApDashboardLog(message As String,
                                level As String,
                                Optional mirrorToLocalToolingLog As Boolean = False)
+        message = SharedLibrary.Agents.SubAgentLogScope.FormatMessage(message)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
 
         MarkAutoPilotJobActivity()
@@ -7169,13 +7296,18 @@ Partial Public Class ThisAddIn
                     If(_apCurrentProcessingCategory, AP_Cat_TextOnly))
 
                 payload("jobElapsedSeconds") = Math.Round(elapsedSeconds, 1)
-                payload("jobEstimateSeconds") = Math.Round(estimateSeconds, 1)
+                Dim effortClass As System.String = System.Threading.Volatile.Read(Of System.String)(_apCurrentJobEffortClass)
+                payload("jobEffortClass") = If(effortClass, System.String.Empty)
+                payload("jobEstimateSeconds") = Math.Round(GetEffortAdjustedEstimate(
+                    If(_apCurrentProcessingCategory, AP_Cat_TextOnly), effortClass, estimateSeconds), 1)
+                ' Model metadata changes the displayed forecast only; preserve existing liveness diagnostics.
                 payload("jobSecondsSinceActivity") = Math.Round(sinceActivitySeconds, 1)
                 payload("jobStalled") = (sinceActivitySeconds >= AP_JobStallThresholdSeconds)
                 payload("jobOverrun") = (estimateSeconds > 0 AndAlso elapsedSeconds > (estimateSeconds * 5))
             Else
                 payload("jobElapsedSeconds") = 0
                 payload("jobEstimateSeconds") = 0
+                payload("jobEffortClass") = System.String.Empty
                 payload("jobSecondsSinceActivity") = 0
                 payload("jobStalled") = False
                 payload("jobOverrun") = False
@@ -7937,6 +8069,37 @@ Partial Public Class ThisAddIn
     '  HELPFUL FAILURE RESPONSE
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ' Use the existing shared host-message LLM localization for every language;
+    ' retain URLs as host-owned literals and fail closed if an LLM drops placeholders.
+    Private Async Function LocalizeAutoPilotRequiredMessageAsync(
+            sourceText As System.String,
+            targetLanguage As System.String,
+            cancellationToken As System.Threading.CancellationToken,
+            Optional protectedUrl As System.String = "") As System.Threading.Tasks.Task(Of System.String)
+
+        Dim source As System.String = If(sourceText, System.String.Empty)
+        Dim signatureSuffix As System.String = "— " & AN6
+        Dim hasSignature As System.Boolean = source.Contains(signatureSuffix)
+        If hasSignature Then source = source.Replace(signatureSuffix, "— {{HOST_SIGNATURE}}")
+        If Not System.String.IsNullOrWhiteSpace(protectedUrl) Then
+            If Not source.Contains(protectedUrl) Then
+                Throw New System.InvalidOperationException("Required host response does not contain its expected URL.")
+            End If
+            source = source.Replace(protectedUrl, "{{HOST_URL}}")
+        End If
+        Dim localized As System.String = Await LocalizeHostMessageIfNeededAsync(
+            source, targetLanguage, _apUseSecondApi, True, cancellationToken, strictTranslation:=True)
+        If hasSignature Then
+            VerifyAutoPilotHostNoticeToken(localized, "{{HOST_SIGNATURE}}")
+            localized = localized.Replace("{{HOST_SIGNATURE}}", AN6)
+        End If
+        If Not System.String.IsNullOrWhiteSpace(protectedUrl) Then
+            VerifyAutoPilotHostNoticeToken(localized, "{{HOST_URL}}")
+            localized = localized.Replace("{{HOST_URL}}", protectedUrl)
+        End If
+        Return localized
+    End Function
+
     Private Function BuildAutoPilotProcessingFailureNotice(Optional userLanguage As System.String = "") As System.String
         Return BuildAutoPilotDeliveryFailureNotice(userLanguage, False)
     End Function
@@ -7959,6 +8122,9 @@ Partial Public Class ThisAddIn
             Case "it"
                 first = If(submitted, "Una risposta alla richiesta è stata inoltrata per l’invio, ma si è verificato un errore interno durante le restanti fasi di consegna.", "Un errore interno ha impedito di completare la richiesta in modo sicuro.")
                 second = If(submitted, "Potrebbero quindi mancare alcuni file richiesti. Invia nuovamente la richiesta o contatta il gestore per ottenere il risultato completo.", "Non sono stati inviati file di risultato incompleti o non verificati. Invia nuovamente la richiesta o contatta il gestore se il problema persiste.")
+            Case "es"
+                first = If(submitted, "Se ha enviado una respuesta a su solicitud, pero se produjo un error interno durante los pasos restantes de la entrega.", "Un error interno ha impedido completar su solicitud de forma segura.")
+                second = If(submitted, "Por lo tanto, es posible que falten algunos archivos solicitados. Vuelva a enviar su solicitud o póngase en contacto con el operador si necesita los resultados completos.", "No se han enviado archivos de resultado incompletos ni sin validar. Vuelva a enviar su solicitud o contacte al operador si el problema persiste.")
             Case Else
                 first = If(submitted, "A reply to your request was submitted, but an internal error occurred while completing the remaining delivery steps.", "I'm sorry, but an internal error prevented me from completing your request safely.")
                 second = If(submitted, "One or more requested result files may therefore be missing. Please resend your request or contact the operator if you need the complete result set.", "No incomplete or unvalidated result files have been sent. Please resend your request or contact the operator if the problem persists.")

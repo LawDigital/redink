@@ -32,6 +32,11 @@ Namespace Agents
         ''' <summary>Unified default for INI_ToolingMaximumIterations across all hosts.</summary>
         Public Const DefaultMaxToolIterations As Integer = 100
 
+        ' Consecutive redundant context reads (or compactions without reads), per run.
+        ' Successful new coverage/work resets the episode; a recovery gets a smaller budget.
+        Public Const ContextChurnInitialAttempts As System.Int32 = 8
+        Public Const ContextChurnRecoveryAttempts As System.Int32 = 4
+
         ''' <summary>Additional seconds added to the configured LLM timeout per iteration.</summary>
         Public Const LlmTimeoutBufferSeconds As Integer = 60
 

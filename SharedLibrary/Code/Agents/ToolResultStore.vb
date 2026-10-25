@@ -284,8 +284,7 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Records a model-requested compaction for a workflow. Only tightens (keeps the
-        ''' smallest requested recent-full count). Honoured by the host on the next rebuild.
+        ''' Enables automatic context-pressure recovery independently of voluntary shelving.
         ''' </summary>
         Public Shared Sub RequestContextRecovery(workflowId As System.String)
             If Not System.String.IsNullOrWhiteSpace(workflowId) Then _contextRecoveryRequests(workflowId) = True
@@ -295,17 +294,18 @@ Namespace Agents
             Return Not System.String.IsNullOrWhiteSpace(workflowId) AndAlso _contextRecoveryRequests.ContainsKey(workflowId)
         End Function
 
+        ''' <summary>Queues one shelving operation; coalesces requests only until the next replay rebuild.</summary>
         Public Shared Sub RequestCompaction(workflowId As String, keepRecentFullCount As Integer)
             If String.IsNullOrWhiteSpace(workflowId) Then Return
             Dim keep As Integer = Math.Max(0, keepRecentFullCount)
             _compactionRequests.AddOrUpdate(workflowId, keep, Function(k, existing) Math.Min(existing, keep))
         End Sub
 
-        ''' <summary>Returns True and the requested recent-full count when the model asked to compact this workflow.</summary>
-        Public Shared Function TryGetRequestedKeepRecent(workflowId As String, ByRef keepRecentFullCount As Integer) As Boolean
+        ''' <summary>Atomically consumes the pending operation. It never governs future results.</summary>
+        Public Shared Function TryTakeRequestedKeepRecent(workflowId As String, ByRef keepRecentFullCount As Integer) As Boolean
             keepRecentFullCount = 0
             If String.IsNullOrWhiteSpace(workflowId) Then Return False
-            Return _compactionRequests.TryGetValue(workflowId, keepRecentFullCount)
+            Return _compactionRequests.TryRemove(workflowId, keepRecentFullCount)
         End Function
 
         ''' <summary>Releases durable in-memory bodies; failed snapshots remain available in memory for recovery.</summary>

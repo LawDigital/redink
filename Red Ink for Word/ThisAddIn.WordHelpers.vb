@@ -181,6 +181,7 @@ Partial Public Class ThisAddIn
             End Sub)
 
         t.SetApartmentState(System.Threading.ApartmentState.STA)
+        t.IsBackground = True
         t.Start()
     End Sub
 

@@ -1663,8 +1663,31 @@ Namespace SharedLibrary
             Catch
             End Try
 
-            Dim appendedStyle As String =
-                $"background-color: rgb({hostBackColor.R}, {hostBackColor.G}, {hostBackColor.B}); margin: 20px; font-family: 'Segoe UI'; font-size: 9pt;"
+            Dim backgroundCss As System.String =
+                $"background-color: rgb({hostBackColor.R}, {hostBackColor.G}, {hostBackColor.B});"
+            Dim appendedStyle As System.String =
+                backgroundCss & " margin: 0; padding: 20px; font-family: 'Segoe UI'; font-size: 9pt;"
+
+            ' The embedded browser has its own HTML canvas. Styling only <body> with
+            ' a margin leaves a white strip around it under some IE/WebBrowser modes.
+            ' Give the root canvas the same form background, then use body padding
+            ' rather than a margin so the inset remains inside that background.
+            Try
+                Dim htmlRoots As System.Windows.Forms.HtmlElementCollection =
+                    htmlBrowser.Document.GetElementsByTagName("html")
+                If htmlRoots IsNot Nothing AndAlso htmlRoots.Count > 0 Then
+                    Dim htmlRoot As System.Windows.Forms.HtmlElement = htmlRoots(0)
+                    Dim existingRootStyle As System.String = If(htmlRoot.GetAttribute("style"), System.String.Empty)
+                    If existingRootStyle.IndexOf(backgroundCss, System.StringComparison.OrdinalIgnoreCase) < 0 Then
+                        htmlRoot.Style = If(System.String.IsNullOrWhiteSpace(existingRootStyle),
+                                            backgroundCss,
+                                            existingRootStyle.Trim().TrimEnd(";"c) & "; " & backgroundCss)
+                    End If
+                End If
+            Catch ex As System.Exception
+                ' Some older browser hosts reject writes to <html>; body padding/background still work.
+                System.Diagnostics.Debug.WriteLine("HTML viewer root styling fallback: " & ex.Message)
+            End Try
 
             If String.IsNullOrWhiteSpace(existingStyle) Then
                 body.Style = appendedStyle
@@ -1707,6 +1730,7 @@ Namespace SharedLibrary
                                     ShowHTMLCustomMessageBoxInternal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose)
                                 End Sub)
             t.SetApartmentState(System.Threading.ApartmentState.STA)
+            t.IsBackground = True
             t.Start()
         End Sub
 
@@ -1751,7 +1775,6 @@ Namespace SharedLibrary
                 .IsWebBrowserContextMenuEnabled = True,
                 .ScrollBarsEnabled = True,
                 .ScriptErrorsSuppressed = True,
-                .DocumentText = bodyText,
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .BackColor = HTMLMessageForm.BackColor,
                 .Margin = New System.Windows.Forms.Padding(20)
@@ -1759,6 +1782,9 @@ Namespace SharedLibrary
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
                                                           ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
+            ' Register before navigation: otherwise a cached/synchronous document load
+            ' may finish before the handler is attached, dropping the body inset.
+            htmlBrowser.DocumentText = bodyText
 
             ' OK button
             Dim okButton As New System.Windows.Forms.Button() With {
@@ -1917,7 +1943,6 @@ Namespace SharedLibrary
                 .IsWebBrowserContextMenuEnabled = True,
                 .ScrollBarsEnabled = True,
                 .ScriptErrorsSuppressed = True,
-                .DocumentText = bodyText,
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .BackColor = HTMLMessageForm.BackColor,
                 .Margin = New System.Windows.Forms.Padding(20)
@@ -1925,6 +1950,9 @@ Namespace SharedLibrary
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
                                                           ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
+            ' Register before navigation: otherwise a cached/synchronous document load
+            ' may finish before the handler is attached, dropping the body inset.
+            htmlBrowser.DocumentText = bodyText
 
             ' OK button
             Dim okButton As New System.Windows.Forms.Button() With {
@@ -2105,7 +2133,6 @@ Namespace SharedLibrary
                 .IsWebBrowserContextMenuEnabled = True,
                 .ScrollBarsEnabled = True,
                 .ScriptErrorsSuppressed = True,
-                .DocumentText = bodyText,
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .BackColor = HTMLMessageForm.BackColor,
                 .Margin = New System.Windows.Forms.Padding(20)
@@ -2113,6 +2140,9 @@ Namespace SharedLibrary
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
                                                           ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
+            ' Register before navigation: otherwise a cached/synchronous document load
+            ' may finish before the handler is attached, dropping the body inset.
+            htmlBrowser.DocumentText = bodyText
 
             ' OK button.
             Dim okButton As New System.Windows.Forms.Button() With {

@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 18.10.2026
+' 25.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -77,7 +77,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.181026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.251026" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -251,7 +251,52 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Handles add-in startup. Initializes UI synchronization, UpdateHandler targets, host window handle, Explorer hooks, fallback timer, and restores last chat id.
     ''' </summary>
+    Private _hostModelessWindows As Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry
+
+    Friend Function RegisterHostModelessForm(form As System.Windows.Forms.Form) As System.Windows.Forms.IWin32Window
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        Return _hostModelessWindows.Register(form)
+    End Function
+
+    Friend ReadOnly Property HostWindowLifetimeToken As System.Threading.CancellationToken
+        Get
+            If _hostModelessWindows Is Nothing Then
+                Return New System.Threading.CancellationToken(True)
+            End If
+            Return _hostModelessWindows.ShutdownToken
+        End Get
+    End Property
+
+    Friend Sub ShowHostModelessForm(form As System.Windows.Forms.Form)
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        _hostModelessWindows.Show(form)
+    End Sub
+
+    Friend ReadOnly Property IsHostModelessClosing As System.Boolean
+        Get
+            Return _hostModelessWindows IsNot Nothing AndAlso _hostModelessWindows.IsClosing
+        End Get
+    End Property
+
+    Private Sub CloseHostModelessWindows()
+        Try
+            If _hostModelessWindows IsNot Nothing Then _hostModelessWindows.CloseAll()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink modeless host shutdown failed: " & ex.Message)
+            Try
+                Global.SharedLibrary.SharedLibrary.RiCrashLogger.LogMarker("MODELESS_HOST_SHUTDOWN_FAILED", ex.ToString())
+            Catch
+            End Try
+        End Try
+    End Sub
+
     Private Sub ThisAddIn_Startup() Handles Me.Startup
+        _hostModelessWindows = New Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry()
+
 
         ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
         ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
@@ -665,11 +710,46 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Outlook add-in shutdown handler. Sequentially stops HTTP listener, watchdog, and power watch components.
     ''' </summary>
+    Private _autoPilotHostExitStarted As System.Int32
+
+    ''' <summary>
+    ''' Host exit is NOT an operator-initiated AutoPilot stop. Retain the queue journal,
+    ''' cancel in-flight work, detach callbacks and timers, and leave the normal Stop
+    ''' behavior unchanged. Called before destroying the dashboard windows.
+    ''' </summary>
+    Private Sub PrepareAutoPilotForHostExit()
+        If System.Threading.Interlocked.Exchange(_autoPilotHostExitStarted, 1) <> 0 Then Return
+        Try
+            If _apActive Then PersistAutoPilotQueueJournal()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("AutoPilot exit journal snapshot failed: " & ex.Message)
+        End Try
+        _apActive = False
+        Try : _apCts?.Cancel() : Catch : End Try
+        Try : _apCurrentJobCts?.Cancel() : Catch : End Try
+        Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
+        Try : StopScanInbox() : Catch : End Try
+        Try : StopSchedulerTimer() : Catch : End Try
+        Try : StopAutoDeleteTimer() : Catch : End Try
+        Try : _apNotificationTimer?.Dispose() : Catch : End Try
+        _apNotificationTimer = Nothing
+        If _apDashboardDisplaySettingsHooked Then
+            Try : RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf AutoPilot_DashboardDisplaySettingsChanged : Catch : End Try
+            _apDashboardDisplaySettingsHooked = False
+        End If
+    End Sub
+
     Private Sub MarkdownEditorHostQuit() Handles Application.Quit
+        PrepareAutoPilotForHostExit()
+        CancelActiveToolingForHostExit()
+        CloseHostModelessWindows()
         Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.HostClosing("Outlook")
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        PrepareAutoPilotForHostExit()
+        CancelActiveToolingForHostExit()
+        CloseHostModelessWindows()
         Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.HostClosing("Outlook")
 
         ' Best-effort final snapshot of the AutoPilot queue. The journal is NOT

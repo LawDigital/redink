@@ -1079,7 +1079,7 @@ Partial Public Class ThisAddIn
             End If
         End If
         ' Show and bring the form to the front
-        chatForm.Show()
+        ShowHostModelessForm(chatForm)
         chatForm.BringToFront()
     End Sub
 
@@ -1705,8 +1705,8 @@ SkipPromptWin:
                 New System.Globalization.CultureInfo(
                     Globals.ThisAddIn.Application.LanguageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)).DisplayName)
         End If
-        ' No owner needed
-        _win.ShowRaised()
+        ' Keep HelpMeInky tied to the Excel process and close it on add-in exit.
+        _win.ShowRaised(RegisterHostModelessForm(_win))
     End Sub
 
     ''' <summary>

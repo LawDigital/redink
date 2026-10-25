@@ -51,6 +51,7 @@ Namespace SharedLibrary
                                     End If
                                 End Sub)
             t.SetApartmentState(ApartmentState.STA)
+            t.IsBackground = True
             t.Start()
         End Sub
     End Module

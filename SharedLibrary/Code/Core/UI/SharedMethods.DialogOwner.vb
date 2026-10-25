@@ -132,8 +132,19 @@ Namespace SharedLibrary
         ''' Thread-local stack of dialog owners. Each managed UI thread keeps its
         ''' own stack so background threads cannot accidentally inherit an owner.
         ''' </summary>
-        Private Shared ReadOnly _ownerStack As New ThreadLocal(Of Stack(Of IWin32Window))(
-            Function() New Stack(Of IWin32Window)())
+        ' Entries are unique per PushDialogOwner scope. Modeless forms may close out of
+        ' creation order, so matching only the top owner would leave a stale form alive
+        ' in the ambient stack. Never infer ownership from window titles or processes.
+        Private NotInheritable Class DialogOwnerEntry
+            Public ReadOnly Property Owner As System.Windows.Forms.IWin32Window
+
+            Public Sub New(ownerWindow As System.Windows.Forms.IWin32Window)
+                Owner = ownerWindow
+            End Sub
+        End Class
+
+        Private Shared ReadOnly _ownerStack As New System.Threading.ThreadLocal(Of System.Collections.Generic.Stack(Of DialogOwnerEntry))(
+            Function() New System.Collections.Generic.Stack(Of DialogOwnerEntry)())
 
         ''' <summary>
         ''' Pushes <paramref name="owner"/> onto the ambient dialog-owner stack for
@@ -147,8 +158,9 @@ Namespace SharedLibrary
         ''' </param>
         Public Shared Function PushDialogOwner(owner As IWin32Window) As IDisposable
             If owner Is Nothing Then Return New NullOwnerScope()
-            _ownerStack.Value.Push(owner)
-            Return New OwnerScope(owner)
+            Dim entry As New DialogOwnerEntry(owner)
+            _ownerStack.Value.Push(entry)
+            Return New OwnerScope(entry)
         End Function
 
         ''' <summary>
@@ -175,14 +187,18 @@ Namespace SharedLibrary
 
         Private Shared Function ResolveDialogOwnerCore() As IWin32Window
             Dim stack = _ownerStack.Value
-            If stack IsNot Nothing AndAlso stack.Count > 0 Then
-                Dim top = stack.Peek()
-                ' Defensive: skip disposed forms (e.g. if a caller forgot to pop).
-                Dim asForm = TryCast(top, Form)
-                If asForm Is Nothing OrElse Not asForm.IsDisposed Then
-                    Return top
+            While stack IsNot Nothing AndAlso stack.Count > 0
+                Dim top As DialogOwnerEntry = stack.Peek()
+                Dim asForm As System.Windows.Forms.Form = TryCast(top.Owner, System.Windows.Forms.Form)
+                ' A handle can be destroyed before the scope is disposed. Skip all
+                ' stale top entries rather than hiding the next still-live owner.
+                If top.Owner Is Nothing OrElse
+                   (asForm IsNot Nothing AndAlso (asForm.IsDisposed OrElse asForm.Disposing)) Then
+                    stack.Pop()
+                    Continue While
                 End If
-            End If
+                Return top.Owner
+            End While
 
             Dim hwnd As IntPtr = GetOfficeApplicationHwnd()
             If hwnd <> IntPtr.Zero Then
@@ -416,24 +432,53 @@ Namespace SharedLibrary
         Private NotInheritable Class OwnerScope
             Implements IDisposable
 
-            Private ReadOnly _expected As IWin32Window
+            Private ReadOnly _expected As DialogOwnerEntry
+            Private ReadOnly _threadId As System.Int32 = System.Threading.Thread.CurrentThread.ManagedThreadId
             Private _disposed As Boolean
 
-            Public Sub New(expected As IWin32Window)
+            Public Sub New(expected As DialogOwnerEntry)
                 _expected = expected
             End Sub
 
             Public Sub Dispose() Implements IDisposable.Dispose
                 If _disposed Then Return
+                ' The stack is thread-local. Disposing it on another thread must
+                ' never touch that thread's unrelated dialog owners.
+                If System.Threading.Thread.CurrentThread.ManagedThreadId <> _threadId Then
+                    Try
+                        RiCrashLogger.LogMarker("DIALOG_OWNER_SCOPE_WRONG_THREAD",
+                            "Dialog owner scope disposal requires its creating UI thread.")
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("Dialog owner scope disposal on wrong thread: " & ex.Message)
+                    End Try
+                    Return
+                End If
                 _disposed = True
                 Try
-                    Dim stack = _ownerStack.Value
-                    If stack IsNot Nothing AndAlso stack.Count > 0 AndAlso
-                       Object.ReferenceEquals(stack.Peek(), _expected) Then
+                    Dim stack As System.Collections.Generic.Stack(Of DialogOwnerEntry) = _ownerStack.Value
+                    If stack Is Nothing OrElse stack.Count = 0 Then Return
+                    If Object.ReferenceEquals(stack.Peek(), _expected) Then
                         stack.Pop()
+                        Return
                     End If
-                Catch
-                    ' Never throw from dispose.
+
+                    ' Remove precisely this scope without disturbing newer scopes.
+                    ' In particular, two scopes can refer to the SAME form instance.
+                    Dim newer As New System.Collections.Generic.Stack(Of DialogOwnerEntry)()
+                    While stack.Count > 0
+                        Dim current As DialogOwnerEntry = stack.Pop()
+                        If Object.ReferenceEquals(current, _expected) Then Exit While
+                        newer.Push(current)
+                    End While
+                    While newer.Count > 0
+                        stack.Push(newer.Pop())
+                    End While
+                Catch ex As System.Exception
+                    Try
+                        RiCrashLogger.LogMarker("DIALOG_OWNER_SCOPE_RELEASE_FAILED", ex.ToString())
+                    Catch
+                        System.Diagnostics.Debug.WriteLine("Dialog owner scope release failed: " & ex.Message)
+                    End Try
                 End Try
             End Sub
         End Class
@@ -445,5 +490,137 @@ Namespace SharedLibrary
             End Sub
         End Class
 
+    End Class
+
+    ''' <summary>
+    ''' Per-Office-add-in lifetime for explicitly registered modeless windows. Never enumerates
+    ''' Application.OpenForms (which may include windows belonging to another add-in).
+    ''' Registration and shutdown run on the Office UI thread; the validated Office HWND is
+    ''' used as the native owner when available, so a host window's destruction also closes
+    ''' modeless windows if the VSTO Shutdown event is not delivered.
+    ''' </summary>
+    Public NotInheritable Class HostModelessFormRegistry
+        Private ReadOnly _uiThreadId As System.Int32 = System.Threading.Thread.CurrentThread.ManagedThreadId
+        Private ReadOnly _registered As New System.Collections.Generic.List(Of System.Windows.Forms.Form)()
+        Private _closing As System.Boolean
+        Private ReadOnly _shutdownCts As New System.Threading.CancellationTokenSource()
+
+        ' An explicit host-lifetime signal. Background STA tools may observe this
+        ' token but must clean up their own windows on their own STA thread.
+        Public ReadOnly Property ShutdownToken As System.Threading.CancellationToken
+            Get
+                Return _shutdownCts.Token
+            End Get
+        End Property
+
+        Public ReadOnly Property IsClosing As System.Boolean
+            Get
+                Return _closing
+            End Get
+        End Property
+
+        Private Shared Sub LogModelessShutdown(eventName As System.String, details As System.String)
+            Try
+                RiCrashLogger.LogMarker(eventName, details)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine(eventName & ": " & details & "; log failed: " & ex.Message)
+            End Try
+        End Sub
+
+        Private Sub RequireUiThread()
+            If System.Threading.Thread.CurrentThread.ManagedThreadId <> _uiThreadId Then
+                Throw New System.InvalidOperationException("Modeless Office windows must be managed on the owning Office UI thread.")
+            End If
+        End Sub
+
+        Private Shared Function VerifiedOfficeOwner() As System.Windows.Forms.IWin32Window
+            Dim hwnd As System.IntPtr = SharedMethods.GetHostWindowHandle()
+            If hwnd = System.IntPtr.Zero OrElse Not SharedMethods.IsWindowOnCurrentThread(hwnd) Then
+                Return Nothing
+            End If
+            Return SharedMethods.IfOwnerOnCurrentThread(New WindowWrapper(hwnd))
+        End Function
+
+        ''' <summary>Registers a Red Ink-owned form and returns a validated native Office owner.</summary>
+        Public Function Register(form As System.Windows.Forms.Form) As System.Windows.Forms.IWin32Window
+            RequireUiThread()
+            If _closing Then Throw New System.InvalidOperationException("The Office host is closing; new modeless windows are forbidden.")
+            If form Is Nothing OrElse form.IsDisposed Then Throw New System.ArgumentException("A live form is required.", NameOf(form))
+            If Not _registered.Contains(form) Then
+                AddHandler form.FormClosed, AddressOf RegisteredFormClosed
+                _registered.Add(form)
+            End If
+            Dim owner As System.Windows.Forms.IWin32Window = VerifiedOfficeOwner()
+            If owner Is Nothing Then
+                LogModelessShutdown("MODELESS_HOST_OWNER_UNAVAILABLE", form.GetType().FullName & ": no verified same-thread Office HWND; explicit registry cleanup remains active.")
+            End If
+            Return owner
+        End Function
+
+        ''' <summary>Shows or raises a registered form, normally owned by the Office main window.</summary>
+        Public Sub Show(form As System.Windows.Forms.Form)
+            Dim owner As System.Windows.Forms.IWin32Window = Register(form)
+            Try
+                If Not form.Visible Then
+                    If owner IsNot Nothing Then
+                        form.Show(owner)
+                    Else
+                        form.Show()
+                    End If
+                Else
+                    form.BringToFront()
+                End If
+            Catch
+                If Not form.Visible Then Unregister(form)
+                Throw
+            End Try
+        End Sub
+
+        Private Sub RegisteredFormClosed(sender As System.Object, e As System.Windows.Forms.FormClosedEventArgs)
+            Dim form As System.Windows.Forms.Form = TryCast(sender, System.Windows.Forms.Form)
+            If form IsNot Nothing Then Unregister(form)
+        End Sub
+
+        Private Sub Unregister(form As System.Windows.Forms.Form)
+            RemoveHandler form.FormClosed, AddressOf RegisteredFormClosed
+            _registered.Remove(form)
+        End Sub
+
+        ''' <summary>
+        ''' Closes only this add-in's registered modeless windows. A form whose FormClosing
+        ''' handler cancels the close is force-disposed during host exit; failure is logged.
+        ''' </summary>
+        Public Sub CloseAll()
+            RequireUiThread()
+            If _closing Then Return
+            _closing = True
+            ' Cancel before closing forms. Polling workers can finish their own STA
+            ' cleanup without a synchronous wait from the Office UI thread.
+            Try
+                _shutdownCts.Cancel()
+            Catch ex As System.Exception
+                LogModelessShutdown("MODELESS_HOST_CANCEL_FAILED", ex.ToString())
+            End Try
+            Dim forms As System.Windows.Forms.Form() = _registered.ToArray()
+            For index As System.Int32 = forms.Length - 1 To 0 Step -1
+                Dim form As System.Windows.Forms.Form = forms(index)
+                Try
+                    If Not form.IsDisposed Then form.Close()
+                Catch ex As System.Exception
+                    LogModelessShutdown("MODELESS_HOST_CLOSE_FAILED", form.GetType().FullName & ": " & ex.Message)
+                Finally
+                    Try
+                        If Not form.IsDisposed Then
+                            LogModelessShutdown("MODELESS_HOST_FORCE_DISPOSE", form.GetType().FullName)
+                            form.Dispose()
+                        End If
+                    Catch ex As System.Exception
+                        LogModelessShutdown("MODELESS_HOST_DISPOSE_FAILED", form.GetType().FullName & ": " & ex.Message)
+                    End Try
+                    Unregister(form)
+                End Try
+            Next
+            _registered.Clear()
+        End Sub
     End Class
 End Namespace

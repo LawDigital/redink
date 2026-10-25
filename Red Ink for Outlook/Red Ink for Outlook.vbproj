@@ -505,6 +505,7 @@
     <Compile Include="ThisAddIn.AutoPilot.Config.vb" />
     <Compile Include="ThisAddIn.AutoPilot.LogDiagnostics.vb" />
     <Compile Include="ThisAddIn.AutoPilot.DocProcessor.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.HostNotices.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PDFCommentProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.OutgoingDelivery.vb" />
@@ -537,6 +538,7 @@
     <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorageDashboard.vb" />
     <Compile Include="ThisAddIn.Autopilot.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Timing.vb" />
     <Compile Include="ThisAddIn.ChatAgentScope.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />

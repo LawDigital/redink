@@ -4165,10 +4165,14 @@ SkipPromptInput:
             If DoFiles Then
                 Try
                     If archivePrepared Is Nothing Then
-                        CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI, True)
+                        CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs &
+                                " Newly authored prose: use straight ASCII quotation marks and write z.B. without spaces; preserve unchanged source paragraphs character for character.",
+                                "_freestyle", UseSecondAPI, True)
                     Else
                         Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
-                            Await CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI, True)
+                            Await CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs &
+                                " Newly authored prose: use straight ASCII quotation marks and write z.B. without spaces; preserve unchanged source paragraphs character for character.",
+                                "_freestyle", UseSecondAPI, True)
                         End Using
                     End If
                 Catch ex As System.Exception
@@ -4292,7 +4296,10 @@ SkipPromptInput:
             ' === Execute LLM processing with configured parameters ===
 
             ' Invoke ProcessSelectedText with all configured options
-            Dim processingPrompt As System.String = InterpolateAtRuntime(SysPrompt)
+            Dim processingPrompt As System.String = InterpolateAtRuntime(SysPrompt) &
+                " RED_INK_FREESTYLE_TYPOGRAPHY_R22: In newly drafted or rewritten prose, use only straight double/single quotation marks (" &
+                "ASCII 34/39), not typographic quotation marks. Always write the German abbreviation z.B. without spaces. " &
+                "Do not modify paragraphs or source excerpts that the task does not call for changing."
             If archivePrepared IsNot Nothing AndAlso archivePrepared.HasTrigger Then
                 processingPrompt &= System.Environment.NewLine & archivePrepared.ContextText
             End If

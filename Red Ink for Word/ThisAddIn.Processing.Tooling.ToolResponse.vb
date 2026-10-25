@@ -139,7 +139,7 @@ Partial Public Class ThisAddIn
         Dim keepRecentFullCount As System.Int32 = System.Math.Max(0, INI_ToolResponseKeepRecentFullCount)
 
         Dim requestedKeep As Integer
-        Dim requestedCompaction As System.Boolean = SharedLibrary.Agents.ToolResultStore.TryGetRequestedKeepRecent(
+        Dim requestedCompaction As System.Boolean = SharedLibrary.Agents.ToolResultStore.TryTakeRequestedKeepRecent(
                 SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, requestedKeep)
         If requestedCompaction Then
             keepRecentFullCount = requestedKeep
@@ -371,6 +371,12 @@ Partial Public Class ThisAddIn
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = False
             Return rawContent
+        End If
+
+        If replayRetention = SharedLibrary.Agents.ToolReplayRetentionKind.NormalHistorical AndAlso
+           Not compactForSubAgent AndAlso resp.WasCompactedForModelReplay AndAlso
+           SharedLibrary.Agents.ContextProgressPolicy.CanRetainHistoricalReplay(resp.ModelReplayContent) Then
+            Return resp.ModelReplayContent
         End If
 
         If resp.Success AndAlso

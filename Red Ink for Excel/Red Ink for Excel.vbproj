@@ -324,6 +324,7 @@
     <Compile Include="ThisAddIn.DirectoryAnalyzer.vb" />
     <Compile Include="ThisAddIn.ExcelHelpers.vb" />
     <Compile Include="ThisAddIn.FactExtractor.vb" />
+    <Compile Include="ThisAddIn.CollectionAnalyzer.vb" />
     <Compile Include="ThisAddIn.FileHelpers.vb" />
     <Compile Include="ThisAddIn.FileRenamer.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />

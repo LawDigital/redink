@@ -62,6 +62,8 @@ Public Class LogWindow
     ''' Hidden by default; shown via <see cref="ShowAbortJobButton"/>.
     ''' </summary>
     Private ReadOnly btnAbortJob As Button
+    Private ReadOnly btnStopAfterCurrent As System.Windows.Forms.Button
+    Public Event StopAfterCurrentRequested As System.EventHandler
 
     ''' <summary>Tracks whether the initial bottom-right placement was already applied.</summary>
     Private _initialPositionSet As Boolean = False
@@ -220,6 +222,15 @@ Public Class LogWindow
         btnAbortJob = New Button() With {.Text = "Abort Job", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5), .Visible = False}
         AddHandler btnAbortJob.Click, AddressOf OnAbortJobClick
 
+        btnStopAfterCurrent = New System.Windows.Forms.Button() With {
+            .Text = "Stop After Job", .AutoSize = True,
+            .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5), .Visible = False}
+        AddHandler btnStopAfterCurrent.Click,
+            Sub(sender As System.Object, e As System.EventArgs)
+                SetStopAfterCurrentPending(True)
+                RaiseEvent StopAfterCurrentRequested(Me, System.EventArgs.Empty)
+            End Sub
+
         btnCopy = New Button() With {.Text = "Copy Log", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)}
         AddHandler btnCopy.Click, AddressOf OnCopyClick
 
@@ -229,6 +240,7 @@ Public Class LogWindow
         buttonPanel.Controls.Add(btnCancel)
         buttonPanel.Controls.Add(btnKeepOpen)
         buttonPanel.Controls.Add(btnAbortJob)
+        buttonPanel.Controls.Add(btnStopAfterCurrent)
         buttonPanel.Controls.Add(btnCopy)
         buttonPanel.Controls.Add(btnClear)
         mainPanel.Controls.Add(buttonPanel, 0, 1)
@@ -502,13 +514,33 @@ Public Class LogWindow
     End Sub
 
     ''' <summary>
-    ''' Shows or hides the Abort Job button.
+    ''' Shows or hides the Stop After Job button.
     ''' </summary>
     ''' <param name="visible">True to show, False to hide.</param>
     ''' <remarks>
     ''' Thread-safe: marshals to the UI thread if called from a background thread.
     ''' Used by AutoPilot to expose per-job abort functionality on the dashboard.
     ''' </remarks>
+    Public Sub ShowStopAfterCurrentButton(visible As System.Boolean)
+        If Me.IsDisposed Then Return
+        If Me.InvokeRequired Then
+            If Me.IsHandleCreated Then Me.BeginInvoke(Sub() ShowStopAfterCurrentButton(visible))
+            Return
+        End If
+        btnStopAfterCurrent.Visible = visible
+    End Sub
+
+    Public Sub SetStopAfterCurrentPending(pending As System.Boolean)
+        If Me.IsDisposed Then Return
+        If Me.InvokeRequired Then
+            If Me.IsHandleCreated Then Me.BeginInvoke(Sub() SetStopAfterCurrentPending(pending))
+            Return
+        End If
+        btnStopAfterCurrent.Enabled = Not pending
+        btnStopAfterCurrent.Text = If(pending, "Stopping after job...", "Stop After Job")
+    End Sub
+
+    ''' <summary>Shows or hides the existing per-job abort control.</summary>
     Public Sub ShowAbortJobButton(visible As Boolean)
         If Me.IsDisposed Then Return
 
@@ -581,6 +613,7 @@ Public Class LogWindow
             btnAbortJob.Visible = False
         End If
 
+        btnStopAfterCurrent.Visible = False
         Me.Text = $"{ThisAddIn.AN} Tooling Log (Complete)"
 
         StartAutoCloseCountdown(ThisAddIn.ToolingLog_AutoCloseDefaultSeconds)

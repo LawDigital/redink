@@ -61,6 +61,18 @@ Partial Public Class ThisAddIn
 
     Private _activeToolingContext As ToolExecutionContext = Nothing
 
+    ''' <summary>Cooperatively cancels the current tooling run before Office COM/UI teardown.</summary>
+    Private Sub CancelActiveToolingForHostExit()
+        Dim active As ToolExecutionContext = _activeToolingContext
+        If active Is Nothing Then Return
+        Dim root As ToolExecutionContext = active
+        While root.ParentToolingContext IsNot Nothing
+            root = root.ParentToolingContext
+        End While
+        root.RequestCancellation()
+        If active IsNot root Then active.RequestCancellation()
+    End Sub
+
     ''' <summary>Per-session staging/temp directory for the current Word tooling run.</summary>
     Private _wordAgentTempDir As String = Nothing
 
@@ -163,9 +175,9 @@ Partial Public Class ThisAddIn
                             End If
                         Next
                     End If
-                    createdForm.Show()
+                    ShowHostModelessForm(createdForm)
                 Else
-                    rootContext.LogWindowForm.Show()
+                    ShowHostModelessForm(rootContext.LogWindowForm)
                     rootContext.LogWindowForm.BringToFront()
                     rootContext.LogWindowForm.Activate()
                 End If
@@ -266,7 +278,8 @@ Partial Public Class ThisAddIn
         Optional semanticArchivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing,
         Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing,
         Optional retainedToolResultsSink As System.Action(Of Newtonsoft.Json.Linq.JArray) = Nothing,
-        Optional workflowContinuationRetentionDays As System.Int32 = 0) As System.Threading.Tasks.Task(Of String)
+        Optional workflowContinuationRetentionDays As System.Int32 = 0,
+        Optional effortEstimateSink As System.Action(Of System.String) = Nothing) As System.Threading.Tasks.Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -744,6 +757,20 @@ Partial Public Class ThisAddIn
                     End Function)
         End If
 
+        ' Optional monitoring metadata lives only on this run's fresh progress-tool config.
+        ' Child runs and callers without a sink retain their original schema and prompt.
+        Dim effortEstimate As New SharedLibrary.Agents.RunEffortEstimate(If(subAgentMode, Nothing, effortEstimateSink))
+        If Not subAgentMode AndAlso effortEstimateSink IsNot Nothing AndAlso context.SelectedTools IsNot Nothing Then
+            For i As System.Int32 = 0 To context.SelectedTools.Count - 1
+                If context.SelectedTools(i) IsNot Nothing AndAlso IsReportProgressToolName(context.SelectedTools(i).ToolName) Then
+                    Dim progressTool As Global.SharedLibrary.SharedLibrary.ModelConfig = GetInternalProgressReportTool()
+                    progressTool.ToolDefinition = effortEstimate.DecorateProgressDefinition(progressTool.ToolDefinition)
+                    context.SelectedTools(i) = progressTool
+                    Exit For
+                End If
+            Next
+        End If
+
         If Not subAgentMode Then
             context.CapabilityRoutingRequired =
                 context.SelectedTools IsNot Nothing AndAlso
@@ -787,7 +814,7 @@ Partial Public Class ThisAddIn
                 Sub()
                     Try
                         createdForm = New LogWindow()
-                        createdForm.Show()
+                        ShowHostModelessForm(createdForm)
                         AddHandler createdForm.CancelRequested, Sub() context.IsCancelled = True
                     Catch ex As Exception
                         createError = ex
@@ -946,6 +973,7 @@ Partial Public Class ThisAddIn
             ' host-side progress (A) still surfaces for every tool call, so A always appears even if
             ' the model never calls report_progress.
             baseSysPrompt &= " " & BuildMajorStepProgressToolInstruction()
+            If effortEstimate.Enabled Then baseSysPrompt &= " " & SharedLibrary.Agents.RunEffortEstimate.Instruction
 
             ' Add bubbles extract instruction if bubbles text is present
             If Not String.IsNullOrWhiteSpace(bubblesText) Then
@@ -1084,6 +1112,7 @@ Partial Public Class ThisAddIn
             Dim iteration As Integer = 0
             Dim fullUserPrompt As String = ""
             Dim abortDueToRepeatedToolLoop As Boolean = False
+            Dim abortDueToContextChurn As System.Boolean = False
 
             ' Tracks the currently exposed tool set so the (potentially large) tool
             ' definitions block is only rebuilt when the exposed tools actually change
@@ -1374,7 +1403,7 @@ Partial Public Class ThisAddIn
                                 "Your previous turn was empty after intermediate data was produced, but the requested output file is still missing."
                             context.PendingRejectedAssistantTurn = ""
 
-                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModelBudgeted(
                                 context.AllToolResponses,
                                 context.ToolingModel,
                                 currentIteration:=context.CurrentIteration)
@@ -1419,7 +1448,7 @@ Partial Public Class ThisAddIn
                                 "Your previous turn was empty after successful partial progress."
                             context.PendingRejectedAssistantTurn = ""
 
-                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModelBudgeted(
                                 context.AllToolResponses,
                                 context.ToolingModel,
                                 currentIteration:=context.CurrentIteration)
@@ -1446,7 +1475,7 @@ Partial Public Class ThisAddIn
                             "Your previous turn was empty after successful partial progress."
                         context.PendingRejectedAssistantTurn = ""
 
-                        INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                        INI_APICall_ToolResponses_2 = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             currentIteration:=context.CurrentIteration)
@@ -1582,6 +1611,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             context.ReportMajorProgress(progressNote)
+                            effortEstimate.Observe(tc.Arguments)
 
                             Dim progressResponse As New ToolResponse() With {
                                 .CallId = tc.CallId,
@@ -2252,6 +2282,49 @@ Partial Public Class ThisAddIn
                             context.PrematureTextRetryCount = 0
                             stopCurrentBatchAfterTool = True
 
+                            Exit For
+                        End If
+
+                        ' Shared progress accounting is independent of visibility. Legitimate
+                        ' rereads stay possible, but compact/expand churn has a bounded recovery.
+                        Dim contextWindowKey As System.String = System.String.Empty
+                        If SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(tc.ToolName) Then
+                            SharedLibrary.Agents.ContextExpandTool.TryBuildCanonicalWindowKey(tc.Arguments, contextWindowKey, _context)
+                        End If
+                        Dim contextProgressAction As System.Int32 = context.ContextProgress.Evaluate(tc.ToolName, contextWindowKey)
+                        If contextProgressAction > 0 Then
+                            Dim churnResponse As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = False,
+                                .ResultKind = "error",
+                                .ErrorCode = SharedLibrary.Agents.ContextProgressPolicy.StalledCode,
+                                .ErrorMessage = SharedLibrary.Agents.ContextProgressPolicy.RecoveryPrompt,
+                                .Response = New Newtonsoft.Json.Linq.JObject(
+                                    New Newtonsoft.Json.Linq.JProperty("ok", False),
+                                    New Newtonsoft.Json.Linq.JProperty("code", SharedLibrary.Agents.ContextProgressPolicy.StalledCode),
+                                    New Newtonsoft.Json.Linq.JProperty("retryable", contextProgressAction = 1),
+                                    New Newtonsoft.Json.Linq.JProperty("message", SharedLibrary.Agents.ContextProgressPolicy.RecoveryPrompt)).ToString(Newtonsoft.Json.Formatting.None),
+                                .OriginalCallJson = tc.RawJson,
+                                .NormalizedCallSignature = normalizedToolCallSignature
+                            }
+                            AddToolResponseToHistory(context, churnResponse)
+                            context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ContextProgressPolicy.RecoveryPrompt
+                            context.PendingGuardTitle = "HOST CONTEXT PROGRESS GUARD"
+                            context.PendingRejectedTurnExplanation = "Context management made no material progress; use a different completion path."
+                            context.PendingRejectedAssistantTurn = System.String.Empty
+                            context.PrematureTextRetryCount = 0
+                            abortDueToContextChurn = contextProgressAction = 2
+                            If abortDueToContextChurn AndAlso context.SequencingState IsNot Nothing Then
+                                context.SequencingState.NoteToolFailure(
+                                    tc.ToolName, SharedLibrary.Agents.ContextProgressPolicy.StalledCode,
+                                    "Context management remained stalled after strategy recovery.",
+                                    terminal:=True, recoveryScopeKey:=recoveryScopeKey)
+                            End If
+                            context.LogWarn("Context progress guard: " & If(abortDueToContextChurn, "blocked", "strategy recovery"),
+                                            details:=context.ContextProgress.LastDiagnostic)
+                            ToolingFileLogger.LogWarn("Context progress guard: " & If(abortDueToContextChurn, "blocked", "strategy recovery"),
+                                                      details:=context.ContextProgress.LastDiagnostic)
                             Exit For
                         End If
 
@@ -2973,6 +3046,8 @@ Partial Public Class ThisAddIn
                         End Try
                     Next
 
+                    If abortDueToContextChurn Then Exit While
+
                     If restartForCapabilityRouting Then
                         Dim preparedRoutingResponses As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
@@ -3391,6 +3466,9 @@ Partial Public Class ThisAddIn
 
                         Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
                             If context.ToolLoaderConfirmedAvailableToolsPendingUse Then
+                                ' One reminder per loader observation. Availability alone must not
+                                ' reject every later truthful blocked response without new evidence.
+                                context.ToolLoaderConfirmedAvailableToolsPendingUse = False
                                 context.PendingContinuationGuardPrompt =
                                     "HOST CONFIRMED TOOL AVAILABILITY: tool_loader already confirmed that the required tool is loaded and exposed" &
                                     If(String.IsNullOrWhiteSpace(context.ToolLoaderConfirmedAvailableTools), ". ", " (" & context.ToolLoaderConfirmedAvailableTools & "). ") &
@@ -3428,7 +3506,8 @@ Partial Public Class ThisAddIn
                                         currentResponse,
                                         _ftGateNeedsDeliverable_B,
                                         _ftGateHasDeliverable_B,
-                                        _ftGateUntried_B)
+                                        _ftGateUntried_B,
+                                        fallbackReview:=context.SequencingState?.FallbackReview)
 
                             If hasDeclaredTerminalOutcomeFailure Then
                                 context.Log(
@@ -3600,6 +3679,19 @@ Partial Public Class ThisAddIn
 
             End While
 
+            If abortDueToContextChurn Then
+                context.FinalizationBlocked = True
+                context.FinalizationBlockedReason = SharedLibrary.Agents.ContextProgressPolicy.StalledCode
+                currentResponse = Await BuildBlockedToolingResultAsync(
+                    context, SharedLibrary.Agents.ContextProgressPolicy.StalledCode,
+                    "Repeated context management made no material progress after a strategy recovery. Completed results are preserved; required work remains incomplete.",
+                    useSecondAPI, hideSplash, cancellationToken)
+                If context.SequencingState IsNot Nothing Then
+                    context.SequencingState.FinalResponseOrigin = "host_generated"
+                    context.SequencingState.HasOpenToolWorkflow = False
+                End If
+            End If
+
             If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) AndAlso
                context.ForceNoToolFinalizationRequested AndAlso
                Not context.IsCancelled AndAlso
@@ -3736,6 +3828,7 @@ Partial Public Class ThisAddIn
             ' final text response so the user never receives raw protocol content.
             ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
             If iteration >= context.MaxIterations AndAlso
+               Not abortDueToContextChurn AndAlso
                Not context.IsCancelled AndAlso
                (ContainsConfirmedToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern, context.ToolingModel.ToolCallExtractionMap) OrElse
                 Not SharedLibrary.Agents.ToolCallSequencing.IsUserPresentableFinalText(currentResponse)) Then
@@ -3828,7 +3921,7 @@ Partial Public Class ThisAddIn
                 Return ""
             End If
 
-            If iteration >= context.MaxIterations Then
+            If iteration >= context.MaxIterations AndAlso Not abortDueToContextChurn Then
                 context.LogWarn($"Maximum iterations ({context.MaxIterations}) reached")
                 ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
                 ToolingFileLogger.LogWarn("Maximum iterations reached.", details:=$"MaxIterations={context.MaxIterations}")
@@ -5064,6 +5157,9 @@ Partial Public Class ThisAddIn
         If context Is Nothing OrElse response Is Nothing Then Return
         response.ProducedIteration = context.CurrentIteration
         context.AllToolResponses.Add(response)
+        If response.Success Then
+            context.ContextProgress.RecordSuccess(response.ToolName, response.Response, response.NormalizedCallSignature)
+        End If
     End Sub
 
     Private Function ExtractWorkflowSkillName(toolCall As ToolCall,
@@ -5770,6 +5866,10 @@ Partial Public Class ThisAddIn
             structuredRetryable =
                 Not (context.SequencingState IsNot Nothing AndAlso
                      context.SequencingState.HasTerminalUnresolvedToolFailure)
+        End If
+
+        If System.String.Equals(errorCode, SharedLibrary.Agents.ContextProgressPolicy.StalledCode, System.StringComparison.Ordinal) Then
+            structuredRetryable = False
         End If
 
         Dim completedResults As Newtonsoft.Json.Linq.JArray = PreserveSuccessfulToolResults(context)
