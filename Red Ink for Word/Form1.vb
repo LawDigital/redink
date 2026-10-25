@@ -2982,6 +2982,19 @@ Public Class frmAIChat
     End Function
 
 
+    ''' <summary>
+    '' User-facing typography for newly authored Word-chat prose only. Never normalize
+    '' search anchors, existing Word ranges, or the JSON envelope itself.
+    ''' </summary>
+    Private Shared Function NormalizeGeneratedWordProse(value As System.String) As System.String
+        Return Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeGeneratedProseTypography(value)
+    End Function
+
+    ''' <summary>Clean a JSON document-content field without changing whitespace semantics.</summary>
+    Private Function CleanJsonGeneratedWordText(value As System.String) As System.String
+        Return NormalizeGeneratedWordProse(CleanJsonArgument(value, preserveOuterWhitespace:=True))
+    End Function
+
     ' =========================================================================
     ' Word Chat Command Parsing
     ' =========================================================================
@@ -3100,6 +3113,10 @@ Public Class frmAIChat
         ' Optional insertion-boundary intent. Nothing keeps the original verbatim behavior.
         Public Property JoinBefore As System.String
         Public Property JoinAfter As System.String
+        ' Only insert_table uses these structured, prevalidated native Word table cells.
+        Public Property TableRows As System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))
+        Public Property TableHeaderRow As System.Boolean
+        Public Property TablePosition As System.String
         ' Transport compatibility belongs at parsing, not in shared navigation logic.
         ' Old bracket-protocol find commands retain their historic document highlight.
         Public Property IsLegacyCommand As Boolean
@@ -3516,7 +3533,7 @@ Public Class frmAIChat
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "replace"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
                     parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
@@ -3531,7 +3548,7 @@ Public Class frmAIChat
                 Case "insert"
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "text", "join_before", "join_after", "as_paragraph")
                     parsed.Command = "insert"
-                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.Argument1 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
                     parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
                     parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
                     ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
@@ -3540,7 +3557,7 @@ Public Class frmAIChat
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format", "join_before", "join_after", "as_paragraph")
                     parsed.Command = "insertbefore"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
                     parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
                     parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
                     ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
@@ -3551,18 +3568,55 @@ Public Class frmAIChat
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format", "join_before", "join_after", "as_paragraph")
                     parsed.Command = "insertafter"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
                     parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
                     parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
                     ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
                     parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
+                Case "insert_table"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}",
+                                           "op", "rows", "search", "position", "occurrence", "header_row")
+                    parsed.Command = "inserttable"
+                    parsed.TableRows = ParseJsonTableRows(commandObject, commandIndex)
+                    Dim anchorText As System.String = GetOptionalJsonString(commandObject, "search", commandIndex)
+                    Dim location As System.String = GetOptionalJsonString(commandObject, "position", commandIndex)
+                    If anchorText IsNot Nothing AndAlso System.String.IsNullOrWhiteSpace(anchorText) Then
+                        Throw New System.InvalidOperationException($"Word table command #{commandIndex} cannot use an empty 'search' anchor.")
+                    End If
+                    If System.String.IsNullOrWhiteSpace(anchorText) Then
+                        If Not System.String.IsNullOrWhiteSpace(location) AndAlso
+                           Not System.String.Equals(location, "cursor", System.StringComparison.OrdinalIgnoreCase) Then
+                            Throw New System.InvalidOperationException($"Word table command #{commandIndex} requires 'search' for before/after placement.")
+                        End If
+                        If commandObject.GetValue("occurrence", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException($"Word table command #{commandIndex} cannot use 'occurrence' without 'search'.")
+                        End If
+                        parsed.TablePosition = "cursor"
+                    Else
+                        parsed.Argument1 = CleanJsonArgument(anchorText)
+                        If System.String.IsNullOrWhiteSpace(location) OrElse
+                           (Not System.String.Equals(location, "before", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                            Not System.String.Equals(location, "after", System.StringComparison.OrdinalIgnoreCase)) Then
+                            Throw New System.InvalidOperationException($"Word table command #{commandIndex} requires position='before' or 'after' when search is provided.")
+                        End If
+                        parsed.TablePosition = location.Trim().ToLowerInvariant()
+                        Dim nth As System.Nullable(Of Integer) = GetOptionalPositiveJsonInteger(commandObject, "occurrence", commandIndex)
+                        If nth.HasValue Then
+                            parsed.MatchSpec = New ParsedCommandMatchSpec() With {.Occurrence = nth}
+                        End If
+                    End If
+                    Dim headerToken As Newtonsoft.Json.Linq.JToken = commandObject.GetValue("header_row", System.StringComparison.OrdinalIgnoreCase)
+                    If headerToken IsNot Nothing Then
+                        parsed.TableHeaderRow = GetRequiredJsonBoolean(headerToken, "header_row", commandIndex)
+                    End If
+
                 Case "add_comment"
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
                     parsed.Command = "addcomment"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
                     parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
                     parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
 
@@ -3570,7 +3624,7 @@ Public Class frmAIChat
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "comment_id", "text")
                     parsed.Command = "replycomment"
                     parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "comment_id", commandIndex))
-                    parsed.Argument2 = CleanJsonArgument(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True), preserveOuterWhitespace:=True)
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
 
                 Case "format"
                     ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence", "max_matches", "format", "match_format")
@@ -3748,6 +3802,49 @@ Public Class frmAIChat
         End If
 
         Return value
+    End Function
+
+    ''' <summary>Strict rectangular table contract, verified before executing any commands.</summary>
+    Private Function ParseJsonTableRows(commandObject As Newtonsoft.Json.Linq.JObject,
+                                        commandIndex As Integer) As System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))
+        Dim token As Newtonsoft.Json.Linq.JToken = commandObject.GetValue("rows", System.StringComparison.OrdinalIgnoreCase)
+        If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+            Throw New System.InvalidOperationException($"Word table command #{commandIndex} requires a 'rows' array.")
+        End If
+        Dim inputRows As Newtonsoft.Json.Linq.JArray = DirectCast(token, Newtonsoft.Json.Linq.JArray)
+        If inputRows.Count < 1 OrElse inputRows.Count > 100 Then
+            Throw New System.InvalidOperationException($"Word table command #{commandIndex} must contain 1 to 100 rows.")
+        End If
+        Dim result As New System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))()
+        Dim columnCount As Integer = -1
+        Dim totalTextLength As Integer = 0
+        For Each rowToken As Newtonsoft.Json.Linq.JToken In inputRows
+            If rowToken Is Nothing OrElse rowToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+                Throw New System.InvalidOperationException($"Word table command #{commandIndex} rows must be arrays of strings.")
+            End If
+            Dim inputCells As Newtonsoft.Json.Linq.JArray = DirectCast(rowToken, Newtonsoft.Json.Linq.JArray)
+            If columnCount < 0 Then columnCount = inputCells.Count
+            If columnCount < 1 OrElse columnCount > 20 OrElse inputCells.Count <> columnCount Then
+                Throw New System.InvalidOperationException($"Word table command #{commandIndex} must have 1 to 20 columns and equal-sized rows.")
+            End If
+            Dim cells As New System.Collections.Generic.List(Of System.String)()
+            For Each cellToken As Newtonsoft.Json.Linq.JToken In inputCells
+                If cellToken Is Nothing OrElse cellToken.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                    Throw New System.InvalidOperationException($"Word table command #{commandIndex} cell values must be JSON strings.")
+                End If
+                Dim cellText As System.String = NormalizeGeneratedWordProse(cellToken.ToObject(Of System.String)())
+                If cellText.Length > 10000 OrElse cellText.IndexOf(ChrW(7)) >= 0 Then
+                    Throw New System.InvalidOperationException($"Word table command #{commandIndex} contains an oversized cell or an invalid Word cell delimiter.")
+                End If
+                totalTextLength += cellText.Length
+                If totalTextLength > 80000 Then
+                    Throw New System.InvalidOperationException($"Word table command #{commandIndex} contains too much text.")
+                End If
+                cells.Add(cellText.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr))
+            Next
+            result.Add(cells)
+        Next
+        Return result
     End Function
 
     Private Function GetOptionalJsonString(
@@ -4165,6 +4262,12 @@ Public Class frmAIChat
         ' duplicate suppression. This preserves the model's intended cardinality instead
         ' of silently dropping the second and later requested replacements.
         If TryMergeRepeatedOccurrenceOneReplaceCommand(results, parsed) Then Return
+
+        ' Tables are distinct document actions even when their shape and anchor match.
+        If System.String.Equals(parsed.Command, "inserttable", System.StringComparison.OrdinalIgnoreCase) Then
+            results.Add(parsed)
+            Return
+        End If
 
         Dim parsedFormatKey As System.String = If(parsed.FormatSpec Is Nothing, "", parsed.FormatSpec.GetDuplicateKey())
         Dim parsedMatchFormatKey As System.String = If(parsed.MatchFormatSpec Is Nothing, "", parsed.MatchFormatSpec.GetDuplicateKey())
@@ -5757,6 +5860,12 @@ Public Class frmAIChat
                     Debug.WriteLine("ExecuteInsert")
                     commandSuccess = ExecuteInsertCommand(pc.Argument1, pc.JoinBefore, pc.JoinAfter)
 
+                Case "inserttable"
+                    commandDescription = "Inserting a Word table"
+                    CommandsList = commandDescription & System.Environment.NewLine & CommandsList
+                    LastCommandsList = CommandsList
+                    commandSuccess = ExecuteInsertTableCommand(pc, OnlySelection)
+
                 Case "goto", "jump", "show", "select"
                     commandDescription = If(
                         System.String.IsNullOrWhiteSpace(pc.Target),
@@ -5812,7 +5921,7 @@ Public Class frmAIChat
 
             If Not commandSuccess AndAlso Not String.IsNullOrWhiteSpace(commandDescription) Then
                 Select Case pc.Command.ToLowerInvariant()
-                    Case "replace", "insert", "insertbefore", "insertafter", "format"
+                    Case "replace", "insert", "insertbefore", "insertafter", "inserttable", "format"
                         ' A partial apply must never leave last_change pointing at an older action.
                         _lastRecentWordChangeId = ""
                 End Select
@@ -6569,6 +6678,15 @@ Public Class frmAIChat
         Dim originalRevisionsView As Word.WdRevisionsView = Word.WdRevisionsView.wdRevisionsViewFinal
         Dim originalShowRevisions As Boolean = False
 
+        ' Diagnostic only: never change search ranges, selection, or retry behavior.
+        ' Persist numeric progress once per replacement, not inside the search loop.
+        Dim searchTraceClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        Dim searchTrace As New System.Text.StringBuilder()
+        Dim searchTraceAttempts As System.Int32 = 0
+        Dim searchTraceRejected As System.Int32 = 0
+        Dim searchTraceOutcome As System.String = "not-completed"
+        searchTrace.AppendLine("BEGIN " & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+
         Try
             Debug.WriteLine("ExecuteReplaceCommand: START")
             LogReplaceDiag(New String("-"c, 100))
@@ -6641,12 +6759,27 @@ Public Class frmAIChat
                 LogReplaceDiag($"PASS1 before Find: nextIteration={iterationCount + 1}; searchEnd={searchEnd}; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}; {DescribeSelectionState(doc.Application.Selection)}")
 
                 Dim findReturned As Boolean = False
+                searchTraceAttempts += 1
+                Dim findTraceClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                 Try
                     findReturned = Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True)
-                Catch ex As Exception
+                Catch ex As System.Exception
+                    searchTraceOutcome = "search-exception:" & ex.GetType().Name
+                    searchTrace.AppendLine("FIND exception at attempt=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) & " type=" & ex.GetType().Name)
                     LogReplaceDiag($"PASS1 FindLongTextInChunks THREW: {ex.GetType().Name}: {ex.Message}")
                     Throw
+                Finally
+                    findTraceClock.Stop()
                 End Try
+
+                ' Bounded trace: the first attempts and periodic samples are sufficient
+                ' to locate stalls without large logs or continuous disk I/O.
+                If searchTraceAttempts <= 16 OrElse searchTraceAttempts Mod 25 = 0 Then
+                    searchTrace.AppendLine("FIND attempt=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                           " from=" & requestedSearchStart.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                           " found=" & findReturned.ToString() &
+                                           " ms=" & findTraceClock.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                End If
 
                 LogReplaceDiag($"PASS1 after Find: returned={findReturned}; {DescribeSelectionState(doc.Application.Selection)}")
 
@@ -6665,6 +6798,7 @@ Public Class frmAIChat
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
                     CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
                     Debug.WriteLine("ExecuteReplaceCommand: ESC pressed, aborting")
+                    searchTraceOutcome = "cancelled-by-escape"
                     LogReplaceDiag("PASS1 ESC pressed, aborting")
                     Return False
                 End If
@@ -6673,6 +6807,8 @@ Public Class frmAIChat
                 If iterationCount > maxIterations Then
                     CommandsList = $"Warning: Max search iterations ({maxIterations}) reached." & Environment.NewLine & CommandsList
                     Debug.WriteLine("ExecuteReplaceCommand: Max iterations reached")
+                    searchTraceOutcome = "iteration-guard"
+                    searchTrace.AppendLine("GUARD count=" & iterationCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
                     LogReplaceDiag($"PASS1 maxIterations reached ({maxIterations})")
                     Exit Do
                 End If
@@ -6755,6 +6891,13 @@ Public Class frmAIChat
                 If hitWentBackwards OrElse hitDidNotAdvance Then
                     Debug.WriteLine($"ExecuteReplaceCommand: rejecting stale/backward hit [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart}, lastFoundEnd={lastFoundEnd})")
                     LogReplaceDiag($"PASS1 rejecting stale/backward hit; hitWentBackwards={hitWentBackwards}; hitDidNotAdvance={hitDidNotAdvance}; {DescribeSelectionState(doc.Application.Selection)}")
+                    searchTraceRejected += 1
+                    If searchTraceRejected <= 16 OrElse searchTraceRejected Mod 25 = 0 Then
+                        searchTrace.AppendLine("REJECT no-forward-progress attempt=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                               " start=" & selStart.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                               " end=" & selEnd.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                               " requested=" & requestedSearchStart.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
 
                     Dim forcePos As Integer = System.Math.Max(requestedSearchStart + 1, lastFoundEnd + 1)
 
@@ -6871,6 +7014,8 @@ Public Class frmAIChat
             Loop
 
             Debug.WriteLine($"ExecuteReplaceCommand: PASS 1 complete, found {matchPositions.Count} matches")
+            searchTrace.AppendLine("SCAN matches=" & matchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " iterations=" & iterationCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
             If matchPositions.Count = 0 Then
                 CommandsList = $"Note: The search term '{oldText}' was not found." & System.Environment.NewLine & CommandsList
@@ -7002,6 +7147,8 @@ Public Class frmAIChat
             End Using
 
             Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 complete, replaced {replaceCount} of {selectedMatchPositions.Count} selected match(es)")
+            searchTrace.AppendLine("REPLACE completed=" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " planned=" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
             ' ─────────────────────────────────────────────────────────────────────
             ' RESTORE SELECTION
@@ -7025,9 +7172,13 @@ Public Class frmAIChat
             If Not allReplacementsApplied Then
                 FailedCommandsList.Add($"Replacement incomplete: {replaceCount} of {selectedMatchPositions.Count} matches fully applied for '{oldText}'. Check this passage before retrying; partial changes may remain.")
             End If
+            If searchTraceOutcome <> "iteration-guard" Then
+                searchTraceOutcome = If(allReplacementsApplied, "success", "incomplete")
+            End If
             Return allReplacementsApplied
 
         Catch ex As System.Exception
+            searchTraceOutcome = "exception:" & ex.GetType().Name
             Debug.WriteLine($"ExecuteReplaceCommand: OUTER CATCH: {ex.GetType().Name}: {ex.Message}")
             Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
 #If DEBUG Then
@@ -7037,6 +7188,12 @@ Public Class frmAIChat
             Return False
 
         Finally
+            searchTraceClock.Stop()
+            searchTrace.AppendLine("END outcome=" & searchTraceOutcome &
+                                   " attempts=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " rejected=" & searchTraceRejected.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " elapsedMs=" & searchTraceClock.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            SaveWordSearchTrace(searchTrace.ToString())
             Try
                 If view IsNot Nothing Then
                     view.RevisionsView = originalRevisionsView
@@ -7054,6 +7211,32 @@ Public Class frmAIChat
             End Try
         End Try
     End Function
+
+    ''' <summary>
+    ''' Writes bounded, content-free replacement diagnostics after each operation,
+    ''' only when the Word host has INI_APIDebug enabled.
+    ''' Diagnostic failures must never alter document editing or recovery behavior.
+    ''' </summary>
+    Private Shared Sub SaveWordSearchTrace(trace As System.String)
+        Try
+            ' Only persist Word search diagnostics when API debugging is enabled.
+            ' Do not create directories, rotate or write log files otherwise.
+            If Not ThisAddIn.INI_APIDebug Then Return
+            If System.String.IsNullOrWhiteSpace(trace) Then Return
+            Dim diagnosticDirectory As System.String = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "RedInk")
+            System.IO.Directory.CreateDirectory(diagnosticDirectory)
+            Dim diagnosticPath As System.String = System.IO.Path.Combine(diagnosticDirectory, "RI_WordSearch.log")
+            If System.IO.File.Exists(diagnosticPath) AndAlso
+               (New System.IO.FileInfo(diagnosticPath)).Length > 524288 Then
+                System.IO.File.WriteAllText(diagnosticPath, System.String.Empty, System.Text.Encoding.UTF8)
+            End If
+            System.IO.File.AppendAllText(diagnosticPath, trace & System.Environment.NewLine, System.Text.Encoding.UTF8)
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Word search diagnostic logging failed: " & ex.GetType().Name)
+        End Try
+    End Sub
 
     Private Shared Function PreviewForLog(value As String, Optional maxLen As Integer = 120) As String
         If value Is Nothing Then Return "<null>"
@@ -7522,6 +7705,103 @@ Public Class frmAIChat
     ''' Normalizes line breaks to vbCr (Word's internal format).
     ''' Restores original TrackRevisions state in Finally block.
     ''' </remarks>
+    ''' <summary>
+    '' Inserts a real Word table at an explicit anchor or at a collapsed caret. The
+    '' input has already passed batch-wide JSON validation. Nothing is overwritten.
+    ''' </summary>
+    Private Function ExecuteInsertTableCommand(command As ParsedCommand, onlySelection As System.Boolean) As System.Boolean
+        Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+        Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+        If doc Is Nothing OrElse command Is Nothing OrElse command.TableRows Is Nothing Then Return False
+        Dim tracking As System.Boolean = doc.TrackRevisions
+        Dim insertionRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim createdTable As Microsoft.Office.Interop.Word.Table = Nothing
+        Try
+            Dim insertionPoint As Integer = -1
+            If command.TablePosition = "cursor" Then
+                If app.Selection Is Nothing OrElse app.Selection.Start <> app.Selection.End Then
+                    Return False ' Never replace a non-collapsed selection with a table.
+                End If
+                insertionPoint = app.Selection.Start
+            Else
+                Dim limitStart As Integer = doc.Content.Start
+                Dim limitEnd As Integer = doc.Content.End
+                If onlySelection Then
+                    If app.Selection Is Nothing OrElse app.Selection.Start = app.Selection.End Then Return False
+                    limitStart = app.Selection.Start
+                    limitEnd = app.Selection.End
+                End If
+                Dim searchRange As Microsoft.Office.Interop.Word.Range = doc.Range(limitStart, limitEnd)
+                Dim found As Integer = 0
+                Dim requested As Integer = If(command.MatchSpec IsNot Nothing AndAlso command.MatchSpec.Occurrence.HasValue,
+                                               command.MatchSpec.Occurrence.Value, 0)
+                Dim uniquePosition As Integer = -1
+                Try
+                    Do While searchRange.Start < limitEnd
+                        Dim matchFound As System.Boolean = searchRange.Find.Execute(
+                            FindText:=command.Argument1, MatchCase:=False,
+                            MatchWholeWord:=False, Forward:=True,
+                            Wrap:=Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop)
+                        If Not matchFound Then Exit Do
+                        found += 1
+                        If found > 10000 Then Return False
+                        If requested = 0 OrElse found = requested Then
+                            uniquePosition = If(command.TablePosition = "before", searchRange.Start, searchRange.End)
+                            If requested > 0 Then Exit Do
+                        End If
+                        Dim continueAt As Integer = System.Math.Max(searchRange.End, searchRange.Start + 1)
+                        If continueAt >= limitEnd Then Exit Do
+                        searchRange.SetRange(continueAt, limitEnd)
+                    Loop
+                Finally
+                    ReleaseWordRange(searchRange)
+                End Try
+                ' Without a specified occurrence, refuse ambiguous anchors.
+                If uniquePosition < 0 OrElse (requested = 0 AndAlso found <> 1) Then Return False
+                insertionPoint = uniquePosition
+            End If
+            insertionPoint = System.Math.Max(doc.Content.Start, System.Math.Min(insertionPoint, doc.Content.End - 1))
+            insertionRange = doc.Range(insertionPoint, insertionPoint)
+            If CBool(insertionRange.Information(Microsoft.Office.Interop.Word.WdInformation.wdWithInTable)) Then
+                Return False ' A new table must not silently split an existing table cell.
+            End If
+            If insertionRange.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return False
+
+            doc.TrackRevisions = True
+            Using ThisAddIn.BeginMarkupAuthorScope(app)
+                createdTable = doc.Tables.Add(insertionRange, command.TableRows.Count, command.TableRows(0).Count)
+                For rowIndex As Integer = 1 To command.TableRows.Count
+                    For columnIndex As Integer = 1 To command.TableRows(rowIndex - 1).Count
+                        Dim cellContent As Microsoft.Office.Interop.Word.Range = createdTable.Cell(rowIndex, columnIndex).Range
+                        Try
+                            cellContent.End -= 1 ' Preserve native Word end-of-cell marker.
+                            cellContent.Text = command.TableRows(rowIndex - 1)(columnIndex - 1)
+                        Finally
+                            ReleaseWordRange(cellContent)
+                        End Try
+                    Next
+                Next
+                If command.TableHeaderRow Then
+                    createdTable.Rows(1).HeadingFormat = -1
+                End If
+                RememberLastActionRange(createdTable.Range.Start, createdTable.Range.End)
+            End Using
+            Return True
+        Catch ex As System.Exception
+            ShowWordChatOperationError("ExecuteInsertTableCommand", ex, WordEditFailureUserMessage)
+            Return False
+        Finally
+            doc.TrackRevisions = tracking
+            If createdTable IsNot Nothing Then
+                Try
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(createdTable)
+                Catch
+                End Try
+            End If
+            If insertionRange IsNot Nothing Then ReleaseWordRange(insertionRange)
+        End Try
+    End Function
+
     Private Function ExecuteInsertCommand(
         newText As String,
         Optional joinBefore As System.String = Nothing,

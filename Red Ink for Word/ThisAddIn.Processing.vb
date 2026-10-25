@@ -1309,6 +1309,24 @@ Partial Public Class ThisAddIn
                     LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
                 End If
 
+                ' Freestyle prose policy is scoped by a runtime marker, not by model/provider.
+                ' Keep intact source lines byte-identical when a chunk is returned unchanged.
+                If SysCommand.IndexOf("RED_INK_FREESTYLE_TYPOGRAPHY_R22", System.StringComparison.Ordinal) >= 0 AndAlso
+                   Not System.String.IsNullOrEmpty(LLMResult) AndAlso
+                   Not DoMarkup AndAlso Not DoTPMarkup AndAlso
+                   System.String.IsNullOrEmpty(SlideDeck) AndAlso DoChart = 0 AndAlso Not CreatePodcast Then
+                    Dim generatedLines As System.String() = System.Text.RegularExpressions.Regex.Split(LLMResult, "(?<=\n)|(?<=\r)(?!\n)")
+                    For lineNumber As Integer = 0 To generatedLines.Length - 1
+                        Dim originalLine As System.String = generatedLines(lineNumber).TrimEnd(ChrW(13), ChrW(10))
+                        If Not System.String.IsNullOrEmpty(originalLine) AndAlso
+                           (System.String.IsNullOrEmpty(SelectedText) OrElse
+                            SelectedText.IndexOf(originalLine, System.StringComparison.Ordinal) < 0) Then
+                            generatedLines(lineNumber) = Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeGeneratedProseTypography(generatedLines(lineNumber))
+                        End If
+                    Next
+                    LLMResult = System.String.Concat(generatedLines)
+                End If
+
                 Debug.WriteLine($"LLMResult 0 = '{LLMResult}'")
 
                 ' Remove horizontal whitespace (incl. NBSP) between real newline tokens (CRLF/CR/LF)

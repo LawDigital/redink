@@ -3643,5 +3643,28 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ' <summary>
+        ' Normalizes typography in newly generated prose. Callers must never use this
+        ' for search anchors, unmodified source content or protocol payloads.
+        ' </summary>
+        Public Shared Function NormalizeGeneratedProseTypography(value As System.String) As System.String
+            If value Is Nothing Then Return System.String.Empty
+            Dim normalized As System.String = value
+            For Each mark As System.Char In New System.Char() {
+                    ChrW(&H201C), ChrW(&H201D), ChrW(&H201E), ChrW(&H201F), ChrW(&HAB), ChrW(&HBB)}
+                normalized = normalized.Replace(mark, """"c)
+            Next
+            For Each mark As System.Char In New System.Char() {
+                    ChrW(&H2018), ChrW(&H2019), ChrW(&H201A), ChrW(&H201B), ChrW(&H2039), ChrW(&H203A)}
+                normalized = normalized.Replace(mark, "'"c)
+            Next
+            Return System.Text.RegularExpressions.Regex.Replace(
+                normalized,
+                "(?<![\p{L}\p{N}])z\.[ \t\u00A0\u202F]*B\.(?![\p{L}\p{N}])",
+                "z.B.",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        End Function
+
     End Class
 End Namespace

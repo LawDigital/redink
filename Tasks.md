@@ -1,4 +1,14 @@
-﻿# Tasks
+# Tasks
+
+## Completed 2026-10-25 — Word search fallback range contract (R25)
+
+- Baseline: verified cumulative R24 (688 source entries). The concrete `RI_WordSearch.log` shows 36 Find calls, 34 rejected backward repeats of the same table-cell hit `[973,995]` despite search requests moving from 996 onward, one actual replacement and a successful completion after 6.652 seconds; the 5,000-iteration guard did not trigger.
+- Root cause in `ThisAddIn.WordSearchHelper.vb`: fallback strategies 3 (anchored canonical map) and 4 (windowed canonical map) could return hits whose back-mapped coordinates lay outside the caller's requested search area. Strategies 0 and 1 already reject such hits. Word table-cell boundaries may cause a regressing character-to-Range backmap; the caller's replace scan correctly discards the stale hit but previously had to retry it many times.
+- Correction: enforce the *caller-search-area* bounds on back-mapped hits in both fallback strategies, including any range extension by strategy 4; continue inspecting later canonical candidates within the same slice/window when an earlier candidate is rejected. Preserve all four strategies, normalization, revision handling, replacement sequencing, cell-boundary handling, user cancellation and the existing R24 diagnostic log.
+- Regression invariants: matches never start before the requested range or extend beyond its end; valid later hits are not skipped due to an earlier invalid mapping; repeated matches in separate table cells, selected-scope searches, long-text fallback and non-table matches retain their previous valid results; source text, cell markers, document changes and replacement selection are unchanged outside the specified match.
+- Verification: independent static comparison against R24, source-contract inspections and isolated simulated mapping/boundary tests. **Actual Windows/VSTO compilation and Word COM tests were not performed.** Retest R23 scenarios A–C first and inspect `%LOCALAPPDATA%\RedInk\RI_WordSearch.log`: a successful single-match replacement should no longer need dozens of stale backward-hit retries. Only then continue D–I, including multiple hits and selected scope.
+- Delivery: changed-only ZIP contains `Red Ink for Word/ThisAddIn.WordSearchHelper.vb` and this cumulative `Tasks.md`. No change to Form1, the R22 insert_table contract or other files. Future action depends on the real Word rerun: if the same stale hit persists, do not increase guards; capture the new numeric trace and track the exact COM selection and search-range boundaries.
+
 
 ## Completed 2026-10-25 — Agnostic external-tool API argument binding guard (R21)
 
@@ -2479,3 +2489,29 @@ Cumulative H24d source ZIP contains exactly15 genuinely changed VB files; increm
 - Changed only the diagnostic log destination to `%LOCALAPPDATA%\RedInk\RI_ConfigurationPath.log` as requested. Rotation of `.previous` files remains in the same directory, and the nonblocking logging behavior is unchanged.
 - No changes to source-selection priority, loading, retry, or message behavior. Existing logs in the former folder are not moved or deleted.
 - QA: exact replacement verified, full cumulative archive compared, changed-only archive checked; actual Windows/VSTO build not performed.
+
+## R22 – Word chat native table insertion and generated-prose typography (2026-10-25)
+
+- Word JSON protocol v1 remains unchanged; guidance revision R22 adds `insert_table` with strictly validated rectangular `rows`, optional `header_row`, and optional unique `search` plus `position=before|after` / `occurrence`, or `position=cursor` at a collapsed caret. All rows and cell contents are validated before executing the batch. The host inserts a real native Word table via `Tables.Add`, preserving native styles, revision tracking and saved change ranges. No legacy protocol changes.
+- Do not automatically insert inside an existing table cell, target multiple ambiguous anchors, or replace a non-collapsed selection. Unsupported/out-of-bounds commands fail closed. Partial Word failures remain reportable and are never described as guaranteed rollback.
+- New Word chat text arguments (not source/search anchors) and table cells use shared newly-generated-prose typography normalization for ASCII straight quotation marks and `z.B.`. Freestyle gains an explicit per-execution prompt rule, including old custom prompts; unchanged lines from the source are protected by the scoped return-path normalizer. Other Word operations and the existing Data Extractor/Outlook are unchanged.
+- QA: strict parser limits, JSON-v1 command compatibility, duplicate table insertion preservation, only one BOM, original newline format, scoped word prose typography and old R21 changed-file snapshot comparisons. Windows/VSTO compilation and real native Word table integration test pending.
+
+### R23 – Word search forward-progress guard in table-cell replacement
+- In `Red Ink for Word/ThisAddIn.WordSearchHelper.vb`, Strategy 4 of `FindLongTextAnchoredFastRange` no longer `Continue While`s on an invalid canonical back-map range before advancing the search window. This removes a genuine non-progress loop condition in the shared Word search fallback. The existing `p += Max(1, winSize - overlap)` remains the only window step and retains timeout/cancellation checks.
+- No changes to `Form1.vb`, table insertion, two-pass replacement, surgical tracked changes, field handling, or the command protocol. Excel, Outlook, `.inky` and earlier R22 typography behavior are unchanged.
+- Added regression fixture and written Word/VSTO acceptance scenarios for table-cell starts, nearby cells, repeated content, tracked changes and insert-table behavior. Real Word/VSTO execution is required to establish whether this explains the exact reported hang.
+
+## R24 — Word replacement diagnostics (2026-10-25)
+
+- Added a bounded on-disk trace for Word chat `replace` operations at `%LOCALAPPDATA%\RedInk\RI_WordSearch.log`. It records elapsed time, search calls, search start positions, loop guard, non-advancing hits, and applied/planned replacement counts. No user text or source path is persisted by this instrumentation. The trace is appended once in `Finally`, so Word search performance is not affected by per-iteration filesystem writes. The file is truncated after 512 KB.
+- **No search or replacement semantics modified**: `FindLongTextInChunks`, all search strategies, table-cell handling, Word Range operations, and change tracking are unchanged from R23. The trace may document a guard hit, but is not itself a fix for the user's observed repeated search flashes.
+- Static checks: only `Red Ink for Word/Form1.vb` and `Tasks.md` changed. Native Visual Studio/VSTO build and runtime reproduction pending.
+
+## R26 — Word search file logging only under INI_APIDebug (2026-10-25)
+
+- Baseline: cumulative R25 (688 files), after the Word search range correction and successful user's practical regression tests.
+- Root cause: `SaveWordSearchTrace` unconditionally created `%LOCALAPPDATA%\RedInk\RI_WordSearch.log` and appended diagnostics even when API debugging was disabled.
+- Change: add an early `ThisAddIn.INI_APIDebug` guard inside the existing non-throwing logging routine before any directory/file operations. Enabled logging, 512 KB rotation, trace content and error handling remain unchanged. Disabled logging does not create, modify or delete an existing log.
+- Regression invariants: no Word search, replacement, table, range, track-changes, guard or runtime model behavior modified; all R25 fixes and `.inky` files retained. Existing lightweight trace creation in memory is unchanged to avoid touching the carefully tuned search logic.
+- QA: exact changed-only diff, unchanged search/replace implementation, Word property verified, BOM/CRLF and complete archive comparison; no native Windows, Visual Studio 2022 or VSTO execution performed. Runtime check: compare file timestamp/size with INI_APIDebug=False, then enable True and verify append.
