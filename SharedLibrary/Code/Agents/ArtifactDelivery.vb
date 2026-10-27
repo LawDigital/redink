@@ -475,7 +475,31 @@ Namespace Agents
             ' opt-in boundary. Keeping the delivery preparation aligned prevents a harmless
             ' artifact_state/artifact_delivery_intent hint from causing a retry-loop failure.
             ' expected_artifacts by itself is orchestration context, not artifact identity.
-            If Not hasAnyExplicitIdentity Then Return True
+            If Not hasAnyExplicitIdentity Then
+                If hasExpectedArtifacts AndAlso
+                   (System.String.Equals(stateText, "final", System.StringComparison.OrdinalIgnoreCase) OrElse
+                    System.String.Equals(intentText, "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) OrElse
+                    System.String.Equals(intentText, "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase)) Then
+                    Dim expectedItems As Newtonsoft.Json.Linq.JArray = Nothing
+                    Try
+                        If expectedRaw IsNot Nothing Then
+                            expectedItems = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(expectedRaw), Newtonsoft.Json.Linq.JArray)
+                        End If
+                    Catch ex As System.Exception
+                        expectedItems = Nothing
+                    End Try
+                    If expectedItems Is Nothing Then
+                        failureCode = "invalid_expected_artifacts"
+                        failureMessage = "expected_artifacts must be an array; use [] for an explicitly empty output contract."
+                        Return False
+                    End If
+                    If expectedItems.Count = 0 Then Return True
+                    failureCode = "explicit_artifact_identity_incomplete"
+                    failureMessage = "A declared final output requires an unambiguous logical_deliverable_id/output_slot_id and artifact_id. Select exactly one expected output slot; do not execute an untracked final producer."
+                    Return False
+                End If
+                Return True
+            End If
 
             If artifactId = "" OrElse logicalId = "" OrElse slotId = "" Then
                 failureCode = "explicit_artifact_identity_incomplete"

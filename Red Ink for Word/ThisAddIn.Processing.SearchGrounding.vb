@@ -357,8 +357,8 @@ Partial Public Class ThisAddIn
             context.VisitedUrls.Add(currentUrl)
 
             ' Use the cancellation token to abort if it exceeds the specified time
-            Dim response As HttpResponseMessage = Await httpClient.GetAsync(currentUrl, cancellationToken)
-            Dim pageHtml As String = Await response.Content.ReadAsStringAsync()
+            Dim pageHtml As System.String = Await SharedLibrary.SharedLibrary.SharedMethods.ReadWebToolTextResponseAsync(
+                httpClient, currentUrl, System.TimeSpan.FromSeconds(timeOutSeconds), cancellationToken)
 
             Dim doc As New HtmlAgilityPack.HtmlDocument()
             doc.LoadHtml(pageHtml)

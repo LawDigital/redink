@@ -37,6 +37,103 @@ Imports Newtonsoft.Json.Linq
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
+        ''' <summary>
+        ''' Bounded HTTP text retrieval shared by Office tooling hosts. Binary responses
+        ''' are rejected before decoding; download/extraction remains with those tools.
+        ''' The linked deadline covers headers AND stream reads (ResponseHeadersRead).
+        ''' </summary>
+        Public Shared Async Function ReadWebToolTextResponseAsync(
+            client As System.Net.Http.HttpClient,
+            url As System.String,
+            timeout As System.TimeSpan,
+            cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.String)
+
+            If client Is Nothing Then Throw New System.ArgumentNullException(NameOf(client))
+            Using deadline As System.Threading.CancellationTokenSource =
+                System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+                deadline.CancelAfter(timeout)
+                Using response As System.Net.Http.HttpResponseMessage =
+                    Await client.GetAsync(url, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(False)
+                    response.EnsureSuccessStatusCode()
+                    Dim mediaType As System.String = System.String.Empty
+                    If response.Content.Headers.ContentType IsNot Nothing Then
+                        mediaType = If(response.Content.Headers.ContentType.MediaType, System.String.Empty).ToLowerInvariant()
+                    End If
+                    Dim textualType As System.Boolean = mediaType.StartsWith("text/", System.StringComparison.Ordinal) OrElse
+                        mediaType = "application/json" OrElse mediaType.EndsWith("+json", System.StringComparison.Ordinal) OrElse
+                        mediaType = "application/xml" OrElse mediaType.EndsWith("+xml", System.StringComparison.Ordinal) OrElse
+                        mediaType = "application/javascript" OrElse mediaType = "application/x-javascript"
+                    If Not textualType AndAlso mediaType <> System.String.Empty AndAlso mediaType <> "application/octet-stream" Then
+                        Throw New System.IO.InvalidDataException("binary_web_content_requires_download: MIME type " & mediaType &
+                            ". Download the original file and use a document text extractor; no binary content was returned as text.")
+                    End If
+                    If response.Content.Headers.ContentLength.HasValue AndAlso
+                       response.Content.Headers.ContentLength.Value > WebToolMaxTextResponseBytes Then
+                        Throw New System.IO.InvalidDataException("web_text_response_too_large: use file download and bounded document extraction.")
+                    End If
+                    Using input As System.IO.Stream = Await response.Content.ReadAsStreamAsync().ConfigureAwait(False)
+                        Using output As New System.IO.MemoryStream()
+                            Dim buffer(8191) As System.Byte
+                            Do
+                                Dim count As System.Int32 = Await input.ReadAsync(buffer, 0, buffer.Length, deadline.Token).ConfigureAwait(False)
+                                If count = 0 Then Exit Do
+                                If output.Length + count > WebToolMaxTextResponseBytes Then
+                                    Throw New System.IO.InvalidDataException("web_text_response_too_large: streaming limit exceeded; use file download and bounded document extraction.")
+                                End If
+                                output.Write(buffer, 0, count)
+                            Loop
+                            Dim bytes As System.Byte() = output.ToArray()
+                            Dim container As System.String = DetectBinaryDocumentContainer(bytes)
+                            If container <> System.String.Empty Then
+                                Throw New System.IO.InvalidDataException("binary_web_content_requires_download: detected " & container &
+                                    " despite MIME type " & mediaType & ". Download the original file and use a document text extractor.")
+                            End If
+                            ' Retain HttpContent's BOM/charset decoding behavior, but only after bounded reading.
+                            Using boundedContent As New System.Net.Http.ByteArrayContent(bytes)
+                                If response.Content.Headers.ContentType IsNot Nothing Then
+                                    boundedContent.Headers.ContentType = response.Content.Headers.ContentType
+                                End If
+                                Dim text As System.String = Await boundedContent.ReadAsStringAsync().ConfigureAwait(False)
+                                ValidateWebToolText(text)
+                                Return text
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            End Using
+        End Function
+
+        Public Shared Sub ValidateWebToolText(text As System.String)
+            If System.String.IsNullOrEmpty(text) Then Return
+            Dim prefix As System.Byte() = System.Text.Encoding.UTF8.GetBytes(text.Substring(0, System.Math.Min(text.Length, 512)).TrimStart(System.Convert.ToChar(&HFEFF)))
+            If DetectBinaryDocumentContainer(prefix) <> System.String.Empty Then
+                Throw New System.IO.InvalidDataException("binary_web_content_requires_download: use original-file download followed by text extraction.")
+            End If
+            For index As System.Int32 = 0 To System.Math.Min(text.Length, 8192) - 1
+                Dim value As System.Int32 = System.Convert.ToInt32(text(index))
+                If value = 0 OrElse (value < 32 AndAlso value <> 9 AndAlso value <> 10 AndAlso value <> 12 AndAlso value <> 13) Then
+                    Throw New System.IO.InvalidDataException("binary_web_content_requires_download: response contains binary control characters.")
+                End If
+            Next
+        End Sub
+
+        ''' <summary>Keep complete textual evidence retrievable rather than silently clipping it.</summary>
+        Public Shared Function PrepareWebToolTextForReplay(text As System.String, sourceUrl As System.String) As System.String
+            ValidateWebToolText(text)
+            If System.String.IsNullOrEmpty(text) OrElse text.Length <= WebToolMaxInlineTextCharacters Then Return text
+            Dim preview As Newtonsoft.Json.Linq.JObject = Global.SharedLibrary.Agents.ToolResultStore.BuildSourcePreview(
+                Global.SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, "web_text", text, WebToolMaxInlineTextCharacters, sourceUrl)
+            If Not preview.Value(Of System.Boolean)("durable_snapshot") OrElse
+               System.String.IsNullOrWhiteSpace(preview.Value(Of System.String)("result_ref")) Then
+                Throw New System.IO.InvalidDataException("web_text_snapshot_unavailable: full evidence could not be retained durably; use file download and extraction.")
+            End If
+            Dim serialized As System.String = preview.ToString(Newtonsoft.Json.Formatting.None)
+            If serialized.Length > WebToolMaxInlineTextCharacters * 2 Then
+                Throw New System.IO.InvalidDataException("web_text_snapshot_unavailable: complete content could not be retained within the response budget; use file download and extraction.")
+            End If
+            Return serialized
+        End Function
+
         Private Class WebImportPageResult
             Public Property TextContent As String = ""
             Public Property FinalUrl As String = ""

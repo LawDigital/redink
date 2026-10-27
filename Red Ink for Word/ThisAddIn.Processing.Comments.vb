@@ -782,7 +782,8 @@ Partial Public Class ThisAddIn
     ''' <param name="SortByDate">Sorts output by date when true; otherwise by document order.</param>
     ''' <returns>XML payload containing summary metadata and comment nodes, or an empty string if none were exported.</returns>
     Public Shared Function BubblesExtract(ByVal rng As Microsoft.Office.Interop.Word.Range,
-                                      Optional ByVal Silent As Boolean = False, Optional ByVal SortByDate As Boolean = False) As System.String
+                                      Optional ByVal Silent As Boolean = False, Optional ByVal SortByDate As Boolean = False,
+                                      Optional ByVal TargetCommentIndex As System.Int32 = 0) As System.String
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -843,6 +844,17 @@ Partial Public Class ThisAddIn
                 End Try
 
                 For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
+                    ' A reply launched from a comment cursor targets only that comment.
+                    ' Normal selected-text extraction keeps its established all-comments behavior.
+                    If TargetCommentIndex > 0 Then
+                        Try
+                            If c.Index <> TargetCommentIndex Then Continue For
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine($"Comment index unavailable during reply extraction: {ex.Message}")
+                            Continue For
+                        End Try
+                    End If
+
                     Dim cStart As System.Int32
                     Dim cEnd As System.Int32
                     Try

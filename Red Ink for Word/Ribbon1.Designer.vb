@@ -1087,9 +1087,8 @@ Partial Class Ribbon1
 
 
     Private Async Sub Ribbon1_Load(ByVal sender As Object, ByVal e As RibbonUIEventArgs) Handles MyBase.Load
-        ' Start initialization in background (asynchronously)
-        Await InitializeAppAsync()
-        ApplyThemeAwareMenuIcon()
+        ' Register the command handlers independently of configuration initialization.
+        ' A failed initialization must not leave a visually present but inert ribbon.
 
         AddHandler RI_Correct.Click, AddressOf RI_Correct_Click
         AddHandler RI_Correct2.Click, AddressOf RI_Correct2_Click
@@ -1126,6 +1125,36 @@ Partial Class Ribbon1
         AddHandler RI_Anonymization.Click, AddressOf RI_Anonymization_Click
         AddHandler Group2.DialogLauncherClick, AddressOf Easteregg_Click
 
+        Try
+            Await InitializeAppAsync()
+        Catch ex As System.Exception
+            LogRibbonInitializationFailure("InitializeAppAsync", ex)
+        End Try
+
+        Try
+            ApplyThemeAwareMenuIcon()
+        Catch ex As System.Exception
+            LogRibbonInitializationFailure("ApplyThemeAwareMenuIcon", ex)
+        End Try
+
+    End Sub
+
+    Private Shared Sub LogRibbonInitializationFailure(ByVal operation As String, ByVal ex As System.Exception)
+        ' Log outside the add-in's configurable log path: initialization may not
+        ' have loaded the configuration yet. Never throw from the diagnostic path.
+        Try
+            Dim logDirectory As String = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "RedInk", "Diagnostics")
+            System.IO.Directory.CreateDirectory(logDirectory)
+            Dim logPath As String = System.IO.Path.Combine(logDirectory, "WordRibbonStartup.log")
+            System.IO.File.AppendAllText(logPath,
+                System.DateTime.Now.ToString("o", System.Globalization.CultureInfo.InvariantCulture) &
+                " | " & operation & System.Environment.NewLine & ex.ToString() &
+                System.Environment.NewLine & System.Environment.NewLine)
+        Catch
+            System.Diagnostics.Debug.WriteLine("Word ribbon initialization failure: " & ex.ToString())
+        End Try
     End Sub
 
 
@@ -1268,8 +1297,9 @@ Partial Class Ribbon1
             Me.RI_FreestyleRepeat.Enabled = False
         Else
             Me.RI_FreestyleRepeat.Enabled = True
-            If My.Settings.LastFreestyleWasAM Then
-                Me.RI_FreestyleRepeat.ScreenTip = Left((My.Settings.LastFreestyleModelConfig.Model & " " & My.Settings.LastFreestyleModelConfig.ModelDescription).Trim() & ": " & LastFreestylePrompt, 1023)
+            Dim savedFreestyleModel As Global.SharedLibrary.SharedLibrary.ModelConfig = My.Settings.LastFreestyleModelConfig
+            If My.Settings.LastFreestyleWasAM AndAlso savedFreestyleModel IsNot Nothing Then
+                Me.RI_FreestyleRepeat.ScreenTip = Left((savedFreestyleModel.Model & " " & savedFreestyleModel.ModelDescription).Trim() & ": " & LastFreestylePrompt, 1023)
             Else
                 Me.RI_FreestyleRepeat.ScreenTip = Left(LastFreestylePrompt, 1023)
             End If

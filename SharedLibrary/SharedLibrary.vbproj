@@ -572,6 +572,7 @@
     <Compile Include="Code\Agents\SubAgentLogScope.vb" />
     <Compile Include="Code\Agents\RunEffortEstimate.vb" />
     <Compile Include="Code\Agents\ToolResultStore.vb" />
+    <Compile Include="Code\Agents\ToolResultDiagnostics.vb" />
     <Compile Include="Code\Agents\ToolingControlPlaneStore.vb" />
     <Compile Include="Code\Agents\WebGroundingTool.vb" />
     <Compile Include="Code\Agents\WebView2JsSandbox.vb" />
