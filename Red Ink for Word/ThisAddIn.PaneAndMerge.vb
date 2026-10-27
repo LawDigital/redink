@@ -212,7 +212,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Async Function ApplyBalloonMergeContextAsync(context As BalloonMergeContext,
-                                                        Silent As System.Boolean) As System.Threading.Tasks.Task(Of System.Boolean)
+                                                        Silent As System.Boolean,
+                                                        Optional onDocumentWriteback As System.Action(Of Microsoft.Office.Interop.Word.Range) = Nothing) As System.Threading.Tasks.Task(Of System.Boolean)
         Dim targetRange As Microsoft.Office.Interop.Word.Range = context.TargetRange.Duplicate
         Dim newtext As System.String = context.FullCommentText
         Dim instructionSource As System.String = "full_comment"
@@ -302,7 +303,8 @@ Partial Public Class ThisAddIn
             False,
             True,
             False,
-            INI_KeepFormatCap)
+            INI_KeepFormatCap,
+            onDocumentWriteback:=onDocumentWriteback)
 
         Return True
     End Function

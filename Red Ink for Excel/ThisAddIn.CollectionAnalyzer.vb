@@ -437,7 +437,9 @@ Friend NotInheritable Class CollectionAnalyzerDialog
         Next
         Dim selection As Integer = Global.SharedLibrary.SharedLibrary.SharedMethods.SelectValue(
             items, 1,
-            "Choose an earlier matching analysis to resume, or start a new one. Cancel leaves all files unchanged.",
+            "Select an earlier analysis or start a new one. Changing models does not hide prior runs: " &
+            "verified findings will be reused, and any new model calls will use the currently selected model. " &
+            "Cancel leaves all files unchanged.",
             "Red Ink – Collection Analyzer", Me)
         If selection = 0 Then Return Nothing
         If selection = 1 Then Return String.Empty
@@ -512,6 +514,12 @@ Friend NotInheritable Class CollectionAnalyzerDialog
                 AppendStatus("New analysis selected. Existing checkpoints will not be reused.")
             Else
                 AppendStatus("Resuming selected analysis: " & System.IO.Path.GetFileName(selectedRun))
+                Dim chosenInfo As CollectionAnalysisRunInfo = previousRuns.Find(
+                    Function(run) String.Equals(run.DirectoryPath, selectedRun, System.StringComparison.OrdinalIgnoreCase))
+                If chosenInfo IsNot Nothing AndAlso chosenInfo.ModelChanged Then
+                    AppendStatus("Model changed: verified checkpoints from the earlier model will be reused. " &
+                                 "Remaining processing will use the currently selected model.")
+                End If
             End If
             Dim reporter As New Progress(Of String)(Sub(message) AppendStatus(message))
             Dim result As CollectionAnalysisResult = Await CollectionAnalysisService.RunAsync(options, modelRun.InvokeModel, _cts.Token, reporter)

@@ -1472,8 +1472,22 @@ Partial Public Class ThisAddIn
             Dim application As Word.Application = Globals.ThisAddIn.Application
             Dim selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-            ' Check if no text is selected (insertion point only)
+            ' Preserve the normal text-selection behavior. An insertion point in a Word
+            ' comment is additionally eligible for Reply to comments, even though no
+            ' document text was selected.
             If selection.Type = WdSelectionType.wdSelectionIP Then NoText = True
+
+            Dim activePushbackComment As Microsoft.Office.Interop.Word.Comment = Nothing
+            Dim cursorOnComment As System.Boolean = False
+            Try
+                If selection.Range.Start = selection.Range.End Then
+                    cursorOnComment = TryResolveActiveComment(selection, activePushbackComment)
+                    If cursorOnComment Then NoText = True
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"Freestyle comment detection failed: {ex.Message}")
+            End Try
+            Dim replyTargetCommentIndex As System.Int32 = 0
 
             ' Check if the selected model supports tooling (can call tools)f
             Dim modelSupportsTool As Boolean = False
@@ -1604,7 +1618,7 @@ SkipPromptInput:
                     .Heading = "What would you like Red Ink to do?",
                     .ModeCaption = "Output",
                     .ModelText = If(UseSecondAPI, INI_Model_2, INI_Model),
-                    .ContextStatusText = If(NoText, "No text selected", "The current selection will be used as context"),
+                    .ContextStatusText = If(cursorOnComment, "Cursor in a comment; reply to this comment is available", If(NoText, "No text selected", "The current selection will be used as context")),
                     .LastPrompt = My.Settings.LastPrompt,
                     .PromptLibraryEnabled = INI_PromptLib,
                     .ShowShortCommandsHint = True,
@@ -1804,8 +1818,8 @@ SkipPromptInput:
                     .Text = "Reply to comments",
                     .Prefix = PushbackPrefix,
                     .ManualSyntax = PushbackPrefix & " / " & PushbackPrefix2,
-                    .IsAvailable = Not NoText,
-                    .UnavailableReason = "Replying to comments requires selected text."
+                    .IsAvailable = Not NoText OrElse cursorOnComment,
+                    .UnavailableReason = "Select text with comments or place the cursor in a comment."
                 }
 
                 modePushback.Prefixes.Add(PushbackPrefix)
@@ -3796,24 +3810,30 @@ SkipPromptInput:
                 DoPane = True
                 DoClipboard = True
                 DoChunks = False
-            ElseIf OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase) Then
-                If NoText Then
-                    ShowPrefixRequiresSelection(PushbackPrefix)
+            ElseIf OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase) OrElse
+                   OtherPrompt.StartsWith(PushbackPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                Dim requestedPrefix As System.String = If(
+                    OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase),
+                    PushbackPrefix, PushbackPrefix2)
+                If NoText AndAlso Not cursorOnComment Then
+                    ShowPrefixRequiresSelection(requestedPrefix)
                     Return
                 End If
-                OtherPrompt = OtherPrompt.Substring(PushbackPrefix.Length).Trim()
+                OtherPrompt = OtherPrompt.Substring(requestedPrefix.Length).Trim()
                 DoPushback = True
                 DoChunks = False
                 DoBubblesExtract = True
-            ElseIf OtherPrompt.StartsWith(PushbackPrefix2, StringComparison.OrdinalIgnoreCase) Then
-                If NoText Then
-                    ShowPrefixRequiresSelection(PushbackPrefix2)
-                    Return
+
+                If cursorOnComment Then
+                    ' Use the comment's document anchor rather than the live cursor in
+                    ' the comment story. This preserves the existing reply pipeline
+                    ' (BubblesExtract -> LLM -> ReplyBubbles), not the comment editor.
+                    If Not TrySelectPushbackCommentAnchor(activePushbackComment, replyTargetCommentIndex) Then
+                        ShowCustomMessageBox("The comment anchor could not be resolved. Please select the associated document text and retry.")
+                        Return
+                    End If
+                    NoText = False
                 End If
-                OtherPrompt = OtherPrompt.Substring(PushbackPrefix2.Length).Trim()
-                DoPushback = True
-                DoChunks = False
-                DoBubblesExtract = True
             ElseIf OtherPrompt.StartsWith(FilePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(FilePrefix.Length).Trim()
                 DoFiles = True
@@ -4304,7 +4324,8 @@ SkipPromptInput:
                 processingPrompt &= System.Environment.NewLine & archivePrepared.ContextText
             End If
             Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
-                Dim result As String = Await ProcessSelectedText(processingPrompt, True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel)
+                Dim result As String = Await ProcessSelectedText(processingPrompt, True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel,
+                    TargetReplyCommentIndex:=replyTargetCommentIndex)
             End Using
 
         Catch ex As System.Exception
@@ -4317,6 +4338,78 @@ SkipPromptInput:
             End If
         End Try
     End Sub
+
+    ''' <summary>
+    ''' Resolves the main-document anchor for a comment and selects a non-empty
+    ''' range so the existing text-based reply pipeline can extract its context.
+    ''' Does not modify the document or the comment text.
+    ''' </summary>
+    Private Shared Function TrySelectPushbackCommentAnchor(
+        ByVal targetComment As Microsoft.Office.Interop.Word.Comment,
+        ByRef targetCommentIndex As System.Int32) As System.Boolean
+
+        targetCommentIndex = 0
+        If targetComment Is Nothing Then Return False
+
+        Try
+            Dim doc As Microsoft.Office.Interop.Word.Document = targetComment.Range.Document
+            If doc Is Nothing Then Return False
+
+            Dim anchor As Microsoft.Office.Interop.Word.Range = Nothing
+            Try
+                anchor = targetComment.Scope.Duplicate
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"Comment scope unavailable: {ex.Message}")
+            End Try
+            If anchor Is Nothing Then
+                Try
+                    anchor = targetComment.Reference.Duplicate
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine($"Comment reference unavailable: {ex.Message}")
+                    Return False
+                End Try
+            End If
+            If anchor Is Nothing OrElse anchor.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return False
+
+            Dim mainStory As Microsoft.Office.Interop.Word.Range = doc.StoryRanges(Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory)
+            If mainStory Is Nothing Then Return False
+            Dim startPos As System.Int32 = System.Math.Max(mainStory.Start, System.Math.Min(anchor.Start, mainStory.End))
+            Dim endPos As System.Int32 = System.Math.Max(startPos, System.Math.Min(anchor.End, mainStory.End))
+
+            ' Point-anchored comments can have an empty Scope/Reference. Select one
+            ' adjoining document character, not the entire document: BubblesExtract
+            ' otherwise interprets an empty range as a whole-document request.
+            If startPos = endPos Then
+                If endPos < mainStory.End Then
+                    endPos += 1
+                ElseIf startPos > mainStory.Start Then
+                    startPos -= 1
+                Else
+                    Return False
+                End If
+            End If
+
+            Dim index As System.Int32 = targetComment.Index
+            If index <= 0 Then Return False
+
+            ' Word.Document.Range declares both arguments ByRef As Object. Passing
+            ' Int32 variables directly causes BC32029 with Option Strict On.
+            Dim wordRangeStart As System.Object = startPos
+            Dim wordRangeEnd As System.Object = endPos
+            doc.Range(Start:=wordRangeStart, End:=wordRangeEnd).Select()
+            Dim selected As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
+            If selected Is Nothing OrElse
+               selected.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse
+               selected.Range.Start >= selected.Range.End OrElse
+               System.String.IsNullOrWhiteSpace(selected.Range.Text) Then Return False
+
+            targetCommentIndex = index
+            Return True
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine($"Selecting comment anchor for pushback failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
 
 End Class
 
