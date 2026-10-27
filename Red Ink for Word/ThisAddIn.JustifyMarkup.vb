@@ -281,7 +281,10 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            Dim markedUpText As String = SafeRangeText(sel.Range)
+            ' Preserve the original document anchor across dialogs and the LLM call.
+            ' Selection is a live Office object and must not be sampled after Await.
+            Dim selectedAnchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
+            Dim markedUpText As String = SafeRangeText(selectedAnchor)
             If String.IsNullOrWhiteSpace(markedUpText) Then
                 ShowCustomMessageBox("The selection is empty. Please select the marked-up clause text.")
                 Return
@@ -294,7 +297,7 @@ Partial Public Class ThisAddIn
 
             ' Get the revised (visible) text — treats all tracked changes as accepted
             ' so the LLM sees what the clause looks like after markup.
-            Dim revisedText As String = GetVisibleTextSafe(sel.Range)
+            Dim revisedText As String = GetVisibleTextSafe(selectedAnchor)
             If String.IsNullOrWhiteSpace(revisedText) Then
                 revisedText = markedUpText ' fall back to raw text if extraction fails
             End If
@@ -337,12 +340,11 @@ Partial Public Class ThisAddIn
             ' Insert justification bubble on the selection
             Await EnsureUIThread()
 
-            ' Grab a stable range from the document (not the live Selection)
-            Dim anchorRange As Microsoft.Office.Interop.Word.Range = doc.Range(sel.Range.Start, sel.Range.End)
-            InsertJustificationBubble(doc, anchorRange, justification, "")
-
-            ' Remove the used snapshot from the list
-            OriginalClauseSnapshots.RemoveAt(picked - 1)
+            ' Anchor to the original selected passage, not the current live Selection.
+            ' A used snapshot is removed only after the Word comment exists.
+            If InsertJustificationBubble(doc, selectedAnchor, justification, "") Then
+                OriginalClauseSnapshots.RemoveAt(picked - 1)
+            End If
 
         Catch ex As System.Exception
             Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in JustifyMarkup:{Environment.NewLine}{ex.Message}", "Error")
@@ -391,75 +393,78 @@ Partial Public Class ThisAddIn
     ' ========================= Shared Bubble Insertion =========================
 
     ''' <summary>
-    ''' Inserts a justification comment bubble on a given range. Follows the same
-    ''' three-tier pattern as InsertMarkupReviewResults in MarkupReview.vb:
-    '''   1. Direct range + InsertMarkdownToComment (when INI_MarkdownBubbles is enabled)
-    '''   2. Direct range + plain text comment
-    '''   3. AddNoticeBubbleAt fallback (last resort)
-    '''
-    ''' This helper is shared by JustifyMarkup and BalloonMergeWithJustification.
+    ''' Creates and validates a justification comment on the revised document range.
+    ''' The text is committed before optional formatting, which may fall back to
+    ''' plaintext in the SAME comment. No out-of-position or silent fallbacks.
     ''' </summary>
     ''' <param name="doc">Target Word document.</param>
-    ''' <param name="anchorRange">Range to anchor the comment to.</param>
-    ''' <param name="justificationText">The justification text to insert into the bubble.</param>
-    ''' <param name="prefix">Prefix appended after AN5 in the comment (e.g. " Justify Markup").</param>
-    Public Sub InsertJustificationBubble(doc As Microsoft.Office.Interop.Word.Document,
-                                          anchorRange As Microsoft.Office.Interop.Word.Range,
-                                          justificationText As String,
-                                          Optional prefix As String = "")
-        If doc Is Nothing OrElse String.IsNullOrWhiteSpace(justificationText) Then Return
-
-        Dim app As Microsoft.Office.Interop.Word.Application = doc.Application
-        Dim win As Microsoft.Office.Interop.Word.Window = Nothing
-        Try : win = doc.ActiveWindow : Catch : End Try
-
-        ' If no usable anchor range, fall back to AddNoticeBubbleAt
+    ''' <param name="anchorRange">Range containing the revised text.</param>
+    ''' <param name="justificationText">Explanation to add.</param>
+    ''' <param name="prefix">Optional comment label suffix.</param>
+    Public Function InsertJustificationBubble(doc As Microsoft.Office.Interop.Word.Document,
+                                                anchorRange As Microsoft.Office.Interop.Word.Range,
+                                                justificationText As String,
+                                                Optional prefix As String = "") As System.Boolean
+        If doc Is Nothing Then Throw New System.ArgumentNullException(NameOf(doc))
         If anchorRange Is Nothing Then
-            AddNoticeBubbleAt(doc, 0, justificationText, prefix)
-            Return
+            Throw New System.InvalidOperationException("No valid document range is available for the justification comment.")
+        End If
+        If System.String.IsNullOrWhiteSpace(justificationText) Then
+            Throw New System.InvalidOperationException("The justification is empty; no comment was inserted.")
+        End If
+        If Not IsSameProcessingDocument(anchorRange.Document, doc) Then
+            Throw New System.InvalidOperationException("The justification anchor belongs to a different Word document.")
         End If
 
-        Try
-            Using BeginMarkupAuthorScope(app)
-                If INI_MarkdownBubbles Then
-                    ' Markdown-enabled bubble (same pattern as MarkupReview lines 1253-1263)
-                    Dim cmt As Microsoft.Office.Interop.Word.Comment = Nothing
-                    Try
-                        cmt = doc.Comments.Add(Range:=anchorRange, Text:="")
-                    Catch exAdd As System.Runtime.InteropServices.COMException
-                        cmt = doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
-                    Catch exAdd2 As System.Exception
-                        cmt = doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
-                    End Try
+        Dim commentText As System.String = $"{AN5}{prefix}: {justificationText}"
+        Using BeginMarkupAuthorScope(doc.Application)
+            ' Create the real Word comment WITH text first. A formatting failure
+            ' must never leave an empty comment or hide an insertion failure.
+            Dim newComment As Microsoft.Office.Interop.Word.Comment =
+                doc.Comments.Add(Range:=anchorRange, Text:=commentText)
+            If newComment Is Nothing Then
+                Throw New System.InvalidOperationException("Word did not create the justification comment.")
+            End If
 
+            If INI_MarkdownBubbles Then
+                Try
+                    Dim commentRange As Microsoft.Office.Interop.Word.Range = newComment.Range
+                    Dim commentWindow As Microsoft.Office.Interop.Word.Window = Nothing
                     Try
-                        Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                        cRng.Text = ""
-                        If win IsNot Nothing Then
-                            Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
-                            Try
-                                win.View.ShowRevisionsAndComments = True
-                                InsertMarkdownToComment(cRng, $"{AN5}{prefix}: {justificationText}")
-                            Finally
-                                win.View.ShowRevisionsAndComments = prevShow
-                            End Try
-                        Else
-                            InsertMarkdownToComment(cRng, $"{AN5}{prefix}: {justificationText}")
-                        End If
-                    Catch exMk As System.Exception
-                        cmt.Range.Text = $"{AN5}{prefix}: {justificationText}"
+                        commentWindow = doc.ActiveWindow
+                    Catch
                     End Try
-                Else
-                    ' Plain text bubble (same pattern as MarkupReview line 1265)
-                    doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
-                End If
-            End Using
+                    If commentWindow IsNot Nothing Then
+                        ' Match the existing markdown-comment insertion contract:
+                        ' briefly make comments visible for rich formatting.
+                        Dim previousShow As System.Boolean = commentWindow.View.ShowRevisionsAndComments
+                        Try
+                            commentWindow.View.ShowRevisionsAndComments = True
+                            commentRange.Text = ""
+                            InsertMarkdownToComment(commentRange, commentText)
+                        Finally
+                            commentWindow.View.ShowRevisionsAndComments = previousShow
+                        End Try
+                    Else
+                        commentRange.Text = ""
+                        InsertMarkdownToComment(commentRange, commentText)
+                    End If
+                    If System.String.IsNullOrWhiteSpace(newComment.Range.Text) Then
+                        Throw New System.InvalidOperationException("The formatted justification comment is empty.")
+                    End If
+                Catch exFormat As System.Exception
+                    ' Safe formatting fallback: keep the ALREADY CREATED comment
+                    ' attached to the same anchor instead of inserting a second one.
+                    newComment.Range.Text = commentText
+                End Try
+            End If
 
-        Catch ex As System.Exception
-            ' Last-resort fallback (same as MarkupReview line 1268)
-            AddNoticeBubbleAt(doc, 0, justificationText, prefix)
-        End Try
-    End Sub
+            If System.String.IsNullOrWhiteSpace(newComment.Range.Text) Then
+                Throw New System.InvalidOperationException("Word created an empty justification comment.")
+            End If
+        End Using
+        Return True
+    End Function
 
     ' ========================= BalloonMerge + Justify =========================
 
@@ -495,61 +500,56 @@ Partial Public Class ThisAddIn
             Dim dummyRange As Range = Nothing
             Dim originalText As String = GetVisibleTextSafe(targetRange, restoreRange, dummyRange)
 
-            ' Remember the start position; after merge the selection collapses to the end
-            ' of the replaced text, giving us the end boundary.
-            Dim premergeStart As Integer = targetRange.Start
+            ' Capture the ACTUAL revised range during the processing writeback.
+            ' Application.Selection is not a reliable output contract: Word may
+            ' restore an earlier selection before this async method resumes.
+            Dim committedRange As Microsoft.Office.Interop.Word.Range = Nothing
+            Dim captureWriteback As System.Action(Of Microsoft.Office.Interop.Word.Range) =
+                Sub(changedRange As Microsoft.Office.Interop.Word.Range)
+                    If changedRange IsNot Nothing Then
+                        Try
+                            committedRange = changedRange.Duplicate
+                        Catch exCapture As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Could not duplicate the revised Word range: " & exCapture.ToString())
+                        End Try
+                    End If
+                End Sub
 
-            ' Apply the same captured comment and instruction source.
-            If Not Await ApplyBalloonMergeContextAsync(mergeContext, Silent) Then Return
+            If Not Await ApplyBalloonMergeContextAsync(mergeContext, Silent, captureWriteback) Then Return
 
             Await EnsureUIThread()
 
-            Try
-                Dim targetWindow As Word.Window = doc.ActiveWindow
-                If targetWindow IsNot Nothing Then
-                    targetWindow.Activate()
-                End If
-            Catch
-            End Try
+            If committedRange Is Nothing Then
+                Throw New System.InvalidOperationException(
+                    "The merge returned without a captured document writeback range. No justification comment could be created. " &
+                    "Check whether the selected merge mode modified the document.")
+            End If
 
-            If app.Selection Is Nothing OrElse
-               app.Selection.Range Is Nothing OrElse
-               app.Selection.Range.Document Is Nothing OrElse
-               Not Object.ReferenceEquals(app.Selection.Range.Document, doc) Then
+            Dim bubbleRange As Microsoft.Office.Interop.Word.Range = Nothing
+            Dim revisedText As String = GetVisibleTextSafe(committedRange, Nothing, bubbleRange)
+            If System.String.IsNullOrWhiteSpace(revisedText) Then
+                Throw New System.InvalidOperationException("The revised text could not be read after the merge.")
+            End If
+
+            ' A no-op merge needs no explanation. Do not silently skip a real
+            ' change merely because the restored Word cursor was at its start.
+            If System.String.Equals(originalText.Trim(), revisedText.Trim(), System.StringComparison.Ordinal) Then
+                ShowCustomMessageBox("The merge did not change the selected text; no justification was needed.")
                 Return
             End If
 
-            ' Reconstruct the revised range: premergeStart -> collapsed cursor position
-            Dim postmergeEnd As Integer = app.Selection.Range.Start
-            If postmergeEnd <= premergeStart Then
-                Return
-            End If
-
-            Dim revisedRange As Range = doc.Range(premergeStart, postmergeEnd)
-
-            ' Read revised visible text and capture the valid range for the bubble
-            Dim bubbleRange As Range = Nothing
-            Dim revisedText As String = GetVisibleTextSafe(revisedRange, Nothing, bubbleRange)
-
-            ' Only justify if text actually changed
-            If String.IsNullOrWhiteSpace(revisedText) OrElse
-               String.Equals(originalText.Trim(), revisedText.Trim(), StringComparison.Ordinal) Then
-                Return
-            End If
-
-            ' Get justification from LLM — pass the balloon comment as context (no user prompt)
+            ' Generate the explanation using the original and the committed text.
             Dim justification As String = Await GetJustificationFromLLM(
                 originalText, revisedText, balloonCommentText,
                 "BALLOONCOMMENT",
                 $"Use the balloon comment above to better justify the revision — it contains the instruction or proposal that motivated the revision; beware, it may be of internal nature, in particular if it starts with '{AN5}:'.")
 
-            If String.IsNullOrWhiteSpace(justification) Then
-                ShowCustomMessageBox("The LLM did not return a justification for the merge changes.")
-                Return
+            If System.String.IsNullOrWhiteSpace(justification) Then
+                Throw New System.InvalidOperationException("The LLM returned no justification for the applied changes.")
             End If
 
-            ' Insert justification bubble using the range captured by GetVisibleTextSafe
-            Dim anchorForBubble As Range = If(bubbleRange, revisedRange)
+            Await EnsureUIThread()
+            Dim anchorForBubble As Microsoft.Office.Interop.Word.Range = If(bubbleRange, committedRange)
             InsertJustificationBubble(doc, anchorForBubble, justification, "")
 
         Catch ex As System.Exception

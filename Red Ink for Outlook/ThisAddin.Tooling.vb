@@ -185,6 +185,8 @@ Partial Public Class ThisAddIn
 
         Public Property ResultKind As String
         Public Property ErrorCode As String
+        ' Diagnostic data only; source retry hints do not authorize execution/recovery.
+        Public Property ServiceErrorDetails As SharedLibrary.Agents.ToolServiceErrorInfo
 
         Public Property PreservedResultRef As System.String
         Public Property ModelReplayContent As String
@@ -196,6 +198,8 @@ Partial Public Class ThisAddIn
 
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
+        ' Set only by the host/tool adapter when no execution occurred; not parsed from model output.
+        Public Property RejectedBeforeExecution As System.Boolean
 
         ''' <summary>True when a tool classifies a failed result as recoverable planning/input feedback that should not count toward the generic host failure circuit breaker.</summary>
         Public Property RepairLoopRecoverable As Boolean
@@ -1052,6 +1056,11 @@ Partial Public Class ThisAddIn
         context.AuthoritativeToolRegistry = authoritativeRegistrySource
         context.AuthoritativeToolRegistrySnapshot = authoritativeRegistrySnapshot
         context.HostKind = "Outlook"
+        context.SequencingState.ReadOnlyIndependentToolNames =
+            New System.Collections.Generic.HashSet(Of System.String)(
+                SharedLibrary.Agents.HostToolRegistration.GetReadOnlyIndependentToolNames(
+                    SharedLibrary.Agents.ToolingHostKind.Outlook, selectedTools),
+                System.StringComparer.OrdinalIgnoreCase)
         context.SequencingState.DeliverableCapableToolNames =
             New HashSet(Of String)(
                 SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
@@ -2277,6 +2286,12 @@ Partial Public Class ThisAddIn
                                 tc.CallId)
                         End If
 
+                        If context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.NormalizeDeclaredProducerArtifactArguments(
+                               normalizedToolName, tc.Arguments, tc.CallId) Then
+                            context.Log("Bound a declared final output to its unique logical deliverable slot.", "diag")
+                        End If
+
                         Dim recoveryScopeKey As String =
                             SharedLibrary.Agents.ToolCallSequencing.ResolveExplicitRecoveryScopeKey(tc.Arguments)
                         auditRecoveryScopeKey = recoveryScopeKey
@@ -3195,7 +3210,9 @@ Partial Public Class ThisAddIn
                                                                           If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling)),
                                                     terminal:=toolResponse.RepairLoopTerminal,
                                                     recoveryScopeKey:=recoveryScopeKey,
-                                                    retryCorrelationArguments:=tc.Arguments)
+                                                    retryCorrelationArguments:=tc.Arguments,
+                                                    rejectedBeforeExecution:=toolResponse.RejectedBeforeExecution,
+                                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails)
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -3411,7 +3428,8 @@ Partial Public Class ThisAddIn
                                     returnedToParent:=skippedStructuredAgentFailure,
                                     toolErrorHandling:=If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling),
                                     terminal:=True,
-                                    recoveryScopeKey:=recoveryScopeKey)
+                                    recoveryScopeKey:=recoveryScopeKey,
+                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails)
                             End If
                         End If
 
@@ -3424,8 +3442,8 @@ Partial Public Class ThisAddIn
                             context.LastToolExecutionRepeatCount = 1
                         End If
 
-                        If Not toolResponse.RepairLoopTerminal AndAlso
-                           context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
+                        If Not toolConfig.AllowRepeatedIdenticalCalls AndAlso Not toolResponse.RepairLoopTerminal AndAlso
+                           context.LastToolExecutionRepeatCount >= System.Math.Max(3, context.DuplicateToolExecutionAbortThreshold) Then
                             context.LogWarn($"Detected repeated identical tool execution for '{tc.ToolName}'. Terminating this tooling run to prevent an execution loop.")
                             ToolingFileLogger.LogWarn(
                                     "Terminating tooling run after repeated identical tool execution.",
@@ -3455,6 +3473,18 @@ Partial Public Class ThisAddIn
                                 cancellationToken)
 
                             stopCurrentBatchAfterTool = True
+                            Exit For
+                        End If
+
+                        If Not toolConfig.AllowRepeatedIdenticalCalls AndAlso Not toolResponse.RepairLoopTerminal AndAlso
+                           context.LastToolExecutionRepeatCount = System.Math.Max(2, context.DuplicateToolExecutionAbortThreshold - 1) Then
+                            context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRepeatedCallRecoveryGuidance()
+                            context.PendingGuardTitle = "HOST REPEATED CALL RECOVERY"
+                            context.PendingRejectedTurnExplanation = "Identical call/outcome repeated; use the existing result or a distinct necessary recovery step."
+                            context.PendingRejectedAssistantTurn = System.String.Empty
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
+                            context.Log("Repeated call warning issued before circuit breaker; yielding results for one recovery turn.", "warn")
                             Exit For
                         End If
 
@@ -4060,6 +4090,8 @@ Partial Public Class ThisAddIn
                             End If
 
                             If context.SequencingState IsNot Nothing Then
+                                SharedLibrary.Agents.ToolCallSequencing.CommitNonessentialFailureAcknowledgements(
+                                    context.SequencingState, turnValidation, Sub(message As System.String) context.Log(message, "diag"))
                                 context.SequencingState.FinalizeObservedAlternativeRecoveries("alternative_recovery_finalized")
                             End If
                             SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
@@ -4389,6 +4421,8 @@ Partial Public Class ThisAddIn
                                 End If
 
                                 If context.SequencingState IsNot Nothing Then
+                                    SharedLibrary.Agents.ToolCallSequencing.CommitNonessentialFailureAcknowledgements(
+                                        context.SequencingState, forcedValidation, Sub(message As System.String) context.Log(message, "diag"))
                                     context.SequencingState.FinalizeObservedAlternativeRecoveries("alternative_recovery_finalized")
                                 End If
                                 SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
@@ -5791,6 +5825,16 @@ Partial Public Class ThisAddIn
 
     Private Sub ApplyStructuredAgentResult(response As ToolResponse, context As ToolExecutionContext)
         If response Is Nothing Then Return
+
+        Dim serviceError As SharedLibrary.Agents.ToolServiceErrorInfo = Nothing
+        If SharedLibrary.Agents.ToolResultDiagnostics.TryReadServiceError(response.Response, serviceError) Then
+            response.ServiceErrorDetails = serviceError
+            ' Keep service codes separate from host-owned preflight/recovery codes.
+            ' New diagnostics must not change success, failure category or retry policy.
+            If context IsNot Nothing Then
+                context.Log("Structured tool-service diagnostics: " & serviceError.ToDiagnosticJson(), "diag")
+            End If
+        End If
 
         Dim errorCode As String = ""
         Dim resultKind As String = ""

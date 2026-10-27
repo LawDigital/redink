@@ -688,18 +688,31 @@ Namespace Agents
                 End If
 
                 Dim result As PythonExecuteToolCoreResult = CreateResultFromRun(runResult, duration)
-                If options.PublishOutputFile IsNot Nothing Then
-                    Dim expectedResultsRoot As System.String = System.IO.Path.GetFullPath(System.IO.Path.Combine(callRoot, "results", runResult.SessionId.ToString("D")))
-                    For Each output As RedInkPythonAgentOutput In runResult.Outputs
-                        Try
-                            If Not ValidatePublishedOutput(output, expectedResultsRoot, logDiag) Then
-                                Continue For
-                            End If
-                            options.PublishOutputFile.Invoke(output)
-                        Catch ex As System.Exception
-                            SafeLog(logDiag, ex.ToString())
-                        End Try
-                    Next
+                Dim publicationFailed As System.Boolean = False
+                If runResult.Outputs IsNot Nothing AndAlso runResult.Outputs.Count > 0 Then
+                    If options.PublishOutputFile Is Nothing Then
+                        publicationFailed = True
+                        SafeLog(logWarn, "Output files exist but no host publisher is configured.")
+                    Else
+                        Dim expectedResultsRoot As System.String = System.IO.Path.GetFullPath(System.IO.Path.Combine(callRoot, "results", runResult.SessionId.ToString("D")))
+                        For Each output As RedInkPythonAgentOutput In runResult.Outputs
+                            Try
+                                If Not ValidatePublishedOutput(output, expectedResultsRoot, logDiag) Then
+                                    publicationFailed = True
+                                    Continue For
+                                End If
+                                options.PublishOutputFile.Invoke(output)
+                            Catch ex As System.Exception
+                                publicationFailed = True
+                                SafeLog(logDiag, ex.ToString())
+                            End Try
+                        Next
+                    End If
+                End If
+                If publicationFailed Then
+                    retainDiagnostics = True
+                    SafeLog(logWarn, "One or more output files failed validation/publication; execution is not a completed delivery.")
+                    Return CreateLocalFailure("OUTPUT_PUBLICATION_FAILED", "failed", "One or more generated files could not be validated or published by the host. Inspect the diagnostic log and retry delivery; no complete delivery is claimed.")
                 End If
                 If Not result.Success Then
                     retainDiagnostics = True

@@ -503,42 +503,10 @@ Partial Public Class ThisAddIn
 
 
     Private Function TryExtractToolServiceErrorMessage(rawResponse As System.String, ByRef errorMessage As System.String) As System.Boolean
-        errorMessage = System.String.Empty
-        If System.String.IsNullOrWhiteSpace(rawResponse) Then Return False
-        Dim errorCode As System.String = System.String.Empty
-        Dim resultKind As System.String = System.String.Empty
-        If SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(rawResponse, errorCode, resultKind) Then
-            If Not SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorMessage(rawResponse, errorMessage) Then
-                errorMessage = "Tool service reported failure: " & errorCode
-            End If
-            Return True
-        End If
-        Try
-            Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(rawResponse)
-            Dim result As Newtonsoft.Json.Linq.JObject = TryCast(root("result"), Newtonsoft.Json.Linq.JObject)
-            If root("isError") IsNot Nothing OrElse result Is Nothing Then result = root
-            Dim isError As System.Boolean = False
-            Dim isErrorToken As Newtonsoft.Json.Linq.JToken = result("isError")
-            If isErrorToken Is Nothing OrElse Not System.Boolean.TryParse(isErrorToken.ToString().Trim(), isError) OrElse Not isError Then Return False
-            ' Recognition is authoritative even when the optional human-readable content is malformed.
-            errorMessage = "Tool service returned an error."
-            Dim messages As New System.Collections.Generic.List(Of System.String)()
-            Dim content As Newtonsoft.Json.Linq.JArray = TryCast(result("content"), Newtonsoft.Json.Linq.JArray)
-            If content IsNot Nothing Then
-                For Each item As Newtonsoft.Json.Linq.JToken In content
-                    Dim entry As Newtonsoft.Json.Linq.JObject = TryCast(item, Newtonsoft.Json.Linq.JObject)
-                    Dim textToken As Newtonsoft.Json.Linq.JToken = If(entry Is Nothing, Nothing, entry("text"))
-                    If textToken IsNot Nothing AndAlso textToken.Type = Newtonsoft.Json.Linq.JTokenType.String Then
-                        Dim message As System.String = textToken.Value(Of System.String)().Trim()
-                        If message <> System.String.Empty Then messages.Add(message)
-                    End If
-                Next
-            End If
-            If messages.Count > 0 Then errorMessage = System.String.Join(" ", messages)
-            Return True
-        Catch ex As System.Exception
-            Return errorMessage <> System.String.Empty
-        End Try
+        Dim details As SharedLibrary.Agents.ToolServiceErrorInfo = Nothing
+        Dim recognized As System.Boolean = SharedLibrary.Agents.ToolResultDiagnostics.TryReadServiceError(rawResponse, details)
+        errorMessage = If(details Is Nothing, System.String.Empty, details.Message)
+        Return recognized
     End Function
 
     ''' <summary>

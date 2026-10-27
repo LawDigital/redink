@@ -52,7 +52,7 @@ Partial Public Class ThisAddIn
             Agents.PythonExecuteTool.Configure(New Agents.PythonExecuteToolCoreOptions() With {
                 .AgentConfiguration = configuration,
                 .InputFileResolver = Function(rel) ResolvePythonInputFile(rel),
-                .PublishOutputFile = Sub(output) PublishPythonAgentOutput(output),
+                .PublishOutputFile = Sub(output) PublishPythonAgentOutputChecked(output),
                 .HostServiceHandler = Nothing
             })
         Catch ex As Exception
@@ -158,6 +158,14 @@ Partial Public Class ThisAddIn
         Return expected IsNot Nothing AndAlso
                expected.RequiredEffects IsNot Nothing AndAlso
                expected.RequiredEffects.Contains(effect.Trim().ToLowerInvariant())
+    End Function
+
+    Private Function PublishPythonAgentOutputChecked(output As Agents.RedInkPythonAgentOutput) As System.String
+        Dim publishedPath As System.String = PublishPythonAgentOutput(output)
+        If System.String.IsNullOrWhiteSpace(publishedPath) OrElse Not System.IO.File.Exists(publishedPath) Then
+            Throw New System.IO.IOException("output_publication_failed: the host did not publish a verified output file.")
+        End If
+        Return publishedPath
     End Function
 
     Private Function PublishPythonAgentOutput(output As Agents.RedInkPythonAgentOutput) As System.String
@@ -279,16 +287,11 @@ Partial Public Class ThisAddIn
         End If
 
         Dim publishedArtifactPaths As New System.Collections.Generic.List(Of System.String)()
-        Dim artifactPublisher As System.Action(Of Agents.RedInkPythonAgentOutput) = Nothing
-        If artifactMetadata IsNot Nothing Then
-            artifactPublisher =
-                Sub(output As Agents.RedInkPythonAgentOutput)
-                    Dim publishedPath As System.String = PublishPythonAgentOutput(output)
-                    If Not System.String.IsNullOrWhiteSpace(publishedPath) Then
-                        publishedArtifactPaths.Add(publishedPath)
-                    End If
-                End Sub
-        End If
+        Dim artifactPublisher As System.Action(Of Agents.RedInkPythonAgentOutput) =
+            Sub(output As Agents.RedInkPythonAgentOutput)
+                Dim publishedPath As System.String = PublishPythonAgentOutputChecked(output)
+                publishedArtifactPaths.Add(publishedPath)
+            End Sub
 
         ' Pre-execution guard: reject an unchanged deterministic resubmission before starting the worker, so a
         ' prior code-repair/diagnostic outcome that produced no code change does not spawn another identical
@@ -296,6 +299,7 @@ Partial Public Class ThisAddIn
         Dim pythonUnchangedRejection As String = Nothing
         If Agents.PythonExecuteRepairAdvisor.ShouldRejectUnchangedResubmission(context, toolCall.Arguments, pythonUnchangedRejection) Then
             response.Success = False
+            response.RejectedBeforeExecution = True
             response.ErrorCode = "UNCHANGED_RESUBMISSION_REJECTED"
             response.ErrorMessage = "The submitted Python program is unchanged from the previous deterministic failure."
             response.Response = pythonUnchangedRejection
@@ -309,6 +313,7 @@ Partial Public Class ThisAddIn
         Dim pythonSuspiciousRejection As String = Nothing
         If Agents.PythonExecuteRepairAdvisor.ShouldRejectSuspiciousRepair(context, toolCall.Arguments, pythonSuspiciousRejection) Then
             response.Success = False
+            response.RejectedBeforeExecution = True
             response.ErrorCode = "SUSPICIOUS_REPAIR_REJECTED"
             response.ErrorMessage = "The proposed change is not a minimal repair and was not executed."
             response.Response = pythonSuspiciousRejection

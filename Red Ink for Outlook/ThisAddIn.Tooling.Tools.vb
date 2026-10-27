@@ -512,7 +512,8 @@ Partial Public Class ThisAddIn
                             client.Timeout = System.TimeSpan.FromSeconds(WebToolTimeoutSeconds)
                             client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RedInk/1.0")
 
-                            Dim fallbackHtml As String = client.GetStringAsync(baseUrl).GetAwaiter().GetResult()
+                            Dim fallbackHtml As System.String = SharedLibrary.SharedLibrary.SharedMethods.ReadWebToolTextResponseAsync(
+                                client, baseUrl, System.TimeSpan.FromSeconds(WebToolTimeoutSeconds), cancellationToken).GetAwaiter().GetResult()
 
                             If Not System.String.IsNullOrWhiteSpace(fallbackHtml) Then
                                 Dim fallbackText As String = fallbackHtml
@@ -1479,23 +1480,15 @@ Partial Public Class ThisAddIn
     ''' <param name="url">Absolute URL to retrieve.</param>
     ''' <param name="maxDepth">Unused by this implementation; retained for caller compatibility.</param>
     ''' <param name="client">HTTP client used for retrieval.</param>
-    ''' <returns>Response body as a string, or an error string on failure.</returns>
-    Private Async Function RetrieveWebsiteContent(url As String, maxDepth As Integer, client As System.Net.Http.HttpClient) As Task(Of String)
-        Try
-            client.Timeout = TimeSpan.FromSeconds(WebToolTimeoutSeconds)
-
-            If Not client.DefaultRequestHeaders.UserAgent.Any() Then
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RedInk/1.0")
-            End If
-
-            Return Await client.GetStringAsync(url)
-        Catch ex As TaskCanceledException
-            Return $"Timed out after {WebToolTimeoutSeconds} seconds while retrieving {url}."
-        Catch ex As OperationCanceledException
-            Return $"Timed out after {WebToolTimeoutSeconds} seconds while retrieving {url}."
-        Catch ex As Exception
-            Return $"Error retrieving {url}: {ex.Message}"
-        End Try
+    ''' <returns>Bounded textual response; transport, binary-content and size failures throw to the per-URL error handler.</returns>
+    Private Async Function RetrieveWebsiteContent(url As System.String, maxDepth As System.Int32,
+                                                  client As System.Net.Http.HttpClient,
+                                                  Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of System.String)
+        If Not client.DefaultRequestHeaders.UserAgent.Any() Then
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RedInk/1.0")
+        End If
+        Return Await SharedLibrary.SharedLibrary.SharedMethods.ReadWebToolTextResponseAsync(
+            client, url, System.TimeSpan.FromSeconds(WebToolTimeoutSeconds), cancellationToken)
     End Function
 
 #End Region
@@ -1599,6 +1592,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim results As New StringBuilder()
+            Dim retrievedCount As System.Int32 = 0
 
             If UseWebView2 Then
                 For i = 0 To urls.Count - 1
@@ -1624,10 +1618,13 @@ Partial Public Class ThisAddIn
                         results.AppendLine($"<URL_{i + 1}>{resolvedUrl}</URL_{i + 1}>")
 
                         If Not String.IsNullOrWhiteSpace(content) Then
+                            Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                             results.AppendLine($"<CONTENT_{i + 1}>")
-                            results.AppendLine(content)
+                            results.AppendLine(preparedContent)
+                            retrievedCount += 1
                             results.AppendLine($"</CONTENT_{i + 1}>")
                         Else
+                            If includeLinks AndAlso Not System.String.IsNullOrWhiteSpace(linksJson) AndAlso linksJson.Trim() <> "[]" Then retrievedCount += 1
                             results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
                             ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
                         End If
@@ -1680,13 +1677,15 @@ Partial Public Class ThisAddIn
 
                         Try
                             context.Log($"  Fetching: {requestedUrl}")
-                            Dim content = Await RetrieveWebsiteContent(requestedUrl, INI_ISearch_MaxDepth, httpClient)
+                            Dim content = Await RetrieveWebsiteContent(requestedUrl, INI_ISearch_MaxDepth, httpClient, cancellationToken)
 
                             results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
 
                             If Not String.IsNullOrWhiteSpace(content) Then
+                                Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                                 results.AppendLine($"<CONTENT_{i + 1}>")
-                                results.AppendLine(content)
+                                results.AppendLine(preparedContent)
+                                retrievedCount += 1
                                 results.AppendLine($"</CONTENT_{i + 1}>")
                             Else
                                 results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
@@ -1732,8 +1731,18 @@ Partial Public Class ThisAddIn
                 End Using
             End If
 
+            If retrievedCount < urls.Count Then
+                results.AppendLine("<RETRIEVAL_STATUS>" & If(retrievedCount = 0, "failed", "partial") &
+                    "; retrieved=" & retrievedCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; requested=" & urls.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; inspect each URL result; missing content was not retrieved.</RETRIEVAL_STATUS>")
+            End If
             response.Response = results.ToString()
-            response.Success = True
+            response.Success = retrievedCount > 0
+            If Not response.Success Then
+                response.ErrorCode = "web_content_unavailable"
+                response.ErrorMessage = "No requested source content or usable link result was retrieved. Inspect the per-URL errors and use the stated download/extraction or retrieval alternative."
+            End If
 
         Catch ex As OperationCanceledException
             response.Success = False

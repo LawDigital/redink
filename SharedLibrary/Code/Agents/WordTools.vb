@@ -163,6 +163,29 @@ Namespace Agents
             Dim p As String = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Read)
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
 
+            Dim prefix(511) As System.Byte
+            Dim prefixLength As System.Int32
+            Using input As New System.IO.FileStream(p, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                                                    System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
+                Do While prefixLength < prefix.Length
+                    Dim readCount As System.Int32 = input.Read(prefix, prefixLength, prefix.Length - prefixLength)
+                    If readCount = 0 Then Exit Do
+                    prefixLength += readCount
+                Loop
+            End Using
+            System.Array.Resize(prefix, prefixLength)
+            Dim container As System.String = SharedMethods.DetectBinaryDocumentContainer(prefix)
+            If container = "ole_compound" Then
+                Return Err_("word_compound_format_requires_conversion",
+                    "This is an OLE compound document, not an OpenXML ZIP package. It may be legacy .doc or encrypted Office content. " &
+                    "For legacy .doc use text_export_to_text with the existing AllowLegacyDocFiles policy and host reader dispatcher, " &
+                    "or provide a converted .docx. Encrypted documents must first be decrypted through an authorized path. No ZIP parser was invoked.")
+            End If
+            If container <> "zip" Then
+                Return Err_("unsupported_word_container",
+                    "The file is not an OpenXML ZIP package. Use the format-appropriate text extraction tool; changing the filename extension does not convert it.")
+            End If
+
             ' Use the rich sandboxed extractor so the returned text includes footnotes,
             ' endnotes, headers/footers, automatic paragraph/list/heading numbering,
             ' cross-references, tables, and text-box/margin text — not just body runs.
@@ -2926,7 +2949,7 @@ Namespace Agents
                 .ToolPriority = 880,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (extract text)",
-                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from a .docx file, including the main body, footnotes, endnotes, headers/footers, tables, numbering, and text-box/margin text when present."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional inline-preview cap. The complete extraction is stored under result_ref; retrieve omitted ranges with context_expand before using them. If snapshot storage fails, the full text is returned.""}},""required"":[""path""]}}",
+                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from an OpenXML .docx/.docm file. Legacy OLE .doc and encrypted documents return an explicit format-routing error; use text_export_to_text under the configured legacy policy. Includes the main body, footnotes, endnotes, headers/footers, tables, numbering, and text-box/margin text when present."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional inline-preview cap. The complete extraction is stored under result_ref; retrieve omitted ranges with context_expand before using them. If snapshot storage fails, the full text is returned.""}},""required"":[""path""]}}",
                 .ToolInstructionsPrompt = ToolExtract & ": Extract plain text from a .docx file, including footnotes and endnotes."
             }
         End Function

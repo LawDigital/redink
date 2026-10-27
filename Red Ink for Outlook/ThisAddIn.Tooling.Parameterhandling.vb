@@ -603,21 +603,10 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function BuildExecutedToolSignature(toolCall As ToolCall, toolResponse As ToolResponse) As String
-        Dim toolName As String = If(toolCall?.ToolName, "")
-        Dim argsSig As String = BuildToolArgumentsSignature(toolCall?.Arguments)
-        Dim successSig As String = If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "ok", "err")
-        Dim responseSig As String = If(toolResponse?.Response, "")
-        Dim errorSig As String = If(toolResponse?.ErrorMessage, "")
-
-        If responseSig.Length > 500 Then
-            responseSig = responseSig.Substring(0, 500)
-        End If
-
-        If errorSig.Length > 300 Then
-            errorSig = errorSig.Substring(0, 300)
-        End If
-
-        Return toolName & "|" & argsSig & "|" & successSig & "|" & responseSig & "|" & errorSig
+        Return SharedLibrary.Agents.ToolCallSequencing.BuildExecutionOutcomeFingerprint(
+            If(toolCall?.ToolName, System.String.Empty), BuildToolArgumentsSignature(toolCall?.Arguments),
+            toolResponse IsNot Nothing AndAlso toolResponse.Success,
+            If(toolResponse?.Response, System.String.Empty), If(toolResponse?.ErrorMessage, System.String.Empty))
     End Function
 
 
@@ -777,9 +766,10 @@ Partial Public Class ThisAddIn
             Return False
         End If
 
-        If Not IsDuplicateSuccessGuardedTool(toolCall.ToolName) Then
-            Return False
-        End If
+        Dim readOnlyReplay As System.Boolean = context.SequencingState IsNot Nothing AndAlso
+            context.SequencingState.ReadOnlyIndependentToolNames IsNot Nothing AndAlso
+            context.SequencingState.ReadOnlyIndependentToolNames.Contains(toolCall.ToolName)
+        If Not readOnlyReplay AndAlso Not IsDuplicateSuccessGuardedTool(toolCall.ToolName) Then Return False
 
         If context.AllToolResponses Is Nothing OrElse context.AllToolResponses.Count = 0 Then
             Return False
@@ -788,6 +778,12 @@ Partial Public Class ThisAddIn
         For i As Integer = context.AllToolResponses.Count - 1 To 0 Step -1
             Dim prior As ToolResponse = context.AllToolResponses(i)
 
+            If readOnlyReplay Then
+                ' Same model batch only: a new turn, a failed result or any possible mutation is a freshness barrier.
+                If prior Is Nothing OrElse prior.ProducedIteration <> context.CurrentIteration OrElse Not prior.Success OrElse
+                   Not context.SequencingState.ReadOnlyIndependentToolNames.Contains(prior.ToolName) OrElse
+                   prior.WasCompactedForModelReplay Then Exit For
+            End If
             If prior Is Nothing OrElse Not prior.Success Then Continue For
             If prior.WasDuplicateReplay Then Continue For
 

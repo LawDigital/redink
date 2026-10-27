@@ -32,6 +32,8 @@ Namespace Agents
     Public NotInheritable Class CollectionAnalysisRunInfo
         Public Property DirectoryPath As String
         Public Property DisplayLabel As String
+        ' True when resuming will use a different model than the original run.
+        Public Property ModelChanged As Boolean
     End Class
 
     Public NotInheritable Class CollectionAnalysisResult
@@ -117,8 +119,9 @@ Namespace Agents
             ".txt", ".md", ".eml"
         }
 
-        ' Lists recoverable runs matching the exact source, user objective, model and
-        ' processing contract. Does not select a default or change any checkpoint.
+        ' Lists recoverable runs matching the source, objective and processing contract.
+        ' The currently selected model is deliberately NOT a filter: changing models
+        ' must not hide earlier validated checkpoints. Selection remains explicit.
         Public Shared Function ListResumableRuns(options As CollectionAnalysisOptions,
                     Optional cancellation As CancellationToken = Nothing) As List(Of CollectionAnalysisRunInfo)
             If options Is Nothing Then Throw New System.ArgumentNullException(NameOf(options))
@@ -126,8 +129,7 @@ Namespace Agents
             Dim outputRoot As String = NormalizeRoot(options.WorkspaceDirectory)
             Dim matches As New List(Of CollectionAnalysisRunInfo)()
             If Not Directory.Exists(outputRoot) Then Return matches
-            Dim identity As String = ComputeJobIdentity(options, sourceRoot)
-            Dim legacySignature As String = Nothing
+            Dim legacyInventory As SourceInventory = Nothing
             For Each folder As String In Directory.EnumerateDirectories(outputRoot, "*", SearchOption.TopDirectoryOnly).OrderByDescending(Function(p) p, StringComparer.OrdinalIgnoreCase)
                 cancellation.ThrowIfCancellationRequested()
                 If File.Exists(Path.Combine(folder, "Result.md")) Then Continue For
@@ -135,14 +137,17 @@ Namespace Agents
                 If manifestPath Is Nothing Then Continue For
                 Try
                     Dim prior As JObject = JObject.Parse(File.ReadAllText(manifestPath, Encoding.UTF8))
+                    Dim originalModel As String = CStr(prior("model_signature"))
+                    If String.IsNullOrWhiteSpace(originalModel) Then Continue For
                     Dim existingId As String = CStr(prior("job_identity"))
-                    Dim isMatch As Boolean = String.Equals(existingId, identity, StringComparison.Ordinal)
-                    If existingId Is Nothing Then
-                        ' A legacy R16 run is only compatible with an UNCHANGED source inventory.
-                        If legacySignature Is Nothing Then
-                            Dim inventory As SourceInventory = IndexSources(sourceRoot, cancellation)
-                            legacySignature = ComputeLegacySignature(options, inventory)
-                        End If
+                    Dim isMatch As Boolean = False
+                    If existingId IsNot Nothing Then
+                        isMatch = String.Equals(existingId,
+                            ComputeJobIdentity(options, sourceRoot, originalModel), StringComparison.Ordinal)
+                    Else
+                        ' Legacy runs require an unchanged inventory, also when changing models.
+                        If legacyInventory Is Nothing Then legacyInventory = IndexSources(sourceRoot, cancellation)
+                        Dim legacySignature As String = ComputeLegacySignature(options, legacyInventory, originalModel)
                         isMatch = String.Equals(CStr(prior("job_signature")), legacySignature, StringComparison.Ordinal)
                     End If
                     If Not isMatch Then Continue For
@@ -155,9 +160,12 @@ Namespace Agents
                         count = Directory.EnumerateFiles(checkpointFolder, "*.json", SearchOption.TopDirectoryOnly).Count(
                             Function(p) Not p.EndsWith(".diagnostic.json", StringComparison.OrdinalIgnoreCase))
                     End If
+                    Dim changedModel As Boolean = Not String.Equals(originalModel, options.ModelSignature, StringComparison.Ordinal)
                     matches.Add(New CollectionAnalysisRunInfo With {
                         .DirectoryPath = folder,
-                        .DisplayLabel = folderName & "  (" & status & ", " & count.ToString() & " saved batch file(s))"
+                        .ModelChanged = changedModel,
+                        .DisplayLabel = folderName & "  (" & status & ", " & count.ToString() &
+                            " saved batch file(s)" & If(changedModel, ", different model – verified results will be reused", "") & ")"
                     })
                 Catch ex As System.Exception When TypeOf ex Is IOException OrElse
                                                   TypeOf ex Is UnauthorizedAccessException OrElse
@@ -173,15 +181,17 @@ Namespace Agents
             Return Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar) & Path.DirectorySeparatorChar
         End Function
 
-        Private Shared Function ComputeJobIdentity(options As CollectionAnalysisOptions, sourceRoot As String) As String
+        Private Shared Function ComputeJobIdentity(options As CollectionAnalysisOptions, sourceRoot As String,
+                                                    Optional modelSignature As String = Nothing) As String
             Return Digest("collection-v2" & vbLf & sourceRoot & vbLf & options.Objective & vbLf &
-                          options.ModelSignature & vbLf &
+                          If(modelSignature, options.ModelSignature) & vbLf &
                           options.MaxInputCharacters.ToString(System.Globalization.CultureInfo.InvariantCulture) & vbLf &
                           options.RemoveExactDuplicates.ToString())
         End Function
 
-        Private Shared Function ComputeLegacySignature(options As CollectionAnalysisOptions, inventory As SourceInventory) As String
-            Return Digest(options.Objective & vbLf & options.ModelSignature & vbLf &
+        Private Shared Function ComputeLegacySignature(options As CollectionAnalysisOptions, inventory As SourceInventory,
+                                                      Optional modelSignature As String = Nothing) As String
+            Return Digest(options.Objective & vbLf & If(modelSignature, options.ModelSignature) & vbLf &
                           options.MaxInputCharacters.ToString() & vbLf & options.RemoveExactDuplicates.ToString() & vbLf &
                           String.Join(vbLf, inventory.Items.Select(Function(s) s.RelativePath & ":" & s.Sha256)) & vbLf &
                           String.Join(vbLf, inventory.ExcludedPaths))
@@ -222,8 +232,7 @@ Namespace Agents
             ' A run is keyed by the request/configuration rather than the entire corpus hash.
             ' Reindexing changed files does not discard validated checkpoints for unchanged batches.
             Dim identity As String = ComputeJobIdentity(options, sourceRoot)
-            Dim legacySignature As String = ComputeLegacySignature(options, inventory)
-            Dim jobDir As String = SelectJobDirectory(outputRoot, identity, legacySignature, options.ResumeDirectory)
+            Dim jobDir As String = SelectJobDirectory(outputRoot, options, sourceRoot, inventory, options.ResumeDirectory)
             Dim stateDir As String = Path.Combine(jobDir, "Analysis state - keep for recovery")
             ' An existing legacy R16 run retains its old checkpoint layout.
             If File.Exists(Path.Combine(jobDir, "manifest.json")) Then stateDir = jobDir
@@ -255,18 +264,41 @@ Namespace Agents
                 {"excluded_files", JArray.FromObject(inventory.ExcludedPaths)},
                 {"unreadable_sources", JArray.FromObject(inventory.FailedPaths)}
             }
-            ' Recheck the request identity before reusing any existing validated batch.
+            ' Preserve the original identity and model. Validated evidence checkpoints
+            ' can be reused after an explicit model change; new calls use the new model.
+            Dim originalModel As String = options.ModelSignature
+            Dim modelHistory As New JArray(options.ModelSignature)
             If File.Exists(manifestFile) Then
                 Dim prior As JObject = JObject.Parse(File.ReadAllText(manifestFile, Encoding.UTF8))
+                originalModel = CStr(prior("model_signature"))
+                If String.IsNullOrWhiteSpace(originalModel) Then
+                    Throw New System.InvalidOperationException("The selected run is missing its original model information.")
+                End If
                 Dim priorIdentity As String = CStr(prior("job_identity"))
                 If priorIdentity IsNot Nothing Then
-                    If Not String.Equals(priorIdentity, identity, StringComparison.Ordinal) Then
-                        Throw New System.InvalidOperationException("Existing run belongs to a different request or model.")
+                    If Not String.Equals(priorIdentity, ComputeJobIdentity(options, sourceRoot, originalModel), StringComparison.Ordinal) Then
+                        Throw New System.InvalidOperationException("The selected run belongs to a different analysis request.")
                     End If
-                ElseIf Not String.Equals(CStr(prior("job_signature")), legacySignature, StringComparison.Ordinal) Then
-                    Throw New System.InvalidOperationException("Existing legacy run no longer matches its original source inventory.")
+                    manifest("job_identity") = priorIdentity
+                Else
+                    Dim originalLegacySignature As String = ComputeLegacySignature(options, inventory, originalModel)
+                    If Not String.Equals(CStr(prior("job_signature")), originalLegacySignature, StringComparison.Ordinal) Then
+                        Throw New System.InvalidOperationException("Existing legacy run no longer matches its original source inventory.")
+                    End If
+                    manifest.Remove("job_identity")
+                    manifest("job_signature") = CStr(prior("job_signature"))
+                End If
+                manifest("model_signature") = originalModel
+                modelHistory = If(TryCast(prior("model_signatures_used"), JArray), New JArray(originalModel))
+                If Not modelHistory.Any(Function(token) String.Equals(CStr(token), originalModel, StringComparison.Ordinal)) Then
+                    modelHistory.Insert(0, originalModel)
                 End If
             End If
+            If Not modelHistory.Any(Function(token) String.Equals(CStr(token), options.ModelSignature, StringComparison.Ordinal)) Then
+                modelHistory.Add(options.ModelSignature)
+            End If
+            manifest("model_signatures_used") = modelHistory
+            manifest("last_model_signature") = options.ModelSignature
             WriteAtomic(manifestFile, manifest.ToString(Formatting.Indented))
 
             Dim canonical As New Dictionary(Of String, String)(StringComparer.Ordinal)
@@ -356,14 +388,21 @@ Namespace Agents
             result.EvidenceCount = allEvidence.Count
             result.FailedPackageCount = failedPackages.Count
             Notice(progress, "Integrating findings across batches...")
+            ' Keep the original model's merge checkpoints compatible with older runs.
+            ' Other models receive separate merge/final caches, but share verified evidence.
+            Dim mergeWorkDir As String = If(String.Equals(options.ModelSignature, originalModel, StringComparison.Ordinal),
+                                           mergeDir, Path.Combine(mergeDir, "model-" & Digest(options.ModelSignature).Substring(0, 16)))
+            Directory.CreateDirectory(mergeWorkDir)
             Dim merged As List(Of EvidenceItem) = Await IntegrateAsync(allEvidence, options.Objective, options.MaxInputCharacters,
-                                                                      model, mergeDir, cancellation, result, progress)
+                                                                      model, mergeWorkDir, cancellation, result, progress)
             Dim finalPrompt As String = RenderFindings(merged)
             Dim finalPayload As String = "USER OBJECTIVE:" & vbLf & options.Objective & vbLf & "CROSS-SOURCE FINDINGS:" & vbLf & finalPrompt
             If finalPayload.Length > options.MaxInputCharacters Then
                 Throw New System.InvalidOperationException("The final synthesis remains too large. Intermediate results are retained; increase the budget or reduce the scope.")
             End If
-            Dim finalFile As String = Path.Combine(stateDir, "final-" & Digest(finalPayload & vbLf & ReportPrompt).Substring(0, 24) & ".json")
+            Dim finalModelScope As String = If(String.Equals(options.ModelSignature, originalModel, StringComparison.Ordinal),
+                                               String.Empty, vbLf & options.ModelSignature)
+            Dim finalFile As String = Path.Combine(stateDir, "final-" & Digest(finalPayload & vbLf & ReportPrompt & finalModelScope).Substring(0, 24) & ".json")
             Dim finalReport As JObject = Nothing
             Dim validFinalCheckpoint As Boolean = False
             If File.Exists(finalFile) Then
@@ -424,8 +463,8 @@ Namespace Agents
             End Try
         End Function
 
-        Private Shared Function SelectJobDirectory(outputRoot As String, identity As String,
-                            legacySignature As String, resumeDirectory As String) As String
+        Private Shared Function SelectJobDirectory(outputRoot As String, options As CollectionAnalysisOptions,
+                            sourceRoot As String, inventory As SourceInventory, resumeDirectory As String) As String
             Directory.CreateDirectory(outputRoot)
             If Not String.IsNullOrWhiteSpace(resumeDirectory) Then
                 ' Only an existing direct child of this output root may be resumed.
@@ -444,12 +483,16 @@ Namespace Agents
                     Throw New System.InvalidOperationException("The selected recovery folder has no valid manifest.")
                 End If
                 Dim prior As JObject = JObject.Parse(File.ReadAllText(manifestPath, Encoding.UTF8))
+                Dim originalModel As String = CStr(prior("model_signature"))
+                If String.IsNullOrWhiteSpace(originalModel) Then
+                    Throw New System.InvalidOperationException("The selected analysis has no original model information.")
+                End If
                 Dim previousIdentity As String = CStr(prior("job_identity"))
                 If previousIdentity IsNot Nothing Then
-                    If Not String.Equals(previousIdentity, identity, StringComparison.Ordinal) Then
-                        Throw New System.InvalidOperationException("The selected analysis no longer matches the source, objective, model or processing settings.")
+                    If Not String.Equals(previousIdentity, ComputeJobIdentity(options, sourceRoot, originalModel), StringComparison.Ordinal) Then
+                        Throw New System.InvalidOperationException("The selected analysis no longer matches the source, objective or processing settings.")
                     End If
-                ElseIf Not String.Equals(CStr(prior("job_signature")), legacySignature, StringComparison.Ordinal) Then
+                ElseIf Not String.Equals(CStr(prior("job_signature")), ComputeLegacySignature(options, inventory, originalModel), StringComparison.Ordinal) Then
                     Throw New System.InvalidOperationException("The selected older analysis no longer matches its original source inventory.")
                 End If
                 Return requested
@@ -560,7 +603,8 @@ Namespace Agents
                 Dim files As String = String.Join("; ", parts.Select(Function(part) sources(part.SourceId).RelativePath).
                                                    Distinct(StringComparer.Ordinal))
                 failures.Add("Package " & batchNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                             " (" & files & "): " & ex.Message)
+                             " (" & files & "): The model's answer could not be verified. " &
+                             "Retry this run to attempt the missing analysis. Technical details are in the recovery diagnostics.")
                 Notice(progress, "Package " & batchNumber.ToString() &
                        " was not accepted. Other packages will continue; the report will be marked incomplete.")
             End Try
@@ -634,7 +678,10 @@ Namespace Agents
                             .stage = "source_evidence", .attempt = attempt, .validation_error = ex.Message,
                             .response = If(response, String.Empty)
                         }, Formatting.Indented))
-                        Notice(progress, "Package " & batchNumber.ToString() & " rejected (attempt " & attempt.ToString() & "): " & ex.Message)
+                        Notice(progress, "The AI model supplied an answer that could not be verified against the original documents " &
+                            "(package " & batchNumber.ToString() & ", attempt " & attempt.ToString() & "). " &
+                            If(attempt = 1, "Red Ink will try once more.", "This package will be marked incomplete; other packages can continue.") &
+                            " The technical reason is saved in the recovery diagnostics.")
                         If attempt = 2 Then Throw New InvalidDataException("The selected model could not provide verifiable source references. The source files were not changed. Diagnostic responses were saved in the job's evidence directory; no incomplete batch was accepted.", ex)
                     End Try
                 Next

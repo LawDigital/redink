@@ -2340,6 +2340,33 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Identifies known binary containers from bytes, independently of filename/MIME.
+        ''' In particular OLE may also contain encrypted OOXML, not only legacy Word.
+        ''' Empty means unknown, NOT verified text or a verified Office document.
+        ''' </summary>
+        Public Shared Function DetectBinaryDocumentContainer(prefix As System.Byte()) As System.String
+            If prefix Is Nothing OrElse prefix.Length = 0 Then Return System.String.Empty
+            If prefix.Length >= 8 AndAlso
+               prefix(0) = &HD0 AndAlso prefix(1) = &HCF AndAlso prefix(2) = &H11 AndAlso prefix(3) = &HE0 AndAlso
+               prefix(4) = &HA1 AndAlso prefix(5) = &HB1 AndAlso prefix(6) = &H1A AndAlso prefix(7) = &HE1 Then
+                Return "ole_compound"
+            End If
+            If prefix.Length >= 4 AndAlso prefix(0) = &H50 AndAlso prefix(1) = &H4B AndAlso
+               ((prefix(2) = 3 AndAlso prefix(3) = 4) OrElse
+                (prefix(2) = 5 AndAlso prefix(3) = 6) OrElse
+                (prefix(2) = 7 AndAlso prefix(3) = 8)) Then Return "zip"
+            If prefix.Length >= 2 AndAlso prefix(0) = &H1F AndAlso prefix(1) = &H8B Then Return "gzip"
+            If prefix.Length >= 3 AndAlso prefix(0) = &HFF AndAlso prefix(1) = &HD8 AndAlso prefix(2) = &HFF Then Return "image"
+            If prefix.Length >= 8 AndAlso prefix(0) = &H89 AndAlso prefix(1) = &H50 AndAlso prefix(2) = &H4E AndAlso prefix(3) = &H47 Then Return "image"
+            Dim head As System.String = System.Text.Encoding.ASCII.GetString(prefix, 0, System.Math.Min(prefix.Length, 512)).TrimStart()
+            If head.StartsWith("%PDF-", System.StringComparison.Ordinal) Then Return "pdf"
+            If head.StartsWith("GIF87a", System.StringComparison.Ordinal) OrElse
+               head.StartsWith("GIF89a", System.StringComparison.Ordinal) OrElse
+               head.StartsWith("RIFF", System.StringComparison.Ordinal) Then Return "media"
+            Return System.String.Empty
+        End Function
+
     End Class
 
 End Namespace

@@ -75,6 +75,8 @@ Partial Public Class ThisAddIn
 
         Public Property ResultKind As String
         Public Property ErrorCode As String
+        ' Diagnostic data only; source retry hints do not authorize execution/recovery.
+        Public Property ServiceErrorDetails As SharedLibrary.Agents.ToolServiceErrorInfo
 
         Public Property PreservedResultRef As System.String
         Public Property ModelReplayContent As String
@@ -85,6 +87,8 @@ Partial Public Class ThisAddIn
         Public Property ControlPlanePayloadKey As String
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
+        ' Set only by the host/tool adapter when no execution occurred; not parsed from model output.
+        Public Property RejectedBeforeExecution As System.Boolean
 
         ''' <summary>True when a tool classifies a failed result as recoverable planning/input feedback that should not count toward the generic host failure circuit breaker.</summary>
         Public Property RepairLoopRecoverable As Boolean
@@ -351,13 +355,16 @@ Partial Public Class ThisAddIn
         ElseIf Not System.String.IsNullOrEmpty(resp.Response) Then
             ' Failed tools may contain completed work or partial source evidence.
             ' Keep the complete body and label the failed execution explicitly.
-            rawContent = New Newtonsoft.Json.Linq.JObject(
+            Dim failureEnvelope As New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("ok", False),
                 New Newtonsoft.Json.Linq.JProperty("execution_succeeded", False),
                 New Newtonsoft.Json.Linq.JProperty("error", If(resp.ErrorMessage, "Tool failed.")),
                 New Newtonsoft.Json.Linq.JProperty("raw_result", resp.Response),
-                New Newtonsoft.Json.Linq.JProperty("result_contract", "Unabridged output of a failed tool. Preserve useful evidence, but do not infer successful completion from this body.")
-            ).ToString(Newtonsoft.Json.Formatting.None)
+                New Newtonsoft.Json.Linq.JProperty("result_contract", "Unabridged output of a failed tool. Preserve useful evidence, but do not infer successful completion from this body."))
+            If resp.ServiceErrorDetails IsNot Nothing Then
+                failureEnvelope("service_error") = Newtonsoft.Json.Linq.JObject.Parse(resp.ServiceErrorDetails.ToDiagnosticJson())
+            End If
+            rawContent = failureEnvelope.ToString(Newtonsoft.Json.Formatting.None)
         Else
             rawContent = $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
         End If
@@ -854,6 +861,7 @@ Partial Public Class ThisAddIn
         Dim previewLength As System.Int32 = SharedLibrary.Agents.ToolResultStore.GetUnicodeSafePrefixLength(rawContent, INI_ToolResultReferencePreviewChars)
         Dim envelope As Newtonsoft.Json.Linq.JObject = SharedLibrary.Agents.ToolResultStore.DescribeReference(stored)
         envelope("tool") = resp.ToolName
+        envelope("execution_succeeded") = resp.Success
         envelope("preview") = rawContent.Substring(0, previewLength)
         envelope("returned_chars") = previewLength
         envelope("next_offset") = previewLength
@@ -1117,42 +1125,10 @@ Partial Public Class ThisAddIn
 
 
     Private Function TryExtractToolServiceErrorMessage(rawResponse As System.String, ByRef errorMessage As System.String) As System.Boolean
-        errorMessage = System.String.Empty
-        If System.String.IsNullOrWhiteSpace(rawResponse) Then Return False
-        Dim errorCode As System.String = System.String.Empty
-        Dim resultKind As System.String = System.String.Empty
-        If SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(rawResponse, errorCode, resultKind) Then
-            If Not SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorMessage(rawResponse, errorMessage) Then
-                errorMessage = "Tool service reported failure: " & errorCode
-            End If
-            Return True
-        End If
-        Try
-            Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(rawResponse)
-            Dim result As Newtonsoft.Json.Linq.JObject = TryCast(root("result"), Newtonsoft.Json.Linq.JObject)
-            If root("isError") IsNot Nothing OrElse result Is Nothing Then result = root
-            Dim isError As System.Boolean = False
-            Dim isErrorToken As Newtonsoft.Json.Linq.JToken = result("isError")
-            If isErrorToken Is Nothing OrElse Not System.Boolean.TryParse(isErrorToken.ToString().Trim(), isError) OrElse Not isError Then Return False
-            ' Recognition is authoritative even when the optional human-readable content is malformed.
-            errorMessage = "Tool service returned an error."
-            Dim messages As New System.Collections.Generic.List(Of System.String)()
-            Dim content As Newtonsoft.Json.Linq.JArray = TryCast(result("content"), Newtonsoft.Json.Linq.JArray)
-            If content IsNot Nothing Then
-                For Each item As Newtonsoft.Json.Linq.JToken In content
-                    Dim entry As Newtonsoft.Json.Linq.JObject = TryCast(item, Newtonsoft.Json.Linq.JObject)
-                    Dim textToken As Newtonsoft.Json.Linq.JToken = If(entry Is Nothing, Nothing, entry("text"))
-                    If textToken IsNot Nothing AndAlso textToken.Type = Newtonsoft.Json.Linq.JTokenType.String Then
-                        Dim message As System.String = textToken.Value(Of System.String)().Trim()
-                        If message <> System.String.Empty Then messages.Add(message)
-                    End If
-                Next
-            End If
-            If messages.Count > 0 Then errorMessage = System.String.Join(" ", messages)
-            Return True
-        Catch ex As System.Exception
-            Return errorMessage <> System.String.Empty
-        End Try
+        Dim details As SharedLibrary.Agents.ToolServiceErrorInfo = Nothing
+        Dim recognized As System.Boolean = SharedLibrary.Agents.ToolResultDiagnostics.TryReadServiceError(rawResponse, details)
+        errorMessage = If(details Is Nothing, System.String.Empty, details.Message)
+        Return recognized
     End Function
 
 

@@ -572,6 +572,35 @@ Namespace Agents
             Return CInt(System.Math.Max(1L, effectiveMs))
         End Function
 
+        ' Explicit read-only capability declarations. Unknown tools fail closed; arbitrary names
+        ' containing "read" or "search" are NOT sufficient to grant replay/abandonment privileges.
+        Public Function GetReadOnlyIndependentToolNames(
+            host As ToolingHostKind,
+            Optional resolvedTools As System.Collections.Generic.IEnumerable(Of SharedLibrary.ModelConfig) = Nothing) As System.Collections.Generic.IReadOnlyCollection(Of System.String)
+
+            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim nativeNames As System.String() = {
+                TextTools.ToolRead, TextTools.ToolSearch, WordTools.ToolExtract, WordTools.ToolSearch,
+                WordTools.ToolCommentList, ContextExpandTool.ToolName,
+                "retrieve_web_content", "web_content_retriever", "web_grounding", "internet_search", "knowledge_search",
+                "search_in_attachments", "read_attachment", "list_attachments", "extract_pdf_text",
+                "read_word_document_details", "extract_excel_data",
+                "agent_workspace_read", "agent_workspace_list", "agent_workspace_search", "agent_workspace_find_files"
+            }
+            For Each name As System.String In nativeNames
+                If IsSharedInternalToolName(name) OrElse
+                   (host = ToolingHostKind.Outlook AndAlso IsOutlookOnlyInternalToolName(name)) OrElse
+                   (host = ToolingHostKind.Word AndAlso IsWordOnlyInternalToolName(name)) Then result.Add(name)
+            Next
+            If resolvedTools IsNot Nothing Then
+                For Each tool As SharedLibrary.ModelConfig In resolvedTools
+                    If tool Is Nothing OrElse System.String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                    If HasCapabilityTag(tool.CapabilityTags, "read_only_independent") Then result.Add(tool.ToolName.Trim())
+                Next
+            End If
+            Return result.ToList()
+        End Function
+
         Public Function GetDeliverableCapableToolNames(host As ToolingHostKind) As IReadOnlyCollection(Of String)
             Return GetDeliverableCapableToolNames(host, Nothing)
         End Function
