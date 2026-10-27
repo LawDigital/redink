@@ -551,6 +551,11 @@ Partial Public Class ThisAddIn
         context.AuthoritativeToolRegistry = authoritativeRegistrySource
         context.AuthoritativeToolRegistrySnapshot = authoritativeRegistrySnapshot
         context.HostKind = "Word"
+        context.SequencingState.ReadOnlyIndependentToolNames =
+            New System.Collections.Generic.HashSet(Of System.String)(
+                SharedLibrary.Agents.HostToolRegistration.GetReadOnlyIndependentToolNames(
+                    SharedLibrary.Agents.ToolingHostKind.Word, selectedTools),
+                System.StringComparer.OrdinalIgnoreCase)
         context.SequencingState.DeliverableCapableToolNames =
             New HashSet(Of String)(
                 SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
@@ -1714,6 +1719,12 @@ Partial Public Class ThisAddIn
                                 tc.CallId)
                         End If
 
+                        If context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.NormalizeDeclaredProducerArtifactArguments(
+                               normalizedToolName, tc.Arguments, tc.CallId) Then
+                            context.Log("Bound a declared final output to its unique logical deliverable slot.", "diag")
+                        End If
+
                         Dim recoveryScopeKey As String =
                             SharedLibrary.Agents.ToolCallSequencing.ResolveExplicitRecoveryScopeKey(tc.Arguments)
                         auditRecoveryScopeKey = recoveryScopeKey
@@ -2615,7 +2626,9 @@ Partial Public Class ThisAddIn
                                                                           If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling)),
                                                     terminal:=toolResponse.RepairLoopTerminal,
                                                     recoveryScopeKey:=recoveryScopeKey,
-                                                    retryCorrelationArguments:=tc.Arguments)
+                                                    retryCorrelationArguments:=tc.Arguments,
+                                                    rejectedBeforeExecution:=toolResponse.RejectedBeforeExecution,
+                                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails)
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -2826,7 +2839,8 @@ Partial Public Class ThisAddIn
                                     returnedToParent:=skippedStructuredAgentFailure,
                                     toolErrorHandling:=If(System.String.IsNullOrWhiteSpace(toolConfig.ToolErrorHandling), "skip", toolConfig.ToolErrorHandling),
                                     terminal:=True,
-                                    recoveryScopeKey:=recoveryScopeKey)
+                                    recoveryScopeKey:=recoveryScopeKey,
+                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails)
                             End If
                         End If
 
@@ -2839,8 +2853,8 @@ Partial Public Class ThisAddIn
                             context.LastToolExecutionRepeatCount = 1
                         End If
 
-                        If Not toolResponse.RepairLoopTerminal AndAlso
-                           context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
+                        If Not toolConfig.AllowRepeatedIdenticalCalls AndAlso Not toolResponse.RepairLoopTerminal AndAlso
+                           context.LastToolExecutionRepeatCount >= System.Math.Max(3, context.DuplicateToolExecutionAbortThreshold) Then
                             context.LogWarn($"Detected repeated identical tool execution for '{tc.ToolName}'. Terminating this tooling run to prevent an execution loop.")
                             ToolingFileLogger.LogWarn(
                                     "Terminating tooling run after repeated identical tool execution.",
@@ -2870,6 +2884,18 @@ Partial Public Class ThisAddIn
                                 cancellationToken)
 
                             stopCurrentBatchAfterTool = True
+                            Exit For
+                        End If
+
+                        If Not toolConfig.AllowRepeatedIdenticalCalls AndAlso Not toolResponse.RepairLoopTerminal AndAlso
+                           context.LastToolExecutionRepeatCount = System.Math.Max(2, context.DuplicateToolExecutionAbortThreshold - 1) Then
+                            context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRepeatedCallRecoveryGuidance()
+                            context.PendingGuardTitle = "HOST REPEATED CALL RECOVERY"
+                            context.PendingRejectedTurnExplanation = "Identical call/outcome repeated; use the existing result or a distinct necessary recovery step."
+                            context.PendingRejectedAssistantTurn = System.String.Empty
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
+                            context.Log("Repeated call warning issued before circuit breaker; yielding results for one recovery turn.", "warn")
                             Exit For
                         End If
 
@@ -3446,6 +3472,8 @@ Partial Public Class ThisAddIn
                             End If
 
                             If context.SequencingState IsNot Nothing Then
+                                SharedLibrary.Agents.ToolCallSequencing.CommitNonessentialFailureAcknowledgements(
+                                    context.SequencingState, turnValidation, Sub(message As System.String) context.Log(message, "diag"))
                                 context.SequencingState.FinalizeObservedAlternativeRecoveries("alternative_recovery_finalized")
                             End If
                             SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
@@ -3772,6 +3800,8 @@ Partial Public Class ThisAddIn
                                 End If
 
                                 If context.SequencingState IsNot Nothing Then
+                                    SharedLibrary.Agents.ToolCallSequencing.CommitNonessentialFailureAcknowledgements(
+                                        context.SequencingState, forcedValidation, Sub(message As System.String) context.Log(message, "diag"))
                                     context.SequencingState.FinalizeObservedAlternativeRecoveries("alternative_recovery_finalized")
                                 End If
                                 SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
@@ -5603,6 +5633,16 @@ Partial Public Class ThisAddIn
     Private Sub ApplyStructuredAgentResult(response As ToolResponse, context As ToolExecutionContext)
         If response Is Nothing Then Return
 
+        Dim serviceError As SharedLibrary.Agents.ToolServiceErrorInfo = Nothing
+        If SharedLibrary.Agents.ToolResultDiagnostics.TryReadServiceError(response.Response, serviceError) Then
+            response.ServiceErrorDetails = serviceError
+            ' Keep service codes separate from host-owned preflight/recovery codes.
+            ' New diagnostics must not change success, failure category or retry policy.
+            If context IsNot Nothing Then
+                context.Log("Structured tool-service diagnostics: " & serviceError.ToDiagnosticJson(), "diag")
+            End If
+        End If
+
         Dim errorCode As String = ""
         Dim resultKind As String = ""
 
@@ -7382,9 +7422,10 @@ Partial Public Class ThisAddIn
             Return False
         End If
 
-        If Not IsDuplicateSuccessGuardedTool(toolCall.ToolName) Then
-            Return False
-        End If
+        Dim readOnlyReplay As System.Boolean = context.SequencingState IsNot Nothing AndAlso
+            context.SequencingState.ReadOnlyIndependentToolNames IsNot Nothing AndAlso
+            context.SequencingState.ReadOnlyIndependentToolNames.Contains(toolCall.ToolName)
+        If Not readOnlyReplay AndAlso Not IsDuplicateSuccessGuardedTool(toolCall.ToolName) Then Return False
 
         If context.AllToolResponses Is Nothing OrElse context.AllToolResponses.Count = 0 Then
             Return False
@@ -7393,6 +7434,12 @@ Partial Public Class ThisAddIn
         For i As Integer = context.AllToolResponses.Count - 1 To 0 Step -1
             Dim prior As ToolResponse = context.AllToolResponses(i)
 
+            If readOnlyReplay Then
+                ' Same model batch only: a new turn, a failed result or any possible mutation is a freshness barrier.
+                If prior Is Nothing OrElse prior.ProducedIteration <> context.CurrentIteration OrElse Not prior.Success OrElse
+                   Not context.SequencingState.ReadOnlyIndependentToolNames.Contains(prior.ToolName) OrElse
+                   prior.WasCompactedForModelReplay Then Exit For
+            End If
             If prior Is Nothing OrElse Not prior.Success Then Continue For
             If prior.WasDuplicateReplay Then Continue For
 
@@ -7422,21 +7469,10 @@ Partial Public Class ThisAddIn
 
 
     Private Function BuildExecutedToolSignature(toolCall As ToolCall, toolResponse As ToolResponse) As String
-        Dim toolName As String = If(toolCall?.ToolName, "")
-        Dim argsSig As String = BuildToolArgumentsSignature(toolCall?.Arguments)
-        Dim successSig As String = If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "ok", "err")
-        Dim responseSig As String = If(toolResponse?.Response, "")
-        Dim errorSig As String = If(toolResponse?.ErrorMessage, "")
-
-        If responseSig.Length > 500 Then
-            responseSig = responseSig.Substring(0, 500)
-        End If
-
-        If errorSig.Length > 300 Then
-            errorSig = errorSig.Substring(0, 300)
-        End If
-
-        Return toolName & "|" & argsSig & "|" & successSig & "|" & responseSig & "|" & errorSig
+        Return SharedLibrary.Agents.ToolCallSequencing.BuildExecutionOutcomeFingerprint(
+            If(toolCall?.ToolName, System.String.Empty), BuildToolArgumentsSignature(toolCall?.Arguments),
+            toolResponse IsNot Nothing AndAlso toolResponse.Success,
+            If(toolResponse?.Response, System.String.Empty), If(toolResponse?.ErrorMessage, System.String.Empty))
     End Function
 
     Private Function IsEmptyJsRunResult(rawResponse As String) As Boolean

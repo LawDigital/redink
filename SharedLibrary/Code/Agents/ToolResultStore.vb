@@ -206,7 +206,7 @@ Namespace Agents
         End Function
 
         Public Shared Function DescribeReference(stored As StoredResult) As Newtonsoft.Json.Linq.JObject
-            Return New Newtonsoft.Json.Linq.JObject(
+            Dim envelope As New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("result_ref", stored.Ref),
                 New Newtonsoft.Json.Linq.JProperty("content_complete", False),
                 New Newtonsoft.Json.Linq.JProperty("representation", "reference_stub"),
@@ -219,6 +219,11 @@ Namespace Agents
                 New Newtonsoft.Json.Linq.JProperty("expires_utc", stored.ExpiresUtc),
                 New Newtonsoft.Json.Linq.JProperty("total_chars", stored.TotalChars),
                 New Newtonsoft.Json.Linq.JProperty("retrieval_required", "Incomplete reference. You MUST retrieve every task-required range before using omitted evidence; whole-source tasks require complete coverage. Use context_expand, or an exposed isolated analyzer accepting input_result_ref to read the complete stored text without filling parent context. If the stored text contains nested previews/references, follow them: reading a wrapper is not reading its sources. Never infer unavailable content."))
+            ' Read the full stored body, not its positional preview. This shared boundary
+            ' also protects evidence cores, sub-agent replay and historical window stubs.
+            Dim sourceMetadata As Newtonsoft.Json.Linq.JObject = ToolResultDiagnostics.BuildSourceMetadata(stored.FullContent)
+            If sourceMetadata IsNot Nothing Then envelope("source_result_metadata") = sourceMetadata
+            Return envelope
         End Function
 
         Public Shared Function AnnotateReferenceEnvelope(envelope As Newtonsoft.Json.Linq.JObject) As Newtonsoft.Json.Linq.JObject

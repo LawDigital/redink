@@ -496,13 +496,16 @@ Partial Public Class ThisAddIn
         ElseIf Not System.String.IsNullOrEmpty(resp.Response) Then
             ' Failed tools may contain completed work or partial source evidence.
             ' Keep the complete body and label the failed execution explicitly.
-            rawContent = New Newtonsoft.Json.Linq.JObject(
+            Dim failureEnvelope As New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("ok", False),
                 New Newtonsoft.Json.Linq.JProperty("execution_succeeded", False),
                 New Newtonsoft.Json.Linq.JProperty("error", If(resp.ErrorMessage, "Tool failed.")),
                 New Newtonsoft.Json.Linq.JProperty("raw_result", resp.Response),
-                New Newtonsoft.Json.Linq.JProperty("result_contract", "Unabridged output of a failed tool. Preserve useful evidence, but do not infer successful completion from this body.")
-            ).ToString(Newtonsoft.Json.Formatting.None)
+                New Newtonsoft.Json.Linq.JProperty("result_contract", "Unabridged output of a failed tool. Preserve useful evidence, but do not infer successful completion from this body."))
+            If resp.ServiceErrorDetails IsNot Nothing Then
+                failureEnvelope("service_error") = Newtonsoft.Json.Linq.JObject.Parse(resp.ServiceErrorDetails.ToDiagnosticJson())
+            End If
+            rawContent = failureEnvelope.ToString(Newtonsoft.Json.Formatting.None)
         Else
             rawContent = $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
         End If
@@ -999,6 +1002,7 @@ Partial Public Class ThisAddIn
         Dim previewLength As System.Int32 = SharedLibrary.Agents.ToolResultStore.GetUnicodeSafePrefixLength(rawContent, INI_ToolResultReferencePreviewChars)
         Dim envelope As Newtonsoft.Json.Linq.JObject = SharedLibrary.Agents.ToolResultStore.DescribeReference(stored)
         envelope("tool") = resp.ToolName
+        envelope("execution_succeeded") = resp.Success
         envelope("preview") = rawContent.Substring(0, previewLength)
         envelope("returned_chars") = previewLength
         envelope("next_offset") = previewLength

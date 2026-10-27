@@ -768,6 +768,7 @@ Partial Public Class ThisAddIn
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
 
             Dim results As New StringBuilder()
+            Dim retrievedCount As System.Int32 = 0
 
             If UseWebView2 Then
                 For i = 0 To urls.Count - 1
@@ -790,10 +791,13 @@ Partial Public Class ThisAddIn
                         results.AppendLine($"<URL_{i + 1}>{resolvedUrl}</URL_{i + 1}>")
 
                         If Not String.IsNullOrWhiteSpace(content) Then
+                            Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                             results.AppendLine($"<CONTENT_{i + 1}>")
-                            results.AppendLine(content)
+                            results.AppendLine(preparedContent)
+                            retrievedCount += 1
                             results.AppendLine($"</CONTENT_{i + 1}>")
                         Else
+                            If includeLinks AndAlso Not System.String.IsNullOrWhiteSpace(linksJson) AndAlso linksJson.Trim() <> "[]" Then retrievedCount += 1
                             results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
                             ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
                         End If
@@ -846,8 +850,10 @@ Partial Public Class ThisAddIn
                             results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
 
                             If Not String.IsNullOrWhiteSpace(content) Then
+                                Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                                 results.AppendLine($"<CONTENT_{i + 1}>")
-                                results.AppendLine(content)
+                                results.AppendLine(preparedContent)
+                                retrievedCount += 1
                                 results.AppendLine($"</CONTENT_{i + 1}>")
                             Else
                                 results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
@@ -891,8 +897,18 @@ Partial Public Class ThisAddIn
                 End Using
             End If
 
+            If retrievedCount < urls.Count Then
+                results.AppendLine("<RETRIEVAL_STATUS>" & If(retrievedCount = 0, "failed", "partial") &
+                    "; retrieved=" & retrievedCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; requested=" & urls.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; inspect each URL result; missing content was not retrieved.</RETRIEVAL_STATUS>")
+            End If
             response.Response = results.ToString()
-            response.Success = True
+            response.Success = retrievedCount > 0
+            If Not response.Success Then
+                response.ErrorCode = "web_content_unavailable"
+                response.ErrorMessage = "No requested source content or usable link result was retrieved. Inspect the per-URL errors and use the stated download/extraction or retrieval alternative."
+            End If
 
         Catch ex As Exception
             response.Success = False

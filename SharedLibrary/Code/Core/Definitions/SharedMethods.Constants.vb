@@ -50,6 +50,10 @@ Namespace SharedLibrary
         Public Const RKModeTrigger2 As String = "(rkmode_longest)"
         Public Const RKModeTrigger3 As String = "(rkmode_first)"
 
+        ' Hard transfer limit and recoverable inline-preview budget for textual web tools.
+        Public Const WebToolMaxTextResponseBytes As System.Int32 = 8 * 1024 * 1024
+        Public Const WebToolMaxInlineTextCharacters As System.Int32 = 100000
+
         Public Const WebAgent_DefaultFromEMail As String = "noreply@noreply.com"
         Public Const WebAgent_DefaultFromName As String = AN & " WebAgent"
 
