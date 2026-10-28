@@ -47,6 +47,24 @@ Partial Public Class ThisAddIn
     ''' <summary>Reserved body/header space in attachment-only follow-up messages.</summary>
     Private Const AP_OutgoingFollowUpReserveBytes As Long = 512L * 1024L
 
+    ''' <summary>Resolve one Outlook recipient to its actual SMTP identity on the Outlook STA.</summary>
+    Private Shared Function GetAutoPilotRecipientSmtpAddress(recipient As Microsoft.Office.Interop.Outlook.Recipient) As System.String
+        If recipient Is Nothing Then Throw New System.ArgumentNullException(NameOf(recipient))
+        Dim entry As Microsoft.Office.Interop.Outlook.AddressEntry = Nothing
+        Dim user As Microsoft.Office.Interop.Outlook.ExchangeUser = Nothing
+        Try
+            entry = recipient.AddressEntry
+            If entry IsNot Nothing AndAlso entry.Type = "EX" Then
+                user = entry.GetExchangeUser()
+                If user IsNot Nothing Then Return If(user.PrimarySmtpAddress, System.String.Empty)
+            End If
+            Return If(recipient.Address, System.String.Empty)
+        Finally
+            If user IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(user) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(user)
+            If entry IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(entry) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(entry)
+        End Try
+    End Function
+
     Private Const AP_SubmissionProperty As System.String = "http://schemas.microsoft.com/mapi/string/{00020329-0000-0000-C000-000000000046}/RedInkSubmissionAttempt"
 
     Private Shared ReadOnly AP_SubmittedMailObjects As New System.Runtime.CompilerServices.ConditionalWeakTable(Of Microsoft.Office.Interop.Outlook.MailItem, System.Object)()

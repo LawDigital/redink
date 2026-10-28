@@ -79,19 +79,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Shared Function ScanRecipientAddress(recipient As Microsoft.Office.Interop.Outlook.Recipient) As System.String
-        Dim entry As Microsoft.Office.Interop.Outlook.AddressEntry = Nothing
-        Dim user As Microsoft.Office.Interop.Outlook.ExchangeUser = Nothing
-        Try
-            entry = recipient.AddressEntry
-            If entry IsNot Nothing AndAlso entry.Type = "EX" Then
-                user = entry.GetExchangeUser()
-                If user IsNot Nothing Then Return If(user.PrimarySmtpAddress, "")
-            End If
-            Return If(recipient.Address, "")
-        Finally
-            ReleaseScanCom(user)
-            ReleaseScanCom(entry)
-        End Try
+        ' Compatibility wrapper: scanning and other per-user mail share one SMTP resolver.
+        Return GetAutoPilotRecipientSmtpAddress(recipient)
     End Function
 
     Private Function MatchScanRule(mail As Microsoft.Office.Interop.Outlook.MailItem, info As AutoPilotMailInfo) As ScanInbox.RuleSet

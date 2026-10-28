@@ -185,6 +185,18 @@ Partial Public Class ThisAddIn
         ''' <summary>Optional input character cap per analysis call; 0 analyses the complete log.</summary>
         Public Property LogDiagnosticsMaxInputChars As System.Int32 = 0
 
+        ''' <summary>Enables optional user-facing Inky request recommendations, independently of engineering reports.</summary>
+        Public Property PromptCoachingEnabled As System.Boolean = False
+
+        ''' <summary>True includes all accepted users by default; explicit per-user opt-out always wins.</summary>
+        Public Property PromptCoachingDefaultForAllUsers As System.Boolean = False
+
+        ''' <summary>System default schedule: True sends after analysis; False collects from 20:00 local time. Explicit per-user timing overrides this default.</summary>
+        Public Property PromptCoachingImmediateDelivery As System.Boolean = False
+
+        ''' <summary>Exact SMTP addresses included by the administrator; no wildcard or domain patterns.</summary>
+        Public Property PromptCoachingIncludedUsers As System.String = System.String.Empty
+
 
     End Class
 
@@ -452,6 +464,27 @@ Partial Public Class ThisAddIn
             .Value = saved.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture)
         }
 
+        Dim pPromptCoachingEnabled As New InputParameter() With {
+            .Name = "Inky recommendations",
+            .ToolTipText = "Analyse completed requests for highly significant improvements. Only specific, evidence-bound advice passing a second quality review is sent; minor style suggestions do not trigger mail (independent of engineering diagnostics)",
+            .Value = saved.PromptCoachingEnabled
+        }
+        Dim pPromptCoachingDefaultForAllUsers As New InputParameter() With {
+            .Name = "Recommendations for all users",
+            .ToolTipText = "On: all accepted users receive useful tips unless explicitly opted out. Off: only opted-in users and exact addresses on the inclusion list. Explicit opt-out always wins.",
+            .Value = saved.PromptCoachingDefaultForAllUsers
+        }
+        Dim pPromptCoachingImmediateDelivery As New InputParameter() With {
+            .Name = "Send recommendations immediately",
+            .ToolTipText = "Default schedule for users without a personal timing choice. On: after a qualifying request is analysed. Off: one digest from 20:00 local host time. DAILY/IMMEDIATE override this default; SYSTEM restores it. No tips without a high-value improvement.",
+            .Value = saved.PromptCoachingImmediateDelivery
+        }
+        Dim pPromptCoachingIncludedUsers As New InputParameter() With {
+            .Name = "Additional recommendation users",
+            .ToolTipText = "Exact e-mail addresses separated by semicolons, commas or newlines. No wildcards. Explicit user/admin opt-out overrides this list; unrelated mail recipients are never inferred.",
+            .Value = If(saved.PromptCoachingIncludedUsers, System.String.Empty)
+        }
+
         Dim paramsList As New List(Of InputParameter) From {
             pCooldown,
             pMaxReplies,
@@ -467,7 +500,11 @@ Partial Public Class ThisAddIn
             pIncludeSourcesFooter,
             pThreadRetentionDays,
             pLogDiagnosticsReportEmail,
-            pLogDiagnosticsMaxInputChars
+            pLogDiagnosticsMaxInputChars,
+            pPromptCoachingEnabled,
+            pPromptCoachingDefaultForAllUsers,
+            pPromptCoachingImmediateDelivery,
+            pPromptCoachingIncludedUsers
         }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -573,6 +610,16 @@ Partial Public Class ThisAddIn
         Else
             config.LogDiagnosticsReportEmail = System.String.Empty
         End If
+
+        config.PromptCoachingEnabled = CBool(If(pPromptCoachingEnabled.Value, False))
+        config.PromptCoachingDefaultForAllUsers = CBool(If(pPromptCoachingDefaultForAllUsers.Value, False))
+        config.PromptCoachingImmediateDelivery = CBool(If(pPromptCoachingImmediateDelivery.Value, False))
+        Try
+            config.PromptCoachingIncludedUsers = System.String.Join("; ", ParseAutoPilotPromptCoachingIncludedUsers(pPromptCoachingIncludedUsers.Value?.ToString()))
+        Catch ex As System.ArgumentException
+            ShowCustomMessageBox(ex.Message, AN)
+            Return Nothing
+        End Try
 
         ' Voicemail settings
         If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
@@ -688,6 +735,11 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Engineering diagnostics: {If(String.IsNullOrWhiteSpace(config.LogDiagnosticsReportEmail), "disabled", "enabled → " & config.LogDiagnosticsReportEmail)}")
         summaryBuilder.AppendLine("Engineering diagnostics: one collected High/Critical report at 20:00 local time; no empty report; confirmed new security findings immediately. Topics: AutoPilotLogTopics.txt beside the per-sender rules (otherwise %APPDATA%\RedInk).")
         summaryBuilder.AppendLine("Engineering diagnostics input: " & If(config.LogDiagnosticsMaxInputChars = 0, "complete log in one call", config.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture) & " characters per part") & "; at most two failed analyses per run.")
+        summaryBuilder.AppendLine("Inky recommendations: " & If(config.PromptCoachingEnabled, "enabled", "disabled") & "; " &
+                                  If(config.PromptCoachingDefaultForAllUsers, "all accepted users by default", "opted-in users and inclusion list only") & "; " &
+                                  If(config.PromptCoachingImmediateDelivery, "default: after completed-request analysis", "default: daily digest from 20:00 local time") & "; personal timing overrides this default")
+        summaryBuilder.AppendLine("Recommendation inclusion list: " & ParseAutoPilotPromptCoachingIncludedUsers(config.PromptCoachingIncludedUsers).Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                  " exact address(es); explicit opt-out always wins. User control: INKY_TIPS ON / OFF / STATUS / DEFAULT. Admin control: User Dashboard.")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -874,6 +926,10 @@ Partial Public Class ThisAddIn
         My.Settings.AP_LogDiagnosticsMaxInputChars = config.LogDiagnosticsMaxInputChars
         My.Settings.AP_LogDiagnosticsReportIntervalDays = 1
         My.Settings.AP_LogDiagnosticsReportEmail = If(config.LogDiagnosticsReportEmail, "")
+        My.Settings.AP_PromptCoachingEnabled = config.PromptCoachingEnabled
+        My.Settings.AP_PromptCoachingDefaultForAllUsers = config.PromptCoachingDefaultForAllUsers
+        My.Settings.AP_PromptCoachingImmediateDelivery = config.PromptCoachingImmediateDelivery
+        My.Settings.AP_PromptCoachingIncludedUsers = If(config.PromptCoachingIncludedUsers, System.String.Empty)
 
         ' Persist the explicit user selection exactly as before. In addition, persist the
         ' catalog against which that selection was made so newly introduced tools can be
@@ -927,6 +983,16 @@ Partial Public Class ThisAddIn
         config.LogDiagnosticsReportEmail = If(My.Settings.AP_LogDiagnosticsReportEmail, "")
         config.LogDiagnosticsMaxInputChars = If(My.Settings.AP_LogDiagnosticsMaxInputChars >= 10000, My.Settings.AP_LogDiagnosticsMaxInputChars, 0)
         config.LogDiagnosticsReportIntervalDays = 1
+        config.PromptCoachingEnabled = My.Settings.AP_PromptCoachingEnabled
+        config.PromptCoachingDefaultForAllUsers = My.Settings.AP_PromptCoachingDefaultForAllUsers
+        config.PromptCoachingImmediateDelivery = My.Settings.AP_PromptCoachingImmediateDelivery
+        config.PromptCoachingIncludedUsers = If(My.Settings.AP_PromptCoachingIncludedUsers, System.String.Empty)
+        Try
+            config.PromptCoachingIncludedUsers = System.String.Join("; ", ParseAutoPilotPromptCoachingIncludedUsers(config.PromptCoachingIncludedUsers))
+        Catch ex As System.ArgumentException
+            config.PromptCoachingEnabled = False
+            System.Diagnostics.Debug.WriteLine("Inky recommendations disabled because the saved inclusion list is invalid: " & ex.Message)
+        End Try
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

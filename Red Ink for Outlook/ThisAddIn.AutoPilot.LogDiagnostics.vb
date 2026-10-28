@@ -369,6 +369,7 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub CancelAutoPilotLogDiagnosticsForForegroundWork()
+        CancelAutoPilotPromptCoachingForForegroundWork()
         Try
             Dim cts As System.Threading.CancellationTokenSource = _apLogDiagnosticsCts
             If cts IsNot Nothing AndAlso Not cts.IsCancellationRequested Then cts.Cancel()
@@ -398,6 +399,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Sub TryStartAutoPilotLogDiagnosticsIdle(sessionToken As System.Threading.CancellationToken)
+        ' Coaching has its own lifecycle and also runs without an engineering recipient.
+        TryStartAutoPilotPromptCoachingIdle(sessionToken)
         If Not IsAutoPilotLogDiagnosticsEnabled() Then
             LogAutoPilotLogDiagnosticsStatus("idle", "disabled: no report e-mail address configured.")
             Return
@@ -484,7 +487,7 @@ Partial Public Class ThisAddIn
                     Continue While
                 End If
 
-                If bundle.IsPending Then DeletePendingAutoPilotLogDiagnosticBundle(bundle.RunKey)
+                If bundle.IsPending AndAlso PreserveAutoPilotPromptCoachingInputBeforeRotation(bundle.RunKey) Then DeletePendingAutoPilotLogDiagnosticBundle(bundle.RunKey)
                 ' Result-cache retention is handled by the nightly AutoPilot pass.
 
                 Await MaybeSendImmediateAutoPilotSecurityDiagnosticsForResultAsync(GetAutoPilotLogDiagnosticResultPath(bundle.RunKey), ct).ConfigureAwait(False)

@@ -947,8 +947,15 @@ Partial Public Class ThisAddIn
                     Else
                         failedFiles.Add($"{fileName}: {modeNoun} failed")
                     End If
-                Catch ex As Exception
-                    failedFiles.Add($"{fileName}: {ex.Message}")
+                Catch ex As System.Exception When IsWordCommandCancellation(ex)
+                    ' Esc stops the batch. It is not a failed file and must not
+                    ' launch processing for the remaining documents.
+                    ProgressBarModule.CancelOperation = True
+                    LogWordCommandDiagnostic("ProcessDocumentBatch", "cancelled_by_user")
+                    Exit For
+                Catch ex As System.Exception
+                    LogWordCommandDiagnostic("ProcessDocumentBatch", ex.ToString())
+                    failedFiles.Add($"{fileName}: Inky could not finish processing this file.")
                 End Try
             Next
         Finally
@@ -1419,7 +1426,9 @@ Partial Public Class ThisAddIn
             xmlDoc.Save(commentsXmlPath)
             Return True
 
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
             Debug.WriteLine($"ProcessCommentsXml error: {ex.Message}")
             Return False
         End Try
@@ -1461,7 +1470,9 @@ Partial Public Class ThisAddIn
                         xmlDoc.Save(filePath)
                     End If
 
-                Catch ex As Exception
+                Catch ex As System.Exception When IsWordCommandCancellation(ex)
+                    Throw
+                Catch ex As System.Exception
                     Debug.WriteLine($"ProcessHeadersFooters error for {Path.GetFileName(filePath)}: {ex.Message}")
                     ' Continue with other files
                 End Try
@@ -2757,7 +2768,9 @@ Partial Public Class ThisAddIn
                     xmlDoc.Save(filePath)
                 End If
 
-            Catch ex As Exception
+            Catch ex As System.Exception When IsWordCommandCancellation(ex)
+                Throw
+            Catch ex As System.Exception
                 Debug.WriteLine($"ProcessFootnotesEndnotes error for {fileName}: {ex.Message}")
                 ' Continue with other files
             End Try

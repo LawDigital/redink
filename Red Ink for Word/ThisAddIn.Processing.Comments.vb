@@ -783,7 +783,8 @@ Partial Public Class ThisAddIn
     ''' <returns>XML payload containing summary metadata and comment nodes, or an empty string if none were exported.</returns>
     Public Shared Function BubblesExtract(ByVal rng As Microsoft.Office.Interop.Word.Range,
                                       Optional ByVal Silent As Boolean = False, Optional ByVal SortByDate As Boolean = False,
-                                      Optional ByVal TargetCommentIndex As System.Int32 = 0) As System.String
+                                      Optional ByVal TargetCommentIndex As System.Int32 = 0,
+                                      Optional ByVal IncludeOverlappingAnchors As System.Boolean = False) As System.String
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -868,7 +869,12 @@ Partial Public Class ThisAddIn
                             Continue For
                         End Try
                     End Try
-                    If cStart >= effectiveRange.Start AndAlso cEnd <= effectiveRange.End Then
+                    Dim fullyContained As System.Boolean = cStart >= effectiveRange.Start AndAlso cEnd <= effectiveRange.End
+                    Dim overlaps As System.Boolean = IncludeOverlappingAnchors AndAlso
+                        If(cStart = cEnd,
+                           cStart >= effectiveRange.Start AndAlso cStart < effectiveRange.End,
+                           cStart < effectiveRange.End AndAlso cEnd > effectiveRange.Start)
+                    If fullyContained OrElse overlaps Then
                         allInRange.Add(c)
                     End If
                 Next
@@ -1560,9 +1566,10 @@ Partial Public Class ThisAddIn
 
             Return ""
 
-        Catch ex As Exception
-            Debug.WriteLine($"ProcessSelectedTextInActiveCommentBubble error: {ex.Message}{vbCrLf}{ex.StackTrace}")
-            ShowCustomMessageBox($"Error processing comment bubble: {ex.Message}")
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
+            ReportWordCommandFailure("ProcessCommentText", ex, "Inky could not update this comment. Please finish editing the comment and try again.")
             Return ""
         End Try
     End Function

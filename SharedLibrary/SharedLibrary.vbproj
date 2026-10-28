@@ -564,6 +564,8 @@
     <Compile Include="Code\Agents\ToolingConstants.vb" />
     <Compile Include="Code\Agents\ToolingFinalResponseContract.vb" />
     <Compile Include="Code\Agents\ToolingOrchestrator.vb" />
+    <Compile Include="Code\Agents\ToolingOriginalRequestLog.vb" />
+    <Compile Include="Code\Agents\PromptCoachingAdvice.vb" />
     <Compile Include="Code\Agents\ToolLoaderTool.vb" />
     <Compile Include="Code\Agents\ToolRegistry.vb" />
     <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />
@@ -741,7 +743,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Core\UI\SplashScreenCountDown.vb">
-      <SubType>Form</SubType>
+      <SubType>Code</SubType>
     </Compile>
     <Compile Include="Code\Core\UI\DPIProgressForm.vb">
       <SubType>Form</SubType>

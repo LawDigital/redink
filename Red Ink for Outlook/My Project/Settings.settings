@@ -275,6 +275,18 @@
     <Setting Name="AP_LogDiagnosticsReportEmail" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
+    <Setting Name="AP_PromptCoachingEnabled" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="AP_PromptCoachingDefaultForAllUsers" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="AP_PromptCoachingImmediateDelivery" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="AP_PromptCoachingIncludedUsers" Type="System.String" Scope="User">
+      <Value Profile="(Default)"></Value>
+    </Setting>
     <Setting Name="LocalHttpAuthMasterKey" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>

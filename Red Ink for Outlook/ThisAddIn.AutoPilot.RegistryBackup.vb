@@ -77,6 +77,10 @@ Partial Public Class ThisAddIn
                 {"AP_LogDiagnosticsMaxInputChars", My.Settings.AP_LogDiagnosticsMaxInputChars},
                 {"AP_LogDiagnosticsReportIntervalDays", My.Settings.AP_LogDiagnosticsReportIntervalDays},
                 {"AP_LogDiagnosticsReportEmail", If(My.Settings.AP_LogDiagnosticsReportEmail, "")},
+                {"AP_PromptCoachingEnabled", My.Settings.AP_PromptCoachingEnabled},
+                {"AP_PromptCoachingDefaultForAllUsers", My.Settings.AP_PromptCoachingDefaultForAllUsers},
+                {"AP_PromptCoachingImmediateDelivery", My.Settings.AP_PromptCoachingImmediateDelivery},
+                {"AP_PromptCoachingIncludedUsers", If(My.Settings.AP_PromptCoachingIncludedUsers, System.String.Empty)},
                 {"D", Date.UtcNow.ToString("o")}
             }
 
@@ -176,6 +180,10 @@ Partial Public Class ThisAddIn
             My.Settings.AP_SenderToolPolicyPath = GetJsonString(json, "AP_SenderToolPolicyPath")
             My.Settings.AP_ThreadRetentionDays = GetJsonInteger(json, "AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays)
             My.Settings.AP_LogDiagnosticsReportEmail = GetJsonString(json, "AP_LogDiagnosticsReportEmail")
+            My.Settings.AP_PromptCoachingEnabled = GetJsonBoolean(json, "AP_PromptCoachingEnabled", My.Settings.AP_PromptCoachingEnabled)
+            My.Settings.AP_PromptCoachingDefaultForAllUsers = GetJsonBoolean(json, "AP_PromptCoachingDefaultForAllUsers", My.Settings.AP_PromptCoachingDefaultForAllUsers)
+            My.Settings.AP_PromptCoachingImmediateDelivery = GetJsonBoolean(json, "AP_PromptCoachingImmediateDelivery", My.Settings.AP_PromptCoachingImmediateDelivery)
+            My.Settings.AP_PromptCoachingIncludedUsers = GetJsonString(json, "AP_PromptCoachingIncludedUsers")
             My.Settings.AP_LogDiagnosticsMaxInputChars = GetJsonInteger(json, "AP_LogDiagnosticsMaxInputChars", My.Settings.AP_LogDiagnosticsMaxInputChars)
             My.Settings.AP_LogDiagnosticsReportIntervalDays = System.Math.Max(1, System.Math.Min(365, GetJsonInteger(json, "AP_LogDiagnosticsReportIntervalDays", My.Settings.AP_LogDiagnosticsReportIntervalDays)))
 

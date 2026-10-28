@@ -169,12 +169,14 @@ Partial Public Class ThisAddIn
         End If
         Dim ownsScan As System.Boolean = False
         Dim ownsDiagnostics As System.Boolean = False
+        Dim ownsCoaching As System.Boolean = False
         Dim ownsDeletion As System.Boolean = False
         Try
             ownsScan = System.Threading.Interlocked.CompareExchange(_scanSweepRunning, 1, 0) = 0
             If ownsScan Then ownsDiagnostics = System.Threading.Interlocked.CompareExchange(_apLogDiagnosticsRunning, 1, 0) = 0
-            If ownsDiagnostics Then ownsDeletion = System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 1, 0) = 0
-            If Not ownsScan OrElse Not ownsDiagnostics OrElse Not ownsDeletion Then
+            If ownsDiagnostics Then ownsCoaching = System.Threading.Interlocked.CompareExchange(_apPromptCoachingRunning, 1, 0) = 0
+            If ownsCoaching Then ownsDeletion = System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 1, 0) = 0
+            If Not ownsScan OrElse Not ownsDiagnostics OrElse Not ownsCoaching OrElse Not ownsDeletion Then
                 ApDashboardLog("🗂 Nightly file purge skipped: scan, diagnostics or mail deletion is active; next attempt is tomorrow at 01:00.", "step")
                 Return
             End If
@@ -189,11 +191,13 @@ Partial Public Class ThisAddIn
             ct.ThrowIfCancellationRequested()
             PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
             CleanupAutoPilotLogDiagnosticResults()
+            CleanupAutoPilotPromptCoaching()
             ct.ThrowIfCancellationRequested()
             If _apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler Then SchedulerPurgeOrphanDirectories()
             ApDashboardLog("🗂 AutoPilot nightly file purge finished.", "info")
         Finally
             If ownsDeletion Then System.Threading.Interlocked.Exchange(_apAutoDeleteCheckRunning, 0)
+            If ownsCoaching Then System.Threading.Interlocked.Exchange(_apPromptCoachingRunning, 0)
             If ownsDiagnostics Then System.Threading.Interlocked.Exchange(_apLogDiagnosticsRunning, 0)
             If ownsScan Then System.Threading.Interlocked.Exchange(_scanSweepRunning, 0)
             _apProcessingSemaphore.Release()
