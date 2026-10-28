@@ -659,8 +659,11 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-        Catch ex As Exception
-            ShowCustomMessageBox($"Error during document assembly: {ex.Message}", AN & " Assembly Error")
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            LogWordCommandDiagnostic("AssembleDocument", "cancelled_by_user")
+        Catch ex As System.Exception
+            ReportWordCommandFailure("AssembleDocument", ex,
+                "Inky could not assemble the document. Please check the chosen templates and try again.")
         Finally
             ' Cleanup all template temp directories
             For Each kvp In templates

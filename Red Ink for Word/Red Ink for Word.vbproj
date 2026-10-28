@@ -704,6 +704,8 @@
     <Compile Include="ThisAddIn.MCPImporter.vb" />
     <Compile Include="ThisAddIn.Menu.vb" />
     <Compile Include="ThisAddIn.PaneAndMerge.vb" />
+    <Compile Include="ThisAddIn.CommentCommands.vb" />
+    <Compile Include="WordCommentSelectionTracker.vb" />
     <Compile Include="ThisAddIn.Processing.Comments.vb" />
     <Compile Include="ThisAddIn.Processing.FileRAG.vb" />
     <Compile Include="ThisAddIn.Processing.FormatSaveAndRestore.vb" />

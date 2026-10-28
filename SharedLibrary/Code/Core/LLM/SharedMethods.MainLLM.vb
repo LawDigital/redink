@@ -75,6 +75,45 @@ Namespace SharedLibrary
 
     Partial Public Class SharedMethods
 
+        ' <summary>
+        ' Turns an error originating in a model request into a short user-facing
+        ' notice. Raw exceptions remain available to the caller for diagnostics.
+        ' Never include endpoints, credentials, response bodies or stack traces.
+        ' </summary>
+        Public Shared Function FormatModelRequestFailureForUser(requestException As System.Exception) As System.String
+            If requestException Is Nothing Then
+                Return "Inky could not complete the model request. Please try again."
+            End If
+
+            If TypeOf requestException Is System.TimeoutException Then
+                Return "Inky did not receive an answer from the AI service in time. Please try again."
+            End If
+
+            Dim transient As LlmTransientTransportException = TryCast(requestException, LlmTransientTransportException)
+            If transient IsNot Nothing Then
+                Return "The AI service is temporarily unavailable (HTTP " &
+                    transient.StatusCode.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "). Please try again shortly."
+            End If
+
+            If TypeOf requestException Is System.Net.Http.HttpRequestException OrElse
+               TypeOf requestException Is System.Net.WebException Then
+                Return "Inky could not reach the AI service or the service rejected the request. Please try again."
+            End If
+
+            ' Some model-service failures contain a brief, useful explanation.
+            ' Display only plain, bounded descriptions. Never show an endpoint,
+            ' response JSON, credential, local path, stack trace or source snippet.
+            Dim detail As System.String = If(requestException.Message, System.String.Empty).Trim()
+            If detail.Length > 0 AndAlso detail.Length <= 240 AndAlso
+               Not System.Text.RegularExpressions.Regex.IsMatch(detail,
+                   "(?i)(https?://|bearer|authorization|api[_ -]?key|secret|password|access[_ -]?token|refresh[_ -]?token|stack trace|system[.]|[\r\n{}<>]|[a-z]:[\\]|[/]home[/]|[/]users[/])") Then
+                Return "The AI service reported: " & detail
+            End If
+
+            Return "The AI service could not complete this request. Please try again. If it happens again, contact support."
+        End Function
+
         Private Shared Function IsTransientTransportStatusCode(statusCode As Integer) As Boolean
             Select Case statusCode
                 Case 408, 425, 429, 502, 503, 504
@@ -798,7 +837,9 @@ Namespace SharedLibrary
 
                 cancellationToken.ThrowIfCancellationRequested()
 
-                Dim splash As SplashScreenCountDown = Nothing
+                Dim splash As Global.SharedLibrary.SharedLibrary.SplashScreenCountDown = Nothing
+                Dim splashCancelHandler As System.EventHandler = Nothing
+                Dim splashCancelRequested As System.Int32 = 0
                 Dim cts As System.Threading.CancellationTokenSource = Nothing
 
                 Dim TokenCountString As String = ""
@@ -1001,17 +1042,23 @@ Namespace SharedLibrary
                         Next
                     End If
 
-                    ' Create splash & CTS once:
-                    splash = New SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, 0)
+                    ' Hidden requests create no splash/controller or WinForms resources.
+                    If Not Hidesplash Then
+                        splash = New Global.SharedLibrary.SharedLibrary.SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, 0)
+                        splashCancelHandler =
+                            Sub(sender As System.Object, e As System.EventArgs)
+                                ' Record ESC before the controller cancels its own token.
+                                ' Never capture/cancel a request CTS from a late UI callback.
+                                System.Threading.Interlocked.Exchange(splashCancelRequested, 1)
+                            End Sub
+                        AddHandler splash.CancelRequested, splashCancelHandler
+                    End If
 
-                    ' Link a local CTS with the external token so caller cancellation, timeout, and the splash cancel button apply.
-                    cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
-                    Dim splashCancelRequested As System.Int32 = 0
-                    AddHandler splash.CancelRequested,
-                        Sub()
-                            System.Threading.Interlocked.Exchange(splashCancelRequested, 1)
-                            cts.Cancel()
-                        End Sub
+                    ' Cancellation and per-attempt timeout remain active for EVERY request.
+                    ' Linking tokens replaces the unsafe UI callback into a disposed CTS.
+                    cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken,
+                        If(splash IsNot Nothing, splash.RequestCancellationToken, System.Threading.CancellationToken.None))
                     Dim ct As System.Threading.CancellationToken = cts.Token
 
                     Dim lastAttemptTimeoutMilliseconds As System.Int32 = 0
@@ -1067,9 +1114,11 @@ Namespace SharedLibrary
                                 End If
                             End Sub
 
-                    If Not Hidesplash Then
-                        splash.Show()
+                    If splash IsNot Nothing Then
+                        ' Preserve the incoming context for existing clipboard/UI preparation.
+                        Await splash.ShowAsync(ct)
                     End If
+                    ct.ThrowIfCancellationRequested()
 
                     restartCountdownAndTimeout(Nothing)
 
@@ -1530,18 +1579,19 @@ Namespace SharedLibrary
                                         Throw New OperationCanceledException(ct)
                                     Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
                                         If context.INI_APIDebug Then WriteDebugError("Request to the endpoint timed out.", Endpoint, requestBody, "", ex)
-                                        If Not Hidesplash Then splash.Close()
+                                        If splash IsNot Nothing Then splash.Close()
                                         If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
                                     Catch ex As LlmTransientTransportException
                                         Throw
                                     Catch ex As System.Exception When Not ct.IsCancellationRequested
                                         If context.INI_APIDebug Then WriteDebugError("Response from the endpoint resulted in an error.", Endpoint, requestBody, "", ex)
-                                        If Not Hidesplash Then splash.Close()
+                                        If splash IsNot Nothing Then splash.Close()
                                         If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
                                     End Try
                                 End Using
                             End Using
                         Catch ex As System.OperationCanceledException
+                            If splash IsNot Nothing Then splash.ThrowIfFailed()
                             If cancellationToken.IsCancellationRequested OrElse
                                System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
                                 Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
@@ -1551,8 +1601,9 @@ Namespace SharedLibrary
                                 $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                                 ex)
                         Finally
-                            cts.Dispose()
-                            If Not Hidesplash Then splash.Close()
+                            ' Stop the attempt timer; the outer Finally owns CTS disposal.
+                            cts.CancelAfter(System.Threading.Timeout.Infinite)
+                            If splash IsNot Nothing Then splash.Close()
                         End Try
 
                         GoTo PostProcess
@@ -1965,14 +2016,15 @@ Namespace SharedLibrary
                             Throw New OperationCanceledException(ct)
                         Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
                             If context.INI_APIDebug Then WriteDebugError("Request to the endpoint timed out.", Endpoint, requestBody, "", ex)
-                            If Not Hidesplash Then splash.Close()
+                            If splash IsNot Nothing Then splash.Close()
                             If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
                         Catch ex As System.Exception When Not ct.IsCancellationRequested
                             If context.INI_APIDebug Then WriteDebugError("Response from the endpoint resulted in an error.", Endpoint, requestBody, "", ex)
-                            If Not Hidesplash Then splash.Close()
+                            If splash IsNot Nothing Then splash.Close()
                             If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
                         End Try
                     Catch ex As System.OperationCanceledException
+                        If splash IsNot Nothing Then splash.ThrowIfFailed()
                         If cancellationToken.IsCancellationRequested OrElse
                            System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
                             Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
@@ -1982,11 +2034,13 @@ Namespace SharedLibrary
                             $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                             ex)
                     Finally
-                        cts.Dispose()
-                        If Not Hidesplash Then splash.Close()
+                        ' Stop the attempt timer; the outer Finally owns CTS disposal.
+                        cts.CancelAfter(System.Threading.Timeout.Infinite)
+                        If splash IsNot Nothing Then splash.Close()
                     End Try
 
 PostProcess:
+                    If splash IsNot Nothing Then splash.ThrowIfFailed()
                     If context.INI_DoubleS Then
                         Returnvalue = ApplyDoubleSForPresentation(Returnvalue)
                     End If
@@ -2029,6 +2083,13 @@ PostProcess:
 
                     Return Returnvalue
 
+                Catch ex As Global.SharedLibrary.SharedLibrary.SplashScreenCountDown.SplashDisplayException
+                    ' The controller has logged technical details. Do not continue an
+                    ' interactive request without its expected progress/ESC surface.
+                    If context.INI_APIDebug Then WriteDebugError("Progress display unavailable.", "", "", "", ex)
+                    If Not Hidesplash Then ShowCustomMessageBox(ex.Message)
+                    Throw New System.OperationCanceledException("The request was stopped because the progress window was unavailable.", ex)
+
                 Catch ex As System.TimeoutException
                     Throw
 
@@ -2054,9 +2115,13 @@ PostProcess:
                     If Not Hidesplash Then ShowCustomMessageBox($"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}") Else Return $"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}"
                     Return ""
                 Finally
-                    If Not Hidesplash Then
-                        splash.Close()
+                    ' Covers early validation failures, startup failure, both transport
+                    ' paths and normal completion. Close is non-blocking/idempotent.
+                    If splash IsNot Nothing Then
+                        If splashCancelHandler IsNot Nothing Then RemoveHandler splash.CancelRequested, splashCancelHandler
+                        splash.Dispose()
                     End If
+                    If cts IsNot Nothing Then cts.Dispose()
                 End Try
             Finally
                 If requestFailureScope IsNot Nothing Then requestFailureScope.Dispose()

@@ -160,6 +160,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `create_audio_file` | Generates an audio file output. | No | Yes | Yes |
 | `generate_image` | Generates an image file output. | No | Yes | Yes |
 | `manage_scheduled_tasks` | Creates, lists, updates, pauses, resumes, or deletes scheduled tasks. | No | Yes | Yes |
+| `manage_prompt_coaching` | Manages the verified mail sender's optional Inky tips and personal daily/immediate/system delivery schedule; no other user target is accepted. | No | No | Yes |
 | `manage_user_memory` | Manages per-user persistent memory storage. | No | Yes | Yes |
 | `manage_user_files` | Manages files in per-user storage. | No | Yes | Yes |
 | `report_inability` | Returns a structured inability report when the requested action cannot be completed. | No | Yes | Yes |
@@ -179,6 +180,8 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `agent_workspace_create_folder_structure` | Creates multiple folders under a workspace path in one operation. | No | Yes | Yes |
 | `agent_workspace_trash` | Moves workspace files or folders to the Recycle Bin. | No | Yes | Yes |
 | `agent_workspace_inventory_report` | Creates a Word or Excel inventory report for workspace files. | No | Yes | Yes |
+
+`manage_prompt_coaching` accepts only `action`: `status`, `enable`, `disable`, `reset`, `daily`, `immediate`, `delivery_default`. ON/OFF preserve timing; DAILY/IMMEDIATE enable tips with personal timing; SYSTEM (`delivery_default`) changes timing only; DEFAULT (`reset`) resets both choices to the system defaults/inclusion list. Personal timing overrides the startup delivery default, never global disable or explicit opt-out. It remains available for an authorized current mail sender under sender-tool restrictions and when delivery is globally disabled; Local Chat and scheduled tasks cannot use it. The model-independent fallback is one exact full-body command: `INKY_TIPS ON`, `INKY_TIPS OFF`, `INKY_TIPS DAILY`, `INKY_TIPS IMMEDIATE`, `INKY_TIPS SYSTEM`, `INKY_TIPS STATUS`, or `INKY_TIPS DEFAULT`, without a signature or quoted text. Normal sender, actual configured subject-trigger and approval rules still apply. Recommendations are sent only for high-impact contextual improvements which pass an additional quality review; immediate delivery does not imply a message after every mail.
 
 ## Word live-document tools
 

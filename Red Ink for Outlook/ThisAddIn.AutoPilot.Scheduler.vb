@@ -1120,16 +1120,24 @@ Partial Public Class ThisAddIn
                 End If
 
                 If schedulerTools.Count > 0 Then
-                    response = Await ExecuteToolingLoop(
-                        systemPrompt, userPrompt.ToString(),
-                        schedulerTools, executionUseSecondApi,
-                        hideSplash:=True, hideLogWindow:=True,
-                        cancellationToken:=ct, binaryOutputDirectory:=tempDir,
-                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
-                            task.CreatedBy,
-                            If(String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject)),
-                        semanticArchivePrepared:=archivePrepared,
-                        transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
+                    Dim originalRequest As New Global.SharedLibrary.Agents.ToolingOriginalRequestLog.Record(
+                        requestText:=task.Instruction, subject:=task.Subject, senderEmail:=task.CreatedBy,
+                        source:="autopilot_schedule", messageId:=task.Id)
+                    Dim coachingArchivePath As System.String = BuildAutoPilotToolingLogArchivePath(
+                        task.CreatedBy, If(System.String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject), originalRequest)
+                    Try
+                        response = Await ExecuteToolingLoop(
+                            systemPrompt, userPrompt.ToString(),
+                            schedulerTools, executionUseSecondApi,
+                            hideSplash:=True, hideLogWindow:=True,
+                            cancellationToken:=ct, binaryOutputDirectory:=tempDir,
+                            toolingLogArchivePath:=coachingArchivePath,
+                            toolingOriginalRequest:=originalRequest,
+                            semanticArchivePrepared:=archivePrepared,
+                            transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
+                    Finally
+                        CompleteAutoPilotPromptCoachingRun(coachingArchivePath)
+                    End Try
                 Else
                     response = Await LLM(systemPrompt, userPrompt.ToString(),
                                          UseSecondAPI:=executionUseSecondApi,

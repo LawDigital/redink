@@ -61,8 +61,8 @@ Partial Public Class ThisAddIn
     Private Function CreateUserStorageDashboardForm() As Form
         Dim frm As New Form() With {
             .Text = $"{AN6} AutoPilot — User Storage Manager",
-            .Width = 950,
-            .Height = 480,
+            .Width = 1150,
+            .Height = 520,
             .StartPosition = FormStartPosition.CenterScreen,
             .FormBorderStyle = FormBorderStyle.Sizable,
             .MinimumSize = New Drawing.Size(750, 350),
@@ -109,15 +109,19 @@ Partial Public Class ThisAddIn
             }
         }
 
+        dgv.Columns.Add("colEmail", "Verified e-mail")
         dgv.Columns.Add("colUser", "User (folder)")
         dgv.Columns.Add("colMemory", "Memory")
         dgv.Columns.Add("colFiles", "Files")
         dgv.Columns.Add("colSize", "Size")
+        dgv.Columns.Add("colCoaching", "Inky recommendations")
 
-        dgv.Columns("colUser").FillWeight = 45
-        dgv.Columns("colMemory").FillWeight = 15
-        dgv.Columns("colFiles").FillWeight = 15
-        dgv.Columns("colSize").FillWeight = 25
+        dgv.Columns("colEmail").FillWeight = 27
+        dgv.Columns("colUser").FillWeight = 20
+        dgv.Columns("colMemory").FillWeight = 10
+        dgv.Columns("colFiles").FillWeight = 8
+        dgv.Columns("colSize").FillWeight = 10
+        dgv.Columns("colCoaching").FillWeight = 25
 
         mainPanel.Controls.Add(dgv, 0, 0)
 
@@ -163,6 +167,16 @@ Partial Public Class ThisAddIn
         }
         AddHandler btnDeleteUser.Click, Sub(s, e) UserStorageAction_DeleteUser(dgv)
 
+        Dim btnPromptCoaching As New System.Windows.Forms.Button() With {
+            .Text = "Inky recommendations…", .AutoSize = True, .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4)
+        }
+        AddHandler btnPromptCoaching.Click, Sub(s, e) UserStorageAction_PromptCoaching(dgv, False)
+
+        Dim btnAddPromptCoachingUser As New System.Windows.Forms.Button() With {
+            .Text = "Add recommendation user…", .AutoSize = True, .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4)
+        }
+        AddHandler btnAddPromptCoachingUser.Click, Sub(s, e) UserStorageAction_PromptCoaching(dgv, True)
+
         Dim btnClose As New Button() With {
             .Text = "Close", .AutoSize = True, .Padding = New Padding(8, 4, 8, 4)
         }
@@ -175,6 +189,8 @@ Partial Public Class ThisAddIn
         buttonPanel.Controls.Add(btnDeleteFile)
         buttonPanel.Controls.Add(btnDeleteAllFiles)
         buttonPanel.Controls.Add(btnDeleteUser)
+        buttonPanel.Controls.Add(btnPromptCoaching)
+        buttonPanel.Controls.Add(btnAddPromptCoachingUser)
         buttonPanel.Controls.Add(btnClose)
         mainPanel.Controls.Add(buttonPanel, 0, 1)
 
@@ -210,13 +226,16 @@ Partial Public Class ThisAddIn
     Private Sub RefreshUserStorageDashboardCore(dgv As DataGridView)
         dgv.Rows.Clear()
         Dim users = ListAllUserStorageDirs()
+        Dim representedEmails As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
 
         For Each u In users.OrderBy(Function(x) x.FolderName)
             Dim memoryLabel = If(u.HasMemory, "✓ Active", "—")
             Dim filesLabel = If(u.HomeFileCount > 0, u.HomeFileCount.ToString() & " file(s)", "—")
             Dim sizeLabel = If(u.HomeSizeBytes > 0, $"{u.HomeSizeBytes / 1024.0 / 1024.0:F1} MB", "—")
 
-            Dim rowIdx = dgv.Rows.Add(u.FolderName, memoryLabel, filesLabel, sizeLabel)
+            Dim email As System.String = GetAutoPilotPromptCoachingDashboardEmail(u.FolderName)
+            If email.Length > 0 Then representedEmails.Add(email)
+            Dim rowIdx = dgv.Rows.Add(If(email.Length > 0, email, "(unverified legacy identity)"), u.FolderName, memoryLabel, filesLabel, sizeLabel, "")
 
             ' Color-code
             Dim row = dgv.Rows(rowIdx)
@@ -228,13 +247,113 @@ Partial Public Class ThisAddIn
 
             ' Store folder name in Tag for action lookups
             row.Tag = u.FolderName
+            row.Cells("colEmail").Tag = email
+            UpdateUserStoragePromptCoachingCell(row, email)
         Next
+
+        For Each email As System.String In ListAutoPilotPromptCoachingKnownUsers()
+            If representedEmails.Contains(email) Then Continue For
+            Dim rowIndex As System.Int32 = dgv.Rows.Add(email, "(recommendations only)", "—", "—", "—", "")
+            Dim row As System.Windows.Forms.DataGridViewRow = dgv.Rows(rowIndex)
+            row.Tag = Nothing
+            row.Cells("colEmail").Tag = email
+            UpdateUserStoragePromptCoachingCell(row, email)
+        Next
+    End Sub
+
+    Private Sub UpdateUserStoragePromptCoachingCell(row As System.Windows.Forms.DataGridViewRow, email As System.String)
+        Dim cell As System.Windows.Forms.DataGridViewCell = row.Cells("colCoaching")
+        If System.String.IsNullOrWhiteSpace(email) Then
+            cell.Value = "Unavailable (unverified identity)"
+            cell.ToolTipText = "A legacy folder name does not prove its owner's e-mail address. Use Add recommendation user with the exact address."
+            Return
+        End If
+        Dim status As Newtonsoft.Json.Linq.JObject = GetAutoPilotPromptCoachingPreferenceStatus(email)
+        Dim preference As System.String = status.Value(Of System.String)("preference")
+        Dim enabled As System.Boolean = status.Value(Of System.Boolean)("effectiveEnabled")
+        If preference = "unavailable" Then
+            cell.Value = "Withheld (preference unreadable)"
+            cell.Style.ForeColor = System.Drawing.Color.DarkRed
+        ElseIf Not status.Value(Of System.Boolean)("globalEnabled") Then
+            cell.Value = "System off; stored: " & preference
+            cell.Style.ForeColor = System.Drawing.Color.Gray
+        Else
+            cell.Value = If(enabled, "On", "Off") & " — " &
+                If(preference = "default", status.Value(Of System.String)("reason").Replace("_", " "), status.Value(Of System.String)("source") & " choice")
+            cell.Style.ForeColor = If(enabled, System.Drawing.Color.DarkGreen, System.Drawing.Color.Gray)
+        End If
+        Dim timing As System.String = If(status.Value(Of System.String)("deliveryMode") = "immediate", "after analysis", "daily from 20:00")
+        If preference <> "unavailable" Then cell.Value = System.Convert.ToString(cell.Value, System.Globalization.CultureInfo.InvariantCulture) & " — " & timing
+        cell.ToolTipText = "Preference: " & preference & "; effective delivery: " & timing &
+            "; personal timing: " & status.Value(Of System.String)("deliveryPreference") &
+            ". Personal timing overrides the startup schedule, never a global disable or opt-out. Preferences survive memory/file deletion."
+    End Sub
+
+    Private Sub UserStorageAction_PromptCoaching(dgv As System.Windows.Forms.DataGridView, addUser As System.Boolean)
+        Using SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(_apUserStorageDashboard)
+            Dim email As System.String = System.String.Empty
+            If addUser Then
+                Dim input As System.String = ShowCustomInputBox(
+                    "Enter the exact e-mail address whose Inky recommendations you want to manage:",
+                    "Inky recommendations — User", True, System.String.Empty)
+                If input Is Nothing Then Return
+                email = NormalizeAutoPilotPromptCoachingEmail(input)
+            Else
+                If dgv.SelectedRows.Count = 0 Then
+                    ShowCustomMessageBox("Please select a user first.")
+                    Return
+                End If
+                email = NormalizeAutoPilotPromptCoachingEmail(TryCast(dgv.SelectedRows(0).Cells("colEmail").Tag, System.String))
+            End If
+            If email.Length = 0 Then
+                ShowCustomMessageBox("A verified, exact e-mail address is required. Legacy folder names cannot identify a recommendation recipient. Use Add recommendation user if needed.")
+                Return
+            End If
+            Dim current As Newtonsoft.Json.Linq.JObject = GetAutoPilotPromptCoachingPreferenceStatus(email)
+            Dim choices As New System.Collections.Generic.List(Of SharedLibrary.SharedLibrary.SharedMethods.SelectionItem) From {
+                New SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Enable recommendations for this user", 1),
+                New SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Disable recommendations for this user", 2),
+                New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Reset both personal choices to system defaults / inclusion list", 3),
+                New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Enable recommendations, once daily from 20:00", 4),
+                New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Enable recommendations, after each qualifying request analysis", 5),
+                New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Use system delivery schedule (keep current on/off choice)", 6)
+            }
+            Dim preference As System.String = current.Value(Of System.String)("preference")
+            Dim selected As System.Int32 = SelectValue(choices, If(preference = "enabled", 1, If(preference = "disabled", 2, 3)),
+                "Inky recommendations for " & email & System.Environment.NewLine &
+                "Explicit disable overrides the inclusion list and default-for-all setting. Personal timing overrides the startup schedule, not a global disable." &
+                System.Environment.NewLine & "Effective delivery: " & current.Value(Of System.String)("deliveryMode") & "; personal timing: " & current.Value(Of System.String)("deliveryPreference") & "." &
+                System.Environment.NewLine & "Users can ask Inky or send INKY_TIPS ON/OFF/DAILY/IMMEDIATE/SYSTEM/STATUS/DEFAULT. Preferences survive memory/file deletion.",
+                "Inky recommendations — Administrator")
+            If selected < 1 OrElse selected > 6 Then Return
+            Try
+                Select Case selected
+                    Case 1 : SetAutoPilotPromptCoachingPreference(email, "enabled", "admin")
+                    Case 2 : SetAutoPilotPromptCoachingPreference(email, "disabled", "admin")
+                    Case 3 : SetAutoPilotPromptCoachingPreference(email, "default", "admin", "default")
+                    Case 4 : SetAutoPilotPromptCoachingPreference(email, "enabled", "admin", "daily")
+                    Case 5 : SetAutoPilotPromptCoachingPreference(email, "enabled", "admin", "immediate")
+                    Case 6 : SetAutoPilotPromptCoachingPreference(email, Nothing, "admin", "default")
+                End Select
+                RefreshUserStorageDashboard()
+                If _apConfig Is Nothing OrElse Not _apConfig.PromptCoachingEnabled Then
+                    ShowCustomMessageBox("The preference was saved. Inky recommendations are globally disabled, so no recommendation e-mails will be sent until they are enabled in the startup configuration.")
+                End If
+            Catch ex As System.Exception
+                ApDashboardLog("Inky recommendation preference could not be saved: " & ex.GetType().Name & ": " & ex.Message, "warn")
+                ShowCustomMessageBox("The Inky recommendation preference could not be saved safely. No successful change is confirmed. Please try again or check the diagnostic log.")
+            End Try
+        End Using
     End Sub
 
     ''' <summary>Gets the selected user's folder name from the DataGridView, or shows an error.</summary>
     Private Function GetSelectedUserFolder(dgv As DataGridView) As String
         If dgv.SelectedRows.Count = 0 Then
             ShowCustomMessageBox("Please select a user first.")
+            Return Nothing
+        End If
+        If dgv.SelectedRows(0).Tag Is Nothing Then
+            ShowCustomMessageBox("This user currently has a recommendation preference only, with no memory or home-file directory. Use Inky recommendations to change the mailing preference.")
             Return Nothing
         End If
         Return CStr(dgv.SelectedRows(0).Tag)
@@ -406,6 +525,7 @@ Partial Public Class ThisAddIn
             "  • Memory file (all preferences)" & vbCrLf &
             "  • All stored files (home directory)" & vbCrLf &
             "  • The user directory itself" & vbCrLf & vbCrLf &
+            "The separate Inky recommendation preference is retained, so an opt-out will not be lost." & vbCrLf &
             "This action cannot be undone.",
             "Delete Everything", "Cancel",
             header:=$"{AN6} — Delete User Storage")

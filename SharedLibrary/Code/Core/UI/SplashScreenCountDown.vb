@@ -3,317 +3,561 @@
 
 ' =============================================================================
 ' File: SplashScreenCountDown.vb
-' Purpose: Provides a borderless WinForms splash form displaying a message (optionally
-'          with a seconds countdown) and a logo, shown on its own STA thread.
+' Purpose: UI-free controller for a countdown splash on one dedicated STA.
 '
-' Architecture:
-'  - UI Composition: A `PictureBox` (logo) and `Label` (message) arranged side-by-side.
-'  - Threading Model: `Show()` starts a dedicated STA thread and runs a WinForms message loop
-'    (`Application.Run(Me)`), then waits until the form has fired `Load` before returning.
-'  - Countdown: `StartCountdown()` runs a background `Task` that delays in 1-second ticks and
-'    marshals UI updates to the form thread via `Invoke`.
-'  - Cancellation: ESC raises `CancelRequested`, cancels the countdown token, and closes the form.
-'  - Window Interaction: Uses Win32 `ReleaseCapture`/`SendMessage` to allow dragging a borderless form.
+' Contract:
+'  - Construction never creates a Form, Control, native handle or UI context.
+'  - ShowAsync awaits readiness without blocking the caller's message pump.
+'    Startup is bounded; close/cancellation before readiness is remembered.
+'  - The private view constructs, displays, updates and disposes ALL of its
+'    WinForms/GDI resources on its own STA, inside the same Using/Run lifetime.
+'  - Producers enqueue data only. A UI timer drains it on the owning thread;
+'    there are no cross-thread Invoke/Send calls or background countdown tasks.
+'  - Close/Dispose request shutdown; Completion signals actual owner-thread
+'    cleanup. Neither waits synchronously or cancels a successful request.
+'  - ESC cancels RequestCancellationToken and raises the compatible event.
+'    A display failure cancels the same token, but is distinguished by Failure.
+'  - The splash is deliberately ownerless/modeless: never attach an Office
+'    window from another thread. SharedMethods.DialogOwner remains unchanged.
 ' =============================================================================
 
 Option Strict On
 Option Explicit On
 
 Namespace SharedLibrary
-    ''' <summary>
-    ''' Borderless splash screen form showing a logo and message with an optional countdown.
-    ''' The form is shown on a dedicated STA thread by calling the instance `Show()` method.
-    ''' </summary>
-    Public Class SplashScreenCountDown
-        Inherits System.Windows.Forms.Form
+    Public NotInheritable Class SplashScreenCountDown
+        Implements System.IDisposable
 
-        ' ─── Controls & state ───────────────────────────────────────
-        Private lblMessage As System.Windows.Forms.Label
-        Private picLogo As System.Windows.Forms.PictureBox
-        Private remainingSeconds As Integer
-        Private baseText As String
-        Private countdownCts As System.Threading.CancellationTokenSource
-        Private requestedFormWidth As Integer
-        Private requestedFormHeight As Integer
-
-        Private Const LayoutPadding As Integer = 10
-
-        ' Used to wait until the form is loaded before returning from Show()
-        Private loadedEvent As System.Threading.ManualResetEventSlim
+        Private Const StartupTimeoutMilliseconds As System.Int32 = 10000
+        Private ReadOnly stateLock As New System.Object()
+        Private ReadOnly instanceId As System.String = System.Guid.NewGuid().ToString("N")
+        Private ReadOnly initialText As System.String
+        Private ReadOnly requestedWidth As System.Int32
+        Private ReadOnly requestedHeight As System.Int32
+        Private ReadOnly initialSeconds As System.Int32
+        Private ReadOnly pendingUpdates As New System.Collections.Generic.Queue(Of SplashUpdate)()
+        Private ReadOnly ready As New System.Threading.Tasks.TaskCompletionSource(Of System.Boolean)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Private ReadOnly stopped As New System.Threading.Tasks.TaskCompletionSource(Of System.Boolean)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Private ReadOnly requestAbort As New System.Threading.CancellationTokenSource()
+        Private ReadOnly requestAbortToken As System.Threading.CancellationToken
         Private splashThread As System.Threading.Thread
+        Private startRequested As System.Boolean
+        Private closeRequested As System.Boolean
+        Private cleanupCompleted As System.Boolean
+        Private displayFailure As SplashDisplayException
 
-        ''' <summary>
-        ''' Raised when the user presses ESC while the splash screen has focus.
-        ''' </summary>
+        ''' <summary>Raised for ESC only, never for normal Close/Dispose or display failure.</summary>
         Public Event CancelRequested As System.EventHandler
 
-        ' ─── WinAPI for dragging ─────────────────────────────────────
-        ''' <summary>
-        ''' Releases the current mouse capture to allow initiating a window move drag operation.
-        ''' </summary>
-        <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
-        Private Shared Function ReleaseCapture() As Boolean
-        End Function
-
-        ''' <summary>
-        ''' Sends a window message used here to emulate dragging a caption on a borderless form.
-        ''' </summary>
-        <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
-        Private Shared Function SendMessage(
-    ByVal hWnd As IntPtr,
-    ByVal wMsg As Integer,
-    ByVal wParam As IntPtr,
-    ByVal lParam As IntPtr
-) As IntPtr
-        End Function
-
-        ''' <summary>
-        ''' Window message for non-client left button down (caption drag is initiated using HTCAPTION).
-        ''' </summary>
-        Private Const WM_NCLBUTTONDOWN As Integer = &HA1
-
-        ''' <summary>
-        ''' Hit-test value indicating the title bar / caption area.
-        ''' </summary>
-        Private Const HTCAPTION As Integer = 2
-
-        ''' <summary>
-        ''' Initializes a new splash screen instance.
-        ''' </summary>
-        ''' <param name="customText">Prefix text shown in the label.</param>
-        ''' <param name="formWidth">Client width override (0 keeps auto-size behavior).</param>
-        ''' <param name="formHeight">Client height override (0 keeps auto-size behavior).</param>
-        ''' <param name="countdownSeconds">Initial countdown length in seconds (0 disables countdown).</param>
-        Public Sub New(
-    Optional ByVal customText As String = "Please wait …",
-    Optional ByVal formWidth As Integer = 0,
-    Optional ByVal formHeight As Integer = 0,
-    Optional ByVal countdownSeconds As Integer = 0)
-
-            MyBase.New()
-
-            requestedFormWidth = formWidth
-            requestedFormHeight = formHeight
-
-            ' ─── Form basics ──────────────────────────────────────────
-            Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.None
-            Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
-            Me.BackColor = System.Drawing.ColorTranslator.FromWin32(&H8000000F)
-            Me.KeyPreview = True
-            Me.TopMost = True
-
-            ' ─── Logo ──────────────────────────────────────────────────
-            picLogo = New System.Windows.Forms.PictureBox() With {
-        .Image = New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)),
-        .SizeMode = System.Windows.Forms.PictureBoxSizeMode.Zoom
-    }
-            Me.Controls.Add(picLogo)
-
-            ' ─── Label ────────────────────────────────────────────────
-            Dim stdFont As System.Drawing.Font =
-        New System.Drawing.Font("Segoe UI", 10.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
-            lblMessage = New System.Windows.Forms.Label() With {
-        .Font = stdFont,
-        .AutoSize = True,
-        .TextAlign = System.Drawing.ContentAlignment.MiddleLeft
-    }
-            Me.Controls.Add(lblMessage)
-
-            ' ─── Layout & initial text ────────────────────────────────
-            baseText = customText
-            remainingSeconds = countdownSeconds
-            Dim initialText As String = If(countdownSeconds > 0,
-                                   $"{customText} {countdownSeconds}s",
-                                   customText)
-            lblMessage.Text = initialText
-
-            ApplyMessageLayout(initialText, True)
-
-            ' ESC cancels
-            AddHandler Me.KeyDown, AddressOf OnKeyDown
-
-            ' kick off countdown if requested
-            If countdownSeconds > 0 Then
-                StartCountdown()
-            End If
+        Public Sub New(Optional ByVal customText As System.String = "Please wait …",
+                       Optional ByVal formWidth As System.Int32 = 0,
+                       Optional ByVal formHeight As System.Int32 = 0,
+                       Optional ByVal countdownSeconds As System.Int32 = 0)
+            initialText = If(customText, System.String.Empty)
+            requestedWidth = formWidth
+            requestedHeight = formHeight
+            initialSeconds = System.Math.Max(0, countdownSeconds)
+            requestAbortToken = requestAbort.Token
+            LogLifecycle("CREATED")
         End Sub
 
         ''' <summary>
-        ''' Shows the form by starting a dedicated STA thread and running a message loop.
-        ''' This method blocks until the form's `Load` event has fired.
+        ''' Link this token to the request CTS. It is canceled for ESC or a running
+        ''' view failure, not for normal Close. The cached token is safe to read
+        ''' even after owner-thread cleanup has disposed its source.
         ''' </summary>
-        Public Shadows Sub Show()
-            ' prevent multiple shows
-            If splashThread IsNot Nothing Then Return
+        Public ReadOnly Property RequestCancellationToken As System.Threading.CancellationToken
+            Get
+                Return requestAbortToken
+            End Get
+        End Property
 
-            loadedEvent = New System.Threading.ManualResetEventSlim(False)
+        Public ReadOnly Property Completion As System.Threading.Tasks.Task
+            Get
+                Return stopped.Task
+            End Get
+        End Property
 
-            ' start a new STA thread for this form
-            splashThread = New System.Threading.Thread(Sub()
-                                                           ' signal when the form is loaded
-                                                           AddHandler Me.Load, Sub(s, e) loadedEvent.Set()
-                                                           System.Windows.Forms.Application.Run(Me)
-                                                       End Sub)
+        Public ReadOnly Property Failure As SplashDisplayException
+            Get
+                SyncLock stateLock
+                    Return displayFailure
+                End SyncLock
+            End Get
+        End Property
 
-            splashThread.SetApartmentState(System.Threading.ApartmentState.STA)
-            splashThread.IsBackground = True
-            splashThread.Start()
-
-            ' wait until the Load event has fired
-            loadedEvent.Wait()
+        Public Sub ThrowIfFailed()
+            Dim failureSnapshot As SplashDisplayException = Failure
+            If failureSnapshot IsNot Nothing Then Throw failureSnapshot
         End Sub
 
         ''' <summary>
-        ''' Closes the form, marshaling the call onto the form thread when required.
+        ''' Starts at most one dedicated STA and asynchronously waits for its first
+        ''' displayed/message-loop tick. No Wait/Result/Join on an Office thread.
         ''' </summary>
-        Public Shadows Sub Close()
+        Public Async Function ShowAsync(Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task
+            cancellationToken.ThrowIfCancellationRequested()
+            Using cancellationRegistration As System.Threading.CancellationTokenRegistration =
+                    cancellationToken.Register(AddressOf Close)
+                StartThreadIfNeeded()
+                Using startupWait As New System.Threading.CancellationTokenSource()
+                    Dim deadline As System.Threading.Tasks.Task =
+                        System.Threading.Tasks.Task.Delay(StartupTimeoutMilliseconds, startupWait.Token)
+                    Try
+                        Dim completed As System.Threading.Tasks.Task =
+                            Await System.Threading.Tasks.Task.WhenAny(ready.Task, deadline).ConfigureAwait(False)
+                        ThrowIfFailed()
+                        cancellationToken.ThrowIfCancellationRequested()
+                        If completed IsNot ready.Task Then
+                            RecordFailure(New System.TimeoutException("Splash readiness deadline exceeded."))
+                            Close()
+                        End If
+                        ThrowIfFailed()
+                        Dim wasReady As System.Boolean = Await ready.Task.ConfigureAwait(False)
+                        ThrowIfFailed()
+                        If Not wasReady OrElse IsClosing Then
+                            Throw New System.OperationCanceledException("The progress display was closed before the request started.", requestAbortToken)
+                        End If
+                    Finally
+                        startupWait.Cancel()
+                    End Try
+                End Using
+            End Using
+        End Function
+
+        Private Sub StartThreadIfNeeded()
             Try
-                If Not Me.IsHandleCreated OrElse Me.IsDisposed Then Return
-
-                If Me.InvokeRequired Then
-                    ' Use BeginInvoke instead of Invoke to avoid blocking and deadlocks,
-                    ' dropping the invocation call if the handle is lost during transit.
-                    Me.BeginInvoke(New System.Action(Sub()
-                                                         Try
-                                                             If Not Me.IsDisposed Then MyBase.Close()
-                                                         Catch
-                                                         End Try
-                                                     End Sub))
-                Else
-                    If Not Me.IsDisposed Then MyBase.Close()
-                End If
-            Catch
-                ' Silent fail on shutdown race conditions
+                SyncLock stateLock
+                    If startRequested OrElse closeRequested Then Return
+                    startRequested = True
+                    splashThread = New System.Threading.Thread(AddressOf RunView)
+                    splashThread.IsBackground = True
+                    splashThread.Name = "Red Ink countdown " & instanceId.Substring(0, 8)
+                    splashThread.SetApartmentState(System.Threading.ApartmentState.STA)
+                    splashThread.Start()
+                End SyncLock
+            Catch ex As System.Exception
+                RecordFailure(ex)
+                Close()
+                CompleteStopped()
             End Try
         End Sub
 
-        ''' <summary>
-        ''' Applies message text, label bounds, and form size. The form grows when needed,
-        ''' but runtime updates do not shrink it to avoid countdown jitter.
-        ''' </summary>
-        ''' <param name="messageText">Message text to display.</param>
-        ''' <param name="allowShrink">If <c>True</c>, the form may be sized exactly to the message.</param>
-        Private Sub ApplyMessageLayout(ByVal messageText As String, ByVal allowShrink As Boolean)
-            lblMessage.Text = messageText
-
-            Dim textSize As System.Drawing.Size =
-        System.Windows.Forms.TextRenderer.MeasureText(messageText, lblMessage.Font)
-            lblMessage.Size = textSize
-
-            Dim logoSize As Integer = textSize.Height
-            picLogo.SetBounds(LayoutPadding, LayoutPadding, logoSize, logoSize)
-
-            Dim labelX As Integer = picLogo.Right + LayoutPadding
-            Dim labelY As Integer = LayoutPadding + (logoSize - textSize.Height) \ 2
-            lblMessage.SetBounds(labelX, labelY, textSize.Width, textSize.Height)
-
-            Dim clientW As Integer = lblMessage.Right + LayoutPadding
-            Dim clientH As Integer = Math.Max(picLogo.Bottom, lblMessage.Bottom) + LayoutPadding
-
-            If requestedFormWidth > 0 Then
-                clientW = requestedFormWidth
-            ElseIf Not allowShrink Then
-                clientW = Math.Max(Me.ClientSize.Width, clientW)
-            End If
-
-            If requestedFormHeight > 0 Then
-                clientH = requestedFormHeight
-            ElseIf Not allowShrink Then
-                clientH = Math.Max(Me.ClientSize.Height, clientH)
-            End If
-
-            Me.ClientSize = New System.Drawing.Size(clientW, clientH)
-            lblMessage.Refresh()
+        Private Sub RunView()
+            Dim exceptionHandler As System.Threading.ThreadExceptionEventHandler =
+                Sub(sender As System.Object, e As System.Threading.ThreadExceptionEventArgs)
+                    HandleViewFailure(e.Exception)
+                    Try
+                        System.Windows.Forms.Application.ExitThread()
+                    Catch exitException As System.Exception
+                        LogFailure("MESSAGE_LOOP_EXIT_FAILED", exitException)
+                    End Try
+                End Sub
+            Dim handlerInstalled As System.Boolean = False
+            Try
+                If IsClosing Then Return
+                ' This dedicated UI thread never borrows a caller/Office context.
+                System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                ' WinForms stores ThreadException on the CURRENT thread context.
+                ' Install/remove only on our own STA; never change the host's policy.
+                System.Windows.Forms.Application.SetUnhandledExceptionMode(
+                    System.Windows.Forms.UnhandledExceptionMode.CatchException, True)
+                AddHandler System.Windows.Forms.Application.ThreadException, exceptionHandler
+                handlerInstalled = True
+                Using view As New SplashView(Me)
+                    ' Separate initialization ensures Using disposes partially
+                    ' initialized resources if logo/font/layout creation fails.
+                    view.InitializeView(initialText, requestedWidth, requestedHeight, initialSeconds)
+                    If IsClosing Then Return
+                    LogLifecycle("UI_CREATED")
+                    System.Windows.Forms.Application.Run(view)
+                End Using
+                If Not IsClosing Then
+                    HandleViewFailure(New System.InvalidOperationException("Splash message loop ended unexpectedly."))
+                End If
+            Catch ex As System.Exception
+                HandleViewFailure(ex)
+            Finally
+                Try
+                    If handlerInstalled Then RemoveHandler System.Windows.Forms.Application.ThreadException, exceptionHandler
+                Catch cleanupException As System.Exception
+                    LogFailure("EXCEPTION_HANDLER_CLEANUP_FAILED", cleanupException)
+                Finally
+                    CompleteStopped()
+                End Try
+            End Try
         End Sub
 
-        ''' <summary>
-        ''' Updates the label text without changing `remainingSeconds` or restarting the countdown.
-        ''' </summary>
-        ''' <param name="newMessage">The new message to render in the label.</param>
-        Public Sub UpdateMessage(ByVal newMessage As String)
-            If Me.InvokeRequired Then
-                Me.Invoke(New System.Action(Sub() UpdateMessage(newMessage)))
-            Else
-                ApplyMessageLayout(newMessage, False)
-            End If
+        ''' <summary>Idempotent, non-blocking shutdown request; never invokes a Control.</summary>
+        Public Sub Close()
+            Dim firstClose As System.Boolean
+            Dim neverStarted As System.Boolean
+            SyncLock stateLock
+                firstClose = Not closeRequested
+                closeRequested = True
+                pendingUpdates.Clear()
+                neverStarted = Not startRequested
+            End SyncLock
+            ready.TrySetResult(False)
+            If firstClose Then LogLifecycle("CLOSE_REQUESTED")
+            If neverStarted Then CompleteStopped()
         End Sub
 
-        ''' <summary>
-        ''' Restarts the countdown from the specified value, optionally updating the base message prefix.
-        ''' </summary>
-        ''' <param name="seconds">New countdown duration in seconds.</param>
-        ''' <param name="newBaseText">Optional replacement for the base message prefix.</param>
-        Public Sub RestartCountdown(
-    ByVal seconds As Integer,
-    Optional ByVal newBaseText As String = Nothing)
-
-            If newBaseText IsNot Nothing Then
-                baseText = newBaseText
-            End If
-
-            remainingSeconds = seconds
-            UpdateMessage($"{baseText} {remainingSeconds}s")
-            StartCountdown()
+        Public Sub Dispose() Implements System.IDisposable.Dispose
+            Close()
         End Sub
 
-        ''' <summary>
-        ''' Starts (or restarts) the countdown task.
-        ''' Cancels any previously started countdown via `countdownCts`.
-        ''' </summary>
-        Private Sub StartCountdown()
-            ' cancel prior if any
-            countdownCts?.Cancel()
-            countdownCts = New System.Threading.CancellationTokenSource()
-            Dim ct = countdownCts.Token
-
-            System.Threading.Tasks.Task.Run(Async Function()
-                                                While remainingSeconds > 0 AndAlso Not ct.IsCancellationRequested
-                                                    Try
-                                                        Await System.Threading.Tasks.Task.Delay(1000, ct)
-                                                    Catch ex As System.Threading.Tasks.TaskCanceledException
-                                                        Exit While
-                                                    End Try
-
-                                                    remainingSeconds -= 1
-                                                    If remainingSeconds < 0 Then remainingSeconds = 0
-
-                                                    ' marshal update to UI thread
-                                                    If Not Me.IsDisposed Then
-                                                        If Me.InvokeRequired Then
-                                                            Me.Invoke(New System.Action(Sub()
-                                                                                            lblMessage.Text = $"{baseText} {remainingSeconds}s"
-                                                                                            lblMessage.Size = System.Windows.Forms.TextRenderer.MeasureText(lblMessage.Text, lblMessage.Font)
-                                                                                        End Sub))
-                                                        Else
-                                                            ApplyMessageLayout($"{baseText} {remainingSeconds}s", False)
-                                                        End If
-                                                    End If
-                                                End While
-                                            End Function)
+        Public Sub UpdateMessage(ByVal newMessage As System.String)
+            EnqueueUpdate(New SplashUpdate(False, 0, If(newMessage, System.String.Empty)))
         End Sub
 
-        ''' <summary>
-        ''' Handles ESC key press: cancels countdown, raises `CancelRequested`, and closes the form.
-        ''' </summary>
-        Private Sub OnKeyDown(ByVal sender As Object, ByVal e As System.Windows.Forms.KeyEventArgs)
-            If e.KeyCode = System.Windows.Forms.Keys.Escape Then
-                countdownCts?.Cancel()
+        Public Sub RestartCountdown(ByVal seconds As System.Int32,
+                                    Optional ByVal newBaseText As System.String = Nothing)
+            EnqueueUpdate(New SplashUpdate(True, System.Math.Max(0, seconds), newBaseText))
+        End Sub
+
+        Private Sub EnqueueUpdate(update As SplashUpdate)
+            SyncLock stateLock
+                If closeRequested Then Return
+                pendingUpdates.Enqueue(update)
+            End SyncLock
+        End Sub
+
+        Private Function TakeUpdates() As SplashUpdate()
+            SyncLock stateLock
+                Dim updates As SplashUpdate() = pendingUpdates.ToArray()
+                pendingUpdates.Clear()
+                Return updates
+            End SyncLock
+        End Function
+
+        Private ReadOnly Property IsClosing As System.Boolean
+            Get
+                SyncLock stateLock
+                    Return closeRequested
+                End SyncLock
+            End Get
+        End Property
+
+        Private Sub SignalReady()
+            Dim firstReady As System.Boolean
+            SyncLock stateLock
+                If closeRequested Then Return
+                firstReady = ready.TrySetResult(True)
+            End SyncLock
+            If firstReady Then LogLifecycle("READY")
+        End Sub
+
+        ' Only the owning STA calls this method, before disposing requestAbort.
+        Private Sub RequestUserCancellation()
+            If IsClosing Then Return
+            LogLifecycle("USER_CANCEL")
+            Try
                 RaiseEvent CancelRequested(Me, System.EventArgs.Empty)
+            Catch ex As System.Exception
+                LogFailure("CANCEL_HANDLER_FAILED", ex)
+            Finally
+                CancelRequestOnOwnerThread()
                 Close()
-            End If
+            End Try
         End Sub
 
-        ''' <summary>
-        ''' Enables dragging the borderless form by sending a caption drag message on left mouse down.
-        ''' </summary>
-        ''' <param name="e">Mouse event data.</param>
-        Protected Overrides Sub OnMouseDown(ByVal e As System.Windows.Forms.MouseEventArgs)
-            MyBase.OnMouseDown(e)
-            If e.Button = System.Windows.Forms.MouseButtons.Left Then
-                ReleaseCapture()
-                SendMessage(Me.Handle, WM_NCLBUTTONDOWN, CType(HTCAPTION, IntPtr), IntPtr.Zero)
-            End If
+        Private Sub HandleViewFailure(ex As System.Exception)
+            RecordFailure(ex)
+            ' RunView and UI timer are on the source's lifetime-owning STA.
+            CancelRequestOnOwnerThread()
+            Close()
         End Sub
 
+        Private Sub CancelRequestOnOwnerThread()
+            Try
+                requestAbort.Cancel()
+            Catch ex As System.Exception
+                ' A consumer's cancellation callback must not escape the UI loop.
+                LogFailure("CANCEL_CALLBACK_FAILED", ex)
+            End Try
+        End Sub
+
+        Private Sub RecordFailure(ex As System.Exception)
+            Dim isFirstFailure As System.Boolean
+            SyncLock stateLock
+                isFirstFailure = displayFailure Is Nothing
+                If isFirstFailure Then displayFailure = New SplashDisplayException(ex)
+            End SyncLock
+            If isFirstFailure Then LogFailure("FAILED", ex)
+        End Sub
+
+        Private Sub CompleteStopped()
+            SyncLock stateLock
+                If cleanupCompleted Then Return
+                cleanupCompleted = True
+                closeRequested = True
+                pendingUpdates.Clear()
+            End SyncLock
+            ready.TrySetResult(False)
+            Try
+                requestAbort.Dispose()
+            Catch ex As System.Exception
+                LogFailure("TOKEN_DISPOSE_FAILED", ex)
+            Finally
+                LogLifecycle("STOPPED")
+                stopped.TrySetResult(True)
+            End Try
+        End Sub
+
+        Private Sub LogLifecycle(stage As System.String)
+            Try
+                RiCrashLogger.LogMarker("SPLASH_" & stage,
+                    "Instance=" & instanceId & "; ManagedThread=" &
+                    System.Threading.Thread.CurrentThread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Splash lifecycle logging failed: " & ex.ToString())
+            End Try
+        End Sub
+
+        Private Sub LogFailure(stage As System.String, ex As System.Exception)
+            Try
+                RiCrashLogger.LogException("SPLASH_" & stage & "; Instance=" & instanceId, ex)
+            Catch logException As System.Exception
+                System.Diagnostics.Debug.WriteLine(ex.ToString())
+                System.Diagnostics.Debug.WriteLine(logException.ToString())
+            End Try
+        End Sub
+
+        ''' <summary>Public message contains no technical details; InnerException is for diagnostics.</summary>
+        Public NotInheritable Class SplashDisplayException
+            Inherits System.Exception
+
+            Public Sub New(innerException As System.Exception)
+                MyBase.New("The progress window could not be displayed. The request was stopped. Please try again.", innerException)
+            End Sub
+        End Class
+
+        Private NotInheritable Class SplashUpdate
+            Public ReadOnly IsRestart As System.Boolean
+            Public ReadOnly Seconds As System.Int32
+            Public ReadOnly Text As System.String
+
+            Public Sub New(restart As System.Boolean, duration As System.Int32, message As System.String)
+                IsRestart = restart
+                Seconds = duration
+                Text = message
+            End Sub
+        End Class
+
+        ''' <summary>Private owner-thread-only form. No caller ever receives a Control reference.</summary>
+        Private NotInheritable Class SplashView
+            Inherits System.Windows.Forms.Form
+
+            Private Const LayoutPadding As System.Int32 = 10
+            Private ReadOnly controller As SplashScreenCountDown
+            Private ReadOnly countdownClock As New System.Diagnostics.Stopwatch()
+            Private lblMessage As System.Windows.Forms.Label
+            Private picLogo As System.Windows.Forms.PictureBox
+            Private ownedLogo As System.Drawing.Bitmap
+            Private ownedFont As System.Drawing.Font
+            Private uiTimer As System.Windows.Forms.Timer
+            Private baseText As System.String
+            Private countdownSeconds As System.Int32
+            Private lastRemainingSeconds As System.Int32
+            Private requestedFormWidth As System.Int32
+            Private requestedFormHeight As System.Int32
+            Private exitRequested As System.Boolean
+            Private disposalLogged As System.Boolean
+
+            Public Sub New(ownerController As SplashScreenCountDown)
+                MyBase.New()
+                controller = ownerController
+                controller.LogLifecycle("UI_CONSTRUCTED")
+            End Sub
+
+            Public Sub InitializeView(message As System.String, width As System.Int32,
+                                      height As System.Int32, seconds As System.Int32)
+                requestedFormWidth = width
+                requestedFormHeight = height
+                Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.None
+                Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
+                Me.BackColor = System.Drawing.ColorTranslator.FromWin32(&H8000000F)
+                Me.KeyPreview = True
+                Me.TopMost = True
+
+                ' Retain the original logo/font/layout; only dispose resources we own.
+                ownedLogo = New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                picLogo = New System.Windows.Forms.PictureBox() With {
+                    .Image = ownedLogo,
+                    .SizeMode = System.Windows.Forms.PictureBoxSizeMode.Zoom
+                }
+                Me.Controls.Add(picLogo)
+                ownedFont = New System.Drawing.Font("Segoe UI", 10.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+                lblMessage = New System.Windows.Forms.Label() With {
+                    .Font = ownedFont,
+                    .AutoSize = True,
+                    .TextAlign = System.Drawing.ContentAlignment.MiddleLeft
+                }
+                Me.Controls.Add(lblMessage)
+                baseText = message
+                countdownSeconds = seconds
+                lastRemainingSeconds = seconds
+                ApplyMessageLayout(If(seconds > 0, $"{message} {seconds}s", message), True)
+                If seconds > 0 Then countdownClock.Start()
+
+                uiTimer = New System.Windows.Forms.Timer() With {.Interval = 100}
+                AddHandler uiTimer.Tick, AddressOf OnUiTick
+                ' The timer is also the shutdown mailbox consumer. Starting it here
+                ' permits ExitThread even when a late close suppresses initial Show.
+                uiTimer.Start()
+            End Sub
+
+            Protected Overrides Sub SetVisibleCore(value As System.Boolean)
+                If value AndAlso controller.IsClosing Then Return
+                MyBase.SetVisibleCore(value)
+            End Sub
+
+            Private Sub OnUiTick(sender As System.Object, e As System.EventArgs)
+                Try
+                    If controller.IsClosing Then
+                        ExitView()
+                        Return
+                    End If
+                    For Each update As SplashUpdate In controller.TakeUpdates()
+                        If controller.IsClosing Then Exit For
+                        If update.IsRestart Then
+                            If update.Text IsNot Nothing Then baseText = update.Text
+                            countdownSeconds = update.Seconds
+                            lastRemainingSeconds = countdownSeconds
+                            countdownClock.Restart()
+                            ApplyMessageLayout($"{baseText} {countdownSeconds}s", False)
+                        Else
+                            ApplyMessageLayout(update.Text, False)
+                        End If
+                    Next
+                    If countdownClock.IsRunning AndAlso countdownSeconds > 0 Then
+                        Dim remaining As System.Int32 = System.Math.Max(0,
+                            CInt(System.Math.Ceiling(countdownSeconds - countdownClock.Elapsed.TotalSeconds)))
+                        If remaining <> lastRemainingSeconds Then
+                            lastRemainingSeconds = remaining
+                            ApplyMessageLayout($"{baseText} {remaining}s", False)
+                        End If
+                        If remaining = 0 Then countdownClock.Stop()
+                    End If
+                    If controller.IsClosing Then
+                        ExitView()
+                    ElseIf Me.Visible AndAlso Me.IsHandleCreated Then
+                        controller.SignalReady()
+                    End If
+                Catch ex As System.Exception
+                    controller.HandleViewFailure(ex)
+                    ExitView()
+                End Try
+            End Sub
+
+            Private Sub ExitView()
+                If exitRequested Then Return
+                exitRequested = True
+                Try
+                    If uiTimer IsNot Nothing Then uiTimer.Stop()
+                    countdownClock.Stop()
+                    Me.Close()
+                Finally
+                    ' Close on a never-shown form need not raise FormClosed. Always
+                    ' exit THIS thread's loop, never Application.Exit (all hosts).
+                    System.Windows.Forms.Application.ExitThread()
+                End Try
+            End Sub
+
+            Protected Overrides Sub OnKeyDown(e As System.Windows.Forms.KeyEventArgs)
+                MyBase.OnKeyDown(e)
+                If e.KeyCode = System.Windows.Forms.Keys.Escape Then
+                    e.Handled = True
+                    e.SuppressKeyPress = True
+                    controller.RequestUserCancellation()
+                    ExitView()
+                End If
+            End Sub
+
+            Protected Overrides Sub OnFormClosing(e As System.Windows.Forms.FormClosingEventArgs)
+                ' Native user close (for example Alt+F4) is cancellation, not a
+                ' technical display failure. Programmatic completion has closed
+                ' the controller already and must not cancel the request.
+                If Not controller.IsClosing Then controller.RequestUserCancellation()
+                MyBase.OnFormClosing(e)
+            End Sub
+
+            Private Sub ApplyMessageLayout(messageText As System.String, allowShrink As System.Boolean)
+                lblMessage.Text = messageText
+                Dim textSize As System.Drawing.Size =
+                    System.Windows.Forms.TextRenderer.MeasureText(messageText, lblMessage.Font)
+                lblMessage.Size = textSize
+                Dim logoSize As System.Int32 = textSize.Height
+                picLogo.SetBounds(LayoutPadding, LayoutPadding, logoSize, logoSize)
+                Dim labelX As System.Int32 = picLogo.Right + LayoutPadding
+                Dim labelY As System.Int32 = LayoutPadding + (logoSize - textSize.Height) \ 2
+                lblMessage.SetBounds(labelX, labelY, textSize.Width, textSize.Height)
+                Dim clientW As System.Int32 = lblMessage.Right + LayoutPadding
+                Dim clientH As System.Int32 = System.Math.Max(picLogo.Bottom, lblMessage.Bottom) + LayoutPadding
+                If requestedFormWidth > 0 Then
+                    clientW = requestedFormWidth
+                ElseIf Not allowShrink Then
+                    clientW = System.Math.Max(Me.ClientSize.Width, clientW)
+                End If
+                If requestedFormHeight > 0 Then
+                    clientH = requestedFormHeight
+                ElseIf Not allowShrink Then
+                    clientH = System.Math.Max(Me.ClientSize.Height, clientH)
+                End If
+                Me.ClientSize = New System.Drawing.Size(clientW, clientH)
+                lblMessage.Refresh()
+            End Sub
+
+            Protected Overrides Sub Dispose(disposing As System.Boolean)
+                Try
+                    If disposing Then
+                        If uiTimer IsNot Nothing Then
+                            uiTimer.Stop()
+                            RemoveHandler uiTimer.Tick, AddressOf OnUiTick
+                            uiTimer.Dispose()
+                            uiTimer = Nothing
+                        End If
+                        countdownClock.Stop()
+                    End If
+                Finally
+                    Try
+                        MyBase.Dispose(disposing)
+                    Finally
+                        If disposing Then
+                            If ownedLogo IsNot Nothing Then
+                                ownedLogo.Dispose()
+                                ownedLogo = Nothing
+                            End If
+                            If ownedFont IsNot Nothing Then
+                                ownedFont.Dispose()
+                                ownedFont = Nothing
+                            End If
+                            If Not disposalLogged Then
+                                disposalLogged = True
+                                controller.LogLifecycle("UI_DISPOSED")
+                            End If
+                        End If
+                    End Try
+                End Try
+            End Sub
+
+            <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
+            Private Shared Function ReleaseCapture() As System.Boolean
+            End Function
+
+            <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
+            Private Shared Function SendMessage(hWnd As System.IntPtr, wMsg As System.Int32,
+                                               wParam As System.IntPtr, lParam As System.IntPtr) As System.IntPtr
+            End Function
+
+            Protected Overrides Sub OnMouseDown(e As System.Windows.Forms.MouseEventArgs)
+                MyBase.OnMouseDown(e)
+                If e.Button = System.Windows.Forms.MouseButtons.Left Then
+                    ReleaseCapture()
+                    SendMessage(Me.Handle, &HA1, New System.IntPtr(2), System.IntPtr.Zero)
+                End If
+            End Sub
+        End Class
     End Class
 End Namespace

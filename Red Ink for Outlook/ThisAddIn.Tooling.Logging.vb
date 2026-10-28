@@ -105,12 +105,97 @@ Partial Public Class ThisAddIn
         ''' <summary>Nested tooling-session depth. Prevents sub-agent runs from tearing down the parent log session.</summary>
         Private Shared _sessionDepth As Integer = 0
 
+        ' A lease belongs to one async tooling invocation. Explicit EndSession calls
+        ' and the final scope guard share it, so a nested catch cannot end its parent.
+        Private Shared _sessionGeneration As System.Guid = System.Guid.Empty
+        Private Shared ReadOnly _currentSessionScope As New System.Threading.AsyncLocal(Of LoggerSessionScope)()
+
+        Private NotInheritable Class LoggerSessionScope
+            Implements System.IDisposable
+
+            Public ReadOnly Generation As System.Guid
+            Public ReadOnly Depth As System.Int32
+            Public ReadOnly Parent As LoggerSessionScope
+            Public IsClosed As System.Boolean
+            Private _disposed As System.Int32
+
+            Public Sub New(generation As System.Guid, depth As System.Int32, parent As LoggerSessionScope)
+                Me.Generation = generation
+                Me.Depth = depth
+                Me.Parent = parent
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If System.Threading.Interlocked.Exchange(_disposed, 1) <> 0 Then Return
+                SyncLock _lock
+                    Try
+                        EndOwnedSession(Me, False, "Tooling scope exited without an explicit completion.", Nothing)
+                    Finally
+                        If System.Object.ReferenceEquals(_currentSessionScope.Value, Me) Then
+                            Dim restoredParent As LoggerSessionScope = Parent
+                            While restoredParent IsNot Nothing AndAlso
+                                  System.Threading.Interlocked.CompareExchange(restoredParent._disposed, 0, 0) <> 0
+                                restoredParent = restoredParent.Parent
+                            End While
+                            _currentSessionScope.Value = restoredParent
+                        End If
+                    End Try
+                End SyncLock
+            End Sub
+        End Class
+
+        ''' <summary>
+        ''' Starts logging and captures generation/depth ownership in the caller's
+        ''' async flow. The returned guard must surround all setup and loop code.
+        ''' Failed/disabled starts own no parent depth; stale guards are harmless.
+        ''' </summary>
+        Public Shared Function BeginSessionScope(Optional archiveLogPath As System.String = Nothing,
+                                                 Optional originalRequest As SharedLibrary.Agents.ToolingOriginalRequestLog.Record = Nothing) As System.IDisposable
+            SyncLock _lock
+                Dim parent As LoggerSessionScope = _currentSessionScope.Value
+                Dim previousGeneration As System.Guid = _sessionGeneration
+                Dim previousDepth As System.Int32 = _sessionDepth
+                Try
+                    StartSession(archiveLogPath, originalRequest)
+                Catch ex As System.Exception
+                    ' StartSession itself may fail before its header-write handler.
+                    ' Unwind only depth created by this start, never the parent.
+                    Dim minimumDepth As System.Int32 = If(_sessionGeneration = previousGeneration, previousDepth + 1, 1)
+                    While _sessionDepth >= minimumDepth
+                        EndSessionCore(False, "Tooling log setup failed.", ex)
+                    End While
+                    Throw
+                End Try
+                Dim ownsDepth As System.Boolean = _isEnabled AndAlso _started AndAlso _sessionDepth > 0 AndAlso
+                    (_sessionGeneration <> previousGeneration OrElse _sessionDepth > previousDepth)
+                Dim scope As New LoggerSessionScope(_sessionGeneration, If(ownsDepth, _sessionDepth, 0), parent)
+                _currentSessionScope.Value = scope
+                Return scope
+            End SyncLock
+        End Function
+
+        Private Shared Sub EndOwnedSession(scope As LoggerSessionScope,
+                                           success As System.Boolean,
+                                           summary As System.String,
+                                           ex As System.Exception)
+            If scope Is Nothing OrElse scope.IsClosed Then Return
+            scope.IsClosed = True
+            If scope.Depth <= 0 OrElse scope.Generation <> _sessionGeneration Then Return
+            ' Normally exactly one level is removed. If an invocation exits with
+            ' abandoned descendants, unwind only its own depth range. Their late
+            ' guards then see a lower depth/new generation and cannot touch a parent.
+            While _sessionDepth >= scope.Depth
+                EndSessionCore(success, summary, ex)
+            End While
+        End Sub
+
         ''' <summary>
         ''' Starts a tooling log session and writes the log header. A top-level caller may additionally
         ''' provide an archive path. Nested/sub-agent sessions automatically remain in the same log.
         ''' </summary>
         ''' <param name="archiveLogPath">Optional absolute archive file path for this top-level run.</param>
-        Public Shared Sub StartSession(Optional archiveLogPath As String = Nothing)
+        Public Shared Sub StartSession(Optional archiveLogPath As String = Nothing,
+                                       Optional originalRequest As SharedLibrary.Agents.ToolingOriginalRequestLog.Record = Nothing)
             SyncLock _lock
                 ' A nested tooling loop must join an already-active parent session even when
                 ' APIDebug/SkillAuthor is off and the nested caller did not repeat the archive path.
@@ -126,6 +211,7 @@ Partial Public Class ThisAddIn
                 Dim shouldEnable As Boolean = INI_APIDebug OrElse authorActive OrElse archiveRequested
                 If Not shouldEnable Then Return
 
+                _sessionGeneration = System.Guid.NewGuid()
                 _isEnabled = True
                 _sessionDepth = 1
                 _archiveMirrorPath = Nothing
@@ -214,7 +300,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 Try
-                    WriteHeader()
+                    WriteHeader(originalRequest)
                     _started = True
                 Catch ex As System.Exception
                     _isEnabled = False
@@ -234,8 +320,11 @@ Partial Public Class ThisAddIn
         ''' <summary>
         ''' Writes the session header and overwrites any previous log file with the same name.
         ''' </summary>
-        Private Shared Sub WriteHeader()
+        Private Shared Sub WriteHeader(originalRequest As SharedLibrary.Agents.ToolingOriginalRequestLog.Record)
             Dim header As New StringBuilder()
+            ' This immutable machine-readable block is always first, before any
+            ' model/tool content. It is file-only and never sent to a UI log sink.
+            header.Append(SharedLibrary.Agents.ToolingOriginalRequestLog.BuildHeader(originalRequest))
             header.AppendLine("=" & New String("="c, 78))
             header.AppendLine($"{AN} - Tooling Log")
             header.AppendLine($"Started: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
@@ -479,7 +568,19 @@ Partial Public Class ThisAddIn
         ''' <param name="success">Whether the session completed successfully.</param>
         ''' <param name="summary">Optional summary string written to the log.</param>
         ''' <param name="ex">Optional exception written to the log.</param>
-        Public Shared Sub EndSession(Optional success As Boolean = True, Optional summary As String = "", Optional ex As Exception = Nothing)
+        Public Shared Sub EndSession(Optional success As Boolean = True, Optional summary As String = "", Optional ex As System.Exception = Nothing)
+            SyncLock _lock
+                Dim scope As LoggerSessionScope = _currentSessionScope.Value
+                If scope IsNot Nothing Then
+                    EndOwnedSession(scope, success, summary, ex)
+                    Return
+                End If
+                ' Retain compatibility for unscoped external logger callers.
+                EndSessionCore(success, summary, ex)
+            End SyncLock
+        End Sub
+
+        Private Shared Sub EndSessionCore(success As System.Boolean, summary As System.String, ex As System.Exception)
             SyncLock _lock
                 If _sessionDepth > 0 Then
                     _sessionDepth -= 1
@@ -507,20 +608,22 @@ Partial Public Class ThisAddIn
                 End If
                 WriteLine("END", $"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
 
-                FinalizeDiagnosticsFiles()
-
-                _isEnabled = False
-                _started = False
-                _logPath = Nothing
-                _subAgentLogPath = Nothing
-                _topLevelSkillSlug = Nothing
-                _isDiagnosticsMode = False
-                _desktopMirrorPath = Nothing
-                _desktopSubAgentMirrorPath = Nothing
-                _archiveMirrorPath = Nothing
-                _archiveSubAgentMirrorPath = Nothing
-                _archivePrimaryMode = False
-                _sessionDepth = 0
+                Try
+                    FinalizeDiagnosticsFiles()
+                Finally
+                    _isEnabled = False
+                    _started = False
+                    _logPath = Nothing
+                    _subAgentLogPath = Nothing
+                    _topLevelSkillSlug = Nothing
+                    _isDiagnosticsMode = False
+                    _desktopMirrorPath = Nothing
+                    _desktopSubAgentMirrorPath = Nothing
+                    _archiveMirrorPath = Nothing
+                    _archiveSubAgentMirrorPath = Nothing
+                    _archivePrimaryMode = False
+                    _sessionDepth = 0
+                End Try
             End SyncLock
         End Sub
 

@@ -316,73 +316,73 @@ Partial Public Class ThisAddIn
             Return ""
         End If
 
-        ' Route comment-bubble selections to a comment pipeline
+        Try
+            ' Route comment-bubble selections to a comment pipeline
 
-        Dim activeComment As Word.Comment = Nothing
-        If TryResolveActiveComment(selection, activeComment) Then
-            Dim bubbleSel As Word.Range = Nothing
+            Dim activeComment As Word.Comment = Nothing
+            If TryResolveActiveComment(selection, activeComment) Then
+                Dim bubbleSel As Word.Range = Nothing
 
-            Try
-                If selection.StoryType = Word.WdStoryType.wdCommentsStory Then
-                    bubbleSel = selection.Range.Duplicate
-                ElseIf activeComment IsNot Nothing Then
-                    bubbleSel = activeComment.Range.Duplicate
-                End If
-            Catch
-                bubbleSel = Nothing
-            End Try
+                Try
+                    If selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+                        bubbleSel = selection.Range.Duplicate
+                    ElseIf activeComment IsNot Nothing Then
+                        bubbleSel = activeComment.Range.Duplicate
+                    End If
+                Catch
+                    bubbleSel = Nothing
+                End Try
 
-            Return Await ProcessSelectedTextInActiveCommentBubble(
-                    SysCommand,
-                    CheckMaxToken,
-                    bubbleSel,
-                    UseSecondAPI:=UseSecondAPI,
-                    SelectionMandatory:=SelectionMandatory,
-                    FileObject:=FileObject,
-                    DoMarkup:=DoMarkup,
-                    MarkupMethod:=MarkupMethod
-                )
-        End If
-
-
-        'If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
-        'Dim bubbleSel As Word.Range = Nothing
-        'Try
-        'bubbleSel = selection.Range.Duplicate
-        'Catch
-        'bubbleSel = Nothing
-        'End Try
-
-
-        'Return Await ProcessSelectedTextInActiveCommentBubble(
-        'SysCommand,
-        'CheckMaxToken,
-        'bubbleSel,
-        'UseSecondAPI:=UseSecondAPI,
-        'SelectionMandatory:=SelectionMandatory,
-        'FileObject:=FileObject
-        '                   )
-        'End If
-
-        If selection IsNot Nothing AndAlso
-   (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
-    selection.StoryType = Word.WdStoryType.wdEndnotesStory) Then
-
-            Return Await ProcessSelectedTextInActiveFootnote(
+                Return Await ProcessSelectedTextInActiveCommentBubble(
                         SysCommand,
                         CheckMaxToken,
-                        UseSecondAPI,
-                        SelectionMandatory,
-                        FileObject
+                        bubbleSel,
+                        UseSecondAPI:=UseSecondAPI,
+                        SelectionMandatory:=SelectionMandatory,
+                        FileObject:=FileObject,
+                        DoMarkup:=DoMarkup,
+                        MarkupMethod:=MarkupMethod
                     )
-        End If
+            End If
 
-        If selection.Type = WdSelectionType.wdSelectionIP And SelectionMandatory Then
-            ShowCustomMessageBox("Please select the text to be processed.")
-            Return ""
-        End If
 
-        Try
+            'If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+            'Dim bubbleSel As Word.Range = Nothing
+            'Try
+            'bubbleSel = selection.Range.Duplicate
+            'Catch
+            'bubbleSel = Nothing
+            'End Try
+
+
+            'Return Await ProcessSelectedTextInActiveCommentBubble(
+            'SysCommand,
+            'CheckMaxToken,
+            'bubbleSel,
+            'UseSecondAPI:=UseSecondAPI,
+            'SelectionMandatory:=SelectionMandatory,
+            'FileObject:=FileObject
+            '                   )
+            'End If
+
+            If selection IsNot Nothing AndAlso
+       (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
+        selection.StoryType = Word.WdStoryType.wdEndnotesStory) Then
+
+                Return Await ProcessSelectedTextInActiveFootnote(
+                            SysCommand,
+                            CheckMaxToken,
+                            UseSecondAPI,
+                            SelectionMandatory,
+                            FileObject
+                        )
+            End If
+
+            If selection.Type = WdSelectionType.wdSelectionIP And SelectionMandatory Then
+                ShowCustomMessageBox("Please select the text to be processed.")
+                Return ""
+            End If
+
             Using New WordUndoScope(application, $"{AN} Changes")
 
                 If selection.Type = WdSelectionType.wdSelectionIP Or selection.Tables.Count = 0 Or PutInClipboard Or PutInBubbles Or DoPushback Then
@@ -629,8 +629,10 @@ Partial Public Class ThisAddIn
 
             End Using
 
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            LogWordCommandDiagnostic("ProcessSelectedText", "cancelled_by_user")
         Catch ex As System.Exception
-            Debug.WriteLine("Error in Undo: " & ex.Message)
+            ReportWordCommandFailure("ProcessSelectedText", ex)
         End Try
 
         Return ""
@@ -1077,7 +1079,9 @@ Partial Public Class ThisAddIn
                 Dim BubblesText As String = ""
 
                 If DoBubblesExtract Then
-                    BubblesText = BubblesExtract(rng, DoSilent Or InTable, TargetCommentIndex:=TargetReplyCommentIndex)
+                    BubblesText = BubblesExtract(rng, DoSilent Or InTable,
+                        TargetCommentIndex:=TargetReplyCommentIndex,
+                        IncludeOverlappingAnchors:=(DoPushback AndAlso TargetReplyCommentIndex = 0))
                     If DoPushback AndAlso TargetReplyCommentIndex > 0 AndAlso System.String.IsNullOrWhiteSpace(BubblesText) Then
                         ShowCustomMessageBox("The active comment could not be extracted. No reply was generated.")
                         Return ""
@@ -1295,7 +1299,7 @@ Partial Public Class ThisAddIn
 
                     If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart > 0 Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
+                        LLMResult = Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject))
 
                     Else
 
@@ -1303,7 +1307,7 @@ Partial Public Class ThisAddIn
                             Dim err As Boolean = False
                             ApplyModelConfig(_context, mc, err)
 
-                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)) & vbCrLf
 
                         Next
 
@@ -1316,7 +1320,7 @@ Partial Public Class ThisAddIn
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
                 If Not String.IsNullOrEmpty(LLMResult) Then
-                    LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
+                    LLMResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(LLMResult, UseSecondAPI))
                 End If
 
                 ' Freestyle prose policy is scoped by a runtime marker, not by model/provider.
@@ -1749,7 +1753,7 @@ Partial Public Class ThisAddIn
                             writebackOriginalScreenUpdating,
                             writebackFocusLeaseActive)
 
-                        Dim RegexResult = Await LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False)
+                        Dim RegexResult = Await AwaitWordModelRequestAsync(Function() LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False))
 
                         If Not BeginProcessingFocusLease(
                             application,
@@ -2091,17 +2095,18 @@ Partial Public Class ThisAddIn
 
             Loop
 
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            ' Propagate to the command boundary so no later chunk/cell/model runs.
+            ' Finally still restores focus and removes temporary bookmarks.
+            Throw
+        Catch ex As WordCommandNoticeException
+            ' A diagnosed model-service failure is not an INI/configuration error.
+            LogWordCommandDiagnostic("TrueProcessSelectedText", ex.ToString())
+            Throw
         Catch ex As System.Exception
-
-#If DEBUG Then
-            Debug.WriteLine("Error: " & ex.Message)
-            Debug.WriteLine("Stacktrace: " & ex.StackTrace)
-
-            System.Diagnostics.Debugger.Break()
-#End If
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in TrueProcessSelectedText:  " & ex.Message, "Error")
+            LogWordCommandDiagnostic("TrueProcessSelectedText", ex.ToString())
             INIloaded = False
-
+            Throw
         Finally
 
             EndProcessingFocusLease(
@@ -2251,7 +2256,7 @@ Partial Public Class ThisAddIn
 
             ' 5) Call LLM
             Dim llmResult As String =
-            Await LLM(
+            Await AwaitWordModelRequestAsync(Function() LLM(
                 promptSystem:=sysCommand,
                 promptUser:="<TEXTTOPROCESS>" & inputText & "</TEXTTOPROCESS>",
                 Model:="",
@@ -2261,12 +2266,12 @@ Partial Public Class ThisAddIn
                 Hidesplash:=False,
                 AddUserPrompt:=OtherPromptUnfilled,
                 FileObject:=fileObject
-            )
+            ))
 
             llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If Not String.IsNullOrEmpty(llmResult) Then
-                llmResult = Await PostCorrection(llmResult, useSecondApi)
+                llmResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(llmResult, useSecondApi))
             End If
 
             If String.IsNullOrWhiteSpace(llmResult) Then
@@ -2298,9 +2303,10 @@ Partial Public Class ThisAddIn
 
             Return ""
 
-        Catch ex As Exception
-            Debug.WriteLine($"ProcessSelectedTextInActiveFootnote error: {ex.Message}{vbCrLf}{ex.StackTrace}")
-            ShowCustomMessageBox($"Error processing footnote/endnote: {ex.Message}")
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
+            ReportWordCommandFailure("ProcessFootnote", ex, "Inky could not update this footnote or endnote. Please try again.")
             Return ""
         End Try
     End Function
