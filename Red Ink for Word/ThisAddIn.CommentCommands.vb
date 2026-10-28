@@ -363,8 +363,8 @@ Partial Public Class ThisAddIn
     ' COM, networking and model exceptions are never copied into a dialog.
     Private NotInheritable Class WordCommandNoticeException
         Inherits System.Exception
-        Public Sub New(userMessage As System.String)
-            MyBase.New(userMessage)
+        Public Sub New(userMessage As System.String, Optional inner As System.Exception = Nothing)
+            MyBase.New(userMessage, inner)
         End Sub
     End Class
 
@@ -382,6 +382,24 @@ Partial Public Class ThisAddIn
         Dim invocation As System.Reflection.TargetInvocationException = TryCast(ex, System.Reflection.TargetInvocationException)
         Return invocation IsNot Nothing AndAlso invocation.InnerException IsNot Nothing AndAlso
             IsWordCommandCancellation(invocation.InnerException)
+    End Function
+
+    ' Wrap only exceptions raised by an actual model or post-correction call.
+    ' This preserves the distinction between an AI-service failure and an
+    ' unrelated Word/COM/formatting problem, without leaking procedure names.
+    Private Async Function AwaitWordModelRequestAsync(
+        request As System.Func(Of System.Threading.Tasks.Task(Of System.String))) _
+        As System.Threading.Tasks.Task(Of System.String)
+        Try
+            Return Await request().ConfigureAwait(False)
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
+            Throw New WordCommandNoticeException(
+                Global.SharedLibrary.SharedLibrary.SharedMethods.FormatModelRequestFailureForUser(ex), ex)
+        End Try
     End Function
 
     Private Sub ReportWordCommandFailure(operation As System.String, ex As System.Exception,

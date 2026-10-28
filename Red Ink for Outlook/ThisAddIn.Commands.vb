@@ -1693,6 +1693,80 @@ Partial Public Class ThisAddIn
     End Sub
 
 
+    ' An AI error is recorded at the precise Await boundary, rather than
+    ' guessed from an unrelated exception's text or the user's current UI.
+    Private NotInheritable Class OutlookModelRequestException
+        Inherits System.Exception
+
+        Public Sub New(cause As System.Exception)
+            MyBase.New("Model request failed.", cause)
+        End Sub
+    End Class
+
+    Private Async Function AwaitOutlookModelRequestAsync(
+        request As System.Func(Of System.Threading.Tasks.Task(Of System.String))) _
+        As System.Threading.Tasks.Task(Of System.String)
+        Try
+            Return Await request().ConfigureAwait(False)
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception When IsOutlookCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
+            Throw New OutlookModelRequestException(ex)
+        End Try
+    End Function
+
+    Private Shared Function IsOutlookCommandCancellation(ex As System.Exception) As System.Boolean
+        If TypeOf ex Is System.OperationCanceledException Then Return True
+        Dim aggregate As System.AggregateException = TryCast(ex, System.AggregateException)
+        If aggregate IsNot Nothing Then
+            Dim nested As System.Collections.ObjectModel.ReadOnlyCollection(Of System.Exception) =
+                aggregate.Flatten().InnerExceptions
+            If nested.Count = 0 Then Return False
+            For Each candidate As System.Exception In nested
+                If Not IsOutlookCommandCancellation(candidate) Then Return False
+            Next
+            Return True
+        End If
+        Dim invoked As System.Reflection.TargetInvocationException =
+            TryCast(ex, System.Reflection.TargetInvocationException)
+        Return invoked IsNot Nothing AndAlso invoked.InnerException IsNot Nothing AndAlso
+            IsOutlookCommandCancellation(invoked.InnerException)
+    End Function
+
+    Private Sub ReportOutlookCommandFailure(operation As System.String, ex As System.Exception)
+        Dim diagnostic As System.String = "Outlook command [" & operation & "]: " & ex.ToString()
+        System.Diagnostics.Debug.WriteLine(diagnostic)
+        Try
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                Global.SharedLibrary.SharedLogger.Log(_context, _context.RDV, diagnostic)
+            End If
+        Catch loggingFailure As System.Exception
+            System.Diagnostics.Debug.WriteLine("Outlook command logging failed: " & loggingFailure.ToString())
+        End Try
+
+        ' An explicit Esc/caller cancellation is a normal completion path.
+        If IsOutlookCommandCancellation(ex) Then Return
+
+        Dim modelFailure As OutlookModelRequestException = TryCast(ex, OutlookModelRequestException)
+        If modelFailure IsNot Nothing Then
+            Dim cause As System.Exception = If(modelFailure.InnerException, modelFailure)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(
+                Global.SharedLibrary.SharedLibrary.SharedMethods.FormatModelRequestFailureForUser(cause), "Inky")
+            Return
+        End If
+        If TypeOf ex Is System.TimeoutException Then
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(
+                Global.SharedLibrary.SharedLibrary.SharedMethods.FormatModelRequestFailureForUser(ex), "Inky")
+            Return
+        End If
+
+        ' Real internal failures still retain their operation context.
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(
+            "Error in " & operation & ": " & ex.Message, "Error")
+    End Sub
+
     ''' <summary>
     ''' Inserts LLM result before existing content (prepend) in current MailItem; optionally prompts user for answer instructions and applies MyStyle.
     ''' </summary>
@@ -1795,13 +1869,13 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' Call LLM function with selected text
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_MailReply) & If(DoMyStyle, " " & MyStyleInsert, "") & archiveReplyContext, "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(InterpolateAtRuntime(SP_MailReply) & If(DoMyStyle, " " & MyStyleInsert, "") & archiveReplyContext, "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0))
             Else
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0))
             End If
 
             If INI_PostCorrection <> "" Then
-                LLMResult = Await PostCorrection(LLMResult)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
             End If
 
             If String.IsNullOrWhiteSpace(LLMResult) Then
@@ -1856,7 +1930,7 @@ Partial Public Class ThisAddIn
             'If outlookApp IsNot Nothing Then Marshal.ReleaseComObject(outlookApp) : outlookApp = Nothing
 
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Freestyle_InsertBefore: " & ex.Message, "Error")
+            ReportOutlookCommandFailure("Freestyle_InsertBefore", ex)
         End Try
     End Sub
 
@@ -1982,12 +2056,12 @@ Partial Public Class ThisAddIn
             End If
 
             ' Call LLM function with selected text
-            Dim LLMResult As String = Await LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & selectedTextForProcessing & "</TEXTTOPROCESS>", "", "", 0)
+            Dim LLMResult As String = Await AwaitOutlookModelRequestAsync(Function() LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & selectedTextForProcessing & "</TEXTTOPROCESS>", "", "", 0))
 
             LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If INI_PostCorrection <> "" Then
-                LLMResult = Await PostCorrection(LLMResult)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
             End If
 
             ' Remove horizontal whitespace (incl. NBSP) between real newline tokens (CRLF/CR/LF)
@@ -2186,7 +2260,7 @@ Partial Public Class ThisAddIn
             'If outlookApp IsNot Nothing Then Marshal.ReleaseComObject(outlookApp) : outlookApp = Nothing
 
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Command_InsertAfter: " & ex.Message, "Error")
+            ReportOutlookCommandFailure("Command_InsertAfter", ex)
         End Try
     End Sub
 
@@ -2949,13 +3023,13 @@ SkipPromptWin:
             If archivePrepared IsNot Nothing AndAlso archivePrepared.HasTrigger Then
                 SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
             End If
-            LLMResult = Await LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+            LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject))
 
             If Not NoText Then
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
             End If
             If INI_PostCorrection <> "" Then
-                LLMResult = Await PostCorrection(LLMResult)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
             End If
 
             If DoMarkup AndAlso MarkupMethod = 4 AndAlso Not NoText Then
@@ -3108,7 +3182,7 @@ SkipPromptWin:
             End If
 
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Freestyle_InsertAfter: " & ex.Message, "Error")
+            ReportOutlookCommandFailure("Freestyle_InsertAfter", ex)
         End Try
     End Sub
 

@@ -1,5 +1,15 @@
 # Tasks
 
+## Implemented 2026-10-28 — Shared countdown splash lifetime (hang analysis points 1 and 2)
+
+- Baseline: cumulative CommentRange/ReplyMulti full source plus the Inky Recommendations context/delivery overlay. The report's separate 2148 source ZIP was not available; changed-file before/after hashes and a read-only preflight are supplied to prevent overwriting an unknown newer file.
+- Hidden LLM requests no longer construct any splash controller/Form. Linked cancellation, per-attempt timeout calculation, retry/backoff budgets, HTTP handling, post-processing and AgentGate release remain in place. A single guarded outer Finally owns request-CTS cleanup, including early exits.
+- Visible splash is a UI-free controller and a private Form owned by one dedicated STA from construction through Run and disposal. Asynchronous startup has a 10-second readiness limit and remembered early shutdown. A WinForms timer processes queued data updates and countdown ticks without cross-thread synchronous Invoke/Send or background countdown tasks. Normal Close/Dispose is idempotent and does not cancel completed work.
+- ESC signals a dedicated linked token; no UI callback cancels a potentially disposed request CTS. Display failures are separately logged/cancelled and produce a non-technical message. All own UI/GDI/timer resources are disposed on their creating STA. The thread-local UI exception handler is installed/removed on that STA only. Existing DialogOwner remains unchanged.
+- Both known construction sites use ShowAsync (shared LLM and Word special-service/SSE). SSE transport and timeout semantics are unchanged. SharedLibrary project metadata identifies the controller as Code, not Form. Existing recommendation features, Word comment fixes and .inky contents remain unchanged.
+- QA: static source-contract checks, exact file/project preservation, changed-only overlay reconstruction and hashes. A standalone Windows/.NET Framework test harness using the actual production splash source is included but NOT executed here. No VB compilation, Windows/VSTO build, Office runtime or original-hang reproduction is claimed. See _QA/SplashLifecycle/README_DE.md for five short Office checks and limits.
+
+
 ## Completed 2026-10-25 — Word search fallback range contract (R25)
 
 - Baseline: verified cumulative R24 (688 source entries). The concrete `RI_WordSearch.log` shows 36 Find calls, 34 rejected backward repeats of the same table-cell hit `[973,995]` despite search requests moving from 996 onward, one actual replacement and a successful completion after 6.652 seconds; the 5,000-iteration guard did not trigger.

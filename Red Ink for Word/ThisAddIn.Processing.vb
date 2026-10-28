@@ -1299,7 +1299,7 @@ Partial Public Class ThisAddIn
 
                     If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart > 0 Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
+                        LLMResult = Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject))
 
                     Else
 
@@ -1307,7 +1307,7 @@ Partial Public Class ThisAddIn
                             Dim err As Boolean = False
                             ApplyModelConfig(_context, mc, err)
 
-                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)) & vbCrLf
 
                         Next
 
@@ -1320,7 +1320,7 @@ Partial Public Class ThisAddIn
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
                 If Not String.IsNullOrEmpty(LLMResult) Then
-                    LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
+                    LLMResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(LLMResult, UseSecondAPI))
                 End If
 
                 ' Freestyle prose policy is scoped by a runtime marker, not by model/provider.
@@ -1753,7 +1753,7 @@ Partial Public Class ThisAddIn
                             writebackOriginalScreenUpdating,
                             writebackFocusLeaseActive)
 
-                        Dim RegexResult = Await LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False)
+                        Dim RegexResult = Await AwaitWordModelRequestAsync(Function() LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False))
 
                         If Not BeginProcessingFocusLease(
                             application,
@@ -2099,6 +2099,10 @@ Partial Public Class ThisAddIn
             ' Propagate to the command boundary so no later chunk/cell/model runs.
             ' Finally still restores focus and removes temporary bookmarks.
             Throw
+        Catch ex As WordCommandNoticeException
+            ' A diagnosed model-service failure is not an INI/configuration error.
+            LogWordCommandDiagnostic("TrueProcessSelectedText", ex.ToString())
+            Throw
         Catch ex As System.Exception
             LogWordCommandDiagnostic("TrueProcessSelectedText", ex.ToString())
             INIloaded = False
@@ -2252,7 +2256,7 @@ Partial Public Class ThisAddIn
 
             ' 5) Call LLM
             Dim llmResult As String =
-            Await LLM(
+            Await AwaitWordModelRequestAsync(Function() LLM(
                 promptSystem:=sysCommand,
                 promptUser:="<TEXTTOPROCESS>" & inputText & "</TEXTTOPROCESS>",
                 Model:="",
@@ -2262,12 +2266,12 @@ Partial Public Class ThisAddIn
                 Hidesplash:=False,
                 AddUserPrompt:=OtherPromptUnfilled,
                 FileObject:=fileObject
-            )
+            ))
 
             llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If Not String.IsNullOrEmpty(llmResult) Then
-                llmResult = Await PostCorrection(llmResult, useSecondApi)
+                llmResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(llmResult, useSecondApi))
             End If
 
             If String.IsNullOrWhiteSpace(llmResult) Then

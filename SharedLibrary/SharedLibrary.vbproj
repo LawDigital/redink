@@ -743,7 +743,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Core\UI\SplashScreenCountDown.vb">
-      <SubType>Form</SubType>
+      <SubType>Code</SubType>
     </Compile>
     <Compile Include="Code\Core\UI\DPIProgressForm.vb">
       <SubType>Form</SubType>
