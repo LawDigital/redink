@@ -66,6 +66,11 @@ Partial Public Class ThisAddIn
                 System.Threading.Thread.Sleep(50)
             End While
 
+            If llmTask.IsCanceled OrElse
+               (llmTask.IsFaulted AndAlso IsWordCommandCancellation(llmTask.Exception)) Then
+                Throw New System.OperationCanceledException("Internet grounding cancelled.")
+            End If
+
             If llmTask.Status = TaskStatus.RanToCompletion Then
                 SearchTerms = llmTask.Result
             Else
@@ -98,6 +103,11 @@ Partial Public Class ThisAddIn
                 System.Threading.Thread.Sleep(50)
             End While
 
+            If searchTask.IsCanceled OrElse
+               (searchTask.IsFaulted AndAlso IsWordCommandCancellation(searchTask.Exception)) Then
+                Throw New System.OperationCanceledException("Internet grounding cancelled.")
+            End If
+
             If searchTask.Status = TaskStatus.RanToCompletion Then
                 SearchResults = searchTask.Result
             Else
@@ -115,8 +125,13 @@ Partial Public Class ThisAddIn
 
             tcs.SetResult(True)
 
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            InfoBox.ShowInfoBox("")
+            tcs.TrySetCanceled()
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ConsultInternet: " & ex.Message, "Error")
+            InfoBox.ShowInfoBox("")
+            ReportWordCommandFailure("ConsultInternet", ex,
+                "Inky could not complete the internet search. Please try again.")
             tcs.SetResult(False)
         End Try
 

@@ -564,6 +564,8 @@
     <Compile Include="Code\Agents\ToolingConstants.vb" />
     <Compile Include="Code\Agents\ToolingFinalResponseContract.vb" />
     <Compile Include="Code\Agents\ToolingOrchestrator.vb" />
+    <Compile Include="Code\Agents\ToolingOriginalRequestLog.vb" />
+    <Compile Include="Code\Agents\PromptCoachingAdvice.vb" />
     <Compile Include="Code\Agents\ToolLoaderTool.vb" />
     <Compile Include="Code\Agents\ToolRegistry.vb" />
     <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />

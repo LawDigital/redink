@@ -484,9 +484,9 @@ Partial Public Class ThisAddIn
 
         Try
             ' Capture once, before visibility helpers can change the live Word selection.
-            Dim mergeContext As BalloonMergeContext = CaptureBalloonMergeContext(sel, selectWholeParagraph)
+            Dim mergeContext As BalloonMergeContext = Await CaptureBalloonMergeContextAsync(sel, selectWholeParagraph)
             If mergeContext Is Nothing Then
-                ShowCustomMessageBox("This command only works when the cursor is inside a comment balloon or on text that has a comment.")
+                ShowCustomMessageBox("Select a comment, or place the cursor in the text that the comment refers to.", "Inky - Apply Comment")
                 Return
             End If
             Dim balloonCommentText As System.String = mergeContext.FullCommentText
@@ -553,7 +553,7 @@ Partial Public Class ThisAddIn
             InsertJustificationBubble(doc, anchorForBubble, justification, "")
 
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error in BalloonMergeWithJustification:{Environment.NewLine}{ex.Message}", "Error")
+            ReportWordCommandFailure("ApplyCommentWithJustification", ex, "Inky could not finish this request. The text may already have been revised; please check it before trying again.")
         End Try
     End Function
 

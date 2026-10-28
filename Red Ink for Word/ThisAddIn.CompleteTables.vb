@@ -400,9 +400,12 @@ Partial Public Class ThisAddIn
             Else
                 ShowCustomMessageBox("Table completion failed or was cancelled.", AN & " Complete Tables")
             End If
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            WriteTableCompletionDebug("Cancelled", "Cancelled by user.")
+        Catch ex As System.Exception
             WriteTableCompletionDebug("Unhandled exception", ex.ToString())
-            ShowCustomMessageBox($"Error: {ex.Message}", AN & " Complete Tables")
+            ReportWordCommandFailure("CompleteTables", ex,
+                "Inky could not complete the tables. Please check the document and try again.")
         Finally
             ProgressBarModule.CancelOperation = True
         End Try
@@ -505,9 +508,12 @@ Partial Public Class ThisAddIn
             If success Then
                 ShowCustomMessageBox($"Completed document saved as:{vbCrLf}{outputPath}", AN & " Complete Tables")
             End If
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            WriteTableCompletionDebug("Cancelled", "Cancelled by user.")
+        Catch ex As System.Exception
             WriteTableCompletionDebug("Unhandled exception", ex.ToString())
-            ShowCustomMessageBox($"Error: {ex.Message}", AN & " Complete Tables")
+            ReportWordCommandFailure("CompleteTables", ex,
+                "Inky could not complete the tables. Please check the document and try again.")
         Finally
             ProgressBarModule.CancelOperation = True
         End Try

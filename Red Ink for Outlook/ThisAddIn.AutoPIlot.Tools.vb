@@ -162,6 +162,8 @@ Partial Public Class ThisAddIn
     Friend Function GetAutoPilotInternalTools() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
         tools.Add(BuildScanSettingsTool())
+        ' The own-preference command remains discoverable while recommendation delivery is off.
+        tools.Add(BuildManagePromptCoachingTool())
 
         ' Deterministic helper for exact text/data computation inside AutoPilot.
         Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
@@ -1603,6 +1605,8 @@ Partial Public Class ThisAddIn
                     response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ManageScheduledTasks
                     response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManagePromptCoaching
+                    response = ExecuteManagePromptCoachingTool(toolCall, cancellationToken)
                 Case AP_Tool_ManageUserMemory
                     response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ManageUserFiles
@@ -2323,6 +2327,7 @@ Partial Public Class ThisAddIn
      AP_Tool_GenerateImage,
      AP_Tool_WebGrounding,
      AP_Tool_ManageScheduledTasks,
+     AP_Tool_ManagePromptCoaching,
      AP_Tool_ManageUserMemory,
      AP_Tool_ManageUserFiles,
      AP_Tool_ListCollectionUseCases,

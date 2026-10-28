@@ -279,10 +279,21 @@ Partial Public Class ThisAddIn
         Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing,
         Optional retainedToolResultsSink As System.Action(Of Newtonsoft.Json.Linq.JArray) = Nothing,
         Optional workflowContinuationRetentionDays As System.Int32 = 0,
-        Optional effortEstimateSink As System.Action(Of System.String) = Nothing) As System.Threading.Tasks.Task(Of String)
+        Optional effortEstimateSink As System.Action(Of System.String) = Nothing,
+        Optional toolingOriginalRequest As SharedLibrary.Agents.ToolingOriginalRequestLog.Record = Nothing) As System.Threading.Tasks.Task(Of String)
 
 
-        ToolingFileLogger.StartSession()
+        ' Capture the original host input before archive cleanup, prompt enrichment,
+        ' bootstrap calls or checkpoint restoration can mutate the working prompt.
+        Dim originalRequestForLog As SharedLibrary.Agents.ToolingOriginalRequestLog.Record =
+            If(toolingOriginalRequest,
+               SharedLibrary.Agents.ToolingOriginalRequestLog.CaptureHostInput(
+                   userText, otherPrompt, fullPromptOverride, workflowId, resumeWorkflowFromCheckpoint))
+        Dim toolingLogScope As System.IDisposable =
+            ToolingFileLogger.BeginSessionScope(originalRequestForLog)
+        ' Cover setup before the central loop Try as well as every return/exception.
+        ' Existing explicit completion paths are idempotent within this lease.
+        Try
 
         Dim parentToolingContext = _activeToolingContext
         Dim parentStagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
@@ -4401,6 +4412,12 @@ Partial Public Class ThisAddIn
                     "Word deliverable transport failed. Source deliverables remain at their original staging/workspace locations; session staging was preserved when applicable.",
                     wordDeliveryFailure)
             End If
+        End Try
+        Catch toolingScopeError As System.Exception
+            ToolingFileLogger.EndSession(False, "Tooling invocation failed.", ex:=toolingScopeError)
+            Throw
+        Finally
+            toolingLogScope.Dispose()
         End Try
     End Function
 

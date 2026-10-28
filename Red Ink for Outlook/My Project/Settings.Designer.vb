@@ -1142,6 +1142,54 @@ Namespace My
             End Set
         End Property
 
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_PromptCoachingEnabled() As Global.System.Boolean
+            Get
+                Return CType(Me("AP_PromptCoachingEnabled"), Global.System.Boolean)
+            End Get
+            Set
+                Me("AP_PromptCoachingEnabled") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_PromptCoachingDefaultForAllUsers() As Global.System.Boolean
+            Get
+                Return CType(Me("AP_PromptCoachingDefaultForAllUsers"), Global.System.Boolean)
+            End Get
+            Set
+                Me("AP_PromptCoachingDefaultForAllUsers") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_PromptCoachingImmediateDelivery() As Global.System.Boolean
+            Get
+                Return CType(Me("AP_PromptCoachingImmediateDelivery"), Global.System.Boolean)
+            End Get
+            Set
+                Me("AP_PromptCoachingImmediateDelivery") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("")> _
+        Public Property AP_PromptCoachingIncludedUsers() As Global.System.String
+            Get
+                Return CType(Me("AP_PromptCoachingIncludedUsers"), Global.System.String)
+            End Get
+            Set
+                Me("AP_PromptCoachingIncludedUsers") = value
+            End Set
+        End Property
+
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _

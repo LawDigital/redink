@@ -811,7 +811,8 @@ Partial Public Class ThisAddIn
         Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing,
         Optional retainedToolResultsSink As System.Action(Of Newtonsoft.Json.Linq.JArray) = Nothing,
         Optional enforceSelectedToolScope As System.Boolean = False,
-        Optional effortEstimateSink As System.Action(Of System.String) = Nothing) As System.Threading.Tasks.Task(Of String)
+        Optional effortEstimateSink As System.Action(Of System.String) = Nothing,
+        Optional toolingOriginalRequest As SharedLibrary.Agents.ToolingOriginalRequestLog.Record = Nothing) As System.Threading.Tasks.Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -819,7 +820,17 @@ Partial Public Class ThisAddIn
             Return "Operation cancelled due to power transition."
         End If
 
-        ToolingFileLogger.StartSession(toolingLogArchivePath)
+        ' Capture the original host input before archive cleanup, prompt enrichment,
+        ' bootstrap calls or checkpoint restoration can mutate the working prompt.
+        Dim originalRequestForLog As SharedLibrary.Agents.ToolingOriginalRequestLog.Record =
+            If(toolingOriginalRequest,
+               SharedLibrary.Agents.ToolingOriginalRequestLog.CaptureHostInput(
+                   userText, otherPrompt, fullPromptOverride, workflowId, resumeWorkflowFromCheckpoint))
+        Dim toolingLogScope As System.IDisposable =
+            ToolingFileLogger.BeginSessionScope(toolingLogArchivePath, originalRequestForLog)
+        ' Cover setup before the central loop Try as well as every return/exception.
+        ' Existing explicit completion paths are idempotent within this lease.
+        Try
 
         ' Per-run deliverable tracking reset. Local Chat retains its session files but
         ' marks prior-turn outputs as already surfaced. AutoPilot MUST start from empty
@@ -5168,6 +5179,12 @@ Partial Public Class ThisAddIn
             End If
 
             ' Keep the restored parent context alive for repeated sub-agent calls.
+        End Try
+        Catch toolingScopeError As System.Exception
+            ToolingFileLogger.EndSession(False, "Tooling invocation failed.", ex:=toolingScopeError)
+            Throw
+        Finally
+            toolingLogScope.Dispose()
         End Try
     End Function
 

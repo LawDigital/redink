@@ -463,7 +463,9 @@ Partial Public Class ThisAddIn
     ''' policy is configured.
     ''' </summary>
     Friend Function ResolveToolsForSender(senderEmail As String, sessionTools As List(Of ModelConfig)) As List(Of ModelConfig)
-        ' No policy in effect -> unchanged behaviour.
+        ' Self-service preference control grants no access to another sender or substantive tool.
+        sessionTools = EnsureAutoPilotPromptCoachingSelfServiceTool(senderEmail, sessionTools)
+        ' No policy in effect -> unchanged behaviour for substantive tools.
         If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return sessionTools
         If sessionTools Is Nothing OrElse sessionTools.Count = 0 Then Return sessionTools
 
@@ -490,7 +492,7 @@ Partial Public Class ThisAddIn
         End Select
     End Function
 
-    ''' <summary>Returns only the always-allowed safety tools (report_inability).</summary>
+    ''' <summary>Returns the safety fallback and verified own-mail preference control.</summary>
     Private Function KeepAlwaysAllowedToolsOnly(sessionTools As List(Of ModelConfig)) As List(Of ModelConfig)
         Return sessionTools.
             Where(Function(t) t IsNot Nothing AndAlso IsAlwaysAllowedTool(t.ToolName)).
@@ -640,6 +642,9 @@ Partial Public Class ThisAddIn
     ''' <summary>Determines whether a tool must never be filtered out (safety fallback).</summary>
     Private Function IsAlwaysAllowedTool(toolName As String) As Boolean
         If String.IsNullOrWhiteSpace(toolName) Then Return False
+        If toolName.Trim().Equals(AP_Tool_ManagePromptCoaching, System.StringComparison.OrdinalIgnoreCase) Then
+            Return CanManageAutoPilotPromptCoachingFromCurrentMail()
+        End If
         Return toolName.Trim().Equals(AP_Tool_ReportInability, StringComparison.OrdinalIgnoreCase)
     End Function
 
