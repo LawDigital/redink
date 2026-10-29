@@ -1777,7 +1777,7 @@ Partial Public Class ThisAddIn
         End If
 
         If HasToolName(selectedTools, "extract_pdf_text") Then
-            sb.AppendLine("- extract_pdf_text is for a single PDF or staged/session file at a time. Never pass a directory or folder path to extract_pdf_text.")
+            sb.AppendLine("- extract_pdf_text accepts one or more exact PDF session filenames in attachment_names. To read only one PDF, pass a one-item array. Omit the selector or use [] only when all eligible PDFs are intended. Invalid explicit targets fail without processing other attachments. Never pass a directory or folder path.")
         End If
 
         If HasToolName(selectedTools, "agent_workspace_find_files") OrElse

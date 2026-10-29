@@ -168,12 +168,20 @@ Namespace Agents
             Public ReadOnly Property Entries As New System.Collections.Generic.List(Of TrustedXlsxExternalRelationshipBaselineEntry)()
         End Class
 
+        ' Model-facing validation details contain host-selected codes and numeric output identities only.
+        ' Raw failureReason, OOXML part names, relationship targets and exception text stay in diagnostics.
+        Private NotInheritable Class OutputValidationFailure
+            Public Property CheckCode As System.String = "BASELINE_RESTORATION_FAILED"
+            Public Property OutputIndex As System.Int32 = -1
+            Public Property MatchingOutputCount As System.Int32 = 0
+        End Class
+
         Public Const ToolName As System.String = "python_execute"
         Private Const ReservedStdinRelativePath As System.String = "__redink_tool/stdin.txt"
 
         Public Shared ReadOnly Property ToolInstructionsPrompt As System.String
             Get
-                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. For Word document modifications (.docx), native Word tools are usually more efficient and should normally be tried first, but their presence never disables python_execute: use Python whenever its libraries/file model are better suited, whenever a native tool is unsuitable, or after a native-tool limitation/failure. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. When you do use python_execute, put the COMPLETE task into one self-contained program that inspects the document as needed, identifies the target, performs the modification, saves the final output, validates the result, and publishes the result/output, all in the same execution. Do not split a simple task into separate python_execute calls for discovery, editing, re-reading, verification, or publication; only make a second call when information from the first execution is genuinely required before the next program can be constructed, or to repair a genuinely failed execution. After the requested output has been produced and validated in a successful run, do not issue further python_execute calls to re-read or re-verify the result; finalize instead. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Never shorten, rename, or invent aliases for input_files to work around host path lengths; input_files must remain real attachment/workspace references and the host handles any required physical staging aliases transparently. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Do not use python_execute to inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; the sandbox can access only staged `input_files` and files created through `agent_api.output_path(...)`. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model. Each call executes a complete, standalone Python program from scratch; nothing persists between calls. Do not stall the process: do not sleep, poll, retry in a loop, or wait for a file, resource, or state to appear; if an expected input or condition is missing, publish that fact and return immediately instead of waiting. Host-mediated capabilities (such as language-model assistance or web retrieval/search) are comparatively slow and optional; only call them when the task requires them, and never rely on them completing quickly. A deterministic Python error (for example SyntaxError, NameError, AttributeError, TypeError, ValueError, ImportError, or ModuleNotFoundError) will fail identically if resubmitted unchanged, so fix the code instead of retrying the same script. After an AttributeError or an API mismatch, do not guess a similarly named attribute or method; first inspect the real object with type(value), type(value).__module__, type(value).__qualname__, and hasattr(value, 'name') (a filtered dir() is acceptable), then call the API that actually exists. Do not reuse an approach that already failed. agent_api.output_path(name) requires a non-empty relative path inside the output directory; an empty string, '.', absolute paths, and paths escaping the output directory are rejected. Never mask a failure with a broad try/except or by writing placeholder/dummy output; a repair must preserve the required behavior and produce the real result. Published results must be JSON-compatible: allowed values are dictionaries with string keys, lists, strings, integers, finite floating-point values, booleans, and null. The host defensively normalizes common boundary values such as tuples/sets, pathlib.Path, Decimal and date/time values before publication, but library objects or custom classes must still be reduced explicitly to dictionaries or primitive values. agent_api.output_path(name) returns a pathlib.Path; most modern APIs accept path-like objects, but if a third-party library rejects pathlib.Path or WindowsPath (for example reportlab.platypus.SimpleDocTemplate), convert it with str(path) only at that API boundary. python-docx header objects do not provide a universal .text property: read header text from section.header.paragraphs (joining each paragraph.text) and, when required, from section.header.tables. Do not pass a returned internal results path (for example results/<session-id>/file.docx) to input_files: published-result paths are informational only and are not reusable as inputs. Use only attachment references, workspace-relative paths, uniquely resolvable Skill reference files, or explicitly reusable published-file handles as input_files."
+                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. For Word document modifications (.docx), native Word tools are usually more efficient and should normally be tried first, but their presence never disables python_execute: use Python whenever its libraries/file model are better suited, whenever a native tool is unsuitable, or after a native-tool limitation/failure. Combine related processing steps in one script when the declared output contract permits it. An explicit single-file artifact identity allows exactly one physical output; different required final files need their own declared output slots and calls with the matching identities. Never bundle, omit or replace required deliverables merely to satisfy a file-count check. Batching several files is appropriate only when the active contract explicitly permits multiple outputs. For each permitted output contract, put its complete processing into one self-contained program that inspects the document as needed, identifies the target, performs the modification, saves the final output, validates the result, and publishes the result/output, all in the same execution. Do not split a simple task into separate python_execute calls for discovery, editing, re-reading, verification, or publication; only make another call when information from the previous execution is genuinely required, to repair a genuinely failed execution, or to produce a separate required output slot under a single-file contract. After the current output slot has been produced and validated in a successful run, do not re-read or re-verify that result; continue with remaining required slots, or finalize when all requirements are fulfilled. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Never shorten, rename, or invent aliases for input_files to work around host path lengths; input_files must remain real attachment/workspace references and the host handles any required physical staging aliases transparently. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Do not use python_execute to inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; the sandbox can access only staged `input_files` and files created through `agent_api.output_path(...)`. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model. For OUTPUT_VALIDATION_FAILED, inspect the safe error fields and error.validation when present: check_code, stage, zero-based output_index and required_action describe the host check, not script success. Exit code 0 is not acceptance. Keep operation and output identities stable when repairing the same failed step; do not bypass validation or repeat unchanged code. If the worker does not identify its exact failed check, do not invent one. Each call executes a complete, standalone Python program from scratch; nothing persists between calls. Do not stall the process: do not sleep, poll, retry in a loop, or wait for a file, resource, or state to appear; if an expected input or condition is missing, publish that fact and return immediately instead of waiting. Host-mediated capabilities (such as language-model assistance or web retrieval/search) are comparatively slow and optional; only call them when the task requires them, and never rely on them completing quickly. A deterministic Python error (for example SyntaxError, NameError, AttributeError, TypeError, ValueError, ImportError, or ModuleNotFoundError) will fail identically if resubmitted unchanged, so fix the code instead of retrying the same script. After an AttributeError or an API mismatch, do not guess a similarly named attribute or method; first inspect the real object with type(value), type(value).__module__, type(value).__qualname__, and hasattr(value, 'name') (a filtered dir() is acceptable), then call the API that actually exists. Do not reuse an approach that already failed. agent_api.output_path(name) requires a non-empty relative path inside the output directory; an empty string, '.', absolute paths, and paths escaping the output directory are rejected. Never mask a failure with a broad try/except or by writing placeholder/dummy output; a repair must preserve the required behavior and produce the real result. Published results must be JSON-compatible: allowed values are dictionaries with string keys, lists, strings, integers, finite floating-point values, booleans, and null. The host defensively normalizes common boundary values such as tuples/sets, pathlib.Path, Decimal and date/time values before publication, but library objects or custom classes must still be reduced explicitly to dictionaries or primitive values. agent_api.output_path(name) returns a pathlib.Path; most modern APIs accept path-like objects, but if a third-party library rejects pathlib.Path or WindowsPath (for example reportlab.platypus.SimpleDocTemplate), convert it with str(path) only at that API boundary. python-docx header objects do not provide a universal .text property: read header text from section.header.paragraphs (joining each paragraph.text) and, when required, from section.header.tables. Do not pass a returned internal results path (for example results/<session-id>/file.docx) to input_files: published-result paths are informational only and are not reusable as inputs. Use only attachment references, workspace-relative paths, uniquely resolvable Skill reference files, or explicitly reusable published-file handles as input_files."
             End Get
         End Property
 
@@ -679,11 +687,12 @@ Namespace Agents
                    runResult.Outputs.Count > 0 Then
 
                     Dim restorationFailure As System.String = System.String.Empty
-                    If Not TryRestoreTrustedXlsxBaselineIntoOutputs(runResult.Outputs, trustedBaseline, restorationFailure, logDiag) Then
+                    Dim validationFailure As New OutputValidationFailure()
+                    If Not TryRestoreTrustedXlsxBaselineIntoOutputs(runResult.Outputs, trustedBaseline, restorationFailure, logDiag, validationFailure) Then
                         retainDiagnostics = True
                         SafeLog(logWarn, "Python output was validated by the worker but trusted XLSX baseline restoration failed host-side.")
                         If Not System.String.IsNullOrWhiteSpace(restorationFailure) Then SafeLog(logDiag, restorationFailure)
-                        Return CreateLocalFailure("OUTPUT_VALIDATION_FAILED", "failed", FriendlyMessage("OUTPUT_VALIDATION_FAILED", "failed"))
+                        Return CreateOutputValidationFailureResult(runResult, duration, validationFailure)
                     End If
                 End If
 
@@ -901,7 +910,8 @@ Namespace Agents
             outputs As System.Collections.Generic.IReadOnlyList(Of RedInkPythonAgentOutput),
             baseline As TrustedXlsxExternalRelationshipBaseline,
             ByRef failureReason As System.String,
-            logDiag As System.Action(Of System.String)) As System.Boolean
+            logDiag As System.Action(Of System.String),
+            validationFailure As OutputValidationFailure) As System.Boolean
 
             failureReason = System.String.Empty
             If baseline Is Nothing OrElse baseline.Entries.Count = 0 OrElse outputs Is Nothing Then Return True
@@ -915,17 +925,32 @@ Namespace Agents
                                System.String.Equals(System.IO.Path.GetExtension(output.FullPath), baselineExtension, System.StringComparison.OrdinalIgnoreCase)
                     End Function).ToList()
 
+            validationFailure.MatchingOutputCount = matchingOutputs.Count
             If matchingOutputs.Count = 0 Then Return True
             If matchingOutputs.Count > 1 Then
+                validationFailure.CheckCode = "BASELINE_OUTPUT_AMBIGUOUS"
                 failureReason = "Trusted OOXML baseline restoration is ambiguous because the Python run produced more than one matching Office output."
                 Return False
             End If
 
             For Each output As RedInkPythonAgentOutput In matchingOutputs
-                If Not TryRestoreTrustedXlsxBaseline(output.FullPath, baseline, failureReason, logDiag) Then Return False
-                Dim information As New System.IO.FileInfo(output.FullPath)
-                output.Size = information.Length
-                output.Sha256 = ComputeFileSha256Hex(output.FullPath)
+                For outputIndex As System.Int32 = 0 To outputs.Count - 1
+                    If System.Object.ReferenceEquals(outputs(outputIndex), output) Then
+                        validationFailure.OutputIndex = outputIndex
+                        Exit For
+                    End If
+                Next
+                If Not TryRestoreTrustedXlsxBaseline(output.FullPath, baseline, failureReason, logDiag, validationFailure) Then Return False
+                Try
+                    Dim information As New System.IO.FileInfo(output.FullPath)
+                    output.Size = information.Length
+                    output.Sha256 = ComputeFileSha256Hex(output.FullPath)
+                Catch ex As System.Exception
+                    validationFailure.CheckCode = "BASELINE_OUTPUT_READBACK_FAILED"
+                    failureReason = "Restored OOXML output could not be re-read for size and hash validation."
+                    SafeLog(logDiag, ex.ToString())
+                    Return False
+                End Try
                 SafeLog(logDiag, "python_execute restored trusted XLSX baseline hyperlinks after worker validation: " & output.RelativePath)
             Next
 
@@ -936,7 +961,8 @@ Namespace Agents
             outputPath As System.String,
             baseline As TrustedXlsxExternalRelationshipBaseline,
             ByRef failureReason As System.String,
-            logDiag As System.Action(Of System.String)) As System.Boolean
+            logDiag As System.Action(Of System.String),
+            validationFailure As OutputValidationFailure) As System.Boolean
 
             failureReason = System.String.Empty
             Try
@@ -971,6 +997,7 @@ Namespace Agents
                                 If Not ownerDocuments.TryGetValue(baselineEntry.OwnerPart, ownerDocument) Then
                                     Dim ownerArchiveEntry As System.IO.Compression.ZipArchiveEntry = archive.GetEntry(baselineEntry.OwnerPart)
                                     If ownerArchiveEntry Is Nothing Then
+                                        validationFailure.CheckCode = "BASELINE_OWNER_PART_MISSING"
                                         failureReason = "Trusted OOXML baseline restoration could not find the original worksheet part in the Python output: " & baselineEntry.OwnerPart
                                         Return False
                                     End If
@@ -990,12 +1017,14 @@ Namespace Agents
                                                    System.String.Equals(refAttribute.Value, baselineEntry.HyperlinkRef, System.StringComparison.Ordinal)
                                         End Function).ToList()
                                 If matchingHyperlinks.Count <> 1 Then
+                                    validationFailure.CheckCode = "BASELINE_ANCHOR_NOT_UNIQUE"
                                     failureReason = "Trusted OOXML baseline restoration could not uniquely locate the original hyperlink ref in the Python output: " & baselineEntry.OwnerPart & "!" & baselineEntry.HyperlinkRef
                                     Return False
                                 End If
 
                                 Dim existingIdAttribute As System.Xml.Linq.XAttribute = matchingHyperlinks(0).Attribute(relationshipIdName)
                                 If existingIdAttribute IsNot Nothing Then
+                                    validationFailure.CheckCode = "BASELINE_ANCHOR_RELATIONSHIP_CONFLICT"
                                     failureReason = "Trusted OOXML baseline restoration found a Python-created relationship id on an original external hyperlink: " & baselineEntry.OwnerPart & "!" & baselineEntry.HyperlinkRef
                                     Return False
                                 End If
@@ -1018,6 +1047,7 @@ Namespace Agents
                                                    System.String.Equals(idAttribute.Value, baselineEntry.RelationshipId, System.StringComparison.Ordinal)
                                         End Function)
                                 If existingRelationship IsNot Nothing Then
+                                    validationFailure.CheckCode = "BASELINE_RELATIONSHIP_ID_CONFLICT"
                                     failureReason = "Trusted OOXML baseline restoration found a conflicting relationship id in the Python output: " & baselineEntry.RelationshipPart & "#" & baselineEntry.RelationshipId
                                     Return False
                                 End If
@@ -1042,10 +1072,11 @@ Namespace Agents
                     End Using
                 End Using
 
-                If Not VerifyTrustedXlsxBaseline(outputPath, baseline, failureReason) Then Return False
+                If Not VerifyTrustedXlsxBaseline(outputPath, baseline, failureReason, validationFailure) Then Return False
                 Return True
             Catch ex As System.Exception
                 SafeLog(logDiag, ex.ToString())
+                validationFailure.CheckCode = "BASELINE_RESTORATION_EXCEPTION"
                 failureReason = "Trusted OOXML baseline restoration raised a host-side exception."
                 Return False
             End Try
@@ -1054,7 +1085,8 @@ Namespace Agents
         Private Shared Function VerifyTrustedXlsxBaseline(
             outputPath As System.String,
             baseline As TrustedXlsxExternalRelationshipBaseline,
-            ByRef failureReason As System.String) As System.Boolean
+            ByRef failureReason As System.String,
+            validationFailure As OutputValidationFailure) As System.Boolean
 
             failureReason = System.String.Empty
             Dim expectedKeys As New System.Collections.Generic.List(Of System.String)()
@@ -1084,6 +1116,7 @@ Namespace Agents
                             Dim typeAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Type")
                             Dim targetAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Target")
                             If typeAttribute Is Nothing OrElse targetAttribute Is Nothing Then
+                                validationFailure.CheckCode = "BASELINE_EXTERNAL_RELATIONSHIP_INCOMPLETE"
                                 failureReason = "Restored OOXML contains an incomplete external relationship."
                                 Return False
                             End If
@@ -1101,11 +1134,13 @@ Namespace Agents
             expectedKeys.Sort(System.StringComparer.Ordinal)
             actualKeys.Sort(System.StringComparer.Ordinal)
             If expectedKeys.Count <> actualKeys.Count Then
+                validationFailure.CheckCode = "BASELINE_EXTERNAL_RELATIONSHIP_SET_MISMATCH"
                 failureReason = "Restored OOXML external hyperlink set differs from the exact trusted input baseline."
                 Return False
             End If
             For index As System.Int32 = 0 To expectedKeys.Count - 1
                 If Not System.String.Equals(expectedKeys(index), actualKeys(index), System.StringComparison.Ordinal) Then
+                    validationFailure.CheckCode = "BASELINE_EXTERNAL_RELATIONSHIP_SET_MISMATCH"
                     failureReason = "Restored OOXML external hyperlink set differs from the exact trusted input baseline."
                     Return False
                 End If
@@ -1419,6 +1454,63 @@ Namespace Agents
             New Newtonsoft.Json.Linq.JProperty("missingAttribute", If(errorValue.MissingAttribute Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.MissingAttribute))),
             New Newtonsoft.Json.Linq.JProperty("message", If(errorValue.Message Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.Message))),
             New Newtonsoft.Json.Linq.JProperty("stack", stack))
+        End Function
+
+        Private Shared Function CreateOutputValidationFailureResult(
+            runResult As RedInkPythonAgentRunResult,
+            durationMilliseconds As System.Int64,
+            validationFailure As OutputValidationFailure) As PythonExecuteToolCoreResult
+
+            Dim reason As System.String
+            Dim remediation As System.String
+            Select Case validationFailure.CheckCode
+                Case "BASELINE_OUTPUT_AMBIGUOUS"
+                    reason = "More than one Office output matches the trusted input baseline."
+                    remediation = "The host cannot assign one trusted baseline to several outputs. Produce the intended single modified Office output for this baseline, keeping unrelated requested deliverables in their own valid calls/slots."
+                Case "BASELINE_OWNER_PART_MISSING"
+                    reason = "An original worksheet part needed to restore a trusted link is missing."
+                    remediation = "Modify the staged input without deleting or rebuilding the affected worksheet structure; preserve the original hyperlink anchors. An available native editing tool is an alternative."
+                Case "BASELINE_ANCHOR_NOT_UNIQUE"
+                    reason = "An original hyperlink anchor is missing or no longer unique."
+                    remediation = "Preserve the original worksheet hyperlink anchors while applying the requested content changes. Do not replace them with placeholder data."
+                Case "BASELINE_ANCHOR_RELATIONSHIP_CONFLICT", "BASELINE_RELATIONSHIP_ID_CONFLICT"
+                    reason = "A generated relationship conflicts with a trusted original hyperlink."
+                    remediation = "Preserve the sanitized input structure. Do not recreate or invent external relationships; the host restores the trusted originals."
+                Case "BASELINE_EXTERNAL_RELATIONSHIP_INCOMPLETE", "BASELINE_EXTERNAL_RELATIONSHIP_SET_MISMATCH"
+                    reason = "The restored external relationships do not match the trusted input baseline."
+                    remediation = "Preserve the trusted relationship structure and do not add or remove external targets. Use a permitted alternative editor when this transformation cannot retain it."
+                Case "BASELINE_OUTPUT_READBACK_FAILED"
+                    reason = "The restored output could not be re-read for final size and hash validation."
+                    remediation = "No output is accepted from this attempt. Inspect host diagnostics for a staging/access problem before retrying; changing document content may not resolve it."
+                Case Else
+                    reason = "The host could not safely restore and verify the trusted Office baseline."
+                    remediation = "The exact cause is available only in host diagnostics. Do not repeat an unchanged script, bypass validation or publish placeholder output; use a permitted alternative or report the block."
+            End Select
+            Dim message As System.String = "Python output validation failed: " & reason
+            Dim result As PythonExecuteToolCoreResult = CreateLocalFailure("OUTPUT_VALIDATION_FAILED", "failed", message)
+            Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(result.Payload)
+            Dim errorPayload As Newtonsoft.Json.Linq.JObject = DirectCast(payload("error"), Newtonsoft.Json.Linq.JObject)
+            errorPayload("phase") = "validating"
+            errorPayload("message") = message
+            errorPayload("validation") = New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("stage", "host_trusted_ooxml_baseline"),
+                New Newtonsoft.Json.Linq.JProperty("check_code", validationFailure.CheckCode),
+                New Newtonsoft.Json.Linq.JProperty("output_index", If(validationFailure.OutputIndex < 0,
+                    Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(validationFailure.OutputIndex))),
+                New Newtonsoft.Json.Linq.JProperty("output_index_base", 0),
+                New Newtonsoft.Json.Linq.JProperty("matching_output_count", validationFailure.MatchingOutputCount),
+                New Newtonsoft.Json.Linq.JProperty("required_action", remediation))
+            payload("exit_code") = runResult.ExitCode
+            payload("duration_ms") = durationMilliseconds
+            payload("diagnostic_id") = runResult.DiagnosticId.ToString("D")
+            payload("human_log_available") = runResult.HumanLogAvailable
+            result.ExitCode = runResult.ExitCode
+            result.DurationMilliseconds = durationMilliseconds
+            result.DiagnosticId = runResult.DiagnosticId
+            result.HumanLogAvailable = runResult.HumanLogAvailable
+            result.Payload = payload.ToString(Newtonsoft.Json.Formatting.None)
+            ' Remain failed, non-retryable without correction, with no published output_files.
+            Return result
         End Function
 
         Private Shared Function CreateLocalFailure(code As System.String, status As System.String, message As System.String) As PythonExecuteToolCoreResult

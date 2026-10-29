@@ -710,6 +710,10 @@
     <Compile Include="Code\Core\LLM\ModelSelection\ModelSelectorForm.vb">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Code\Core\LLM\ModelSelection\SelectorGrouping.vb" />
+    <Compile Include="Code\Core\LLM\ModelSelection\SelectorGroupedList.vb" />
+    <Compile Include="Code\Core\LLM\ModelSelection\SelectorGroupsEditorForm.vb" />
+    <Compile Include="Code\Core\LLM\ModelSelection\MultiModelSelectorForm.Grouping.vb" />
     <Compile Include="Code\Core\LLM\ModelSelection\MultiModelSelectorForm.vb">
       <SubType>Form</SubType>
     </Compile>

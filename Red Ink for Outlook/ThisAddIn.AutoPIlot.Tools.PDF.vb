@@ -288,6 +288,150 @@ Partial Public Class ThisAddIn
     '  TOOL EXECUTION: extract_pdf_text
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    Private Shared Function NormalizePdfTextArguments(
+        arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Collections.Generic.Dictionary(Of System.String, System.Object)
+
+        Dim normalized As New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.OrdinalIgnoreCase)
+        If arguments Is Nothing Then Return normalized
+        For Each item As System.Collections.Generic.KeyValuePair(Of System.String, System.Object) In arguments
+            normalized.Add(item.Key, item.Value)
+        Next
+        ' Use the existing tool-owned preflight hook; do not add a PDF exception to the shared validator.
+        For Each key As System.String In New System.Collections.Generic.List(Of System.String)(normalized.Keys)
+            If Not System.String.Equals(key, "attachment_names", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+            Dim value As System.Object = normalized(key)
+            If TypeOf value Is System.String Then
+                normalized(key) = New Newtonsoft.Json.Linq.JArray(DirectCast(value, System.String))
+            Else
+                Dim token As Newtonsoft.Json.Linq.JToken = TryCast(value, Newtonsoft.Json.Linq.JToken)
+                If token IsNot Nothing AndAlso token.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                    normalized(key) = New Newtonsoft.Json.Linq.JArray(token.ToString())
+                End If
+            End If
+        Next
+        Return normalized
+    End Function
+
+    ''' <summary>Normalize selectors before resolving files. An invalid explicit selector never means all PDFs.</summary>
+    Private Shared Function TryReadPdfTextTargetNames(
+        arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+        ByRef names As System.Collections.Generic.List(Of System.String),
+        ByRef failureMessage As System.String) As System.Boolean
+
+        names = New System.Collections.Generic.List(Of System.String)()
+        failureMessage = System.String.Empty
+        Dim canonicalSet As System.Collections.Generic.HashSet(Of System.String) = Nothing
+        If arguments Is Nothing Then Return True
+        For Each argument As System.Collections.Generic.KeyValuePair(Of System.String, System.Object) In arguments
+            Dim key As System.String = argument.Key.ToLowerInvariant()
+            Select Case key
+                Case "output_format", "operation_id", "step_id"
+                    Continue For
+                Case "attachment_names", "attachment_name", "filename"
+                    ' Only these selector names are accepted. Unknown fields must not cause a batch fallback.
+                Case Else
+                    failureMessage = "Unsupported argument for extract_pdf_text. Use attachment_names (or attachment_name/filename for one PDF), output_format, and any supported operation_id/step_id metadata."
+                    Return False
+            End Select
+
+            Dim token As Newtonsoft.Json.Linq.JToken = TryCast(argument.Value, Newtonsoft.Json.Linq.JToken)
+            Try
+                If token Is Nothing AndAlso argument.Value IsNot Nothing Then token = Newtonsoft.Json.Linq.JToken.FromObject(argument.Value)
+            Catch ex As System.Exception
+                failureMessage = "A PDF target selector could not be read. Use exact filenames as strings."
+                Return False
+            End Try
+            If token Is Nothing OrElse (token.Type <> Newtonsoft.Json.Linq.JTokenType.String AndAlso
+                (key <> "attachment_names" OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array)) Then
+                failureMessage = "A PDF target selector must contain exact filenames, not null, an object or a number."
+                Return False
+            End If
+
+            Dim entries As New System.Collections.Generic.List(Of Newtonsoft.Json.Linq.JToken)()
+            If token.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                For Each entry As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+                    entries.Add(entry)
+                Next
+            Else
+                entries.Add(token)
+            End If
+            Dim candidate As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim orderedCandidate As New System.Collections.Generic.List(Of System.String)()
+            For Each entry As Newtonsoft.Json.Linq.JToken In entries
+                If entry Is Nothing OrElse entry.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                    failureMessage = "Every PDF target must be a non-empty filename string."
+                    Return False
+                End If
+                Dim name As System.String = entry.ToString().Trim()
+                If name.Length = 0 OrElse name.Length > 255 OrElse name.IndexOfAny(New System.Char() {"/"c, "\"c, "*"c, "?"c, ":"c, System.Convert.ToChar(0), System.Convert.ToChar(10), System.Convert.ToChar(13)}) >= 0 Then
+                    failureMessage = "Use exact non-empty PDF session filenames (at most 255 characters), not paths, wildcards or blank entries."
+                    Return False
+                End If
+                If candidate.Add(name) Then orderedCandidate.Add(name)
+            Next
+            If canonicalSet IsNot Nothing AndAlso Not canonicalSet.SetEquals(candidate) Then
+                failureMessage = "The PDF target selectors disagree. Supply attachment_names only; do not combine an all-files selector with a single target."
+                Return False
+            End If
+            If canonicalSet Is Nothing Then
+                canonicalSet = candidate
+                names = orderedCandidate
+            End If
+        Next
+        Return True
+    End Function
+
+    Private Shared Function TrySelectPdfTextAttachments(
+        names As System.Collections.Generic.List(Of System.String),
+        attachments As System.Collections.Generic.List(Of AutoPilotAttachmentInfo),
+        ByRef selected As System.Collections.Generic.List(Of AutoPilotAttachmentInfo),
+        ByRef failureCode As System.String,
+        ByRef failureMessage As System.String) As System.Boolean
+
+        selected = New System.Collections.Generic.List(Of AutoPilotAttachmentInfo)()
+        failureCode = System.String.Empty
+        failureMessage = System.String.Empty
+        Dim available As System.Collections.Generic.List(Of AutoPilotAttachmentInfo) = If(attachments, New System.Collections.Generic.List(Of AutoPilotAttachmentInfo)())
+        For Each name As System.String In names
+            Dim matches As System.Collections.Generic.List(Of AutoPilotAttachmentInfo) = available.Where(
+                Function(item) item IsNot Nothing AndAlso System.String.Equals(item.OriginalFileName, name, System.StringComparison.OrdinalIgnoreCase)).ToList()
+            If matches.Count <> 1 Then
+                failureCode = If(matches.Count = 0, "pdf_target_not_found", "pdf_target_ambiguous")
+                failureMessage = "The requested PDF filename '" & name & "' does not resolve to exactly one session attachment. No PDFs were processed."
+                Return False
+            End If
+            Dim target As AutoPilotAttachmentInfo = matches(0)
+            If Not System.String.Equals(target.Extension, ".pdf", System.StringComparison.OrdinalIgnoreCase) OrElse
+               target.IsOverSizeLimit OrElse System.String.IsNullOrWhiteSpace(target.TempFilePath) OrElse Not System.IO.File.Exists(target.TempFilePath) Then
+                failureCode = "pdf_target_unavailable"
+                failureMessage = "The requested attachment '" & name & "' is not an available PDF (type, size limit or staged file). No PDFs were processed."
+                Return False
+            End If
+        Next
+
+        ' Preserve session order and the intentional legacy empty/omitted-selector batch mode.
+        For Each item As AutoPilotAttachmentInfo In available
+            If item Is Nothing Then Continue For
+            If names.Count > 0 Then
+                If Not names.Any(Function(name) System.String.Equals(item.OriginalFileName, name, System.StringComparison.OrdinalIgnoreCase)) Then Continue For
+            ElseIf Not System.String.Equals(item.Extension, ".pdf", System.StringComparison.OrdinalIgnoreCase) OrElse item.IsOverSizeLimit OrElse item.TempFilePath Is Nothing Then
+                Continue For
+            End If
+            If System.String.IsNullOrWhiteSpace(item.TempFilePath) OrElse Not System.IO.File.Exists(item.TempFilePath) Then
+                failureCode = "pdf_target_unavailable"
+                failureMessage = "A selected PDF is no longer available in session staging. No PDFs were processed; refresh the attachment references."
+                Return False
+            End If
+            selected.Add(item)
+        Next
+        If selected.Count = 0 Then
+            failureCode = "pdf_targets_empty"
+            failureMessage = "No eligible PDF attachments were found. No PDFs were processed."
+            Return False
+        End If
+        Return True
+    End Function
+
     Private Async Function ExecuteExtractPdfTextTool(
             toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As Task(Of ToolResponse)
 
@@ -296,7 +440,15 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
+            Dim targetNames As System.Collections.Generic.List(Of System.String) = Nothing
+            Dim selectionFailure As System.String = System.String.Empty
+            If Not TryReadPdfTextTargetNames(toolCall.Arguments, targetNames, selectionFailure) Then
+                response.Success = False
+                response.ErrorCode = "pdf_target_arguments_invalid"
+                response.ErrorMessage = selectionFailure
+                response.Response = selectionFailure
+                Return response
+            End If
             Dim outputFormatRaw As String = If(GetArgString(toolCall.Arguments, "output_format"), "text").Trim()
             Dim returnMarkdown As Boolean = False
             Dim ocrMarkdownInstruction As String = String.Empty
@@ -317,19 +469,13 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
-            Dim toProcess As List(Of AutoPilotAttachmentInfo)
-            If targetNames.Count > 0 Then
-                toProcess = _apCurrentAttachments?.Where(
-                    Function(a) targetNames.Any(Function(n) a.OriginalFileName.Equals(n, StringComparison.OrdinalIgnoreCase)) AndAlso
-                                Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing).ToList()
-            Else
-                toProcess = _apCurrentAttachments?.Where(
-                    Function(a) a.Extension = ".pdf" AndAlso Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing).ToList()
-            End If
-
-            If toProcess Is Nothing OrElse toProcess.Count = 0 Then
+            Dim toProcess As System.Collections.Generic.List(Of AutoPilotAttachmentInfo) = Nothing
+            Dim selectionFailureCode As System.String = System.String.Empty
+            If Not TrySelectPdfTextAttachments(targetNames, _apCurrentAttachments, toProcess, selectionFailureCode, selectionFailure) Then
                 response.Success = False
-                response.Response = "No PDF attachments found to extract."
+                response.ErrorCode = selectionFailureCode
+                response.ErrorMessage = selectionFailure
+                response.Response = selectionFailure
                 Return response
             End If
 

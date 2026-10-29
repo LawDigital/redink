@@ -40,7 +40,7 @@ Namespace SharedLibrary
     ''' Modal dialog that supports selecting multiple alternate models, with filtering and
     ''' persisted selection state across filter changes.
     ''' </summary>
-    Public Class MultiModelSelectorForm
+    Partial Public Class MultiModelSelectorForm
         Inherits System.Windows.Forms.Form
 
         ''' <summary>Title label displayed above the filter input.</summary>
@@ -115,6 +115,7 @@ Namespace SharedLibrary
         ''' </summary>
         Public ReadOnly Property SelectedModels As System.Collections.Generic.List(Of ModelConfig)
             Get
+                If _groupedActive Then SyncGroupedSelectionToLabels()
                 ' Return models based on the persisted selectedLabels (not only the currently visible items)
                 Dim result As New System.Collections.Generic.List(Of ModelConfig)
                 For Each key In selectedLabels
@@ -439,6 +440,10 @@ Namespace SharedLibrary
 
         Private Sub UpdatePreferredDialogWidth()
             If Me.chkList Is Nothing OrElse Me.pnlButtons Is Nothing Then Return
+            If _groupingStore IsNot Nothing Then
+                UpdateGroupingDialogWidth()
+                Return
+            End If
 
             Dim buttonsWidth As Integer = Me.pnlButtons.PreferredSize.Width
 
@@ -496,6 +501,7 @@ Namespace SharedLibrary
         ''' Returns True when all currently visible items are checked.
         ''' </summary>
         Private Function AreAllVisibleItemsChecked() As Boolean
+            If _groupedActive Then Return _groupedView.State.AllMatchingSelected()
             If Me.chkList.Items.Count = 0 Then
                 Return False
             End If
@@ -517,6 +523,12 @@ Namespace SharedLibrary
                 Return
             End If
 
+            If _groupedActive Then
+                Me.btnToggleAll.Enabled = _groupedView.State.MatchingItems().Count > 0
+                Me.btnToggleAll.Text = If(AreAllVisibleItemsChecked(), "Unselect all matches", "Select all matches")
+                Return
+            End If
+            Me.btnToggleAll.Enabled = True
             Me.btnToggleAll.Text = If(AreAllVisibleItemsChecked(), "Unselect All", "Select All")
         End Sub
 
@@ -524,6 +536,10 @@ Namespace SharedLibrary
         ''' Toggles all currently visible items between checked and unchecked.
         ''' </summary>
         Private Sub OnToggleAllClicked(sender As Object, e As EventArgs)
+            If _groupedActive Then
+                _groupedView.ToggleMatching()
+                Return
+            End If
             Dim shouldCheckAll As Boolean = Not AreAllVisibleItemsChecked()
 
             isUpdating = True
@@ -553,6 +569,11 @@ Namespace SharedLibrary
         ''' Check-state is restored from <see cref="selectedLabels"/>.
         ''' </summary>
         Private Sub OnFilterChanged(sender As System.Object, e As System.EventArgs)
+            If _groupedActive Then
+                _groupedView.ApplyFilter(Me.txtFilter.Text)
+                UpdateToggleAllButtonText()
+                Return
+            End If
             Dim filter As System.String = If(Me.txtFilter.Text, String.Empty).Trim().ToLowerInvariant()
 
             isUpdating = True
