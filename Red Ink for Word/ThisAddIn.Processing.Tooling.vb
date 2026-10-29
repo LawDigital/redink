@@ -2900,7 +2900,7 @@ Partial Public Class ThisAddIn
 
                         If Not toolConfig.AllowRepeatedIdenticalCalls AndAlso Not toolResponse.RepairLoopTerminal AndAlso
                            context.LastToolExecutionRepeatCount = System.Math.Max(2, context.DuplicateToolExecutionAbortThreshold - 1) Then
-                            context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRepeatedCallRecoveryGuidance()
+                            context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRepeatedCallRecoveryGuidance(toolResponse.Response)
                             context.PendingGuardTitle = "HOST REPEATED CALL RECOVERY"
                             context.PendingRejectedTurnExplanation = "Identical call/outcome repeated; use the existing result or a distinct necessary recovery step."
                             context.PendingRejectedAssistantTurn = System.String.Empty

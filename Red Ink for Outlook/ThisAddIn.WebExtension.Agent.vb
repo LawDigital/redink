@@ -2168,13 +2168,16 @@ Partial Public Class ThisAddIn
             .ToolInstructionsPrompt =
                 CA_Tool_WorkspaceRead & ": Read or extract text from one workspace file. " &
                 "For one local workspace PDF or Office document, prefer this tool over direct path-based extraction, because it stages the file into the current session and uses the existing attachment extraction stack. " &
+                "Read subsequent text windows with start_char equal to the returned next_offset. Do not repeat the previous offset when truncated=true. " &
                 "When the returned payload contains session_file_name, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.",
             .ToolDefinition =
                 "{""name"":""" & CA_Tool_WorkspaceRead & """," &
                 """description"":""Reads or extracts text from one workspace file and stages it into the current session when possible. When session_file_name is returned, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """path"":{""type"":""string"",""description"":""Relative workspace file path.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, capped.""}" &
+                """start_char"":{""type"":""integer"",""minimum"":0,""description"":""Zero-based character offset in the extracted text. Default 0. If truncated=true, continue at the returned next_offset.""}," &
+                """offset"":{""type"":""integer"",""minimum"":0,""description"":""Compatibility alias for start_char. Prefer start_char; when both are supplied they must match.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, clamped to 1000..500000.""}" &
                 "},""required"":[""path""]}}"
         })
 
@@ -2605,17 +2608,51 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ''' <summary>Resolve paging without turning malformed or conflicting input into a first-page read.</summary>
+    Private Shared Function TryResolveWorkspaceReadStart(
+        arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+        ByRef startChar As System.Int32,
+        ByRef failureMessage As System.String) As System.Boolean
+
+        startChar = 0
+        failureMessage = System.String.Empty
+        Dim found As System.Boolean = False
+        For Each key As System.String In New System.String() {"start_char", "offset"}
+            Dim rawValue As System.Object = Nothing
+            If arguments Is Nothing OrElse Not arguments.TryGetValue(key, rawValue) Then Continue For
+            Dim parsed As System.Int32
+            Dim token As Newtonsoft.Json.Linq.JToken = TryCast(rawValue, Newtonsoft.Json.Linq.JToken)
+            Dim valueText As System.String = System.String.Empty
+            If token IsNot Nothing Then
+                If token.Type = Newtonsoft.Json.Linq.JTokenType.Integer OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.String Then valueText = token.ToString()
+            ElseIf rawValue IsNot Nothing AndAlso Not TypeOf rawValue Is System.Boolean Then
+                valueText = System.Convert.ToString(rawValue, System.Globalization.CultureInfo.InvariantCulture)
+            End If
+            If Not System.Int32.TryParse(valueText, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, parsed) OrElse parsed < 0 Then
+                failureMessage = key & " must be a non-negative integer character offset."
+                Return False
+            End If
+            If found AndAlso startChar <> parsed Then
+                failureMessage = "start_char and offset disagree. Supply start_char only, or the same value in both fields."
+                Return False
+            End If
+            startChar = parsed
+            found = True
+        Next
+        Return True
+    End Function
+
     Private Async Function ExecuteWorkspaceRead(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of String)
         If Not _chatAgentWorkspace.AllowRead Then Return "Error: Workspace read permission is disabled."
 
         Dim rel = GetArgString(toolCall.Arguments, "path")
         Dim maxChars = Math.Min(Math.Max(GetArgInt(toolCall.Arguments, "max_chars", 12000), 1000), 500000)
 
-        Dim startChar As Integer = GetArgInt(toolCall.Arguments, "start_char", -1)
-        If startChar < 0 Then
-            startChar = GetArgInt(toolCall.Arguments, "offset", 0)
+        Dim startChar As System.Int32 = 0
+        Dim pagingFailure As System.String = System.String.Empty
+        If Not TryResolveWorkspaceReadStart(toolCall.Arguments, startChar, pagingFailure) Then
+            Return "Error: " & pagingFailure
         End If
-        startChar = Math.Max(startChar, 0)
 
         Dim startPage As Integer = GetArgInt(toolCall.Arguments, "start_page", 0)
         Dim endPage As Integer = GetArgInt(toolCall.Arguments, "end_page", 0)
@@ -2653,7 +2690,9 @@ Partial Public Class ThisAddIn
         New JProperty("start_char", safeStart),
         New JProperty("returned_chars", takeChars),
         New JProperty("truncated", truncated),
-        New JProperty("continuation", "If more content is needed, call the same tool again with start_char=next_offset and a suitable max_chars value."))
+        New JProperty("continuation", If(truncated,
+            "Continue reading the same path with start_char=" & nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; do not repeat the current offset.",
+            "End of extracted text reached; no further page is available.")))
 
         If stagedAttachment IsNot Nothing Then
             payload("staged") = True

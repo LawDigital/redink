@@ -3439,10 +3439,38 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildRepeatedCallRecoveryGuidance() As System.String
-            Return "HOST REPEATED CALL RECOVERY: The same call and outcome have repeated without progress. " &
+            Return BuildRepeatedCallRecoveryGuidance(Nothing)
+        End Function
+
+        Public Shared Function BuildRepeatedCallRecoveryGuidance(previousResponse As System.String) As System.String
+            Dim pagingHint As System.String = BuildRepeatedCallPagingHint(previousResponse)
+            Return "HOST REPEATED CALL RECOVERY: The same call and outcome have repeated without progress. " & pagingHint &
                 "Consume the existing successful result rather than requesting it again. For a failed call, correct the actual input/contract error or choose a permitted alternative. " &
                 "If all requirements are fulfilled, finalize; otherwise perform a distinct necessary step. Do not claim missing data or outputs were obtained. " &
                 "One recovery turn is available before the unchanged loop reaches the circuit breaker."
+        End Function
+
+        Private Shared Function BuildRepeatedCallPagingHint(previousResponse As System.String) As System.String
+            If System.String.IsNullOrWhiteSpace(previousResponse) OrElse previousResponse.Length > 1048576 Then Return System.String.Empty
+            Try
+                Using textReader As New System.IO.StringReader(previousResponse)
+                    Using jsonReader As New Newtonsoft.Json.JsonTextReader(textReader)
+                        jsonReader.MaxDepth = 32
+                        Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Load(jsonReader)
+                        Dim truncatedToken As Newtonsoft.Json.Linq.JToken = payload("truncated")
+                        Dim nextToken As Newtonsoft.Json.Linq.JToken = payload("next_offset")
+                        If truncatedToken Is Nothing OrElse truncatedToken.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean OrElse Not truncatedToken.ToObject(Of System.Boolean)() Then Return System.String.Empty
+                        If nextToken Is Nothing OrElse nextToken.Type <> Newtonsoft.Json.Linq.JTokenType.Integer Then Return System.String.Empty
+                        Dim nextOffset As System.Int64
+                        If Not System.Int64.TryParse(nextToken.ToString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, nextOffset) OrElse nextOffset <= 0 Then Return System.String.Empty
+                        ' Echo numeric protocol metadata only, never source text or tool-supplied instructions.
+                        Return "The previous result is truncated and reports next_offset=" & nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            ". If remaining content is required, keep the same source and advance the paging argument documented in the exposed tool schema to this offset; do not reload the same window. "
+                    End Using
+                End Using
+            Catch ex As Newtonsoft.Json.JsonException
+                Return System.String.Empty
+            End Try
         End Function
 
         Public Shared Function ClassifyToolName(toolName As String) As ToolCallClassification

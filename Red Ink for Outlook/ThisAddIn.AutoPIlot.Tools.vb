@@ -270,8 +270,11 @@ Partial Public Class ThisAddIn
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractPdfText,
         .ModelDescription = "Extract PDF Text (built-in)",
+        .ToolCallArgumentNormalizer = AddressOf NormalizePdfTextArguments,
         .ToolInstructionsPrompt =
             AP_Tool_ExtractPdfText & ": Extracts content from one or more PDF attachments. " &
+            "Use attachment_names with exact session filenames for a selected subset; a single string is normalized to a one-item list. attachment_name and filename are compatibility aliases for one exact filename; do not combine conflicting selectors. " &
+            "Omit all selectors or pass attachment_names=[] only when all eligible PDFs are intended. Invalid, missing, ambiguous or non-PDF explicit targets fail before any extraction; they never select all files. " &
             "By default it returns plain text. If the user wants Markdown, pass output_format='markdown'. " &
             "For text-based PDFs, Markdown uses the direct PDF-to-Markdown extractor without OCR. " &
             "If OCR is needed and available, the OCR path is retained and should return Markdown when Markdown was requested.",
@@ -280,7 +283,9 @@ Partial Public Class ThisAddIn
             """description"":""Extracts content from PDF file attachments. " &
             "Optional output_format='markdown' returns Markdown instead of plain text when possible.""," &
             """parameters"":{""type"":""object"",""properties"":{" &
-            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}," &
+            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Exact PDF session filenames to read. Omit or use [] only to process all eligible PDFs. Explicit targets must all exist and be available; invalid targets never expand to all files.""}," &
+            """attachment_name"":{""type"":""string"",""description"":""Compatibility alias for one exact PDF session filename. Prefer attachment_names.""}," &
+            """filename"":{""type"":""string"",""description"":""Compatibility alias for one exact PDF session filename. Prefer attachment_names.""}," &
             """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Optional output format. Default is 'text'. Use 'markdown' to request Markdown output.""}" &
             "},""required"":[]}}"
     })

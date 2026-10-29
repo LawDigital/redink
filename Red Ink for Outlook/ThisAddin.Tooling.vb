@@ -1553,6 +1553,10 @@ Partial Public Class ThisAddIn
                     selectedSkillToolNames,
                     selectedAgentToolNames,
                     isAutoPilot:=_apActive)
+                ' Capture only the parent run's actual permission surface and the exact
+                ' guidance just built for it. This cannot widen tools or change the prompt.
+                CaptureAutoPilotPromptCoachingRuntimeContext(
+                    toolingLogArchivePath, originalRequestForLog, context.AllowedToolRegistry, inkyHeader)
                 Dim agentLayerActive As Boolean =
                     (selectedSkillToolNames.Count > 0) OrElse
                     (selectedAgentToolNames.Count > 0) OrElse
@@ -3489,7 +3493,7 @@ Partial Public Class ThisAddIn
 
                         If Not toolConfig.AllowRepeatedIdenticalCalls AndAlso Not toolResponse.RepairLoopTerminal AndAlso
                            context.LastToolExecutionRepeatCount = System.Math.Max(2, context.DuplicateToolExecutionAbortThreshold - 1) Then
-                            context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRepeatedCallRecoveryGuidance()
+                            context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRepeatedCallRecoveryGuidance(toolResponse.Response)
                             context.PendingGuardTitle = "HOST REPEATED CALL RECOVERY"
                             context.PendingRejectedTurnExplanation = "Identical call/outcome repeated; use the existing result or a distinct necessary recovery step."
                             context.PendingRejectedAssistantTurn = System.String.Empty
