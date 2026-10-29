@@ -8142,6 +8142,9 @@ __AfterDispatch:
         preselectMany:=If(SelectedToolNames, New List(Of String)()),
         $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} you want to make available to the model:")
 
+        selector.ConfigureGrouping(Global.SharedLibrary.SharedLibrary.SelectorGroupingStore.ForResourceRoots(
+            _context.INI_AgentResourcesPath, _context.INI_AgentResourcesPathLocal))
+
         selector.AddExtraButton("Skills && Agents…",
             Sub(s, e)
                 Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
@@ -8613,6 +8616,9 @@ __AfterDispatch:
                      "All available tools are on by default; uncheck any you want to disable. " &
                      "Workspace tools appear here only while a workspace is connected.")
 
+            selector.ConfigureGrouping(Global.SharedLibrary.SharedLibrary.SelectorGroupingStore.ForResourceRoots(
+                _context.INI_AgentResourcesPath, _context.INI_AgentResourcesPathLocal))
+
             Dim __safeDialogOwner6537 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
             If If(__safeDialogOwner6537 IsNot Nothing, selector.ShowDialog(__safeDialogOwner6537), selector.ShowDialog()) = DialogResult.OK Then
                 Return selector.SelectedModels.
@@ -8648,6 +8654,9 @@ __AfterDispatch:
             instruction:="Select the agents, sources, skills, and connector-oriented tools you want to make available to the model. " &
                          "Note: all available tools are on by default (including newly added ones); uncheck any you want to disable. " &
                          "Advanced tools are managed separately through the 'Advanced tools…' button.")
+
+            selector.ConfigureGrouping(Global.SharedLibrary.SharedLibrary.SelectorGroupingStore.ForResourceRoots(
+                _context.INI_AgentResourcesPath, _context.INI_AgentResourcesPathLocal))
 
             selector.AddExtraButton("Advanced tools…",
                 Sub(s, e)

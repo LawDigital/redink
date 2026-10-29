@@ -668,6 +668,8 @@ Partial Public Class ThisAddIn
                             resetChecked:=False,
                             preselectMany:=previousToolNames,
                             instruction:=$"Select the optional {Globals.ThisAddIn.ToolFriendlyName.ToLower} to enable for AutoPilot:")
+                            dlg.ConfigureGrouping(Global.SharedLibrary.SharedLibrary.SelectorGroupingStore.ForResourceRoots(
+                                _context.INI_AgentResourcesPath, _context.INI_AgentResourcesPathLocal))
                             Dim __safeDialogOwner532 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
                             If If(__safeDialogOwner532 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner532), dlg.ShowDialog()) = DialogResult.OK Then
                                 config.SelectedExternalTools = dlg.SelectedModels
