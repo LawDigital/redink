@@ -7,6 +7,10 @@
 '          the single dispatch choke point in each host so every heavy producer
 '          (web, M365, Excel/Word/PDF/Office readers, knowledge stores) behaves
 '          identically without per-producer edits.
+'
+' KEY ARCHITECTURE
+'   • Surface: LargeToolResultProcessor (VB implementation).
+'   • Entry points/helpers: NormalizeIfLarge, HasTopLevelReference, ExtractEmbeddedSummary.
 ' =============================================================================
 
 Option Strict On

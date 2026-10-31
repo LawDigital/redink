@@ -1,0 +1,15 @@
+# Merge these sections into an initialized data/server.toml; this is a fragment.
+# Replace the sample DNS hostname with the actual SAN name in your certificate.
+[server]
+host = "0.0.0.0"
+port = 8765
+trusted_hosts = ["redink.example.org"]
+secure_cookies = true
+allow_insecure_remote = false
+
+[tls]
+enabled = true
+certificate = "tls/server-2026/fullchain.pem"
+private_key = "tls/server-2026/private-key.pem"
+# Leave blank for an unencrypted key protected by filesystem permissions.
+key_password_env = "REDINK_TLS_KEY_PASSWORD"

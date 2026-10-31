@@ -1,5 +1,16 @@
 ' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.AutoPilot.PromptCoaching.Preferences.vb
+' PURPOSE
+'   Stores per-sender recommendation preferences and enforces deterministic eligibility and opt-out.
+'
+' KEY ARCHITECTURE
+'   • Identity: Normalized per-sender preferences are separate from deletable user memory.
+'   • Eligibility: Explicit opt-out and sender-bound controls do not trust model recipients.
+' =============================================================================
+
 '
 ' Inky prompt recommendations: explicit per-user preferences and deterministic eligibility.
 ' The preference store is separate from deletable memory/home files so deleting those

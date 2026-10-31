@@ -363,10 +363,7 @@ Namespace SharedLibrary
                             Return If(t.Result, "")
                         Case ".rtf"
                             Try
-                                Using rtb As New System.Windows.Forms.RichTextBox()
-                                    rtb.LoadFile(expandedPath, System.Windows.Forms.RichTextBoxStreamType.RichText)
-                                    Return rtb.Text
-                                End Using
+                                Return SharedMethods.LoadRtfFileAsPlainText(expandedPath)
                             Catch
                                 Return File.ReadAllText(expandedPath, System.Text.Encoding.UTF8)
                             End Try

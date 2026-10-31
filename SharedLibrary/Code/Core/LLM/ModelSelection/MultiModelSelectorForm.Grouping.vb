@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: MultiModelSelectorForm.Grouping.vb
+' PURPOSE
+'   Adds opt-in group presentation to the existing multi-model selector without changing selection semantics.
+'
+' KEY ARCHITECTURE
+'   • Adapter: Opt-in grouped selector behavior wraps the existing flat form.
+'   • Compatibility: Legacy callers and ungrouped selections preserve existing semantics.
+' =============================================================================
+
 ' Opt-in adapter. The legacy flat selector and all callers that do not configure
 ' grouping retain their existing behavior. Stable ToolName IDs are used only here.
 Option Strict On

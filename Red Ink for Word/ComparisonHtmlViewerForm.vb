@@ -103,8 +103,7 @@ Public Class ComparisonHtmlViewerForm
         Me.Size = New Size(1100, 760)
 
         Try
-            Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
-            Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

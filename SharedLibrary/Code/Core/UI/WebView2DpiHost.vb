@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: WebView2DpiHost.vb
+' PURPOSE
+'   Scopes native DPI awareness for visible WebView2 hosts without process-wide changes.
+'
+' KEY ARCHITECTURE
+'   • Scope: Temporarily matches thread DPI awareness to a host window.
+'   • Compatibility: Avoids process-wide awareness changes and WebView2 HTML zoom.
+' =============================================================================
+
 ' Shared native DPI contract for visible WinForms WebView2 hosts in Office.
 ' Do not change Office process awareness, HTML zoom or controller rasterization.
 Option Strict On

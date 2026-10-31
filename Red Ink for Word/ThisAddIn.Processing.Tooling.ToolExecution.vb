@@ -73,7 +73,6 @@ Partial Public Class ThisAddIn
             .ToolName = toolCall.ToolName
         }
 
-        SharedLogger.LogAgentToolCall(_context, _context.RDV, "Word_Agent", toolCall.ToolName)
 
         ' Build condensed parameter summary for log window
         Dim paramSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
@@ -119,6 +118,16 @@ Partial Public Class ThisAddIn
 
         Try
             cancellationToken.ThrowIfCancellationRequested()
+
+            If Not System.String.IsNullOrWhiteSpace(toolCall.ToolName) AndAlso Not IsInternalKnowledgeToolName(toolCall.ToolName) AndAlso
+               Not toolCall.ToolName.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) Then
+                Dim registry As SharedLibrary.Agents.ToolRegistry = If(context Is Nothing, Nothing, context.AllowedToolRegistry)
+                If (registry IsNot Nothing AndAlso registry.Contains(toolCall.ToolName)) OrElse
+                   (toolConfig IsNot Nothing AndAlso System.String.Equals(toolConfig.ToolName, toolCall.ToolName, System.StringComparison.OrdinalIgnoreCase)) OrElse
+                   (registry Is Nothing AndAlso SharedLibrary.Agents.HostToolRegistration.IsInternalToolName(toolCall.ToolName)) Then
+                    SharedLogger.LogAgentToolCall(_context, _context.RDV, "Word_Agent", toolCall.ToolName)
+                End If
+            End If
 
             ' ── python_execute: secure sandboxed Python execution ──
             If toolCall.ToolName.Equals(Agents.PythonExecuteTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
@@ -464,7 +473,8 @@ Partial Public Class ThisAddIn
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
         authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
-        semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope)).ConfigureAwait(False)
+        semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope),
+        onSkillLoaded:=Sub(skillName As System.String) SharedLogger.LogAgentToolCall(_context, _context.RDV, "Word_Agent", SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName))).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
@@ -515,7 +525,8 @@ Partial Public Class ThisAddIn
 
                 response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(
                     skillArgs,
-                    If(context Is Nothing, Nothing, context.LatestUserRequestRaw))
+                    If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
+                    onSkillLoaded:=Sub(skillName As System.String) SharedLogger.LogAgentToolCall(_context, _context.RDV, "Word_Agent", SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName)))
 
                 Dim hostExpectedArtifacts As Object = Nothing
                 If toolCall.Arguments IsNot Nothing AndAlso

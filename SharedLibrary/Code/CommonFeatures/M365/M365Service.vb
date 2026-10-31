@@ -28,6 +28,10 @@
 '   People:      GetPersonAsync
 '   Low level:   GetAccessTokenAsync, GraphGetAsync, GraphPostAsync,
 '                GraphPageAsync, GraphBatchAsync (exposed Friend for power users)
+'
+' KEY ARCHITECTURE
+'   • Surface: M365Service (VB implementation).
+'   • Entry points/helpers: SignInAsync, SignOutAsync, IsSignedInAsync.
 ' =============================================================================
 
 Option Explicit On

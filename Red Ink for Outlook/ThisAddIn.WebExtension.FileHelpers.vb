@@ -8,7 +8,7 @@
 '          escaping, column letter conversion, and encoding-smart file reading.
 '
 ' Architecture:
-'   - Entry points: TryExtractOfficeText (Word/Excel/PowerPoint), TryExtractTextLike (text/code files).
+'   - Async entry points dispatch legacy COM readers to the captured Office host STA; sandboxed readers stay on the caller.
 '   - Word/Excel: early-bound Microsoft Office Interop with explicit COM release (SafeCloseWord/SafeCloseExcel).
 '   - PowerPoint: late binding (CreateObject) to avoid PIA dependency; manual COM release.
 '   - Excel extraction: attempts bulk 2D array retrieval (Value2 and Formula) then per-cell fallback.
@@ -33,6 +33,28 @@ Partial Public Class ThisAddIn
             SharedLibrary.SharedLibrary.SharedMethods.GetDefaultWebImportSupportedExtensions(INI_AllowLegacyDocFiles, True))
     End Function
 
+
+    ''' <summary>Returns success, text and label while dispatching only legacy Office COM work.</summary>
+    Private Async Function TryExtractOfficeTextAsync(filePath As System.String) As System.Threading.Tasks.Task(Of System.Tuple(Of System.Boolean, System.String, System.String))
+        Dim reader As System.Func(Of System.Tuple(Of System.Boolean, System.String, System.String)) =
+            Function()
+                ' Outputs are local to the dispatched operation; no ByRef parameter crosses threads.
+                Dim extracted As System.String = Nothing
+                Dim label As System.String = Nothing
+                Dim succeeded As System.Boolean = TryExtractOfficeText(filePath, extracted, label)
+                Return System.Tuple.Create(succeeded, extracted, label)
+            End Function
+        Dim extension As System.String = If(System.String.IsNullOrWhiteSpace(filePath), System.String.Empty,
+                                             System.IO.Path.GetExtension(filePath).ToLowerInvariant())
+        Select Case extension
+            Case ".doc", ".rtf", ".xls", ".ppt"
+                ' Keep the complete COM create/read/close/release sequence on the actual host STA.
+                Return Await SharedLibrary.SharedLibrary.SharedMethods.PostToHostUiAsync(reader).ConfigureAwait(False)
+            Case Else
+                ' Sandboxed OpenXML/mail readers and ordinary file I/O remain on the caller.
+                Return reader.Invoke()
+        End Select
+    End Function
 
     ''' <summary>
     ''' Attempts plaintext extraction for Word (.doc/.docx/.rtf), Excel (.xls/.xlsx), or PowerPoint (.ppt/.pptx),
@@ -122,6 +144,9 @@ Partial Public Class ThisAddIn
     ''' <param name="path">Absolute file path.</param>
     ''' <returns>Trimmed document text.</returns>
     Private Function ExtractWordText(ByVal path As System.String) As System.String
+        If Not SharedLibrary.SharedLibrary.SharedMethods.IsOnHostUiThread Then
+            Throw New System.InvalidOperationException("Office text extraction requires the captured host UI thread.")
+        End If
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
         Dim weOwnApp As System.Boolean = False
@@ -187,6 +212,9 @@ Partial Public Class ThisAddIn
     ''' <param name="path">Absolute workbook file path.</param>
     ''' <returns>Trimmed textual representation of workbook data.</returns>
     Private Function ExtractExcelText(ByVal path As System.String) As System.String
+        If Not SharedLibrary.SharedLibrary.SharedMethods.IsOnHostUiThread Then
+            Throw New System.InvalidOperationException("Office text extraction requires the captured host UI thread.")
+        End If
         Dim app As Microsoft.Office.Interop.Excel.Application = Nothing
         Dim wb As Microsoft.Office.Interop.Excel.Workbook = Nothing
         Dim sb As New System.Text.StringBuilder(4096)
@@ -373,6 +401,9 @@ Partial Public Class ThisAddIn
     ''' <param name="path">Absolute presentation file path.</param>
     ''' <returns>Trimmed textual content.</returns>
     Private Function ExtractPowerPointText(ByVal path As System.String) As System.String
+        If Not SharedLibrary.SharedLibrary.SharedMethods.IsOnHostUiThread Then
+            Throw New System.InvalidOperationException("Office text extraction requires the captured host UI thread.")
+        End If
         Dim app As System.Object = Nothing
         Dim pres As System.Object = Nothing
         Dim sb As New System.Text.StringBuilder(2048)
@@ -502,6 +533,23 @@ Partial Public Class ThisAddIn
     Private Function EscapeForXml(ByVal s As System.String) As System.String
         If s Is Nothing Then Return ""
         Return System.Security.SecurityElement.Escape(s)
+    End Function
+
+    ''' <summary>Returns success, text and label; the existing Word-based RTF fallback runs on the host.</summary>
+    Private Async Function TryExtractTextLikeAsync(filePath As System.String) As System.Threading.Tasks.Task(Of System.Tuple(Of System.Boolean, System.String, System.String))
+        Dim reader As System.Func(Of System.Tuple(Of System.Boolean, System.String, System.String)) =
+            Function()
+                Dim extracted As System.String = Nothing
+                Dim label As System.String = Nothing
+                Dim succeeded As System.Boolean = TryExtractTextLike(filePath, extracted, label)
+                Return System.Tuple.Create(succeeded, extracted, label)
+            End Function
+        If Not System.String.IsNullOrWhiteSpace(filePath) AndAlso
+           System.String.Equals(System.IO.Path.GetExtension(filePath), ".rtf", System.StringComparison.OrdinalIgnoreCase) Then
+            ' The existing RTF fallback uses Word; its entire COM lifetime belongs to the host.
+            Return Await SharedLibrary.SharedLibrary.SharedMethods.PostToHostUiAsync(reader).ConfigureAwait(False)
+        End If
+        Return reader.Invoke()
     End Function
 
     ''' <summary>

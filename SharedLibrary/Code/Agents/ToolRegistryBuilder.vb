@@ -13,6 +13,10 @@
 '  - AddSkills(...): registers discovered skills as lazy skill_<name> entries.
 '  - AddAgents(...): registers discovered agents as lazy agent_<name> entries.
 '  - This file is additive; does not alter existing call sites.
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolRegistryBuilder (VB implementation).
+'   • Entry points/helpers: ToSafeToolSuffix, BuildSkillToolName, BuildAgentToolName.
 ' =============================================================================
 
 Option Strict On

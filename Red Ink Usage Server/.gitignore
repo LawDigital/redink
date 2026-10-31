@@ -1,0 +1,62 @@
+# Python bytecode, virtual environments and local test/tool caches.
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Server-generated runtime state: never commit credentials or user data.
+# The leading slash is intentional: tests/data/ contains REQUIRED test vectors.
+/data/
+/config-files/
+/tls/
+/certificates/
+/logs/
+/backups/
+/reports/
+/server.toml
+/secrets.json
+/server.lock
+/server.log*
+/feature_taxonomy.json
+*.sqlite3
+*.sqlite3-*
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Do not commit private TLS/signing material, even if placed below another folder.
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Local PyInstaller outputs (keep build/red-ink.ico, build/version_info.txt
+# and dist/README.txt as versioned build inputs/documentation).
+/build/pyinstaller-*/
+/dist/windows-*/
+*.spec.bak
+
+# Temporary generated reports, rather than documentation or test fixtures.
+*.log
+*.log.*
+
+# Development and QA notes under docs are local-only. Keep the complete
+# administrator/user manuals and required third-party attribution in Git.
+/docs/*
+!/docs/ADMINISTRATOR_GUIDE.md
+!/docs/USER_GUIDE.md
+!/docs/THIRD_PARTY_LICENSES.md
+
+# Public packaging text is an intentional build input; never ship test/build source.
+# Generated source/release inventories; keep reproducibility reports outside Git.
+/SHA256SUMS.txt
+/build-info.json
+/build-dependencies.txt

@@ -1,5 +1,16 @@
 ' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.AutoPilot.PromptCoaching.vb
+' PURPOSE
+'   Coordinates resumable, host-authorized Inky request coaching and guarded input retention.
+'
+' KEY ARCHITECTURE
+'   • Lifecycle: Job-scoped persistent state supports idle-time analysis and resumption.
+'   • Privacy: Bounded original inputs and reviewed advice are handled separately from raw logs.
+' =============================================================================
+
 '
 ' Independent, resumable Inky request coaching. Recipient identity is captured by
 ' the host before execution; filenames, model output and log headers never authorize

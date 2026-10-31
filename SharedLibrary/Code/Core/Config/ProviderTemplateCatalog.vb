@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ProviderTemplateCatalog.vb
+' PURPOSE
+'   Loads a shared embedded provider baseline for configuration and installation wizards.
+'
+' KEY ARCHITECTURE
+'   • Baseline: Loads an immutable snapshot from the embedded provider catalog.
+'   • Update: Optional online refresh is explicitly user-confirmed and does not rewrite INI.
+' =============================================================================
+
 '
 ' Canonical embedded provider templates shared by the Installation Wizard and ConfigWizard.
 ' The embedded catalog is the offline baseline. Both wizards use the same optional,

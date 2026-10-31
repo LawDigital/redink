@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ToolResultDiagnostics.vb
+' PURPOSE
+'   Projects bounded tool-result metadata and structured service-error diagnostics.
+'
+' KEY ARCHITECTURE
+'   • Projection: Extracts bounded source metadata and service-error details.
+'   • Boundary: It does not decide result success, retry safety or finalization.
+' =============================================================================
+
 '
 ' Shared result-metadata projection and service-error diagnostics. Neither class
 ' decides success, retry safety, recovery scope, permissions or finalization.

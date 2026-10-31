@@ -299,24 +299,11 @@ Namespace SharedLibrary
             MyBase.Dispose(disposing)
         End Sub
 
-        <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
-        Private Shared Function DestroyIcon(iconHandle As System.IntPtr) As System.Boolean
-        End Function
-
         Private Sub InitializeBranding()
             If _ownedIcon IsNot Nothing Then Return
             Try
-                Using bitmap As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    Dim iconHandle As System.IntPtr = bitmap.GetHicon()
-                    Try
-                        Using borrowed As System.Drawing.Icon = System.Drawing.Icon.FromHandle(iconHandle)
-                            _ownedIcon = DirectCast(borrowed.Clone(), System.Drawing.Icon)
-                            Icon = _ownedIcon
-                        End Using
-                    Finally
-                        DestroyIcon(iconHandle)
-                    End Try
-                End Using
+                _ownedIcon = SharedMethods.CreateOwnedDialogIcon()
+                Icon = _ownedIcon
             Catch ex As System.Exception
                 System.Diagnostics.Debug.WriteLine("Semantic Archive branding: " & ex.Message)
             End Try

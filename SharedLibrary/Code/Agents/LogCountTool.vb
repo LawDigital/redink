@@ -7,6 +7,10 @@
 '   Deterministically counts permitted skill invocations in all Red Ink log files
 '   for the current host under INI_LogPath. Permission filtering happens before logs
 '   are inspected so callers cannot discover unavailable skills through counts.
+'
+' KEY ARCHITECTURE
+'   • Surface: LogCountTool, ExecutionResult (VB implementation).
+'   • Entry points/helpers: IsLogCountTool, Build, Execute.
 ' =============================================================================
 
 Option Strict On

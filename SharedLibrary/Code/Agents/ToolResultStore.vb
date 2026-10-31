@@ -7,6 +7,10 @@
 '          replaced in model replay by a short reference; the full text remains
 '          retrievable on demand via context_expand. Shared by Outlook and Word
 '          so both hosts behave identically.
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolResultStore, StoredResult (VB implementation).
+'   • Entry points/helpers: Put, TryGet, TryGetForWorkflow.
 ' =============================================================================
 
 Option Strict On

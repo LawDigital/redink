@@ -17,6 +17,10 @@
 '  - word_format: set paragraph style and/or run formatting on match.
 '  - word_apply_template: clone template from skill references/ with substitutions.
 '  - word_save_as: copy .docx to new path (workspace or Desktop).
+'
+' KEY ARCHITECTURE
+'   • Surface: WordTools, ParaAtom (VB implementation).
+'   • Entry points/helpers: IsWordTool, BuildAll, Execute.
 ' =============================================================================
 
 Option Strict On

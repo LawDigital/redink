@@ -52,6 +52,7 @@ Partial Public Class ThisAddIn
     ''' <param name="InsertWS">Text representation of additional worksheets to include in the prompt.</param>
     ''' <param name="BatchFilePath">Path to a directory containing files for batch processing.</param>
     Private Async Function ProcessSelectedRange(ByVal SysCommand As String, CheckMaxToken As Boolean, DoRange As Boolean, DoFormulas As Boolean, DoBubbles As Boolean, SelectionMandatory As Boolean, ByVal UseSecondAPI As Boolean, Optional ShortenPercentValue As Integer = 0, Optional Freestyle As Boolean = False, Optional DoColor As Boolean = False, Optional DoPane As Boolean = False, Optional FileObject As String = "", Optional InsertWS As String = "", Optional BatchFilePath As String = "", Optional SysCommandAlreadyInterpolated As System.Boolean = False) As System.Threading.Tasks.Task(Of Boolean)
+        Await EnsureUIThread()
 
         Dim excelApp As Excel.Application = CType(Runtime.InteropServices.Marshal.GetActiveObject("Excel.Application"), Excel.Application)
 
@@ -158,13 +159,16 @@ Partial Public Class ThisAddIn
                                 End If
 
                                 Await System.Threading.Tasks.Task.Delay(500)
+                                Await EnsureUIThread()
 
                                 Dim LLMResult As String = Await LLM(SysCommand & " " & SP_Add_KeepFormulasIntact, If(NoSelectedCells, "", "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>"), "", "", 0, UseSecondAPI, True, "", FileObject)
+                                Await EnsureUIThread()
 
                                 LLMResult = Trim(LLMResult)
 
                                 If Not String.IsNullOrEmpty(LLMResult) Then
                                     LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
+                                    Await EnsureUIThread()
                                 End If
                                 If Not String.IsNullOrWhiteSpace(LLMResult) Then
 
@@ -237,11 +241,14 @@ Partial Public Class ThisAddIn
                                 End If
 
                                 Await System.Threading.Tasks.Task.Delay(500)
+                                Await EnsureUIThread()
 
                                 Dim LLMResult As String = Await LLM(SysCommand, If(NoSelectedCells, "", "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>"), "", "", 0, UseSecondAPI, True, "", FileObject)
+                                Await EnsureUIThread()
 
                                 If Not String.IsNullOrEmpty(LLMResult) Then
                                     LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
+                                    Await EnsureUIThread()
                                 End If
 
                                 ' Remove all trailing CR/LF characters in one pass
@@ -327,6 +334,7 @@ Partial Public Class ThisAddIn
                 If BatchFilePath = "" Then
 
                     Dim LLMResult As String = Await LLM(SysCommand, If(NoSelectedCells, SelectedText, RangeToInsert), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+                    Await EnsureUIThread()
 
                     If InsertWS = "" Then
                         LLMResult = LLMResult.Replace("<RANGEOFCELLS>", "").Replace("</RANGEOFCELLS>", "")
@@ -338,6 +346,7 @@ Partial Public Class ThisAddIn
 
                     If Not String.IsNullOrEmpty(LLMResult) Then
                         LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
+                        Await EnsureUIThread()
                     End If
 
                     Dim instructions As New List(Of String)
@@ -357,10 +366,7 @@ Partial Public Class ThisAddIn
                             ElseIf Not String.IsNullOrWhiteSpace(FinalText) Then
                                 Dim InstructionsFinaltext As String = FinalText
                                 If InstructionsFinaltext.TrimStart().StartsWith("{\rtf", StringComparison.OrdinalIgnoreCase) Then
-                                    Using rtb As New System.Windows.Forms.RichTextBox()
-                                        rtb.Rtf = InstructionsFinaltext
-                                        InstructionsFinaltext = rtb.Text
-                                    End Using
+                                    InstructionsFinaltext = SharedMethods.RtfToPlainText(InstructionsFinaltext)
                                 End If
                                 instructions = ParseLLMResponse(InstructionsFinaltext)
                                 ApplyLLMInstructions(instructions, DoBubbles)
@@ -455,6 +461,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             FileContentString = Await GetFileContent(filePath, True, DoOCR, False)
+                            Await EnsureUIThread()
 
                         Catch ex As System.Exception
                             FileContentString = "File Error: " & ex.Message
@@ -465,6 +472,7 @@ Partial Public Class ThisAddIn
                         Debug.WriteLine(TempSysCommand)
 
                         Dim LLMResult As String = Await LLM(TempSysCommand, $"File = '{System.IO.Path.GetFileName(filePath)}' <FILECONTENT>" & FileContentString & "</FILECONTENT>" & vbCrLf & "Other input to consider (if any): " & If(NoSelectedCells, SelectedText, RangeToInsert), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+                        Await EnsureUIThread()
 
                         If InsertWS = "" Then
                             LLMResult = LLMResult.Replace("<RANGEOFCELLS>", "").Replace("</RANGEOFCELLS>", "")
@@ -476,6 +484,7 @@ Partial Public Class ThisAddIn
 
                         If Not String.IsNullOrEmpty(LLMResult) Then
                             LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
+                            Await EnsureUIThread()
                         End If
 
                         Dim instructions As New List(Of String)

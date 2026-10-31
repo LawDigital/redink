@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: RunEffortEstimate.vb
+' PURPOSE
+'   Captures optional, one-time workload estimates as advisory progress metadata.
+'
+' KEY ARCHITECTURE
+'   • Progress: Adds an optional one-time effort class to existing progress calls.
+'   • Boundary: The estimate does not change tool dispatch, budgets or answer content.
+' =============================================================================
+
 Option Explicit On
 Option Strict On
 

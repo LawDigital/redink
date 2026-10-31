@@ -1,4 +1,5 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland.
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland.
 ' All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
@@ -150,39 +151,45 @@ Partial Public Class ThisAddIn
         "pre { background: #f6f8fa; padding: 10px; border-radius: 4px; overflow-x: auto; }" &
         "</style>"
 
-    Private Shared Sub ShowComparisonHtmlInWebView2(
+    Private Shared Async Sub ShowComparisonHtmlInWebView2(
         htmlContent As String,
         header As String,
         viewerHostFolder As String,
         Optional additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)() = Nothing,
         Optional onClose As System.Action = Nothing)
 
-        Dim t As New System.Threading.Thread(
+        ' Comparison buttons use the running Word Application/Document objects.
+        ' Create, show and close the complete viewer on that host's STA; a second
+        ' STA would still run those callbacks on the wrong Office thread.
+        Dim cleanupStarted As System.Int32 = 0
+        Dim cleanupOnce As System.Action =
             Sub()
+                If System.Threading.Interlocked.Exchange(cleanupStarted, 1) <> 0 Then Return
                 Try
-                    Using viewer As New ComparisonHtmlViewerForm(htmlContent, header, viewerHostFolder, additionalButtons, onClose)
-                        Dim owner As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
-                        If owner IsNot Nothing Then
-                            viewer.ShowDialog(owner)
-                        Else
-                            viewer.ShowDialog()
-                        End If
-                    End Using
+                    If onClose IsNot Nothing Then onClose.Invoke()
                 Catch ex As System.Exception
-                    Try
-                        If onClose IsNot Nothing Then
-                            onClose.Invoke()
-                        End If
-                    Catch
-                    End Try
-
-                    ShowCustomMessageBox($"Failed to show comparison viewer: {ex.Message}", AN)
+                    System.Diagnostics.Debug.WriteLine("Comparison viewer cleanup: " & ex.Message)
                 End Try
-            End Sub)
-
-        t.SetApartmentState(System.Threading.ApartmentState.STA)
-        t.IsBackground = True
-        t.Start()
+            End Sub
+        Try
+            Await Global.SharedLibrary.SharedLibrary.SharedMethods.PostToHostUiAsync(
+                Sub()
+                    Dim viewer As ComparisonHtmlViewerForm = Nothing
+                    Try
+                        viewer = New ComparisonHtmlViewerForm(htmlContent, header, viewerHostFolder, additionalButtons, cleanupOnce)
+                        AddHandler viewer.Disposed, Sub(sender As System.Object, args As System.EventArgs) cleanupOnce.Invoke()
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ShowHostUiForm(viewer)
+                    Catch
+                        If viewer IsNot Nothing Then viewer.Dispose()
+                        Throw
+                    End Try
+                End Sub)
+        Catch ex As System.OperationCanceledException
+            cleanupOnce.Invoke()
+        Catch ex As System.Exception
+            cleanupOnce.Invoke()
+            ShowCustomMessageBox($"Failed to show comparison viewer: {ex.Message}", AN)
+        End Try
     End Sub
 
     ''' <summary>

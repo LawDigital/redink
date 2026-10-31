@@ -18,6 +18,11 @@
 '  - Supports `.docx` and `.doc` input. Legacy `.doc` is converted to `.docx`
 '    in a temporary file before processing.
 '  - Produces `<name>_completed.docx` and, by default, a compare document.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, AutoPilotTableCompletionEngine (host partial/UI).
+'   • Entry points/helpers: ExecuteCompleteWordTablesTool, ProcessDocumentAsync,
+'     ConvertLegacyDocToDocxAsync.
 ' =============================================================================
 
 Option Explicit On

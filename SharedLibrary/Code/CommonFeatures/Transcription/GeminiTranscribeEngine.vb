@@ -5,6 +5,10 @@
 ' File: GeminiTranscribeEngine.vb
 ' Purpose: File-based transcription using Google Gemini 3.5 Transcribe on
 '          Google Enterprise Agent Platform.
+'
+' KEY ARCHITECTURE
+'   • Surface: GeminiTranscribeEngine (VB implementation).
+'   • Entry points/helpers: StartLiveAsync, PushAudioAsync, StopLiveAsync.
 ' =============================================================================
 
 Option Explicit On

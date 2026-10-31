@@ -16,6 +16,11 @@
 '              tool-response JSON with memory stub.
 '
 ' Concurrency: Owner-scope on AgentGate ensures only one sub-agent runs globally.
+'
+' KEY ARCHITECTURE
+'   • Surface: SubAgentRunner (VB implementation).
+'   • Entry points/helpers: InvokeAsync, InvokeResolvedAsync,
+'     TryGetDeclaredCanonicalSourceTools.
 ' =============================================================================
 
 Option Strict On

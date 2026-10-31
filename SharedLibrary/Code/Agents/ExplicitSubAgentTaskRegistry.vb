@@ -32,6 +32,10 @@
 '   Runner-internal continuation retries do not consume another logical attempt.
 '   Parent retries do consume the bounded per-task attempt budget.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ExplicitSubAgentTaskRecord, ExplicitSubAgentTaskRegistry (VB implementation).
+'   • Entry points/helpers: ExportRecords, ImportRecords, IsTerminal.
 ' =============================================================================
 
 Option Strict On

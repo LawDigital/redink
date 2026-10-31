@@ -6,6 +6,10 @@
 ' Purpose: Services for agents to interact with Word documents: list, read, search, 
 '       insert, format, comment.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: HasActiveDocument, ListOpenDocuments, GetActiveDocument.
 ' =============================================================================
 
 Option Strict Off

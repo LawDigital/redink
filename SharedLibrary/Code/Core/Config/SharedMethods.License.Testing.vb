@@ -36,6 +36,10 @@ Namespace SharedLibrary
         ''' Call this from any command handler to access all test functions.
         ''' </summary>
         Public Shared Sub TestLicenseSystem()
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                RunOnStaThread(AddressOf TestLicenseSystem, "Red Ink license testing", alwaysUseWorker:=True)
+                Return
+            End If
             Using form As New Form()
                 form.AutoScaleMode = AutoScaleMode.Dpi
                 form.AutoScaleDimensions = New SizeF(96.0F, 96.0F)

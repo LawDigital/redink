@@ -15,6 +15,10 @@
 '  - worddoc_list_comments: list all comments on document.
 '  - (write verbs when not read-only): worddoc_insert_text, worddoc_replace,
 '    worddoc_delete, worddoc_comment_add, worddoc_format.
+'
+' KEY ARCHITECTURE
+'   • Surface: WordDocTools (VB implementation).
+'   • Entry points/helpers: IsWordDocTool, BuildAll, Execute.
 ' =============================================================================
 
 Option Strict On

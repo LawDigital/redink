@@ -2573,7 +2573,10 @@ Partial Public Class ThisAddIn
                     Return SharedMethods.ReadRtfAsText(filePath, ReturnErrorInsteadOfEmpty:=False)
 
                 Case ".doc"
-                    If INI_AllowLegacyDocFiles Then Return SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)
+                    If INI_AllowLegacyDocFiles Then
+                        Return Await SharedMethods.PostToHostUiAsync(Of String)(
+                            Function() SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)).ConfigureAwait(False)
+                    End If
                     Return ""
 
                 Case ".docx", ".docm"

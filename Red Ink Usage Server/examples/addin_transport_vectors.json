@@ -1,0 +1,106 @@
+{
+  "marker": {
+    "v": 1,
+    "t": "U",
+    "month": "2026-10",
+    "networkKey": "n162ef0cff229f293",
+    "networkScope": "example.org",
+    "allowedNetworkIds": [
+      "example.org"
+    ],
+    "productId": "12345",
+    "productIdSafe": "12345",
+    "hostId": "WD",
+    "userKey": "uf7a66e3125d9ac663a15931fbfdc9714",
+    "billingEventId": "b6913f9765e9964c19d11e874dae95702",
+    "hostEventId": "ee30a08079a123a84ee639908b37bd6f5",
+    "firstUseUtc": "2026-10-01T09:00:00.0000000Z",
+    "anon": true,
+    "actualNetworkId": "example.org",
+    "actualNetworkKey": "n796c97b2e00e9f63",
+    "userObf": "",
+    "ih": "50c2db1cd011cd114760bb9d86d81b57788fc453df83a73bb091b959ab7fa1fd",
+    "lastUseUtc": "2026-10-30T09:30:00.0000000Z",
+    "lastUseIh": "63f68f187918d59e5fdc96175e52f880bd59aed7fab2e5424f7c29d23a9e2f0f",
+    "reportIntervalMinutes": 360
+  },
+  "post": {
+    "ri_lc_v": 1,
+    "t": "U",
+    "m": "2026-10",
+    "n": "n162ef0cff229f293",
+    "ns": "example.org",
+    "p": "12345",
+    "h": "WD",
+    "u": "uf7a66e3125d9ac663a15931fbfdc9714",
+    "b": "b6913f9765e9964c19d11e874dae95702",
+    "e": "ee30a08079a123a84ee639908b37bd6f5",
+    "a": 1,
+    "firstUseUtc": "2026-10-01T09:00:00.0000000Z",
+    "lastUseUtc": "2026-10-30T09:30:00.0000000Z",
+    "reportedUtc": "2026-10-30T09:30:01.0000000Z",
+    "reportIntervalMinutes": 360,
+    "allowedNetworkIds": [
+      "example.org"
+    ]
+  },
+  "form": {
+    "ri_lc_v": [
+      "1"
+    ],
+    "t": [
+      "U"
+    ],
+    "m": [
+      "2026-10"
+    ],
+    "n": [
+      "n162ef0cff229f293"
+    ],
+    "ns": [
+      "example.org"
+    ],
+    "p": [
+      "12345"
+    ],
+    "h": [
+      "WD"
+    ],
+    "u": [
+      "uf7a66e3125d9ac663a15931fbfdc9714"
+    ],
+    "b": [
+      "b6913f9765e9964c19d11e874dae95702"
+    ],
+    "e": [
+      "ee30a08079a123a84ee639908b37bd6f5"
+    ],
+    "a": [
+      "1"
+    ],
+    "firstUseUtc": [
+      "2026-10-01T09:00:00.0000000Z"
+    ],
+    "lastUseUtc": [
+      "2026-10-30T09:30:00.0000000Z"
+    ],
+    "reportedUtc": [
+      "2026-10-30T09:30:01.0000000Z"
+    ],
+    "reportIntervalMinutes": [
+      "360"
+    ],
+    "ani": [
+      "example.org"
+    ]
+  },
+  "error": {
+    "ri_lc_v": 1,
+    "t": "E",
+    "id": "xc297c082a2fd116aff375a6b86315fe3",
+    "ec": "retention_preserved_unreported_marker",
+    "m": "2023-01",
+    "f": "RI_LC_2023-01_example.json",
+    "detail": "Marker exceeded normal retention but was preserved until every enabled target confirms delivery."
+  }
+}

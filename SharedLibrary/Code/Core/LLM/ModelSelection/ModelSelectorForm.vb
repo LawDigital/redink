@@ -106,7 +106,7 @@ Namespace SharedLibrary
             Me.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
             Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
-            Me.Icon = Icon.FromHandle((New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Me.Text = Title
 
             ' Main TableLayoutPanel (4 rows)

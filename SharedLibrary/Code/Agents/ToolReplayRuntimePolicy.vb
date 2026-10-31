@@ -5,6 +5,11 @@
 ' File: ToolReplayRuntimePolicy.vb
 ' Purpose: Shared, host-agnostic semantics for model replay retention and runtime
 '          context primitives. Content strings never determine retention.
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolingRuntimePrimitives, EvidencePropertyCandidate (VB implementation).
+'   • Entry points/helpers: RenderReplayTemplate, NormalizeReplayJsonSeparators,
+'     IsRequiredRuntimePrimitive.
 ' =============================================================================
 
 Option Strict On

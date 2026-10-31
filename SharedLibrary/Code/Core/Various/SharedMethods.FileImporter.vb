@@ -403,14 +403,50 @@ Namespace SharedLibrary
             readError = System.String.Empty
             Try
                 Dim rtfContent As String = File.ReadAllText(rtfPath)
-                Using rtb As New RichTextBox()
-                    rtb.Visible = False
-                    rtb.Rtf = rtfContent
-                    Return rtb.Text
-                End Using
+                Return RtfToPlainText(rtfContent)
             Catch ex As System.Exception
                 Return If(ReturnErrorInsteadOfEmpty, ReportLegacyTextReaderError($"Error reading RTF: {ex.Message}", readError), SuppressLegacyTextReaderError($"Error reading RTF: {ex.Message}", readError))
             End Try
+        End Function
+
+        ''' <summary>
+        ''' Converts RTF without leaving a WinForms synchronization context on the caller.
+        ''' RichEdit parsing, Unicode, paragraphs and tables retain their existing behavior.
+        ''' </summary>
+        Public Shared Function RtfToPlainText(rtfContent As System.String) As System.String
+            Return ReadRtfOnSta(Sub(rtb As System.Windows.Forms.RichTextBox) rtb.Rtf = rtfContent)
+        End Function
+
+        ''' <summary>
+        ''' Loads a RichText file using RichEdit's existing encoding/stream behavior.
+        ''' Exceptions are returned to the caller's existing fallback/error handling.
+        ''' </summary>
+        Public Shared Function LoadRtfFileAsPlainText(rtfPath As System.String) As System.String
+            Return ReadRtfOnSta(
+                Sub(rtb As System.Windows.Forms.RichTextBox)
+                    rtb.LoadFile(rtfPath, System.Windows.Forms.RichTextBoxStreamType.RichText)
+                End Sub)
+        End Function
+
+        Private Shared Function ReadRtfOnSta(loadRtf As System.Action(Of System.Windows.Forms.RichTextBox)) As System.String
+            Return RunOnStaThread(Of System.String)(
+                Function() As System.String
+                    Dim previousContext As System.Threading.SynchronizationContext = System.Threading.SynchronizationContext.Current
+                    Dim previousAutoInstall As System.Boolean = System.Windows.Forms.WindowsFormsSynchronizationContext.AutoInstall
+                    Try
+                        ' AutoInstall is thread-local. A hidden parsing control must not
+                        ' install a dispatch context on a temporary STA with no message loop.
+                        System.Windows.Forms.WindowsFormsSynchronizationContext.AutoInstall = False
+                        Using rtb As New System.Windows.Forms.RichTextBox()
+                            rtb.Visible = False
+                            loadRtf.Invoke(rtb)
+                            Return rtb.Text
+                        End Using
+                    Finally
+                        System.Threading.SynchronizationContext.SetSynchronizationContext(previousContext)
+                        System.Windows.Forms.WindowsFormsSynchronizationContext.AutoInstall = previousAutoInstall
+                    End Try
+                End Function, "Red Ink RTF")
         End Function
 
         ''' <summary>
@@ -1189,7 +1225,7 @@ Namespace SharedLibrary
                 Dim showStatusWindow As System.Boolean = askUser OrElse showProgressWindow
                 If showStatusWindow Then
                     statusDialog = New OcrChunkStatusDialog()
-                    statusDialog.Show("Selective OCR is running." & System.Environment.NewLine & System.Environment.NewLine & "Selected pages: " & FormatPageRanges(candidates))
+                    Await statusDialog.ShowAsync("Selective OCR is running." & System.Environment.NewLine & System.Environment.NewLine & "Selected pages: " & FormatPageRanges(candidates), cancellationToken).ConfigureAwait(False)
                 End If
 
                 Using linkedCancellation As System.Threading.CancellationTokenSource = If(statusDialog Is Nothing, Nothing, System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, statusDialog.CancellationToken))
@@ -1706,8 +1742,13 @@ Namespace SharedLibrary
             Implements System.IDisposable
 
             Private ReadOnly _syncRoot As New Object()
-            Private ReadOnly _readyEvent As New System.Threading.ManualResetEventSlim(False)
+            Private ReadOnly _ready As New System.Threading.Tasks.TaskCompletionSource(Of System.Boolean)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+            Private ReadOnly _stopped As New System.Threading.Tasks.TaskCompletionSource(Of System.Boolean)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
             Private ReadOnly _cancellation As New System.Threading.CancellationTokenSource()
+            Private ReadOnly _cancellationToken As System.Threading.CancellationToken
+            Private _cleanupCompleted As System.Boolean
+            Private _disposeRequested As System.Boolean
+            Private _cancellationDisposed As System.Boolean
             Private _uiThread As System.Threading.Thread = Nothing
             Private ReadOnly _operationName As System.String
             Private ReadOnly _sourceName As System.String
@@ -1722,30 +1763,60 @@ Namespace SharedLibrary
             Private _form As System.Windows.Forms.Form = Nothing
 
             Public Sub New(Optional operationName As System.String = "OCR", Optional sourceName As System.String = "")
+                _cancellationToken = _cancellation.Token
                 _operationName = operationName
                 _sourceName = sourceName
                 _statusText = "Starting " & operationName & "..."
                 _phase = _statusText
             End Sub
 
-            Public Sub Show(initialText As String)
+            Public Async Function ShowAsync(initialText As System.String,
+                                            Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task
+                cancellationToken.ThrowIfCancellationRequested()
                 SyncLock _syncRoot
+                    If _closeRequested Then Throw New System.OperationCanceledException("The progress window was already closed.")
+                    If _uiThread IsNot Nothing Then Throw New System.InvalidOperationException("The progress window has already been started.")
                     _statusText = initialText
                     _totalClock.Restart()
                     _requestClock.Reset()
-                    _phase = "Starting OCR..."
-                    _cancelled = False
-                    _closeRequested = False
+                    _phase = "Starting " & _operationName & "..."
+                    _uiThread = New System.Threading.Thread(AddressOf UiThreadMain) With {
+                        .IsBackground = True,
+                        .Name = "Red Ink extraction progress"
+                    }
                 End SyncLock
+                Using cancellationRegistration As System.Threading.CancellationTokenRegistration = cancellationToken.Register(AddressOf Close)
+                    Try
+                        _uiThread.SetApartmentState(System.Threading.ApartmentState.STA)
+                        _uiThread.Start()
+                    Catch ex As System.Exception
+                        _ready.TrySetException(ex)
+                        CompleteLifetime()
+                    End Try
+                    Using startupDeadline As New System.Threading.CancellationTokenSource()
+                        Try
+                            Dim deadline As System.Threading.Tasks.Task = System.Threading.Tasks.Task.Delay(10000, startupDeadline.Token)
+                            Dim first As System.Threading.Tasks.Task = Await System.Threading.Tasks.Task.WhenAny(_ready.Task, deadline).ConfigureAwait(False)
+                            cancellationToken.ThrowIfCancellationRequested()
+                            If first IsNot _ready.Task Then
+                                Close()
+                                Throw New System.TimeoutException("The extraction progress window did not become ready in time.")
+                            End If
+                            If Not Await _ready.Task.ConfigureAwait(False) Then
+                                Throw New System.OperationCanceledException("The extraction progress window closed before startup completed.")
+                            End If
+                        Finally
+                            startupDeadline.Cancel()
+                        End Try
+                    End Using
+                End Using
+            End Function
 
-                _uiThread = New System.Threading.Thread(AddressOf UiThreadMain) With {
-                    .IsBackground = True
-                }
-                _uiThread.SetApartmentState(System.Threading.ApartmentState.STA)
-                _uiThread.Start()
-
-                _readyEvent.Wait()
-            End Sub
+            Public ReadOnly Property Completion As System.Threading.Tasks.Task
+                Get
+                    Return _stopped.Task
+                End Get
+            End Property
 
             Public Sub UpdateStatus(text As String)
                 SyncLock _syncRoot
@@ -1810,7 +1881,7 @@ Namespace SharedLibrary
 
             Public ReadOnly Property CancellationToken As System.Threading.CancellationToken
                 Get
-                    Return _cancellation.Token
+                    Return _cancellationToken
                 End Get
             End Property
 
@@ -1844,8 +1915,24 @@ Namespace SharedLibrary
             End Function
 
             Private Sub UiThreadMain()
+                Dim localForm As System.Windows.Forms.Form = Nothing
+                Dim standardFont As System.Drawing.Font = Nothing
+                Dim refreshTimer As System.Windows.Forms.Timer = Nothing
+                Dim exceptionHandler As System.Threading.ThreadExceptionEventHandler =
+                    Sub(sender As System.Object, e As System.Threading.ThreadExceptionEventArgs)
+                        HandleUiFailure(e.Exception)
+                        System.Windows.Forms.Application.ExitThread()
+                    End Sub
+                Dim handlerInstalled As System.Boolean
                 Try
-                    Dim localForm As New System.Windows.Forms.Form() With {
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                    System.Windows.Forms.Application.SetUnhandledExceptionMode(System.Windows.Forms.UnhandledExceptionMode.CatchException, True)
+                    AddHandler System.Windows.Forms.Application.ThreadException, exceptionHandler
+                    handlerInstalled = True
+                    SyncLock _syncRoot
+                        If _closeRequested Then Return
+                    End SyncLock
+                    localForm = New System.Windows.Forms.Form() With {
                         .Opacity = 0,
                         .Text = SharedMethods.AN & " " & _operationName,
                         .FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog,
@@ -1859,10 +1946,8 @@ Namespace SharedLibrary
                         .AutoSize = False
                     }
 
-                    Dim bmpIcon As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    localForm.Icon = System.Drawing.Icon.FromHandle(bmpIcon.GetHicon())
-
-                    Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+                    SharedMethods.ApplyStandardDialogIcon(localForm)
+                    standardFont = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
                     localForm.Font = standardFont
 
                     Dim wa As System.Drawing.Rectangle = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea
@@ -2009,9 +2094,10 @@ Namespace SharedLibrary
                     AddHandler localForm.Shown,
                         Sub(sender As Object, e As System.EventArgs)
                             SharedMethods.ForceDialogToForeground(localForm)
+                            _ready.TrySetResult(True)
                         End Sub
 
-                    Dim refreshTimer As New System.Windows.Forms.Timer() With {
+                    refreshTimer = New System.Windows.Forms.Timer() With {
                         .Interval = 250
                     }
 
@@ -2061,7 +2147,9 @@ Namespace SharedLibrary
                         _form = localForm
                     End SyncLock
 
-                    _readyEvent.Set()
+                    SyncLock _syncRoot
+                        If _closeRequested Then Return
+                    End SyncLock
                     refreshTimer.Start()
                     localForm.Opacity = 1
 
@@ -2085,15 +2173,49 @@ Namespace SharedLibrary
                         End If
                     End Try
 
-                    refreshTimer.Dispose()
-
-                Catch
-                    _readyEvent.Set()
+                Catch ex As System.Exception
+                    HandleUiFailure(ex)
                 Finally
-                    SyncLock _syncRoot
-                        _form = Nothing
-                    End SyncLock
+                    ' Every UI/GDI resource is disposed on its creation STA, including
+                    ' initialization failures and a close before ShowDialog starts.
+                    Try
+                        If refreshTimer IsNot Nothing Then
+                            refreshTimer.Stop()
+                            refreshTimer.Dispose()
+                        End If
+                        If localForm IsNot Nothing Then localForm.Dispose()
+                        If standardFont IsNot Nothing Then standardFont.Dispose()
+                    Finally
+                        If handlerInstalled Then RemoveHandler System.Windows.Forms.Application.ThreadException, exceptionHandler
+                        Dim workerContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                            TryCast(System.Threading.SynchronizationContext.Current, System.Windows.Forms.WindowsFormsSynchronizationContext)
+                        Try
+                            System.Windows.Forms.Application.ExitThread()
+                        Finally
+                            If workerContext IsNot Nothing Then workerContext.Dispose()
+                            System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                            SyncLock _syncRoot
+                                _form = Nothing
+                            End SyncLock
+                            CompleteLifetime()
+                        End Try
+                    End Try
                 End Try
+            End Sub
+
+            Private Sub HandleUiFailure(failure As System.Exception)
+                Try
+                    RiCrashLogger.LogException("EXTRACTION_PROGRESS_FAILED", failure)
+                Catch
+                    System.Diagnostics.Debug.WriteLine(failure.ToString())
+                End Try
+                _ready.TrySetException(failure)
+                Try
+                    RequestCancel()
+                Catch
+                    ' Cancellation callbacks must not escape the worker message loop.
+                End Try
+                Close()
             End Sub
 
             Public Sub Close()
@@ -2116,18 +2238,39 @@ Namespace SharedLibrary
                     End Try
                 End If
 
-                If _uiThread IsNot Nothing AndAlso _uiThread.IsAlive Then
-                    Try
-                        _uiThread.Join(2000)
-                    Catch
-                    End Try
-                End If
+                _ready.TrySetResult(False)
+                If _uiThread Is Nothing Then CompleteLifetime()
+            End Sub
+
+            Private Sub CompleteLifetime()
+                Dim shouldDisposeCancellation As System.Boolean
+                SyncLock _syncRoot
+                    If _cleanupCompleted Then Return
+                    _cleanupCompleted = True
+                    _closeRequested = True
+                    shouldDisposeCancellation = _disposeRequested
+                End SyncLock
+                _ready.TrySetResult(False)
+                If shouldDisposeCancellation Then DisposeCancellation()
+                _stopped.TrySetResult(True)
+            End Sub
+
+            Private Sub DisposeCancellation()
+                SyncLock _syncRoot
+                    If _cancellationDisposed Then Return
+                    _cancellationDisposed = True
+                End SyncLock
+                _cancellation.Dispose()
             End Sub
 
             Public Sub Dispose() Implements System.IDisposable.Dispose
+                Dim cleanupCompleted As System.Boolean
+                SyncLock _syncRoot
+                    _disposeRequested = True
+                    cleanupCompleted = _cleanupCompleted
+                End SyncLock
                 Close()
-                _readyEvent.Dispose()
-                _cancellation.Dispose()
+                If cleanupCompleted Then DisposeCancellation()
             End Sub
         End Class
 

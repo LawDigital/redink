@@ -13,6 +13,10 @@
 '  - "Delete" removes the selected entry.
 '  - "Clear All" wipes the entire memory (with confirmation).
 '  - "Refresh" re-reads from storage.
+'
+' KEY ARCHITECTURE
+'   • Surface: SessionMemoryViewerForm, ItemWrap (host partial/UI).
+'   • Entry points/helpers: OnShown, SendMessage, InitializeComponent.
 ' =============================================================================
 
 Option Strict On
@@ -80,8 +84,7 @@ Namespace Agents
             Me.MinimumSize = New Size(680, 440)
 
             Try
-                Dim bmp As New Bitmap(SharedLibrary.SharedMethods.GetLogoBitmap(SharedLibrary.SharedMethods.LogoType.Standard))
-                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
 

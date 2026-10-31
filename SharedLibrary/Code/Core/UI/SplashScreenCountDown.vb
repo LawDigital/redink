@@ -19,6 +19,10 @@
 '    A display failure cancels the same token, but is distinguished by Failure.
 '  - The splash is deliberately ownerless/modeless: never attach an Office
 '    window from another thread. SharedMethods.DialogOwner remains unchanged.
+'
+' KEY ARCHITECTURE
+'   • Surface: SplashScreenCountDown, SplashDisplayException (VB implementation).
+'   • Entry points/helpers: ThrowIfFailed, ShowAsync, StartThreadIfNeeded.
 ' =============================================================================
 
 Option Strict On

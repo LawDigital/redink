@@ -204,6 +204,14 @@ Partial Public Class ThisAddIn
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
         Dim doc As Microsoft.Office.Interop.Word.Document = targetRange.Document
 
+        Dim entryHandle As System.Int32 = 0
+        Try
+            Dim entryWindow As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(wordApp)
+            If entryWindow IsNot Nothing AndAlso IsSameProcessingDocument(entryWindow.Document, doc) Then entryHandle = entryWindow.Hwnd
+        Catch ex As System.Runtime.InteropServices.COMException
+            ' Foreground ownership is unproven: do not restore the selection later.
+            System.Diagnostics.Debug.WriteLine("Surgical selection capture: " & ex.ToString())
+        End Try
         Dim originalTrack As Boolean = doc.TrackRevisions
         Dim originalUpdate As Boolean = wordApp.ScreenUpdating
         Dim originalSmartCutPaste As Boolean = wordApp.Options.SmartCutPaste
@@ -498,7 +506,8 @@ Partial Public Class ThisAddIn
             End Using
 
         Catch ex As SurgicalSourceChangedException
-            LogSurgicalRecovery("Surgical source recovery requested: " & ex.ToString())
+            System.Diagnostics.Debug.WriteLine(ex.ToString())
+            LogSurgicalRecovery("Surgical source recovery requested: " & ex.Message)
             noticeRequired = True
             sourceConflict = True
             If Not mutationStarted Then
@@ -536,11 +545,28 @@ Partial Public Class ThisAddIn
                 splash = Nothing
             End If
 
-            doc.TrackRevisions = originalTrack
-            wordApp.ScreenUpdating = originalUpdate
-            wordApp.Options.SmartCutPaste = originalSmartCutPaste
-
-            wordApp.Selection.SetRange(targetRange.Start, targetRange.End)
+            ' UI yields let Word close a document or activate another window. Restore each
+            ' setting independently; never select a range in a different window or story.
+            Try
+                doc.TrackRevisions = originalTrack
+            Catch ex As System.Runtime.InteropServices.COMException
+                LogSurgicalRecovery("Could not restore revision tracking on the original document: " & ex.ToString())
+            End Try
+            Try
+                wordApp.ScreenUpdating = originalUpdate
+            Finally
+                wordApp.Options.SmartCutPaste = originalSmartCutPaste
+            End Try
+            Try
+                Dim window As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(wordApp)
+                If entryHandle <> 0 AndAlso window IsNot Nothing AndAlso window.Hwnd = entryHandle AndAlso
+                   IsSameProcessingDocument(window.Document, doc) Then
+                    Dim selected As Microsoft.Office.Interop.Word.Selection = window.Selection
+                    If selected IsNot Nothing AndAlso selected.Range.InStory(targetRange) Then selected.SetRange(targetRange.Start, targetRange.End)
+                End If
+            Catch ex As System.Runtime.InteropServices.COMException
+                LogSurgicalRecovery("The original selection was unavailable during cleanup: " & ex.ToString())
+            End Try
             If noticeRequired AndAlso showFailureNotice Then
                 Dim subject As System.String = "One or more changes"
                 If skippedChanges = 1 Then
@@ -2028,17 +2054,21 @@ Partial Public Class ThisAddIn
             End If
 
             Dim ch As Char = liveChars(index).Text(0)
+            Dim nextFieldStart As System.Int32 = If(fieldIndex < fieldSpans.Count, fieldSpans(fieldIndex).StartPos, System.Int32.MaxValue)
 
             If SurgicalIsParagraphBreakChar(ch) Then
-                result.Add(SurgicalCreateTextAtom(vbCr, liveChars(index).LiveStart, liveChars(index).LiveEnd))
+                Dim breakStart As System.Int32 = liveChars(index).LiveStart
+                Dim breakEnd As System.Int32 = liveChars(index).LiveEnd
                 index += 1
 
                 If ch = ControlChars.Cr AndAlso index < liveChars.Count AndAlso
                    Not liveChars(index).IsTrackedDeletion AndAlso
+                   liveChars(index).LiveStart = breakEnd AndAlso liveChars(index).LiveStart < nextFieldStart AndAlso
                    liveChars(index).Text = vbLf Then
-
+                    breakEnd = liveChars(index).LiveEnd
                     index += 1
                 End If
+                result.Add(SurgicalCreateTextAtom(vbCr, breakStart, breakEnd))
 
             ElseIf ch = ChrW(11) Then
                 result.Add(SurgicalCreateTextAtom(ChrW(11).ToString(), liveChars(index).LiveStart, liveChars(index).LiveEnd))
@@ -2049,10 +2079,10 @@ Partial Public Class ThisAddIn
                 index += 1
 
             ElseIf SurgicalIsHorizontalWhitespaceChar(ch) Then
-                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, Function(c As Char) SurgicalIsHorizontalWhitespaceChar(c)))
+                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, nextFieldStart, Function(c As Char) SurgicalIsHorizontalWhitespaceChar(c)))
 
             ElseIf SurgicalIsWordChar(ch) Then
-                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, Function(c As Char) SurgicalIsWordChar(c)))
+                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, nextFieldStart, Function(c As Char) SurgicalIsWordChar(c)))
 
             Else
                 result.Add(SurgicalCreateTextAtom(ch.ToString(), liveChars(index).LiveStart, liveChars(index).LiveEnd))
@@ -2066,12 +2096,13 @@ Partial Public Class ThisAddIn
     Private Shared Function SurgicalReadVisibleRunAtom(
     ByVal liveChars As List(Of SurgicalLiveCharAtom),
     ByRef index As Integer,
+    ByVal nextFieldStart As System.Int32,
     ByVal belongsToRun As System.Func(Of Char, Boolean)) As SurgicalTextAtom
 
         Dim sb As New System.Text.StringBuilder()
         Dim spans As New List(Of SurgicalPositionSpan)()
 
-        Do While index < liveChars.Count
+        Do While index < liveChars.Count AndAlso liveChars(index).LiveStart < nextFieldStart
             If liveChars(index).IsTrackedDeletion OrElse String.IsNullOrEmpty(liveChars(index).Text) Then
                 index += 1
                 Continue Do
@@ -2153,37 +2184,18 @@ Partial Public Class ThisAddIn
                     Continue For
                 End If
 
-                Dim codeRange As Microsoft.Office.Interop.Word.Range = Nothing
-                Dim resultRange As Microsoft.Office.Interop.Word.Range = Nothing
-
-                Try
-                    codeRange = field.Code
-                Catch ex As System.Exception
-                    codeRange = Nothing
-                End Try
-
-                Try
-                    resultRange = field.Result
-                Catch ex As System.Exception
-                    resultRange = Nothing
-                End Try
-
-                If resultRange Is Nothing Then
-                    Continue For
+                Dim codeRange As Microsoft.Office.Interop.Word.Range = field.Code
+                Dim resultRange As Microsoft.Office.Interop.Word.Range = field.Result
+                If codeRange Is Nothing OrElse resultRange Is Nothing Then
+                    Throw New System.IO.InvalidDataException("Cannot establish the live boundaries of a Word field.")
                 End If
 
-                Dim resultStart As Integer = resultRange.Start
                 Dim resultEnd As Integer = resultRange.End
 
-                If resultEnd <= resultStart Then
-                    resultEnd = resultStart + 1
-                End If
-
-                If resultEnd <= targetRange.Start OrElse resultStart >= targetRange.End Then
-                    Continue For
-                End If
-
-                Dim fieldStart As System.Int32 = If(codeRange Is Nothing, resultStart, codeRange.Start - 1)
+                ' Result.End is exclusive, including when the field result is empty. The
+                ' field's closing delimiter occupies exactly one more position, not two.
+                Dim fieldStart As System.Int32 = codeRange.Start - 1
+                If resultEnd + 1 <= targetRange.Start OrElse fieldStart >= targetRange.End Then Continue For
                 Dim spanStart As Integer = System.Math.Max(targetRange.Start, fieldStart)
                 Dim spanEnd As Integer = System.Math.Min(targetRange.End, resultEnd + 1)
 
@@ -2191,15 +2203,7 @@ Partial Public Class ThisAddIn
                     Continue For
                 End If
 
-                Dim fieldCode As String = String.Empty
-                If codeRange IsNot Nothing Then
-                    Try
-                        fieldCode = codeRange.Text
-                    Catch ex As System.Exception
-                        fieldCode = String.Empty
-                    End Try
-                End If
-
+                Dim fieldCode As System.String = codeRange.Text
                 Dim keyText As String = BuildCanonicalWfldPlaceholderKey(fieldCode)
                 If String.Equals(keyText, "WFLD:", StringComparison.Ordinal) Then
                     Continue For
@@ -2212,7 +2216,8 @@ Partial Public Class ThisAddIn
             })
             Next
         Catch ex As System.Exception
-            Debug.WriteLine("BuildSurgicalFieldAtomSpans failed: " & ex.Message)
+            ' Never pass a partial map of protected fields to the mutation/recovery planner.
+            Throw New System.IO.InvalidDataException("Cannot safely map all fields in the surgical source range.", ex)
         End Try
 
         spans.Sort(Function(a, b)

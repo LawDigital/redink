@@ -349,6 +349,7 @@ Sub()
 End Sub)
 
             t.SetApartmentState(System.Threading.ApartmentState.STA)
+            t.IsBackground = True
             t.Start()
 
             ' Wait up to 5 seconds; if the clipboard is locked, treat as failure.

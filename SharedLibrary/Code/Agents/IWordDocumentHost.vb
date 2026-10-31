@@ -13,6 +13,10 @@
 '  - Write verbs: InsertTextJson, ReplaceJson, DeleteJson, AddCommentJson, FormatJson
 '    (gated by WordHostPolicy.ActiveDocReadOnly).
 '  - Host enforces read-only policy; COM/STA calls do not benefit from async.
+'
+' KEY ARCHITECTURE
+'   • Surface: OpenDocInfo, WordDocComment (VB implementation).
+'   • Entry points/helpers: HasActiveDocument, ListOpenDocuments, GetActiveDocument.
 ' =============================================================================
 
 Option Strict On

@@ -8,6 +8,11 @@
 '          prose must be in the detected user language, and (2) host-side
 '          post-localization decisions for final prose when the model ignored
 '          that contract.
+'
+' KEY ARCHITECTURE
+'   • Surface: LanguageContract (VB implementation).
+'   • Entry points/helpers: BuildSystemPromptFragment, ShouldPostLocalizeFinal,
+'     ContainsEmbeddedJsonPayload.
 ' =============================================================================
 
 Option Explicit On

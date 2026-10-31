@@ -4,6 +4,10 @@
 ' =============================================================================
 ' File: M365Models.vb
 ' Purpose: Shared types, enums and option classes used by M365Service.
+'
+' KEY ARCHITECTURE
+'   • Surface: M365SearchProgress, M365SearchHit (VB implementation).
+'   • Integration: Declares project types and compile-time metadata.
 ' =============================================================================
 
 Option Explicit On

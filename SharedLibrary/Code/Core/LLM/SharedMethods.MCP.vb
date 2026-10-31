@@ -23,6 +23,11 @@
 ' Notes:
 '  - These helpers bypass `LLM(...)` because SSE transport returns the effective
 '    tool result on the GET stream rather than in the POST response body.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, MCPStreamableSessionState (VB implementation).
+'   • Entry points/helpers: AcquireMCPSSESessionEndpoint, WriteMCPDebugFile,
+'     ExecuteMCPSSEToolCall.
 ' =============================================================================
 
 Option Explicit On

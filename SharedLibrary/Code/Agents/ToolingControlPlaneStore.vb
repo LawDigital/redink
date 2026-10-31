@@ -5,6 +5,11 @@
 ' File: ToolingControlPlaneStore.vb
 ' Purpose: Keeps authoritative workflow-control payloads outside ordinary tool
 '          history so budget compaction cannot silently remove active instructions.
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolingControlPlaneStore, PinnedPayload (VB implementation).
+'   • Entry points/helpers: PinActiveSkillPayload, TryGetActiveSkillPayload,
+'     BuildPromptContextBlock.
 ' =============================================================================
 
 Option Strict On

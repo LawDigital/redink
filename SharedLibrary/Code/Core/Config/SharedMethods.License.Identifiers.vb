@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SharedMethods.License.Identifiers.vb
+' PURPOSE
+'   Resolves canonical offline-license identities, including Windows joined tenant identity.
+'
+' KEY ARCHITECTURE
+'   • Identity: Normalizes typed offline-license and Windows tenant identifiers.
+'   • Trust: Tenant identity comes from the Windows join API, not cache/config text.
+' =============================================================================
+
 '
 ' Local offline-license identities. Tenant identity is returned by the documented
 ' Windows NetGetAadJoinInformation API, never inferred from configuration/cache text.

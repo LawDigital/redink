@@ -14,6 +14,11 @@
 '  - RejectActionPromiseWithoutInvocation: prose announced future work not done.
 '  - RejectDeliverableFallbackRequired: request requires deliverable, untried fallbacks exist.
 '  - Hosts call EvaluateFinalTurn(...) from existing loops; minimal integration.
+'
+' KEY ARCHITECTURE
+'   • Surface: FinalTurnEvaluation, FallbackReviewState (VB implementation).
+'   • Entry points/helpers: TakeUnreviewed, EvaluateFinalTurn,
+'     BuildMissingDeliverableGuardPrompt.
 ' =============================================================================
 
 Option Explicit On

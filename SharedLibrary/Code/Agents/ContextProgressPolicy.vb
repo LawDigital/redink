@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ContextProgressPolicy.vb
+' PURPOSE
+'   Detects repeated context-management reads without new coverage and bounds recovery.
+'
+' KEY ARCHITECTURE
+'   • State: Tracks covered context ranges and repeated reads within one execution.
+'   • Recovery: Bounds stagnation without treating delivered ranges as verified analysis.
+' =============================================================================
+
 ' Per-execution context-management progress; coverage is delivery history, NOT proof of
 ' active visibility or semantic analysis. Original evidence and normal rereads remain available.
 Option Explicit On

@@ -1,5 +1,16 @@
 ' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: PromptCoachingAdvice.vb
+' PURPOSE
+'   Validates evidence-bound structured request-coaching advice and renders safe host-owned HTML.
+'
+' KEY ARCHITECTURE
+'   • Contract: Parses and reviews constrained structured advice against input evidence.
+'   • Rendering: Escaped HTML and output layout belong to deterministic host code.
+' =============================================================================
+
 '
 ' Evidence-bound request coaching. The model supplies structured, plain-text
 ' explanations; the host validates provenance/quality and owns all HTML/layout.

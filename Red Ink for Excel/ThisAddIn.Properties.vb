@@ -2389,6 +2389,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_LicenseCounterIntervall As System.Int32
+        Get
+            Return _context.INI_LicenseCounterIntervall
+        End Get
+        Set(value As System.Int32)
+            _context.INI_LicenseCounterIntervall = Global.SharedLibrary.SharedLibrary.SharedMethods.ParseLicenseCounterIntervall(value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End Set
+    End Property
+
     Public Shared Property INI_LicenseCounterAnon As Boolean
         Get
             Return _context.INI_LicenseCounterAnon

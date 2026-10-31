@@ -621,7 +621,7 @@ Public Class frmAIChat
         ' Configure form appearance
         Me.Font = New System.Drawing.Font("Segoe UI", 9)
         Me.FormBorderStyle = FormBorderStyle.Sizable
-        Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Me.TopMost = True
         Me.MinimumSize = New Size(830, 521)
 

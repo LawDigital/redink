@@ -24,6 +24,10 @@
 '
 '   Each Office add-in adds a small wrapper that translates its host-local
 '   ToolCall / ToolResponse types to the dictionary + result struct below.
+'
+' KEY ARCHITECTURE
+'   • Surface: M365ToolExecutionResult, M365ToolService (VB implementation).
+'   • Entry points/helpers: EnterSearchBudget, IsM365ToolName, IsSourceRetrievalToolName.
 ' =============================================================================
 
 Option Explicit On
