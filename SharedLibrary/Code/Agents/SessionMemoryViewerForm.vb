@@ -13,6 +13,10 @@
 '  - "Delete" removes the selected entry.
 '  - "Clear All" wipes the entire memory (with confirmation).
 '  - "Refresh" re-reads from storage.
+'
+' KEY ARCHITECTURE
+'   • Surface: SessionMemoryViewerForm, ItemWrap (host partial/UI).
+'   • Entry points/helpers: OnShown, SendMessage, InitializeComponent.
 ' =============================================================================
 
 Option Strict On

@@ -1,7 +1,7 @@
 """Native HTTPS and explicit PFX import, separate from published INI files.
 
-Plain localhost HTTP stays on Waitress. Native HTTPS uses Cheroot's maintained
-WSGI/SSL adapter and Python's standard SSLContext. Credentials and certificates
+HTTP and native HTTPS both use Cheroot's WSGI listener to support controlled
+hot-rebinding without closing Waitress trigger sockets from worker threads. Credentials and certificates
 are never sent to an external certificate-management service.
 """
 from __future__ import annotations
@@ -93,19 +93,18 @@ def validate_tls(settings: Settings) -> dict:
         raise ConfigError("Cannot load the TLS certificate/private-key pair. Check PEM format, matching key, and encrypted-key password. HTTPS was not started.") from None
 
 
-def create_https_server(settings: Settings, app):
-    """Return an unbound production WSGI server; invalid TLS never falls back."""
-    if not settings.tls_enabled:
-        raise ConfigError("Native HTTPS is disabled in this configuration.")
-    metadata = validate_tls(settings)
-    from cheroot.ssl.builtin import BuiltinSSLAdapter
+def _create_listener(settings: Settings, app):
+    """Construct (but do not bind) the shared HTTP/HTTPS transport.
+
+    A single listener implementation is important: the supervisor must be able
+    to stop either protocol through the same well-defined server lifecycle.
+    """
     from cheroot.wsgi import Server
 
     class PrivateLogServer(Server):
         def error_log(self, msg="", level=logging.INFO, traceback=False):
-            # Request paths can contain collector/configuration tokens. Do not
-            # delegate raw protocol text or request tracebacks to access logs.
-            logger.log(level, "HTTPS transport reported a connection or request-processing error.")
+            # Raw protocol diagnostics may contain ingestion/config bearer URLs.
+            logger.log(level, "Transport reported a connection or request-processing error.")
 
     server = PrivateLogServer((settings.host, settings.port), app, numthreads=settings.threads,
                               timeout=30, shutdown_timeout=5, request_queue_size=128,
@@ -113,6 +112,25 @@ def create_https_server(settings: Settings, app):
     server.max_request_body_size = settings.maximum_request_bytes
     server.max_request_header_size = 16384
     server.software = "RedInkUsageServer"
+    return server
+
+
+def create_http_server(settings: Settings, app):
+    """Return an unbound plain HTTP listener (only if explicitly permitted)."""
+    if settings.tls_enabled:
+        raise ConfigError("Plain HTTP cannot be used when native HTTPS is enabled.")
+    if settings.host not in ("127.0.0.1", "localhost", "::1") and not settings.allow_insecure_remote:
+        raise ConfigError("Remote HTTP requires explicit allow_insecure_remote=true or HTTPS.")
+    return _create_listener(settings, app)
+
+
+def create_https_server(settings: Settings, app):
+    """Return an unbound native HTTPS listener. Never fall back to HTTP."""
+    if not settings.tls_enabled:
+        raise ConfigError("Native HTTPS is disabled in this configuration.")
+    metadata = validate_tls(settings)
+    from cheroot.ssl.builtin import BuiltinSSLAdapter
+    server = _create_listener(settings, app)
     try:
         server.ssl_adapter = BuiltinSSLAdapter(metadata["certificate"], metadata["private_key"],
                                                private_key_password=lambda: _key_password(settings) or "")

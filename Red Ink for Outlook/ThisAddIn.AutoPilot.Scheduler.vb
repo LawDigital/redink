@@ -65,6 +65,11 @@
 '      * In-place JSON editor for manual task creation/modification
 '      * Pause/resume and delete operations refresh display immediately
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, ScheduledTask (host partial/UI).
+'   • Entry points/helpers: GetScheduleFilePath, GetScheduleAttachmentBaseDir,
+'     GetTaskWorkspaceDir.
 ' =============================================================================
 
 Option Explicit On

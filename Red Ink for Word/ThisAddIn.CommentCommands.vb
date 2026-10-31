@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.CommentCommands.vb
+' PURPOSE
+'   Implements Word modern-comment resolution commands and guarded user-facing failure handling.
+'
+' KEY ARCHITECTURE
+'   • Host: Word comment commands resolve selected comment evidence before execution.
+'   • Threading: Word COM and custom dialogs remain on the Office STA.
+' =============================================================================
+
 '
 ' Command-only modern-comment resolution and user-facing failure boundary.
 ' Does not change TryResolveActiveComment or the general comment-editing policy.

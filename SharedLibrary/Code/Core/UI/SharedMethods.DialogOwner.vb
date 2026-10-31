@@ -43,6 +43,11 @@
 '     ResolveDialogOwner() directly for ShowDialog. See the "Modal Dialog
 '     Ownership (Cross-Host Deadlock Prevention)" section in CONTRIBUTING.md.
 ' =============================================================================
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, DialogOwnerEntry (VB implementation).
+'   • Entry points/helpers: InitializeHostWindow, IsWindowInCurrentProcess,
+'     IsWindowOnCurrentThread.
 ' =============================================================================
 
 Option Strict On

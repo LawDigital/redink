@@ -92,6 +92,10 @@
 ' ------------------
 ' - `GetDialogOwner` / `CenterFormOnOwnerScreen` - ensures dialogs appear on correct monitor
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, IniParameterChange (VB implementation).
+'   • Entry points/helpers: ToString, IsProtectedKey, InvokeIniUpdateUi.
 ' =============================================================================
 
 Option Strict On

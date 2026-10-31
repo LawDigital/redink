@@ -11,6 +11,11 @@
 '  - Retries failures without resending successful daily evidence across Office hosts.
 '  - Stores lightweight delivery state and pending error events.
 '  - Provides a simple evaluator UI for Word via the "licensecounter" freestyle command.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, LicenseCounterRuntimeOptions (VB implementation).
+'   • Entry points/helpers: ScheduleNextCheck, GetLicenseCounterNextCheckDelay,
+'     StartLicenseCounterReporting.
 ' =============================================================================
 
 Option Strict On

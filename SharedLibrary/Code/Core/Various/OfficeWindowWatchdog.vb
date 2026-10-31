@@ -16,6 +16,10 @@
 '
 '   Anomaly records are written through RiCrashLogger.LogMarker, so they honour the
 '   existing diagnostics on/off switch, session metadata and file rotation.
+'
+' KEY ARCHITECTURE
+'   • Surface: OfficeWindowWatchdog (VB implementation).
+'   • Entry points/helpers: ObserveResponsiveness, StartWatchdog, StopWatchdog.
 ' =============================================================================
 
 Option Strict On

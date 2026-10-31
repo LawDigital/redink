@@ -1,5 +1,6 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 
 ' =============================================================================
 ' File: ThisAddIn.Processing.HyperlinkPlaceholders.vb
@@ -11,6 +12,11 @@
 '          the review dialog, and is turned back into a real hyperlink by
 '          SLib.InsertTextWithMarkdown via Markdig. No post-insert restore
 '          step is required for the Markdown insertion path.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: EncodeHyperlinksAsMarkdown, ConvertAnchorsToMarkdown,
+'     EscapeMarkdownLinkLabel.
 ' =============================================================================
 
 Option Explicit On

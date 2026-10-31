@@ -14,6 +14,10 @@
 '  - "Open Folder" button to browse the resource directory.
 '  - "Refresh" to rescan the discovery paths.
 '  - "Author Mode" checkbox to enable/disable skill authoring.
+'
+' KEY ARCHITECTURE
+'   • Surface: AgentResourcesViewerForm, Entry (host partial/UI).
+'   • Entry points/helpers: OnShown, SendMessage, ToString.
 ' =============================================================================
 
 Option Strict On

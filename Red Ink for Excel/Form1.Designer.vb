@@ -1,6 +1,17 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: Form1.Designer.vb
+' PURPOSE
+'   Designer-managed Windows Forms control layout and component initialization.
+'
+' KEY ARCHITECTURE
+'   • Origin: Designer/project-maintained file; existing generated code and notices are retained.
+'   • Lifecycle: Visual Studio regeneration can replace added documentation comments.
+' =============================================================================
+
+
 Imports System.Windows.Forms
 
 <Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()>

@@ -26,6 +26,11 @@
 '  - ShowPromptSelector / oldShowPromptSelector return a tuple:
 '      (SelectedPrompt, MarkupSelected, BubblesSelected, WindowSelected)
 '    or ("", False, False, False) if canceled or no valid selection exists.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, PromptLibraryEntry (VB implementation).
+'   • Entry points/helpers: ShowPromptSelector, LoadPromptEntriesIntoList,
+'     oldShowPromptSelector.
 ' =============================================================================
 
 Option Strict On

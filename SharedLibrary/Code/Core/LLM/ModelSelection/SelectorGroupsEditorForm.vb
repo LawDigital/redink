@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SelectorGroupsEditorForm.vb
+' PURPOSE
+'   Edits and saves personal selector group layout metadata in a Windows Forms dialog.
+'
+' KEY ARCHITECTURE
+'   • UI: Edits one-level group assignments in a Windows Forms grid.
+'   • Persistence: Saves only personal presentation metadata, not tool permissions.
+' =============================================================================
+
 ' Explicit layout editor. Saving never writes tool selections or central resources.
 Option Strict On
 Option Explicit On

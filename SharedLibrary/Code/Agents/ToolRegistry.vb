@@ -16,6 +16,10 @@
 ' Thread-Safety:
 '  - Per-instance registry (one per tooling loop or add-in lifetime).
 '  - Coarse sync lock protects all mutations and lookups.
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolManifest, ToolRegistry (VB implementation).
+'   • Entry points/helpers: RegisterEager, Snapshot, RegisterLazy.
 ' =============================================================================
 
 Option Strict On

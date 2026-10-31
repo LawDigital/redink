@@ -1,4 +1,17 @@
 ﻿' Part of Red Ink for Excel. Independent Collection Analyzer UI adapter.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.CollectionAnalyzer.vb
+' PURPOSE
+'   Excel UI adapter for independent collection-wide, evidence-based analysis.
+'
+' KEY ARCHITECTURE
+'   • UI: Dedicated collection dialog captures sources, objectives and model preferences.
+'   • Boundary: Delegates analysis to the shared service; existing Excel extraction stays
+'     separate.
+' =============================================================================
+
 ' Existing Data Extractor, worksheet output and Outlook export are untouched.
 Option Strict On
 Option Explicit On

@@ -74,7 +74,7 @@ For Python installations, replace the executable with `.\.venv\Scripts\python.ex
 
 The **Windows startup** controls under **Settings** can create or remove a Task Scheduler task for the **currently logged-in Windows user**, without requiring administrator rights in the usual current-user setup. The task launches the existing application headless at **Windows logon**. It does not run before logon. The scheduled process needs read/write access to the data directory and read access to its import locations. A dedicated pre-logon Windows service/account is a separate deployment choice and should be configured by IT.
 
-The UI's **Shut down server** action requests an orderly shutdown of the current process; it does not disable future autostart. To prevent a launch on the next sign-in, **disable Windows autostart separately**. Remote browsers cannot change the local autostart or invoke the local shutdown function.
+The UI's **Shut down server** action requests an orderly shutdown of the current process; it does not disable future autostart. To prevent a launch on the next sign-in, **disable Windows autostart separately**. Remote browsers cannot change the local autostart or invoke the local shutdown function. Shutdown is scheduled outside the HTTP request worker, allowing the response and other active requests to finish cleanly before sockets are closed.
 
 ## 4. Open the dashboard and sign in
 
@@ -88,7 +88,7 @@ Use a DNS name such as `usage.company.example` and TLS. Configure native HTTPS o
 
 ### Configure HTTPS for network clients
 
-For native HTTPS, obtain a certificate for the public DNS hostname and a corresponding private key, in PEM format. Put both files under the restricted data directory (for example `C:\ProgramData\RedInkUsageServer\tls\`) and make them readable only by the server's Windows account. In **Settings**, configure a network listener, trusted hostnames, secure cookies and the native TLS certificate/key paths; save and restart the server. The equivalent values in `server.toml` are:
+For native HTTPS, obtain a certificate for the public DNS hostname and a corresponding private key, in PEM format. Put both files under the restricted data directory (for example `C:\ProgramData\RedInkUsageServer\tls\`) and make them readable only by the server's Windows account. In **Settings**, configure a network listener, trusted hostnames, secure cookies and the native TLS certificate/key paths; save. The listener switches to the new binding and TLS configuration without restarting the process; existing browser connections may briefly disconnect. The equivalent values in `server.toml` are:
 
 ```toml
 [server]
@@ -111,7 +111,7 @@ Alternatively, terminate HTTPS at an organisation-managed reverse proxy and keep
 
 ## 5. Configure the server from Settings
 
-**Settings** shows the effective server configuration. Click **Save configuration** and check the status message. Most import, publishing, billing and retention changes take effect immediately. Changes to the bind address, port, TLS and listener-level security **require a restart**. Unreachable import paths or missing published files produce warnings. A saved path does not cause remote PCs to send files automatically.
+**Settings** shows the effective server configuration. Click **Save configuration** and check the status message. Most import, publishing, billing and retention changes take effect immediately. Changes to the bind address, port, TLS and listener-level security **trigger a controlled listener rebind** without a process restart. The browser connection may briefly drop; reopen the dashboard using the updated HTTPS hostname and port. If binding fails, the server restores the previous listener and persisted configuration; inspect the Settings status before proceeding. Unreachable import paths or missing published files produce warnings. A saved path does not cause remote PCs to send files automatically.
 
 | Settings area | Administrator purpose | Effective when |
 |---|---|---|
@@ -343,3 +343,5 @@ Use `check --data-dir "..."` for configuration and database integrity, and revie
 The public Windows download intentionally excludes source files, build scripts, regression tests, internal QA reports, release engineering notes and development history. Administrative data remains in the separately configured data directory.
 
 **Document status:** This is the practical administrator operating guide. Windows Task Scheduler, executable startup and Office deployments must be validated in the target environment. Usage evidence is not a legal determination of an organisation's licence terms or privacy duties.
+
+**Activity over time:** Hover or focus chart points for the exact client-local date, direct commands and top-level agent starts; expand **Show exact daily values** for a full accessible table.

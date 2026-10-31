@@ -16,6 +16,10 @@
 '     parent/tool caller.
 '   - Does not perform OCR, PDF parsing, chunking, retrieval, semantic search, Python,
 '     JavaScript, or any other source recovery.
+'
+' KEY ARCHITECTURE
+'   • Surface: TextTools (VB implementation).
+'   • Entry points/helpers: IsAnalyzeTextTool, BuildAnalyzeTools, ExecuteAnalyzeAsync.
 ' =============================================================================
 
 Option Strict On

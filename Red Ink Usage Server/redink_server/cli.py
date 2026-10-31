@@ -24,7 +24,7 @@ from .config import ConfigError, default_data_dir, initialize, load_settings, pr
 from .reports import monthly_report, report_csv
 from .scanner import Scanner
 from .store import Store
-from .tls import create_https_server, import_pfx, validate_tls
+from .tls import create_http_server, create_https_server, import_pfx, validate_tls
 from .web import create_app
 
 
@@ -238,58 +238,40 @@ def main(argv=None):
                 raise ConfigError("port must be between 1 and 65535.")
             if settings.host not in {"127.0.0.1", "localhost", "::1"} and not settings.tls_enabled and not settings.allow_insecure_remote:
                 raise ConfigError("Remote plain HTTP binding requires explicit allow_insecure_remote=true. Enable native [tls] or use a local HTTPS reverse proxy for HTTPS.")
-            from waitress import create_server
+            from .listener_runtime import ListenerSupervisor
+            from .settings_ui import restore_configuration
             with InstanceLock(settings.data_dir / "server.lock"):
                 app = create_app(settings, store)
-                # Validate/load TLS before starting background work or binding.
-                https_server = create_https_server(settings, app) if settings.tls_enabled else None
                 scanner = Scanner(settings, store)
                 app.extensions['redink_scanner'] = scanner
+
+                def listener_factory(next_settings):
+                    return (create_https_server(next_settings, app) if next_settings.tls_enabled
+                            else create_http_server(next_settings, app))
+
+                def apply_runtime(next_settings):
+                    apply = app.extensions['redink_apply_settings']
+                    apply(next_settings)
+
+                def rollback(previous_settings, previous_toml):
+                    restore_configuration(previous_settings.data_dir, previous_toml)
+                    apply_runtime(previous_settings)
+
+                supervisor = ListenerSupervisor(settings, listener_factory, apply_runtime, rollback)
+                app.extensions['redink_listener'] = supervisor
+                app.extensions['redink_shutdown'] = supervisor.shutdown
                 scanner.start()
                 try:
-                    if https_server is not None:
-                        https_server.prepare()
-                        listener = https_server
-                    else:
-                        listener = create_server(app, host=settings.host, port=settings.port,
-                            threads=settings.threads, max_request_body_size=settings.maximum_request_bytes,
-                            max_request_header_size=16384, channel_timeout=30, expose_tracebacks=False,
-                            ident="RedInkUsageServer", clear_untrusted_proxy_headers=True)
-                    # HTTP request handlers may ask for an orderly stop. Defer
-                    # listener close until the response has left the worker.
-                    stop_requested = threading.Event()
-                    stop_lock = threading.Lock()
-                    def request_shutdown():
-                        with stop_lock:
-                            if stop_requested.is_set():
-                                return False
-                            stop_requested.set()
-                        def stop_listener():
-                            time.sleep(0.5)
-                            try:
-                                listener.stop() if https_server is not None else listener.close()
-                            except (OSError, RuntimeError) as exc:
-                                logging.getLogger(__name__).error('Listener shutdown failed: %s', type(exc).__name__)
-                        threading.Thread(target=stop_listener, name='RedInkShutdown', daemon=True).start()
-                        return True
-                    app.extensions['redink_shutdown'] = request_shutdown
-                    try:
-                        url = dashboard_url(settings)
-                        print(f"Red Ink Usage Server {__version__}: {url}", flush=True)
-                        if browser_requested(args.browser):
-                            open_after_bind(url)
-                    except (OSError, RuntimeError, ValueError) as exc:
-                        logging.getLogger(__name__).warning("Open the server page manually: %s", exc)
-                    if https_server is not None:
-                        https_server.serve()
-                    else:
+                    def on_ready(active_settings):
                         try:
-                            listener.run()
-                        finally:
-                            listener.close()
+                            url = dashboard_url(active_settings)
+                            print(f"Red Ink Usage Server {__version__}: {url}", flush=True)
+                            if browser_requested(args.browser):
+                                open_after_bind(url)
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            logging.getLogger(__name__).warning('Open the server page manually (%s).', type(exc).__name__)
+                    supervisor.run(on_ready=on_ready)
                 finally:
-                    if https_server is not None:
-                        https_server.stop()
                     scanner.stop()
             return 0
     except sqlite3.Error:

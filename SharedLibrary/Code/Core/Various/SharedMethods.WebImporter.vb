@@ -17,6 +17,11 @@
 '  - Does not expose preliminary website response sizes, because those often only
 '    reflect the initial HTML payload and can be misleading compared to the final
 '    rendered/extracted text size.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, WebImportPageResult (VB implementation).
+'   • Entry points/helpers: ReadWebToolTextResponseAsync, ValidateWebToolText,
+'     PrepareWebToolTextForReplay.
 ' =============================================================================
 
 Option Strict On

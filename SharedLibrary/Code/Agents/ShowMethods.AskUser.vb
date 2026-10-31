@@ -32,6 +32,11 @@
 '              caller blocks on Join. That leaves the host stuck disabled ("invisible"
 '              blocking window; clicks only ding) and can deadlock. The dialog instead
 '              stays reachable via TopMost and cursor-screen positioning.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, AskUserMarkdownRun (VB implementation).
+'   • Entry points/helpers: ShowAskUserDialog, ShowAskUserDialogCore,
+'     ProtectAskUserQuestionWindowsPathsForMarkdown.
 ' =============================================================================
 
 Option Strict On

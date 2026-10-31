@@ -22,6 +22,10 @@
 '   - All semantic-search logic uses SharedMethods.SemanticSearch.* shared helpers.
 '   - No WinForms interactive APIs are used here.
 '   - LLM-dependent operations require an ISharedContext supplied by the host.
+'
+' KEY ARCHITECTURE
+'   • Surface: TextTools, SemanticConversationStateItem (VB implementation).
+'   • Entry points/helpers: IsExtendedTextTool, BuildExtendedTools, BuildToolConfig.
 ' =============================================================================
 
 Option Strict On

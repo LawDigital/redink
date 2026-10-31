@@ -10,6 +10,10 @@
 '
 ' Wire-up: From any ribbon button (or Immediate window), call:
 '              M365SearchTest.Show(_context)
+'
+' KEY ARCHITECTURE
+'   • Surface: M365SearchTestForm, AiResolvedMail (host partial/UI).
+'   • Entry points/helpers: StableKey, OnHandleCreated, OnHandleDestroyed.
 ' =============================================================================
 
 Option Explicit On

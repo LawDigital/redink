@@ -16,6 +16,10 @@
 '  - In "chat author mode", also writable under skill directories.
 '  - All paths canonicalized; ".." and symlink traversal blocked.
 '  - Default file size limit: 2 MiB (configurable via MaxFileSizeBytes).
+'
+' KEY ARCHITECTURE
+'   • Surface: PathPolicy, HostFileOperationScope (VB implementation).
+'   • Entry points/helpers: BeginHostFileOperationScope, Resolve, SetWorkspaceRoot.
 ' =============================================================================
 
 Option Strict On

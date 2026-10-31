@@ -1,4 +1,4 @@
-# Red Ink Usage Server 1.4.2
+# Red Ink Usage Server 1.4.3
 
 Red Ink Usage Server collects monthly licence-use evidence, provides daily load counts, summarizes Red Ink `LogPath` activity, serves approved Red Ink configuration files, and exports usage reports. It does **not** grant, validate or enforce Red Ink licences.
 

@@ -220,10 +220,15 @@
 
   function renderLogTrend(days) {
     const target = byId("log-activity-chart");
+    const detail = byId("log-chart-selection");
+    const table = byId("log-chart-days");
     target.replaceChildren();
+    table.replaceChildren();
     if (!Array.isArray(days) || !days.length) {
       target.append(element("p", "empty-state", "No recorded invocations within the selected period. This is not proof of inactivity when log sources are missing."));
       target.setAttribute("aria-label", "No log evidence available for the selected range.");
+      detail.textContent = "No observed days in this selection.";
+      const row = element("tr"); row.append(element("td", "empty-row", "No daily evidence.")); row.firstChild.colSpan = 3; table.append(row);
       return;
     }
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -236,6 +241,7 @@
     const point = (d,value) => [48 + (Date.parse(d.date + "T00:00:00Z") - first) / span * 535, 122 - Math.max(0,value) / maximum * 99];
     const ns = "http://www.w3.org/2000/svg";
     const mk = (tag, attrs, txt) => { const node = document.createElementNS(ns,tag); for(const [k,v] of Object.entries(attrs)) node.setAttribute(k,v); if(txt !== undefined) node.textContent=txt; svg.append(node); return node; };
+    const exactText = d => `${d.date} · Direct commands: ${formatNumber(d.standard || 0)} · Top-level agent starts: ${formatNumber(d.agentic || 0)}`;
     for (let i = 0; i <= 4; i++) {
       const y = 22 + i*25;
       mk("line",{x1:48,y1:y,x2:585,y2:y,stroke:"#353535","stroke-width":.8});
@@ -247,7 +253,6 @@
       let segment=[];
       const flush=() => { if(segment.length===1 && days.length>=45) mk("circle",{cx:segment[0][0],cy:segment[0][1],r:2.6,fill:color}); if(segment.length>1) mk("polyline",{points:segment.map(p=>p.join(",")).join(" "),fill:"none",stroke:color,"stroke-width":2.5,"stroke-linecap":"round","stroke-linejoin":"round"}); segment=[]; };
       for(let i=0;i<days.length;i++) {
-        // Do not connect points across dates without observed evidence.
         if(i>0 && Date.parse(days[i].date+"T00:00:00Z")-Date.parse(days[i-1].date+"T00:00:00Z")>86400000) flush();
         if(key === "agentic" && !days[i].agentic) { flush(); continue; }
         const p=point(days[i],days[i][key]||0);
@@ -256,10 +261,27 @@
       }
       flush();
     }
+    // Every observed date has an actual keyboard-focusable hit target, even
+    // when the series is too dense to draw individual visible circles.
+    for(const d of days) {
+      const [x,y] = point(d, d.standard || 0);
+      const hit = mk("circle",{cx:x,cy:y,r:Math.max(3.2,Math.min(8,260/days.length)),
+        fill:"transparent",stroke:"transparent",tabindex:"0",role:"button","aria-label":exactText(d)});
+      const title = document.createElementNS(ns,"title"); title.textContent = exactText(d); hit.append(title);
+      const show = () => { detail.textContent = exactText(d); };
+      hit.addEventListener("mouseenter",show);
+      hit.addEventListener("focus",show);
+      hit.addEventListener("click",show);
+      const row=element("tr");
+      row.append(element("td","",d.date),element("td","numeric",formatNumber(d.standard || 0)),
+                 element("td","numeric",formatNumber(d.agentic || 0)));
+      table.append(row);
+    }
     mk("text",{x:48,y:146,fill:"#a8a8a8","font-size":11},days[0].date);
     mk("text",{x:582,y:146,fill:"#a8a8a8","text-anchor":"end","font-size":11},days[days.length-1].date);
     target.append(svg);
-    target.setAttribute("aria-label", days.map(d => `${d.date}: ${d.standard} other, ${d.agentic || "no evidenced"} top-level run starts`).join("; "));
+    detail.textContent = "Point to or select a date above; expand the daily table for all exact values.";
+    target.setAttribute("aria-label", days.map(exactText).join("; "));
   }
 
   function renderLogDetails(data) {
@@ -667,13 +689,26 @@
       text("active-publishing-dir",settingsCache.published_directory);
       byId("settings-error").hidden=!outcome.warnings?.length;
       if(outcome.warnings?.length) byId("settings-error").textContent=outcome.warnings.join(" · ");
-      text("settings-state",outcome.restart_required ? "Saved · live fields applied · restart required for listener/TLS settings" :
-           (outcome.scan_scheduled ? "Saved · sources updated · scan scheduled" : "Saved · changes active immediately"));
+      text("settings-state",outcome.listener_update === "pending" ? "Saved · switching network listener (connection may briefly drop)" :
+           (outcome.restart_required ? "Saved · listener is not managed in this mode" :
+           (outcome.scan_scheduled ? "Saved · sources updated · scan scheduled" : "Saved · changes active immediately")));
+      if(outcome.listener_update === "pending") {
+        // No need for a process restart. Keep checking the old origin while it
+        // is reachable; after a port/protocol change, the new URL is required.
+        for(let retry=0;retry<16;retry++) {
+          await new Promise(resolve=>setTimeout(resolve,450));
+          try {
+            const state=await apiJson("/api/settings/listener");
+            if(state.status==="active") {text("settings-state","Saved · listener settings active");break;}
+            if(state.status==="failed") {settingsCache=null;await loadServerSettings();text("settings-state",state.message);saveButton.textContent="Update rolled back";break;}
+          } catch (_) {text("settings-state","Listener switched · open the dashboard using the updated host / port / HTTPS URL");break;}
+        }
+      }
       updateAddinSnippet();
       if(Object.hasOwn(changes,"publishing")) refresh();
       if(Object.hasOwn(changes,"imports")) refreshLogs();
       if(Object.hasOwn(changes,"retention")) previewRetention();
-      saveButton.textContent="✓ Saved";
+      if(saveButton.textContent!=="Update rolled back") saveButton.textContent="✓ Saved";
     } catch(e) {byId("settings-error").textContent=e.message;byId("settings-error").hidden=false;saveButton.textContent="Save failed";text("settings-state","Save failed · no settings applied");}
     finally {saveButton.disabled=false;setTimeout(()=>{saveButton.textContent=oldLabel;},1800);}
 
@@ -684,7 +719,7 @@
       const data=await apiJson("/api/settings/retention/preview");
       area.replaceChildren();
       if (!data.enabled) {
-        area.textContent="Retention is disabled. Configure a date or rolling period above, save, and restart.";
+        area.textContent="Retention is disabled. Configure a date or rolling period above and save.";
         button.disabled=true;return;
       }
       const items=Object.entries(data.counts||{});

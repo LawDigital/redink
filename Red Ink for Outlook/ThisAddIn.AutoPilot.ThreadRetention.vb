@@ -33,6 +33,11 @@
 ' Threading:
 '   - AutoPilot processes one mail at a time (processing semaphore), so file I/O
 '     here is effectively serialized. Voicemail/scheduler paths do not call in.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: IsThreadRetentionEnabled, IsThreadRetentionEligible,
+'     GetThreadRetentionRootForSender.
 ' =============================================================================
 
 Option Explicit On

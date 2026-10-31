@@ -16,6 +16,10 @@
 '  - summary: short textual stub (model sees this in subsequent turns).
 '  - value: actual payload (any JSON value or string).
 '  - createdAt, updatedAt, tags, metadata: operational fields.
+'
+' KEY ARCHITECTURE
+'   • Surface: SessionMemoryEntry, SessionMemory (VB implementation).
+'   • Entry points/helpers: GetStorePath, EnsureLoaded, SaveUnlocked.
 ' =============================================================================
 
 Option Strict On

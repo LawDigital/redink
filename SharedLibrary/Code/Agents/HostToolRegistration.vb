@@ -5,6 +5,10 @@
 ' File: HostToolRegistration.vb
 ' Purpose: Central authority for host-internal tool names, host registration,
 '          deliverable-capable tool classification, and selector display suffixes.
+'
+' KEY ARCHITECTURE
+'   • Surface: HostToolRegistration (VB implementation).
+'   • Entry points/helpers: BuildToolNameSet, BuildAllInternalToolNameSet, RegisterSet.
 ' =============================================================================
 
 Option Explicit On

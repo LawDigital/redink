@@ -138,8 +138,27 @@ def update_configuration(settings, updates: dict):
                 raise
         finally:
             temporary.unlink(missing_ok=True)
+    # The API decides whether a running listener needs to be rebound. This
+    # lower-level editor never promises that a network change is already live.
     restart_required = bool(set(updates) & {'server', 'tls', 'collection'})
     return {'saved': True, 'restart_required': restart_required}
+
+
+def restore_configuration(data_dir: Path, previous: str) -> None:
+    """Restore a validated previous TOML after a failed listener transition.
+
+    Roll back by replacement rather than editing individual fields, so comments,
+    all server parameters and security policy are recovered consistently.
+    """
+    tomllib.loads(previous)
+    path = data_dir / 'server.toml'
+    with _LOCK:
+        temporary = path.parent / ('.listener-rollback-' + secrets.token_hex(8) + '.tmp')
+        try:
+            private_write(temporary, previous)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def update_passwordless(settings, enabled: bool):

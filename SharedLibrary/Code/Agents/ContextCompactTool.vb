@@ -6,6 +6,10 @@
 ' Purpose: Model-driven request to compact older tool results out of the active
 '          context. The full bodies remain retrievable via context_expand. Shared
 '          by Outlook and Word so both expose identical behavior.
+'
+' KEY ARCHITECTURE
+'   • Surface: ContextCompactTool (VB implementation).
+'   • Entry points/helpers: IsContextCompactTool, Build, Execute.
 ' =============================================================================
 
 Option Strict On

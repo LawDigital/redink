@@ -1,4 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SharedMethods.OcrMarkdownCleaner.vb
+' PURPOSE
+'   Performs deterministic and validated OCR-layout cleanup without invoking a model.
+'
+' KEY ARCHITECTURE
+'   • Pipeline: Rejoins wrapped OCR prose and optionally handles repeated page headers.
+'   • Validation: Preserves protected content and reports deterministic cleanup results.
+' =============================================================================
+
 ' Explicit, deterministic OCR layout cleanup. Does not invoke a model.
 Option Explicit On
 Option Strict On

@@ -15,6 +15,10 @@
 '   - The logger must never throw into the host; all paths fail silently.
 '   - On-disk retention: the active log rolls to ri-crashlog.previous.txt at 10 MB,
 '     giving roughly 20 MB of headroom (several days of typical collection).
+'
+' KEY ARCHITECTURE
+'   • Surface: RiCrashLogger (VB implementation).
+'   • Entry points/helpers: Initialize, Shutdown, LogMarker.
 ' =============================================================================
 
 Option Strict On

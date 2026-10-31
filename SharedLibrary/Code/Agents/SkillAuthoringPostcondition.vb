@@ -12,6 +12,10 @@
 ' Capability-driven: classification is based on the resolved write target (resource
 ' root vs. workspace) and structural markers (SKILL.md/AGENT.md, skills/ or agents/
 ' path segments) - never on request text or tool-name heuristics.
+'
+' KEY ARCHITECTURE
+'   • Surface: SkillAuthoringPostcondition (VB implementation).
+'   • Entry points/helpers: CurrentKey, NoteResourceRootWrite, NoteWorkspaceSkillLikeWrite.
 ' =============================================================================
 
 Option Strict On

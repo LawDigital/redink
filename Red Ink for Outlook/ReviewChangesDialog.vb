@@ -1,5 +1,6 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 
 ' =============================================================================
 ' File: ReviewChangesDialog.vb
@@ -9,6 +10,10 @@
 '          RichTextBox, and lets the user click each highlighted token to
 '          accept/reject it. The lower pane shows a live Markdown-rendered
 '          preview of the resulting text.
+'
+' KEY ARCHITECTURE
+'   • Surface: ReviewChangesDialog, Segment (VB implementation).
+'   • Entry points/helpers: InitializeUI, BuildDiffPanel, BuildPreviewPanel.
 ' =============================================================================
 
 Option Explicit On

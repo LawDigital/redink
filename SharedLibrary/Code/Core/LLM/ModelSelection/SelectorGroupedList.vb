@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SelectorGroupedList.vb
+' PURPOSE
+'   Renders one-level grouped selector items while preserving check state and filter behavior.
+'
+' KEY ARCHITECTURE
+'   • UI: Displays grouped models with non-selecting headers and filters.
+'   • Selection: Stable model IDs and persisted check state survive presentation changes.
+' =============================================================================
+
 ' One-level presentation of a host-supplied catalog. Headers never change selection.
 Option Strict On
 Option Explicit On

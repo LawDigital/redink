@@ -58,3 +58,10 @@ button:disabled{cursor:progress;opacity:.75}
 #client-url-list .setting-row input{width:100%;min-width:0;font:inherit;font-family:Consolas,Menlo,monospace;font-size:.85rem}
 #client-url-list .setting-row .metric-small{grid-column:2/-1;min-height:1em}
 @media(max-width:680px){#client-url-list .setting-row{grid-template-columns:minmax(0,1fr) auto}#client-url-list .setting-row label{grid-column:1/-1}#client-url-list .setting-row .metric-small{grid-column:1/-1}}
+
+/* Exact per-day chart inspection, with accessible non-hover fallback. */
+.chart-selection{margin-top:9px;min-height:1.7em;font-size:.86rem;color:var(--fg);font-variant-numeric:tabular-nums}
+.chart-data{margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:9px 12px;background:#111}
+.chart-data>summary{cursor:pointer;color:#ff9a88;font-weight:600}
+.chart-data .table-scroll{max-height:310px;margin-top:9px}
+.time-chart svg circle[tabindex]:focus{stroke:#ffc078;stroke-width:2;outline:none}

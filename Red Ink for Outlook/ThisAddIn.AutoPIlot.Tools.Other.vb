@@ -75,6 +75,11 @@
 '       * Image and audio generation only proceed if alternate models are
 '         configured; otherwise, graceful error messages are returned.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: ExecuteGenerateImageTool, ExecuteWebGroundingTool,
+'     ExecuteDescribeBinaryTool.
 ' =============================================================================
 
 

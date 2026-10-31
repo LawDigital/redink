@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (Outlook)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.AutoPilot.Timing.vb
+' PURPOSE
+'   Tracks AutoPilot job durations and advisory workload-based timing estimates.
+'
+' KEY ARCHITECTURE
+'   • Samples: Stores bounded historical timings by AutoPilot workload category.
+'   • Estimates: Advisory effort class adjusts durations from observed category data.
+' =============================================================================
+
 Option Explicit On
 Option Strict On
 

@@ -26,7 +26,7 @@ $BuildPython = Join-Path $VenvRoot 'Scripts\python.exe'
 $BuildWork = Join-Path $ProjectRoot ('build\pyinstaller-' + $Mode)
 $OutputRoot = Join-Path $ProjectRoot ('dist\windows-' + $Mode)
 $ReleaseRoot = Join-Path $OutputRoot 'RedInkUsageServer'
-$Version = '1.4.2'
+$Version = '1.4.3'
 
 function Invoke-Checked {
     param([Parameter(Mandatory=$true)][string]$Command,

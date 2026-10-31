@@ -13,6 +13,11 @@
 '   - Preserve structured facts independently from LLM-translated prose.
 '   - Missing or invalid translation, facts or placeholders fails before Send.
 '   - Deferred approval and final delivery reuse the same localized snapshot.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, AutoPilotHostNoticeAttachment (host partial/UI).
+'   • Entry points/helpers: BuildAutoPilotOversizedAttachmentNotices,
+'     VerifyAutoPilotHostNoticeToken, LocalizeAutoPilotHostNoticesAsync.
 ' =============================================================================
 
 Option Explicit On

@@ -1,5 +1,17 @@
 ' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: WordCommentSelectionTracker.vb
+' PURPOSE
+'   Captures read-only evidence of the active modern Word comment using UI Automation.
+'
+' KEY ARCHITECTURE
+'   • Observation: Tracks the focused modern comment card through UI Automation.
+'   • Boundary: Produces read-only evidence without sending Word COM/UIA objects outside the
+'     host.
+' =============================================================================
+
 '
 ' Read-only bridge for the modern Word comments UI. Word.Selection can still refer
 ' to an unrelated body selection after a comment card receives focus. Capture the

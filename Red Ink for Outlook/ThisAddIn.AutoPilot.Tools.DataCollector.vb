@@ -15,6 +15,10 @@
 '     adding it later.
 '   - DEBUG-only self-test helpers are included at the bottom of this file and can
 '     be removed easily later.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, IDataCollectorOutputWriter (host partial/UI).
+'   • Entry points/helpers: Preview, Write, BuildListCollectionUseCasesTool.
 ' =============================================================================
 
 Option Explicit On

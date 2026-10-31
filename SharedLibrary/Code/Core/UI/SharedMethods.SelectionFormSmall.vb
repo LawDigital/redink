@@ -17,6 +17,10 @@
 '       - Enter or double-click accepts the current selection (DialogResult.OK).
 '       - Escape cancels and resets the result to 0 (DialogResult.Cancel).
 '   - `SelectValue` validates input, shows the dialog, and returns `Result`.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, SelectionItem (VB implementation).
+'   • Entry points/helpers: ToString, AcceptCurrentSelection, OnShown.
 ' =============================================================================
 
 Option Strict On

@@ -31,6 +31,11 @@
 '      - GetChatThreadAsync(chatId)          → 1:1/group Teams chat history
 '      - GetChannelThreadAsync(team,channel,rootMessageId)
 '                                            → channel post + replies
+'
+' KEY ARCHITECTURE
+'   • Surface: M365ExpandedAttachment, M365ExpandOptions (VB implementation).
+'   • Entry points/helpers: ExpandAttachmentsAsync, ExpandAttachmentsRecursive,
+'     DecodeInlineAttachmentAsync.
 ' =============================================================================
 
 Option Explicit On

@@ -35,25 +35,26 @@
 ' Purpose:
 '   Current architectural inventory of all hand-authored VB source files and
 '   the embedded Markdown editor in this package, with supporting project/assets
-'   described separately. Paths and project memberships were checked on 2026-10-22.
+'   described separately. Paths and project memberships were checked on 2026-10-31.
 '
 ' Language: VB.NET (.NET Framework 4.8); embedded HTML/CSS/JavaScript where noted.
 ' Targets:  Word, Outlook and Excel VSTO add-ins, SharedLibrary, and the optional
 '           SemanticArchive.Worker console executable.
-' Scope:    441 hand-authored VB source files in this source package plus MarkdownEditor.html;
+' Scope:    458 hand-authored VB source files in this source package plus MarkdownEditor.html;
 '           generated Designer/My Project files are tracked separately below.
 '           The 26 generated designer/My Project VB files are accounted for below,
-'           not expanded as hand-authored architectural entries.
+'           outside the hand-authored architectural entries.
 ' Headers:  File-purpose/architecture comments orient developers; existing proper
-'           headers and license notices are retained. Generated code stays untouched.
+'           headers and license notices are retained. Generated bodies remain untouched;
+'           generator-owned comment headers can be replaced on regeneration.
 '           Historical references absent from this package are explicitly separated.
 ' =============================================================================
 '
 ' Project inventory (source counts are checked against current project files):
-'   SharedLibrary                  - 260 hand-authored + 6 generated = 266 Compile sources.
-'   Red Ink for Word               - 77 hand-authored + 7 generated = 84 Compile sources.
-'   Red Ink for Outlook            - 81 hand-authored + 6 generated = 87 Compile sources.
-'   Red Ink for Excel              - 18 hand-authored + 7 generated = 25 Compile sources.
+'   SharedLibrary                  - 269 hand-authored + 6 generated = 275 Compile sources.
+'   Red Ink for Word               - 79 hand-authored + 7 generated = 86 Compile sources.
+'   Red Ink for Outlook            - 87 hand-authored + 6 generated = 93 Compile sources.
+'   Red Ink for Excel              - 19 hand-authored + 7 generated = 26 Compile sources.
 '   SemanticArchive.Worker         - 4 hand-authored + 0 generated = 4 Compile sources.
 '
 ' =============================================================================
@@ -135,6 +136,10 @@
 '   WorkspaceState.vb                           - Workspace-scoped runtime state and permissions tracking.
 '   WorkspaceTools.vb                           - Shared `workspace_*` tools for workspace inventory and file operations.
 '
+'   CollectionAnalysisService.vb                    - Host-agnostic collection analysis with evidence and job-scoped checkpoints.
+'   PromptCoachingAdvice.vb                         - Evidence-bound coaching advice contracts, validation and HTML rendering.
+'   ToolingOriginalRequestLog.vb                    - Immutable host-supplied original-request records for tooling logs.
+'   ToolResultDiagnostics.vb                        - Tool result/source metadata and structured service-error diagnostics.
 ' [CommonFeatures]
 '   AnonymizationModule.vb                      - Top-level anonymization coordinator with reversible mappings and prompt helpers.
 '   FactExtractionService.vb                    - Multi-file structured fact extraction with schema/date/sort handling.
@@ -316,6 +321,10 @@
 '   SharedMethods.IsolatedModelCalls.vb         - Isolated model-call contexts, special-task selection and serialized semantic-request budget validation.
 '   SharedMethods.PrimaryModelManager.vb        - Primary-model selection and active-model state management.
 '
+'   MultiModelSelectorForm.Grouping.vb              - Optional grouped presentation adapter for the existing multi-model selector.
+'   SelectorGroupedList.vb                          - Filtered grouped model selector with stable selection and group headers.
+'   SelectorGrouping.vb                             - Validated personal/central group metadata and unchanged selection contract.
+'   SelectorGroupsEditorForm.vb                     - Editor for user-owned selector grouping layouts.
 ' [Core\Security]
 '   LocalHttpBrowserSecurity.vb                 - Shared security helpers for authenticated local HTTP/browser access and bounded request handling.
 '   SharedMethods.SafeExternalLinks.vb          - Shared validation and opening of approved external URI schemes.
@@ -344,6 +353,7 @@
 '   SplashScreenCountDown.vb                    - Splash screen variant with countdown timer.
 '   SplashScreenWorks.vb                        - Alternative splash-screen implementation.
 '
+'   SharedMethods.DialogIcon.vb                     - Safe owned-dialog-icon creation and native HICON lifetime management.
 ' [Core\Various]
 '   SharedMethods.OcrMarkdownCleaner.vb          - Source module for SharedMethods OcrMarkdownCleaner.
 '   Crashlogger.vb                              - Crash logging and emergency diagnostic capture.
@@ -369,7 +379,6 @@
 '
 ' [Red Ink for Word]
 '   ThisAddIn.OcrMarkdownCleanup.vb              - New SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Keep extracted Markdown unchanged (default)", 1),
-'   TranscriptionOptionsDialog.vb                - File: TranscriptionOptionsDialog.vb
 '   BridgeSubs.vb                               - COM-visible automation bridge exposing selected Word add-in commands.
 '   ComparisonHtmlViewerForm.vb                 - WebView2 viewer for prepared Word comparison HTML, revision formatting and action-button callbacks.
 '   DiscussInky.vb                              - Multi-persona discussion UI with knowledge loading and tool integration.
@@ -447,6 +456,8 @@
 '   Transcription\TranscriptionOptionsDialog.vb - Dialog for transcription-session and option selection.
 '   WordWorkspaceForm.vb                        - Workspace-folder management and permission configuration UI.
 '
+'   ThisAddIn.CommentCommands.vb                    - Modern Word-comment commands and guarded UI/STA failure handling.
+'   WordCommentSelectionTracker.vb                  - UI Automation evidence capture for the currently focused modern Word comment.
 ' [Red Ink for Excel]
 '   BridgeSubs.vb                               - COM-visible bridge exposing selected Excel add-in functionality.
 '   DragDropForm.vb                             - File/folder drag-and-drop selector for Excel workflows.
@@ -467,6 +478,7 @@
 '   ThisAddIn.Properties.vb                     - SharedContext bridge and Excel-side configuration properties.
 '   ThisAddIn.vb                                - Excel VSTO entry point, startup/shutdown, and COM automation bridge.
 '
+'   ThisAddIn.CollectionAnalyzer.vb                 - Excel Collection Analyzer UI adapter, independent of the existing extraction workflow.
 ' [Red Ink for Outlook]
 '   ThisAddIn.AutoPilot.Scan.Admin.Dashboard.vb  - Administration dashboard for Outlook scan operations.
 '   ThisAddIn.AutoPilot.Scan.Admin.Editors.vb    - Editors for scan administrative configuration.
@@ -551,11 +563,59 @@
 '   ThisAddIn.WebExtension.Security.vb          - Outlook-side security helpers for local web-extension access.
 '   ThisAddIn.WebExtension.vb                   - Local web UI, API route handling, file upload/extraction, and browser integration.
 '
+'   ThisAddIn.AutoPilot.PromptCoaching.Context.vb   - Bounded and read-only coaching context derived from the authorized parent run.
+'   ThisAddIn.AutoPilot.PromptCoaching.Delivery.vb  - Durable per-sender recommendation outbox, claim deduplication and send safety.
+'   ThisAddIn.AutoPilot.PromptCoaching.Preferences.vb - Durable user preferences, opt-out, identity normalization and eligibility.
+'   ThisAddIn.AutoPilot.PromptCoaching.Tool.vb      - Own-sender coaching controls for AutoPilot tools and exact mail commands.
+'   ThisAddIn.AutoPilot.PromptCoaching.vb           - Resumable idle-time request coaching with bounded inputs and validated output.
 ' [SemanticArchive.Worker]
 '   AssemblyInfo.vb                             - Assembly identity and product metadata for the optional Semantic Archive console worker.
 '   Program.vb                                  - Headless console entry point for bounded/resumable Semantic Archive operations and JSON lifecycle logging.
 '   WorkerDrainPolicy.vb                        - Determines whether another worker batch can make progress without looping indefinitely on deferred work.
 '   WorkerOptions.vb                            - Parses worker archive/document scopes, operations, limits and centrally defined command defaults.
+'
+
+' =============================================================================
+' GENERATED DESIGNER / MY PROJECT SOURCES (COMPILE ITEMS)
+' =============================================================================
+'
+' These are tracked by exact project-relative path (26 files); do not treat
+' them as hand-authored modules. Their generated notices and bodies are retained.
+' Visual Studio regeneration may replace documentary header comments.
+'
+' [SharedLibrary -- generated]
+'   Code\CommonFeatures\M365\M365SearchProgressForm.Designer.vb - generated/project-maintained VB compile source
+'   Code\Core\Config\ConfigWizardForm.Designer.vb - generated/project-maintained VB compile source
+'   My Project\Application.Designer.vb - generated/project-maintained VB compile source
+'   My Project\AssemblyInfo.vb - generated/project-maintained VB compile source
+'   My Project\Resources.Designer.vb - generated/project-maintained VB compile source
+'   My Project\Settings.Designer.vb - generated/project-maintained VB compile source
+'
+' [Red Ink for Word -- generated]
+'   DragDropForm.Designer.vb - generated/project-maintained VB compile source
+'   Form1.Designer.vb - generated/project-maintained VB compile source
+'   My Project\AssemblyInfo.vb - generated/project-maintained VB compile source
+'   My Project\Resources.Designer.vb - generated/project-maintained VB compile source
+'   My Project\Settings.Designer.vb - generated/project-maintained VB compile source
+'   Ribbon1.Designer.vb - generated/project-maintained VB compile source
+'   ThisAddIn.Designer.vb - generated/project-maintained VB compile source
+'
+' [Red Ink for Outlook -- generated]
+'   DragDropForm.Designer.vb - generated/project-maintained VB compile source
+'   My Project\AssemblyInfo.vb - generated/project-maintained VB compile source
+'   My Project\Resources.Designer.vb - generated/project-maintained VB compile source
+'   My Project\Settings.Designer.vb - generated/project-maintained VB compile source
+'   Ribbon1.Designer.vb - generated/project-maintained VB compile source
+'   ThisAddIn.Designer.vb - generated/project-maintained VB compile source
+'
+' [Red Ink for Excel -- generated]
+'   DragDropForm.Designer.vb - generated/project-maintained VB compile source
+'   Form1.Designer.vb - generated/project-maintained VB compile source
+'   My Project\AssemblyInfo.vb - generated/project-maintained VB compile source
+'   My Project\Resources.Designer.vb - generated/project-maintained VB compile source
+'   My Project\Settings.Designer.vb - generated/project-maintained VB compile source
+'   Ribbon1.Designer.vb - generated/project-maintained VB compile source
+'   ThisAddIn.Designer.vb - generated/project-maintained VB compile source
 '
 
 ' =============================================================================
@@ -568,8 +628,8 @@
 ' - Directory.Build.props selects the build environment; project files declare target
 '   framework, references, output type and VSTO/worker build settings.
 ' - *.Designer.vb and My Project contain generated forms/ribbons, VSTO glue, resources,
-'   settings and assembly metadata. Their generated status explains their exclusion
-'   from the architectural entry list, not exclusion from project compilation.
+'   settings and assembly metadata. All 26 are explicitly inventoried below;
+'   they are excluded only from hand-authored architectural entries, not compilation.
 ' - SharedLibrary embeds MarkdownEditor.html as RedInk.MarkdownEditor.html. Shared
 '   resources, project images, .resx and settings files support the compiled UI.
 ' - SemanticArchive.Worker/README.md and WORKER_HELP.txt describe worker invocation,
@@ -602,7 +662,7 @@
 ' NOTES
 ' =============================================================================
 '
-' - Inventory checked against 466 VB files on disk, including 26 generated files.
+' - Inventory checked against 484 VB files on disk, including 26 generated files.
 ' - On case-sensitive hosts, Outlook project reference ThisAddIn.Tooling.vb
 '   differs in case from on-disk ThisAddin.Tooling.vb; Windows lookup is case-insensitive.
 ' - Shared logic stays independent of Office host, organization, template and model;

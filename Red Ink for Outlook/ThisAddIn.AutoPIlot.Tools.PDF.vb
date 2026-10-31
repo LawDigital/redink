@@ -61,6 +61,11 @@
 '       * Encrypted PDFs are detected and handled via rasterization or user
 '         notification as appropriate.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, ApPdfInlineRun (host partial/UI).
+'   • Entry points/helpers: ExecuteCommentPdfTool, ExecuteCreateCodeFileTool,
+'     NormalizePdfTextArguments.
 ' =============================================================================
 
 

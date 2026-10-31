@@ -9,6 +9,10 @@
 '          Executes using the same prompts and JSON-mode behavior as the
 '          original Outlook AutoPilot implementation, while allowing host-
 '          specific logging callbacks (e.g. AutoPilot dashboard).
+'
+' KEY ARCHITECTURE
+'   • Surface: WebGroundingTool (VB implementation).
+'   • Entry points/helpers: IsWebGroundingTool, Build, ExecuteAsync.
 ' =============================================================================
 
 Option Strict On

@@ -22,7 +22,7 @@ from werkzeug.security import check_password_hash
 from . import __version__
 from .config import Settings, token_hash, private_write, ConfigError, load_settings
 from .settings_ui import (configuration_document, update_configuration, update_passwordless,
-                          is_passwordless, is_loopback_request, encrypt_secret, decrypt_secret, apply_live_settings)
+                          is_passwordless, is_loopback_request, encrypt_secret, decrypt_secret, apply_live_settings, restore_configuration)
 from .user_analytics import function_users, license_users
 
 from .protocol import ProtocolError, normalize_event, parse_legacy_path
@@ -207,44 +207,105 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
             result['tokens'][kind] = decrypt_secret(settings.credentials, cipher) if cipher else None
         return jsonify(result)
 
+    runtime_settings_lock = threading.RLock()
+
+    def apply_runtime_settings(next_settings, *, scan_now=False):
+        nonlocal settings
+        with runtime_settings_lock:
+            settings = next_settings
+            store.settings = next_settings
+            scanner = app.extensions.get('redink_scanner')
+            if scanner is not None:
+                scanner.update_settings(next_settings, scan_now=scan_now)
+            app.config.update(
+                MAX_CONTENT_LENGTH=next_settings.maximum_request_bytes,
+                MAX_FORM_MEMORY_SIZE=next_settings.maximum_request_bytes,
+                SESSION_COOKIE_SECURE=next_settings.secure_cookies,
+                TRUSTED_HOSTS=list(next_settings.trusted_hosts),
+            )
+            auth_policy['passwordless'] = is_passwordless(next_settings)
+
+    app.extensions['redink_apply_settings'] = apply_runtime_settings
+
+    @app.get('/api/settings/listener')
+    @admin_required
+    def listener_state_api():
+        supervisor = app.extensions.get('redink_listener')
+        return jsonify(supervisor.status() if supervisor is not None else
+                       {'status': 'unmanaged', 'message': 'No production listener supervisor is active.'})
+
     @app.post('/api/settings')
     @admin_required
     def save_settings_api():
-        nonlocal settings
         check_csrf()
         try:
             data = request.get_json(silent=False)
             if not isinstance(data, dict):
                 raise ConfigError('Expected a JSON object.')
-            result = update_configuration(settings, data)
-            fresh = load_settings(settings.data_dir)
-            # Apply a consistent snapshot of import/publishing/billing/retention
-            # settings immediately; network listener/TLS still require restart.
-            live_settings, changes = apply_live_settings(settings, fresh, data)
-            if changes:
-                settings = live_settings
-                store.settings = settings
-                scanner = app.extensions.get('redink_scanner')
-                if scanner is not None:
-                    scanner.update_settings(settings, scan_now='imports' in data)
-            warnings = []
-            if 'imports' in data:
-                for name, roots in (('LogPath', settings.log_paths), ('LicenseCounter', settings.counter_paths)):
-                    for root in roots:
-                        if not root.exists():
-                            warnings.append(f'{name} source is not accessible: {root}. The scanner will retry when available.')
-            if 'publishing' in data:
-                folder = settings.config_directory
-                if not folder.is_dir():
-                    warnings.append(f'Publishing folder does not exist: {folder}. Create it and place the INI files there.')
+            with runtime_settings_lock:
+                supervisor = app.extensions.get('redink_listener')
+                if supervisor is not None and supervisor.is_pending():
+                    return jsonify(error='A listener update is in progress. Wait for its result before saving again.'), 409
+                previous_toml = (settings.data_dir / 'server.toml').read_text(encoding='utf-8')
+                result = update_configuration(settings, data)
+                try:
+                    fresh = load_settings(settings.data_dir)
+                    if fresh.host not in ('127.0.0.1', 'localhost', '::1') and not fresh.tls_enabled and not fresh.allow_insecure_remote:
+                        raise ConfigError('A remote listener requires HTTPS or explicit allow_insecure_remote=true.')
+                    if fresh.tls_enabled:
+                        from .tls import validate_tls
+                        validate_tls(fresh)
+                except Exception:
+                    restore_configuration(settings.data_dir, previous_toml)
+                    raise
+                # Scanner/publishing/billing/retention are live-safe. Security,
+                # binding and TLS changes are committed by the supervisor only
+                # after successful listener preparation; failure rolls back.
+                live_settings, changes = apply_live_settings(settings, fresh, data)
+                network_changed = any(getattr(fresh, field) != getattr(settings, field) for field in (
+                    'host', 'port', 'threads', 'trusted_hosts', 'secure_cookies',
+                    'allow_insecure_remote', 'tls_enabled', 'tls_certificate',
+                    'tls_private_key', 'tls_key_password_env', 'maximum_request_bytes'))
+                if network_changed and supervisor is not None:
+                    if not supervisor.reconfigure(fresh, previous_toml):
+                        restore_configuration(settings.data_dir, previous_toml)
+                        return jsonify(error='Listener update could not be scheduled; no configuration was changed.'), 409
+                    # Safe settings are also applied after a successful rebind.
+                    applied_now = []
+                    listener_update = 'pending'
+                    restart_required = False
+                elif network_changed:
+                    # Flask's test client has no active listening socket. Do not
+                    # claim the host/port has actually changed in that mode.
+                    apply_runtime_settings(live_settings, scan_now='imports' in data)
+                    applied_now = changes
+                    listener_update = 'unmanaged'
+                    restart_required = True
                 else:
-                    missing = [name for name in CONFIG_FILES if not (folder / name).is_file()]
-                    if missing:
-                        warnings.append('Publishing folder has no ' + ', '.join(missing) + ' yet.')
-            result.update(applied_now=changes, warnings=warnings,
-                          scan_scheduled=bool('imports' in data and app.extensions.get('redink_scanner') is not None),
-                          published_directory=str(settings.config_directory))
-            return jsonify(result)
+                    apply_runtime_settings(fresh, scan_now='imports' in data)
+                    applied_now = sorted(set(changes) | set(data.get('collection', {})))
+                    listener_update = 'not_needed'
+                    restart_required = False
+                active_for_warnings = fresh
+                warnings = []
+                if 'imports' in data:
+                    for name, roots in (('LogPath', active_for_warnings.log_paths), ('LicenseCounter', active_for_warnings.counter_paths)):
+                        for root in roots:
+                            if not root.exists():
+                                warnings.append(f'{name} source is not accessible: {root}. The scanner will retry when available.')
+                if 'publishing' in data:
+                    folder = active_for_warnings.config_directory
+                    if not folder.is_dir():
+                        warnings.append(f'Publishing folder does not exist: {folder}. Create it and place the INI files there.')
+                    else:
+                        missing = [name for name in CONFIG_FILES if not (folder / name).is_file()]
+                        if missing:
+                            warnings.append('Publishing folder has no ' + ', '.join(missing) + ' yet.')
+                result.update(restart_required=restart_required, listener_update=listener_update,
+                              applied_now=applied_now, warnings=warnings,
+                              scan_scheduled=bool('imports' in data and not network_changed and app.extensions.get('redink_scanner') is not None),
+                              published_directory=str(active_for_warnings.config_directory))
+                return jsonify(result)
         except (ConfigError, ValueError, OSError) as exc:
             return jsonify(error=str(exc)), 400
 

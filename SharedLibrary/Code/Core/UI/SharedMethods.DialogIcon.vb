@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SharedMethods.DialogIcon.vb
+' PURPOSE
+'   Creates and applies owned Windows Forms dialog icons with safe native HICON lifetime.
+'
+' KEY ARCHITECTURE
+'   • Ownership: Clone Icon.FromHandle before releasing the native HICON.
+'   • Lifecycle: ApplyStandardDialogIcon leases icons safely to Windows Forms.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 

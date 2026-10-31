@@ -1,5 +1,16 @@
 ' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.AutoPilot.PromptCoaching.Context.vb
+' PURPOSE
+'   Captures bounded, read-only parent-run evidence and authorized guidance for Inky request coaching.
+'
+' KEY ARCHITECTURE
+'   • Evidence: Builds bounded excerpts from the authorized parent-run context.
+'   • Trust: Documentation is supplemental and never authorizes or executes resources.
+' =============================================================================
+
 '
 ' Read-only, bounded evidence for request coaching. The host captures permissions
 ' and effective guidance from the actual parent run. Documentation is supplementary,
