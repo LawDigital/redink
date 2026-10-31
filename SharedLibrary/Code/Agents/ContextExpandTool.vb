@@ -5,6 +5,11 @@
 ' File: ContextExpandTool.vb
 ' Purpose: Model-driven retrieval of a window from a stored large tool result.
 '          Shared by Outlook and Word so both expose identical behavior.
+'
+' KEY ARCHITECTURE
+'   • Surface: ContextExpandTool (VB implementation).
+'   • Entry points/helpers: IsContextExpandTool, TryBuildCanonicalWindowKey,
+'     TryBuildCanonicalWindowKeyFromResponse.
 ' =============================================================================
 
 Option Strict On

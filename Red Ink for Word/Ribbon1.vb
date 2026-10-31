@@ -785,7 +785,7 @@ Public Class Ribbon1
     End Sub
 
     Private Sub RunEastereggCommand()
-        ExecuteLoggedCommand("Easteregg_Word invoked", Sub() Globals.ThisAddIn.EasterEgg())
+        ExecuteLoggedCommand("EasterEgg_Word invoked", Sub() Globals.ThisAddIn.EasterEgg())
     End Sub
 
     Private Sub RunTranscriptorCommand()
@@ -837,7 +837,7 @@ Public Class Ribbon1
     End Sub
 
     Private Sub RunBalloonMergePartCommand()
-        ExecuteLoggedCommand("BallooMergePart_Word invoked", Sub() Globals.ThisAddIn.BalloonMerge(False, True))
+        ExecuteLoggedCommand("BalloonMergePart_Word invoked", Sub() Globals.ThisAddIn.BalloonMerge(False, True))
     End Sub
 
     Private Sub RunBalloonMergeFullCommand()
@@ -1148,7 +1148,7 @@ Public Class Ribbon1
         RunInsertClipboardCommand()
     End Sub
 
-    Private Sub RI_BallooMergePart_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_BalloonMergePart.Click
+    Private Sub RI_BalloonMergePart_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_BalloonMergePart.Click
         RunBalloonMergePartCommand()
     End Sub
 

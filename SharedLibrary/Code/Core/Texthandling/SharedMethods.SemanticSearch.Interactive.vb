@@ -6,6 +6,11 @@
 ' Purpose: Provides optional WinForms profile selection and interactive semantic-
 '          index generation entry points. Agentic, service and batch builds may
 '          omit this file and use the silent APIs from CoreAndGenerator instead.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods (VB implementation).
+'   • Entry points/helpers: SelectSemanticSearchMetadataProfile,
+'     GenerateSemanticSearchIndexAsync, GenerateSemanticSearchIndexInteractiveAsync.
 ' =============================================================================
 
 Option Strict On

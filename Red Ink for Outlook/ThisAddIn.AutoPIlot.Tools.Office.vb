@@ -578,7 +578,7 @@ Partial Public Class ThisAddIn
                     context,
                     ct
                 ).ConfigureAwait(False)
-                Await EnsureUIThread().ConfigureAwait(False)
+                Await EnsureUIThread()
 
                 If templateAssignments.Count <> slidesArray.Count Then
                     Dim missingSlides As New List(Of String)()
@@ -13282,7 +13282,7 @@ Partial Public Class ThisAddIn
     '  TOOL EXECUTION: extract_excel_data
     ' ═══════════════════════════════════════════════════════════════════════════
 
-    Private Function ExecuteExtractExcelDataTool(toolCall As ToolCall, context As ToolExecutionContext) As ToolResponse
+    Private Async Function ExecuteExtractExcelDataTool(toolCall As ToolCall, context As ToolExecutionContext) As System.Threading.Tasks.Task(Of ToolResponse)
         Dim response As New ToolResponse() With {
             .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
         }
@@ -13305,7 +13305,7 @@ Partial Public Class ThisAddIn
             ApDashboardLog($"📊 Extracting Excel data: {fileName}", "step")
 
             ' Use the existing ExtractExcelText which handles interop
-            Dim text = ExtractExcelText(att.TempFilePath)
+            Dim text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractExcelText(att.TempFilePath)).ConfigureAwait(False)
 
             If String.IsNullOrWhiteSpace(text) OrElse text.StartsWith("Error") Then
                 response.Success = False

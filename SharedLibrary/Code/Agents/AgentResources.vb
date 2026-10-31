@@ -16,6 +16,11 @@
 '  - Lazy loading: Bodies and scripts are loaded on demand to keep startup fast.
 '  - Design guidance treats an explicitly user-selected source artifact as the format
 '    authority ahead of implicit/default repository designs.
+'
+' KEY ARCHITECTURE
+'   • Surface: AgentResourceBase, SkillDescriptor (VB implementation).
+'   • Entry points/helpers: LoadBody, GetLocalResourceBaseDirectories,
+'     GetCentralResourceBaseDirectories.
 ' =============================================================================
 
 Option Strict On

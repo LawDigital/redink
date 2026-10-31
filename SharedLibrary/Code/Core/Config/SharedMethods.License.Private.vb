@@ -148,6 +148,9 @@ Namespace SharedLibrary
         ''' differs from the stored version.
         ''' </remarks>
         Private Shared Function HandlePrivateReconfirmation(context As ISharedContext) As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() HandlePrivateReconfirmation(context), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
             Try
                 _currentLicenseState = LicenseState.PrivateReconfirmNeeded
 
@@ -249,6 +252,9 @@ Namespace SharedLibrary
         ''' <param name="context">Shared execution context used for UI.</param>
         ''' <returns><see langword="True"/> when a subsequent license flow succeeds; otherwise <see langword="False"/>.</returns>
         Private Shared Function HandleExpiredPrivateLicense(context As ISharedContext) As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() HandleExpiredPrivateLicense(context), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
             Try
                 Dim msg = $"Your Private License for {AN} has expired." & vbCrLf & vbCrLf &
                           "The Private License is valid for " & PrivateLicenseYears & " years from the version release date." & vbCrLf & vbCrLf &
@@ -352,6 +358,9 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <returns><see langword="True"/> when the user confirms; otherwise <see langword="False"/>.</returns>
         Private Shared Function ShowPrivateUseConfirmation() As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowPrivateUseConfirmation(), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
             Dim confirmationText As String =
                 $"The Private License for {AN} is free of charge and is exclusively " &
                 "for private, non-commercial use." & vbCrLf & vbCrLf &

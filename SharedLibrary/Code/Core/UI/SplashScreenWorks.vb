@@ -8,8 +8,8 @@
 '
 ' Architecture:
 '  - UI Composition: A `PictureBox` (logo) and `Label` (message) arranged side-by-side.
-'  - Countdown: `StartCountdown()` runs a background `Task` that delays in 1-second ticks and
-'    marshals UI updates to the UI thread via `Invoke` when required.
+'  - Countdown: an owner-thread WinForms timer uses a monotonic stopwatch.
+'    No worker Task, synchronous Invoke or late cross-thread update is created.
 '  - Message Updates: `UpdateMessage()` changes the label text and recalculates its size.
 '  - Cancellation: ESC cancels the countdown and raises `CancelRequested` before closing the form.
 '  - Window Interaction: Uses Win32 `ReleaseCapture`/`SendMessage` to allow dragging a borderless form.
@@ -32,7 +32,11 @@ Namespace SharedLibrary
         Private picLogo As System.Windows.Forms.PictureBox
         Private remainingSeconds As Integer
         Private baseText As String
-        Private countdownCts As System.Threading.CancellationTokenSource
+        Private countdownTimer As System.Windows.Forms.Timer
+        Private ReadOnly countdownClock As New System.Diagnostics.Stopwatch()
+        Private countdownDurationSeconds As System.Int32
+        Private ownedLogo As System.Drawing.Bitmap
+        Private ownedFont As System.Drawing.Font
 
         ''' <summary>
         ''' Raised when the user presses ESC while the splash screen has focus.
@@ -91,15 +95,16 @@ Namespace SharedLibrary
             Me.KeyPreview = True
 
             ' ─── Logo ─────────────────────────────────────────────────
+            ownedLogo = New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             picLogo = New System.Windows.Forms.PictureBox() With {
-        .Image = New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)),
+        .Image = ownedLogo,
         .SizeMode = System.Windows.Forms.PictureBoxSizeMode.Zoom
     }
             Me.Controls.Add(picLogo)
 
             ' ─── Label ───────────────────────────────────────────────
-            Dim stdFont As System.Drawing.Font =
-        New System.Drawing.Font("Segoe UI", 10.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+            ownedFont = New System.Drawing.Font("Segoe UI", 10.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+            Dim stdFont As System.Drawing.Font = ownedFont
             lblMessage = New System.Windows.Forms.Label() With {
         .Font = stdFont,
         .AutoSize = True,
@@ -136,7 +141,7 @@ Namespace SharedLibrary
             Me.ClientSize = New System.Drawing.Size(clientW, clientH)
 
             ' ─── ESC cancels ──────────────────────────────────────────
-            AddHandler Me.KeyDown, AddressOf OnKeyDown
+            AddHandler Me.KeyDown, AddressOf HandleKeyDown
 
             ' ─── Start countdown if needed ───────────────────────────
             If countdownSeconds > 0 Then
@@ -174,48 +179,77 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Starts (or restarts) the countdown task.
-        ''' Cancels any previously started countdown via `countdownCts`.
+        ''' Starts/restarts the timer on the form's existing owner UI thread.
         ''' </summary>
         Private Sub StartCountdown()
-            ' Cancel previous if running
-            countdownCts?.Cancel()
+            StopCountdown()
+            If remainingSeconds <= 0 OrElse Me.IsDisposed Then Return
+            If countdownTimer Is Nothing Then
+                countdownTimer = New System.Windows.Forms.Timer() With {.Interval = 100}
+                AddHandler countdownTimer.Tick, AddressOf OnCountdownTick
+            End If
+            countdownDurationSeconds = remainingSeconds
+            countdownClock.Restart()
+            countdownTimer.Start()
+        End Sub
 
-            countdownCts = New System.Threading.CancellationTokenSource()
-            Dim ct = countdownCts.Token
+        Private Sub OnCountdownTick(sender As System.Object, e As System.EventArgs)
+            If Me.IsDisposed OrElse Me.Disposing Then
+                StopCountdown()
+                Return
+            End If
+            Dim nextRemaining As System.Int32 = System.Math.Max(0,
+                CInt(System.Math.Ceiling(countdownDurationSeconds - countdownClock.Elapsed.TotalSeconds)))
+            If nextRemaining <> remainingSeconds Then
+                remainingSeconds = nextRemaining
+                UpdateMessage($"{baseText} {remainingSeconds}s")
+            End If
+            If remainingSeconds = 0 Then StopCountdown()
+        End Sub
 
-            System.Threading.Tasks.Task.Run(Async Function()
-                                                While remainingSeconds > 0 AndAlso Not ct.IsCancellationRequested
-                                                    Try
-                                                        Await System.Threading.Tasks.Task.Delay(1000, ct)
-                                                    Catch ex As System.Threading.Tasks.TaskCanceledException
-                                                        Exit While
-                                                    End Try
-
-                                                    remainingSeconds -= 1
-                                                    If remainingSeconds < 0 Then remainingSeconds = 0
-
-                                                    ' Update on UI thread
-                                                    If Not Me.IsDisposed Then
-                                                        If Me.InvokeRequired Then
-                                                            Me.Invoke(Sub() UpdateMessage($"{baseText} {remainingSeconds}s"))
-                                                        Else
-                                                            UpdateMessage($"{baseText} {remainingSeconds}s")
-                                                        End If
-                                                    End If
-                                                End While
-                                            End Function)
+        Private Sub StopCountdown()
+            If countdownTimer IsNot Nothing Then countdownTimer.Stop()
+            countdownClock.Stop()
         End Sub
 
         ''' <summary>
         ''' Handles ESC key press: cancels countdown, raises `CancelRequested`, and closes the form.
         ''' </summary>
-        Private Sub OnKeyDown(ByVal sender As Object, ByVal e As System.Windows.Forms.KeyEventArgs)
+        Private Sub HandleKeyDown(ByVal sender As Object, ByVal e As System.Windows.Forms.KeyEventArgs)
             If e.KeyCode = System.Windows.Forms.Keys.Escape Then
-                countdownCts?.Cancel()
+                StopCountdown()
                 RaiseEvent CancelRequested(Me, System.EventArgs.Empty)
                 Me.Close()
             End If
+        End Sub
+
+        ''' <summary>Disposes owned countdown and drawing resources on the form thread.</summary>
+        Protected Overrides Sub Dispose(disposing As System.Boolean)
+            Try
+                If disposing Then
+                    StopCountdown()
+                    If countdownTimer IsNot Nothing Then
+                        RemoveHandler countdownTimer.Tick, AddressOf OnCountdownTick
+                        countdownTimer.Dispose()
+                        countdownTimer = Nothing
+                    End If
+                End If
+            Finally
+                Try
+                    MyBase.Dispose(disposing)
+                Finally
+                    If disposing Then
+                        If ownedLogo IsNot Nothing Then
+                            ownedLogo.Dispose()
+                            ownedLogo = Nothing
+                        End If
+                        If ownedFont IsNot Nothing Then
+                            ownedFont.Dispose()
+                            ownedFont = Nothing
+                        End If
+                    End If
+                End Try
+            End Try
         End Sub
 
         ''' <summary>

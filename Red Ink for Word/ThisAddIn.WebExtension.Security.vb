@@ -14,6 +14,11 @@
 '     approved once by the user and then remembered where My.Settings is available.
 '   - Missing My.Settings entries retain approvals only in memory for the current
 '     Word process. Missing persistence never falls back to wildcard access.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: GetLocalHttpSecurity, LogLocalHttpSecurity,
+'     ReadLocalHttpSecuritySetting.
 ' =============================================================================
 
 Option Explicit On

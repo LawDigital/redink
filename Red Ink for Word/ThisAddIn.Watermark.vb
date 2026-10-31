@@ -7,6 +7,10 @@
 '          analysis, token statistics, and optional user-supplied source profiles.
 ' Target: .NET Framework 4.8 / VB.NET / VSTO
 ' Dependency: Microsoft.ML.Tokenizers
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, UniversalTextWatermarkDetector (host partial/UI).
+'   • Entry points/helpers: ShowWatermarkAnalysisWindow, Analyze, AnalyzeUnicode.
 ' =============================================================================
 
 Option Explicit On

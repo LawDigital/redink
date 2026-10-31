@@ -1717,26 +1717,31 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
-    Private Shared Function IsOutlookCommandCancellation(ex As System.Exception) As System.Boolean
-        If TypeOf ex Is System.OperationCanceledException Then Return True
+    Private Shared Function IsOutlookCommandCancellation(ex As System.Exception, Optional pureCausesOnly As System.Boolean = False) As System.Boolean
+        If TypeOf ex Is System.OperationCanceledException Then
+            Return Not pureCausesOnly OrElse ex.InnerException Is Nothing OrElse IsOutlookCommandCancellation(ex.InnerException, True)
+        End If
         Dim aggregate As System.AggregateException = TryCast(ex, System.AggregateException)
         If aggregate IsNot Nothing Then
             Dim nested As System.Collections.ObjectModel.ReadOnlyCollection(Of System.Exception) =
                 aggregate.Flatten().InnerExceptions
             If nested.Count = 0 Then Return False
             For Each candidate As System.Exception In nested
-                If Not IsOutlookCommandCancellation(candidate) Then Return False
+                If Not IsOutlookCommandCancellation(candidate, pureCausesOnly) Then Return False
             Next
             Return True
         End If
         Dim invoked As System.Reflection.TargetInvocationException =
             TryCast(ex, System.Reflection.TargetInvocationException)
         Return invoked IsNot Nothing AndAlso invoked.InnerException IsNot Nothing AndAlso
-            IsOutlookCommandCancellation(invoked.InnerException)
+            IsOutlookCommandCancellation(invoked.InnerException, pureCausesOnly)
     End Function
 
     Private Sub ReportOutlookCommandFailure(operation As System.String, ex As System.Exception)
-        Dim diagnostic As System.String = "Outlook command [" & operation & "]: " & ex.ToString()
+        Dim cancelled As System.Boolean = IsOutlookCommandCancellation(ex)
+        Dim normalCancellation As System.Boolean = cancelled AndAlso IsOutlookCommandCancellation(ex, pureCausesOnly:=True)
+        ' A cancellation caused by a real fault (e.g. unavailable progress UI) retains its full diagnosis.
+        Dim diagnostic As System.String = "Outlook command [" & operation & "]: " & If(normalCancellation, "cancelled_by_user", ex.ToString())
         System.Diagnostics.Debug.WriteLine(diagnostic)
         Try
             If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
@@ -1746,8 +1751,8 @@ Partial Public Class ThisAddIn
             System.Diagnostics.Debug.WriteLine("Outlook command logging failed: " & loggingFailure.ToString())
         End Try
 
-        ' An explicit Esc/caller cancellation is a normal completion path.
-        If IsOutlookCommandCancellation(ex) Then Return
+        ' Timeouts and mixed failures still reach the normal error boundary.
+        If cancelled Then Return
 
         Dim modelFailure As OutlookModelRequestException = TryCast(ex, OutlookModelRequestException)
         If modelFailure IsNot Nothing Then
@@ -1772,6 +1777,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Sub FreeStyle_InsertBefore(Command As String, Optional AskForPrompt As Boolean = False)
         Try
+            Await EnsureUIThread()
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
             Dim inspector As Inspector = ComRetry(Function() outlookApp.ActiveInspector())
 
@@ -1858,6 +1864,7 @@ Partial Public Class ThisAddIn
                 If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(OtherPrompt) Then
                     Dim archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
                         _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                    Await EnsureUIThread()
                     OtherPrompt = archivePrepared.CleanPrompt
                     archiveReplyContext = System.Environment.NewLine & archivePrepared.ContextText
                 End If
@@ -1870,12 +1877,15 @@ Partial Public Class ThisAddIn
 
                 ' Call LLM function with selected text
                 LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(InterpolateAtRuntime(SP_MailReply) & If(DoMyStyle, " " & MyStyleInsert, "") & archiveReplyContext, "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0))
+                Await EnsureUIThread()
             Else
                 LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0))
+                Await EnsureUIThread()
             End If
 
             If INI_PostCorrection <> "" Then
                 LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
+                Await EnsureUIThread()
             End If
 
             If String.IsNullOrWhiteSpace(LLMResult) Then
@@ -1940,6 +1950,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Sub Command_InsertAfter(ByVal SysCommand As String, Optional ByVal DoMarkup As Boolean = False, Optional KeepFormat As Boolean = False, Optional Inplace As Boolean = False, Optional MarkupMethod As Integer = 3)
         Try
+            Await EnsureUIThread()
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
             Dim inspector As Microsoft.Office.Interop.Outlook.Inspector = ComRetry(Function() outlookApp.ActiveInspector())
 
@@ -2057,11 +2068,13 @@ Partial Public Class ThisAddIn
 
             ' Call LLM function with selected text
             Dim LLMResult As String = Await AwaitOutlookModelRequestAsync(Function() LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & selectedTextForProcessing & "</TEXTTOPROCESS>", "", "", 0))
+            Await EnsureUIThread()
 
             LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If INI_PostCorrection <> "" Then
                 LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
+                Await EnsureUIThread()
             End If
 
             ' Remove horizontal whitespace (incl. NBSP) between real newline tokens (CRLF/CR/LF)
@@ -2270,6 +2283,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Sub FreeStyle_InsertAfter()
         Try
+            Await EnsureUIThread()
 
             Dim DoMarkup As Boolean = False
             Dim DoInplace As Boolean = False
@@ -2959,16 +2973,28 @@ SkipPromptWin:
                 Try
                     archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
                         _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                    Await EnsureUIThread()
                 Finally
-                    If saSplash.InvokeRequired Then
-                        saSplash.Invoke(Sub()
+                    Try
+                        If Not saSplash.IsDisposed Then
+                            If saSplash.InvokeRequired Then
+                                saSplash.BeginInvoke(New System.Action(
+                                    Sub()
+                                        If Not saSplash.IsDisposed Then
                                             saSplash.Close()
                                             saSplash.Dispose()
-                                        End Sub)
-                    Else
-                        saSplash.Close()
-                        saSplash.Dispose()
-                    End If
+                                        End If
+                                    End Sub))
+                            Else
+                                saSplash.Close()
+                                saSplash.Dispose()
+                            End If
+                        End If
+                    Catch ex As System.ObjectDisposedException
+                        ' The host/form already completed cleanup during cancellation.
+                    Catch ex As System.InvalidOperationException
+                        ' The owning UI dispatcher is already shutting down; never wait here.
+                    End Try
                 End Try
                 OtherPrompt = archivePrepared.CleanPrompt
                 If Not System.String.Equals(archivePrepared.Status, "ok", System.StringComparison.OrdinalIgnoreCase) AndAlso
@@ -3024,12 +3050,14 @@ SkipPromptWin:
                 SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
             End If
             LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject))
+            Await EnsureUIThread()
 
             If Not NoText Then
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
             End If
             If INI_PostCorrection <> "" Then
                 LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
+                Await EnsureUIThread()
             End If
 
             If DoMarkup AndAlso MarkupMethod = 4 AndAlso Not NoText Then
@@ -3254,6 +3282,7 @@ SkipPromptWin:
 
     Private Async Function InsertClipboard() As System.Threading.Tasks.Task
         Try
+            Await EnsureUIThread()
             If System.String.IsNullOrWhiteSpace(INI_APICall_Object) Then
                 SLib.ShowCustomMessageBox($"Your model ({INI_Model}) is not configured to process clipboard data (binary/object).")
                 Return
@@ -3272,6 +3301,7 @@ SkipPromptWin:
                 cancellationToken:=Nothing,
                 EnsureUI:=False
             )
+            Await EnsureUIThread()
 
             If String.IsNullOrWhiteSpace(result) Then Return
 
@@ -3290,6 +3320,7 @@ SkipPromptWin:
 
             If Not haveMail Then
                 Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
+                Await EnsureUIThread()
                 Return
             End If
 
@@ -3384,9 +3415,11 @@ SkipPromptWin:
                     Try : inspector.Display() : Catch : End Try
                 Else
                     Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
+                    Await EnsureUIThread()
                 End If
             Else
                 Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
+                Await EnsureUIThread()
             End If
 
             If wordEditor IsNot Nothing Then Marshal.ReleaseComObject(wordEditor) : wordEditor = Nothing

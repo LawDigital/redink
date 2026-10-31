@@ -557,6 +557,10 @@ Namespace SharedLibrary
         End Function
 
         Public Shared Sub ShowOfflineDomainLicenseGeneratorDialog()
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                RunOnStaThread(AddressOf ShowOfflineDomainLicenseGeneratorDialog, "Red Ink offline license", alwaysUseWorker:=True)
+                Return
+            End If
             Using form As New Form(), hints As New System.Windows.Forms.ToolTip() With {
                 .AutoPopDelay = 30000, .InitialDelay = 350, .ReshowDelay = 100, .ShowAlways = True}
                 form.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
@@ -583,8 +587,7 @@ Namespace SharedLibrary
                 form.AutoScroll = False
 
                 Try
-                    Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
-                    form.Icon = Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 

@@ -14,6 +14,10 @@
 '  - SubAgentLargeToolResponseExcerptChars = 8000 (excerpt size when compacted).
 '  - MaxLocalizableBlockedFinalChars = 1500 (host post-translation willing threshold).
 '  - MaxFallbackToolsListedInGuard = 6 (fallback tools listed in guard prompts).
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolingConstants (VB implementation).
+'   • Integration: Declares project types and compile-time metadata.
 ' =============================================================================
 
 

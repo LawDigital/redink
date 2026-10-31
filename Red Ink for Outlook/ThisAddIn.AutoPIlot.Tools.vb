@@ -1569,7 +1569,7 @@ Partial Public Class ThisAddIn
                 Case AP_Tool_CreatePdfFromText
                     response = ExecuteCreatePdfFromTextTool(toolCall, context)
                 Case AP_Tool_ExtractExcelData
-                    response = ExecuteExtractExcelDataTool(toolCall, context)
+                    response = Await ExecuteExtractExcelDataTool(toolCall, context)
                 Case AP_Tool_ExcelListLiveWorksheets
                     response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ExcelReadLiveRange
@@ -2143,7 +2143,10 @@ Partial Public Class ThisAddIn
         If Not extracted AndAlso (Not useMarkdown) AndAlso (ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles)) Then
             Try
                 Dim label As String = Nothing
-                extracted = TryExtractOfficeText(att.TempFilePath, text, label)
+                Dim officeRead = Await TryExtractOfficeTextAsync(att.TempFilePath).ConfigureAwait(False)
+                extracted = officeRead.Item1
+                text = officeRead.Item2
+                label = officeRead.Item3
             Catch
             End Try
         End If
@@ -2152,7 +2155,10 @@ Partial Public Class ThisAddIn
         If Not extracted AndAlso (Not useMarkdown) Then
             Try
                 Dim label As String = Nothing
-                extracted = TryExtractTextLike(att.TempFilePath, text, label)
+                Dim textRead = Await TryExtractTextLikeAsync(att.TempFilePath).ConfigureAwait(False)
+                extracted = textRead.Item1
+                text = textRead.Item2
+                label = textRead.Item3
             Catch
             End Try
         End If
@@ -2195,7 +2201,10 @@ Partial Public Class ThisAddIn
         Dim extracted As Boolean = False
 
         Try
-            extracted = TryExtractOfficeText(att.TempFilePath, text, label)
+            Dim officeRead = Await TryExtractOfficeTextAsync(att.TempFilePath).ConfigureAwait(False)
+            extracted = officeRead.Item1
+            text = officeRead.Item2
+            label = officeRead.Item3
         Catch
         End Try
 
@@ -2204,10 +2213,10 @@ Partial Public Class ThisAddIn
             Try
                 Select Case ext
                     Case ".xlsx", ".xls"
-                        text = ExtractExcelText(att.TempFilePath)
+                        text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractExcelText(att.TempFilePath)).ConfigureAwait(False)
                         extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                     Case ".pptx"
-                        text = ExtractPowerPointText(att.TempFilePath)
+                        text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractPowerPointText(att.TempFilePath)).ConfigureAwait(False)
                         extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                 End Select
             Catch
@@ -2216,7 +2225,10 @@ Partial Public Class ThisAddIn
 
         If Not extracted Then
             Try
-                extracted = TryExtractTextLike(att.TempFilePath, text, label)
+                Dim textRead = Await TryExtractTextLikeAsync(att.TempFilePath).ConfigureAwait(False)
+                extracted = textRead.Item1
+                text = textRead.Item2
+                label = textRead.Item3
             Catch
             End Try
         End If

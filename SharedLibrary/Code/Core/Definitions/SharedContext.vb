@@ -353,6 +353,7 @@ Namespace SharedLibrary
             Property INI_NoHelperDownload As Boolean
             Property INI_LicenseCounterPath As String
             Property INI_LicenseCounterMethod As String
+            Property INI_LicenseCounterIntervall As System.Int32
             Property INI_LicenseCounterAnon As Boolean
 
             ' Master switch for INI update mechanism
@@ -778,6 +779,15 @@ Namespace SharedLibrary
         Public Property INI_NoHelperDownload As Boolean Implements ISharedContext.INI_NoHelperDownload
         Public Property INI_LicenseCounterPath As String Implements ISharedContext.INI_LicenseCounterPath
         Public Property INI_LicenseCounterMethod As String Implements ISharedContext.INI_LicenseCounterMethod
+        Private _iniLicenseCounterIntervall As System.Int32 = SharedMethods.DEFAULT_LICENSECOUNTERINTERVALL
+        Public Property INI_LicenseCounterIntervall As System.Int32 Implements ISharedContext.INI_LicenseCounterIntervall
+            Get
+                Return _iniLicenseCounterIntervall
+            End Get
+            Set(value As System.Int32)
+                _iniLicenseCounterIntervall = SharedMethods.ParseLicenseCounterIntervall(value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End Set
+        End Property
         Public Property INI_LicenseCounterAnon As Boolean Implements ISharedContext.INI_LicenseCounterAnon
         Public Property INI_UpdateIni As Boolean Implements ISharedContext.INI_UpdateIni
         Public Property INI_UpdateIniClients As String Implements ISharedContext.INI_UpdateIniClients

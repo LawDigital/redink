@@ -1,5 +1,16 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SelectorGrouping.vb
+' PURPOSE
+'   Defines optional group layouts, selection state and central/local presentation stores.
+'
+' KEY ARCHITECTURE
+'   • Data: Validates group definitions and preserves stable item selections.
+'   • Precedence: Personal layouts replace central layouts without changing permissions.
+' =============================================================================
+
 '
 ' Optional selector presentation metadata. No tool availability, permission, check-state,
 ' prompt or execution semantics belong in this file. Local files replace (not merge)

@@ -40,16 +40,38 @@ Namespace SharedLibrary
         ''' <param name="initialLabel">The initial status label text provided to the progress form.</param>
 
         Public Sub ShowProgressBarInSeparateThread(headerText As String, initialLabel As String)
-            Dim t As New Thread(Sub()
-                                    ' Create and show the progress form modally.
-                                    Dim progressForm As New ProgressForm(headerText, initialLabel)
-                                    Dim __safeDialogOwner46 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
-                                    If __safeDialogOwner46 IsNot Nothing Then
-                                        progressForm.ShowDialog(__safeDialogOwner46)
-                                    Else
-                                        progressForm.ShowDialog()
-                                    End If
-                                End Sub)
+            Dim t As New Thread(
+                Sub()
+                    Dim workerContext As System.Windows.Forms.WindowsFormsSynchronizationContext = Nothing
+                    Try
+                        SynchronizationContext.SetSynchronizationContext(Nothing)
+                        Using progressForm As New ProgressForm(headerText, initialLabel)
+                            workerContext = TryCast(SynchronizationContext.Current, System.Windows.Forms.WindowsFormsSynchronizationContext)
+                            Dim safeOwner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
+                            If safeOwner IsNot Nothing Then
+                                progressForm.ShowDialog(safeOwner)
+                            Else
+                                progressForm.ShowDialog()
+                            End If
+                        End Using
+                    Catch ex As System.Exception
+                        CancelOperation = True
+                        System.Diagnostics.Debug.WriteLine("Progress dialog failed: " & ex.ToString())
+                    Finally
+                        If workerContext Is Nothing Then workerContext = TryCast(SynchronizationContext.Current, System.Windows.Forms.WindowsFormsSynchronizationContext)
+                        Try
+                            System.Windows.Forms.Application.ExitThread()
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Progress thread cleanup failed: " & ex.ToString())
+                        Finally
+                            Try
+                                If workerContext IsNot Nothing Then workerContext.Dispose()
+                            Finally
+                                SynchronizationContext.SetSynchronizationContext(Nothing)
+                            End Try
+                        End Try
+                    End Try
+                End Sub)
             t.SetApartmentState(ApartmentState.STA)
             t.IsBackground = True
             t.Start()

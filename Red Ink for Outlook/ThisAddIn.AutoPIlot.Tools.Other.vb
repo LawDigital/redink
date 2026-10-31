@@ -75,6 +75,11 @@
 '       * Image and audio generation only proceed if alternate models are
 '         configured; otherwise, graceful error messages are returned.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: ExecuteGenerateImageTool, ExecuteWebGroundingTool,
+'     ExecuteDescribeBinaryTool.
 ' =============================================================================
 
 
@@ -986,20 +991,26 @@ Partial Public Class ThisAddIn
                         Dim text As String = Nothing
                         Dim label As String = Nothing
                         Try
-                            If TryExtractOfficeText(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                            Dim officeRead = Await TryExtractOfficeTextAsync(filePath).ConfigureAwait(False)
+                            text = officeRead.Item2
+                            label = officeRead.Item3
+                            If officeRead.Item1 AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
                         Catch : End Try
                         Try
                             Dim ext = Path.GetExtension(filePath).ToLowerInvariant()
                             If ext = ".xlsx" OrElse ext = ".xls" Then
-                                text = ExtractExcelText(filePath)
+                                text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractExcelText(filePath)).ConfigureAwait(False)
                                 If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
                             ElseIf ext = ".pptx" Then
-                                text = ExtractPowerPointText(filePath)
+                                text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractPowerPointText(filePath)).ConfigureAwait(False)
                                 If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
                             End If
                         Catch : End Try
                         Try
-                            If TryExtractTextLike(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                            Dim textRead = Await TryExtractTextLikeAsync(filePath).ConfigureAwait(False)
+                            text = textRead.Item2
+                            label = textRead.Item3
+                            If textRead.Item1 AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
                         Catch : End Try
                         If Path.GetExtension(filePath).ToLowerInvariant() = ".pdf" Then
                             Try

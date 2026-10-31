@@ -12,6 +12,11 @@
 '  - Body must parse as JSON object with string "status" field.
 '  - Allowed status values: complete, blocked, continue (else => Invalid).
 '  - Returns TaskStatusFooter with Kind, Reason, RawJson, position indices.
+'
+' KEY ARCHITECTURE
+'   • Surface: TaskStatusFooter, TaskStatusFooterParser (VB implementation).
+'   • Entry points/helpers: LocateTrailingEnvelope, LocateSingleTrailingEnvelope,
+'     BuildEnvelopeLocation.
 ' =============================================================================
 
 

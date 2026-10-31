@@ -18,6 +18,10 @@
 '  - workspace_make_dir: create a folder in workspace.
 '  - workspace_extract_text / workspace_extract_text_many: extract readable text
 '    from supported file formats (PDF, Word, Excel, etc.).
+'
+' KEY ARCHITECTURE
+'   • Surface: WorkspaceTools, ToolArgumentNormalizationResult (VB implementation).
+'   • Entry points/helpers: IsBinaryWorkspaceExtension, SetActive, IsWorkspaceTool.
 ' =============================================================================
 
 Option Strict On

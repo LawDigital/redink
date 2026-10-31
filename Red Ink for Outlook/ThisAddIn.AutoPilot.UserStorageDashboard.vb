@@ -17,6 +17,11 @@
 '   - Delete All Files: Deletes all files from the selected user's home.
 '   - Delete User:    Deletes the entire user directory (memory + all files).
 '   - Refresh:        Reloads the user list.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: ShowUserStorageDashboard, CloseUserStorageDashboard,
+'     CreateUserStorageDashboardForm.
 ' =============================================================================
 
 Option Explicit On
@@ -75,8 +80,7 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            frm.Icon = Drawing.Icon.FromHandle(
-                (New Drawing.Bitmap(GetLogoBitmap(LogoType.Standard))).GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(frm)
         Catch
         End Try
 

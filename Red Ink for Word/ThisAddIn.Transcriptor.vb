@@ -266,8 +266,7 @@ Partial Public Class ThisAddIn
             Me.Controls.Add(root)
 
             Try
-                Dim bmp As New Bitmap(SLib.GetLogoBitmap(SLib.LogoType.Standard))
-                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
         End Sub

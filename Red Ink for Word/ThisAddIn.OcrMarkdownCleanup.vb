@@ -1,4 +1,16 @@
 ﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.OcrMarkdownCleanup.vb
+' PURPOSE
+'   Offers optional OCR-to-Markdown cleanup modes without overwriting original documents.
+'
+' KEY ARCHITECTURE
+'   • UI: Selects optional cleanup levels for OCR-derived Markdown preparation.
+'   • Safety: Processing never overwrites the original source document or file.
+' =============================================================================
+
 ' Explicit OCR cleanup entry points. Source selection/files are never overwritten.
 Option Explicit On
 Option Strict On

@@ -409,6 +409,9 @@ Namespace SharedLibrary
         ''' <param name="context">Shared execution context.</param>
         ''' <returns><see langword="True"/> when a license flow succeeds; otherwise <see langword="False"/>.</returns>
         Private Shared Function ShowLicenseTypeSelectionDialog(context As ISharedContext) As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowLicenseTypeSelectionDialog(context), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
 
             RequireInteractiveExecution("license_selection")
             ' Check if private license is still available for this version
@@ -433,8 +436,7 @@ Namespace SharedLibrary
                 form.TopMost = True
 
                 Try
-                    Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    form.Icon = Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 
@@ -707,6 +709,9 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <returns><see langword="True"/> when user confirms; otherwise <see langword="False"/>.</returns>
         Private Shared Function ShowTestingProComplianceConfirmation() As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowTestingProComplianceConfirmation(), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
             Try
                 Dim msg = TestingProComplianceMessage & vbCrLf & vbCrLf &
                           "Do you confirm that you are using this software in compliance with these license terms?"

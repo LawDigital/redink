@@ -16,6 +16,10 @@
 '              unattended and reply by e-mail; blocking there would stall the
 '              whole system. Hosts arm InteractivityProvider so Execute returns
 '              a non-blocking result in those contexts.
+'
+' KEY ARCHITECTURE
+'   • Surface: AskUserOption, AskUserRequest (VB implementation).
+'   • Entry points/helpers: IsAskUserTool, IsInteractive, Build.
 ' =============================================================================
 
 Option Strict On

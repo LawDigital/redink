@@ -10,6 +10,10 @@
 '
 ' Wire-up: From any ribbon button (or Immediate window), call:
 '              M365SearchTest.Show(_context)
+'
+' KEY ARCHITECTURE
+'   • Surface: M365SearchTestForm, AiResolvedMail (host partial/UI).
+'   • Entry points/helpers: StableKey, OnHandleCreated, OnHandleDestroyed.
 ' =============================================================================
 
 Option Explicit On
@@ -262,8 +266,7 @@ Public Class M365SearchTestForm
 
         ' Red Ink logo as window icon.
         Try
-            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

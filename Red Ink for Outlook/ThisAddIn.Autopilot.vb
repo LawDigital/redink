@@ -396,6 +396,10 @@ Partial Public Class ThisAddIn
     ''' Add or remove IDs here to control which Pro products grant access.
     ''' A Private license always grants access regardless of product ID.
     ''' </summary>
+    ' 1702 permits AutoPilot; 2150 and 3376 remain standard add-in products only.
+    ' Keep the issued product IDs unchanged for API validation and signed offline keys.
+    Private Shared ReadOnly AP_AddInOnlyProProductIds As System.String() = {"2150", "3376"}
+
     Private Shared ReadOnly AP_PermittedProProductIds As String() = {
         "1702",
         "1727",
@@ -417,11 +421,12 @@ Partial Public Class ThisAddIn
         "3184"
     }
 
-    '  1702 Pro Special -- NO (Temporary yes)
+    '  1702 Pro Special -- YES (AutoPilot permitted with valid Pro licence)
     '  1727 Pro Test Tec
     '  1827 Pro Test
     '  2040 Pro Support
-    '  2150 Pro Special 2 -- NO
+    '  2150 Pro Special 2 -- NO (standard add-ins only)
+    '  3376 Pro Special 3 -- NO (standard add-ins only)
     '  1693 Pro -- NO
     '  2056
     '  2257-2263, 3141-3146 Red Ink AutoPilot
@@ -1868,7 +1873,8 @@ Partial Public Class ThisAddIn
         candidates As List(Of CatchUpCandidate),
         lastProcessed As DateTime) As System.Threading.Tasks.Task(Of List(Of String))
 
-        Dim completion As New System.Threading.Tasks.TaskCompletionSource(Of List(Of String))()
+        Dim completion As New System.Threading.Tasks.TaskCompletionSource(Of List(Of String))(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim hostExitToken As System.Threading.CancellationToken = HostWindowLifetimeToken
 
         ' Everything below is plain managed data. Do not pass Outlook COM objects
         ' to the dialog thread.
@@ -1916,45 +1922,61 @@ Partial Public Class ThisAddIn
         ' Outlook's own UI/STA thread is NOT blocked by this dialog, which allows
         ' NewMailEx and SwitchToUi processing to continue while the window is open.
         Dim dialogThread As New System.Threading.Thread(
-        Sub()
-            Try
-                Using dlg As New SharedLibrary.SharedLibrary.MultiModelSelectorForm(
-                    items,
-                    Nothing,
-                    title:=dialogTitle,
-                    resetChecked:=False,
-                    preselectMany:=preselectLabels,
-                    instruction:=instructionText)
+            Sub()
+                Dim selectedEntryIds As List(Of String) = Nothing
+                Dim failure As System.Exception = Nothing
+                Try
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                    If Not hostExitToken.IsCancellationRequested Then
+                        Using dlg As New SharedLibrary.SharedLibrary.MultiModelSelectorForm(
+                            items,
+                            Nothing,
+                            title:=dialogTitle,
+                            resetChecked:=False,
+                            preselectMany:=preselectLabels,
+                            instruction:=instructionText)
 
-                    dlg.StartPosition = FormStartPosition.CenterScreen
-
-                    Dim __safeDialogOwner1641 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
-                    Dim result As DialogResult = If(__safeDialogOwner1641 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner1641), dlg.ShowDialog())
-
-                    If result = DialogResult.OK Then
-                        Dim selected = dlg.SelectedModels
-
-                        If selected IsNot Nothing AndAlso
-                           selected.Count > 0 Then
-
-                            Dim selectedEntryIds As List(Of String) =
-                                selected.
-                                Select(Function(m) m.Model).
-                                ToList()
-
-                            completion.TrySetResult(selectedEntryIds)
-                        Else
-                            completion.TrySetResult(New List(Of String)())
-                        End If
-                    Else
-                        completion.TrySetResult(Nothing)
+                            dlg.StartPosition = FormStartPosition.CenterScreen
+                            Using closeTimer As New System.Windows.Forms.Timer() With {.Interval = 100}
+                                AddHandler closeTimer.Tick,
+                                    Sub()
+                                        If hostExitToken.IsCancellationRequested Then
+                                            closeTimer.Stop()
+                                            dlg.Close()
+                                        End If
+                                    End Sub
+                                closeTimer.Start()
+                                Dim safeOwner As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                Dim result As DialogResult = If(safeOwner IsNot Nothing, dlg.ShowDialog(safeOwner), dlg.ShowDialog())
+                                If result = DialogResult.OK AndAlso Not hostExitToken.IsCancellationRequested Then
+                                    Dim selected = dlg.SelectedModels
+                                    selectedEntryIds = If(selected Is Nothing, New List(Of String)(), selected.Select(Function(model) model.Model).ToList())
+                                End If
+                            End Using
+                        End Using
                     End If
-                End Using
-
-            Catch ex As System.Exception
-                completion.TrySetException(ex)
-            End Try
-        End Sub)
+                Catch ex As System.Exception
+                    failure = ex
+                Finally
+                    Dim workerContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                        TryCast(System.Threading.SynchronizationContext.Current, System.Windows.Forms.WindowsFormsSynchronizationContext)
+                    Try
+                        System.Windows.Forms.Application.ExitThread()
+                        If workerContext IsNot Nothing Then workerContext.Dispose()
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("Catch-up dialog context cleanup: " & ex.Message)
+                    Finally
+                        System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                    End Try
+                End Try
+                ' Publish after disposing the complete dialog lifetime. Awaiters never
+                ' execute inline inside this dedicated dialog worker's cleanup.
+                If failure IsNot Nothing Then
+                    completion.TrySetException(failure)
+                Else
+                    completion.TrySetResult(selectedEntryIds)
+                End If
+            End Sub)
 
         dialogThread.IsBackground = True
         dialogThread.Name = "AutoPilot Catch-Up Dialog"
@@ -2613,6 +2635,9 @@ Partial Public Class ThisAddIn
                 ' Pro license: only if the product ID is in the permitted list
                 Dim productId As String = StoredProductId
                 If String.IsNullOrWhiteSpace(productId) Then Return False
+                For Each addInOnly As System.String In AP_AddInOnlyProProductIds
+                    If System.String.Equals(productId, addInOnly, System.StringComparison.OrdinalIgnoreCase) Then Return False
+                Next
                 For Each permitted In AP_PermittedProProductIds
                     If productId.Equals(permitted, StringComparison.OrdinalIgnoreCase) Then
                         Return True

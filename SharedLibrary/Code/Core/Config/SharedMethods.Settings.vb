@@ -108,8 +108,7 @@ Namespace SharedLibrary
             settingsForm.ShowInTaskbar = False
             settingsForm.TopMost = True
 
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(settingsForm)
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             settingsForm.Font = standardFont
@@ -1056,8 +1055,7 @@ Namespace SharedLibrary
                 passwordForm.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
 
                 Try
-                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    passwordForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(passwordForm)
                 Catch
                 End Try
 
@@ -2096,6 +2094,8 @@ Namespace SharedLibrary
                     Return context.INI_LicenseCounterPath
                 Case "LicenseCounterMethod"
                     Return context.INI_LicenseCounterMethod
+                Case "LicenseCounterIntervall"
+                    Return context.INI_LicenseCounterIntervall.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 Case "LicenseCounterAnon"
                     Return context.INI_LicenseCounterAnon.ToString()
                 Case "AutoPilot"
@@ -2594,6 +2594,8 @@ Namespace SharedLibrary
                     context.INI_LicenseCounterPath = value
                 Case "LicenseCounterMethod"
                     context.INI_LicenseCounterMethod = value
+                Case "LicenseCounterIntervall"
+                    context.INI_LicenseCounterIntervall = ParseLicenseCounterIntervall(value)
                 Case "LicenseCounterAnon"
                     context.INI_LicenseCounterAnon = Boolean.Parse(value)
                 Case "AutoPilot"
@@ -3147,6 +3149,7 @@ Namespace SharedLibrary
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
                     {"LicenseCounterPath", context.INI_LicenseCounterPath},
                     {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
+                    {"LicenseCounterIntervall", context.INI_LicenseCounterIntervall.ToString(System.Globalization.CultureInfo.InvariantCulture)},
                     {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
@@ -3501,6 +3504,7 @@ Namespace SharedLibrary
                 {"SP_Assemble_Execute", Default_SP_Assemble_Execute},
                 {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize},
                 {"LicenseCounterMethod", DEFAULT_LICENSECOUNTERMETHOD},
+                {"LicenseCounterIntervall", DEFAULT_LICENSECOUNTERINTERVALL},
                 {"LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON},
                 {"SemanticArchiveCatalogPathLocal", DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL},
                 {"SemanticArchiveCatalogLibraryPath", DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH},
@@ -3773,6 +3777,7 @@ Namespace SharedLibrary
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
                     {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
                     {"LicenseCounterPath", context.INI_LicenseCounterPath},
+                    {"LicenseCounterIntervall", context.INI_LicenseCounterIntervall.ToString(System.Globalization.CultureInfo.InvariantCulture)},
                     {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
                     {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
                     {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow}
@@ -3958,8 +3963,7 @@ Namespace SharedLibrary
 
             ' Icon / logo
             Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -4782,6 +4786,7 @@ Namespace SharedLibrary
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
             variableValues.Add("LicenseCounterPath", context.INI_LicenseCounterPath)
             variableValues.Add("LicenseCounterMethod", context.INI_LicenseCounterMethod)
+            variableValues.Add("LicenseCounterIntervall", context.INI_LicenseCounterIntervall)
             variableValues.Add("LicenseCounterAnon", context.INI_LicenseCounterAnon)
             variableValues.Add("AutoPilot", context.INI_AutoPilot)
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
@@ -5099,6 +5104,7 @@ Namespace SharedLibrary
                     If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
                     If updatedValues.ContainsKey("LicenseCounterPath") Then context.INI_LicenseCounterPath = CStr(updatedValues("LicenseCounterPath"))
                     If updatedValues.ContainsKey("LicenseCounterMethod") Then context.INI_LicenseCounterMethod = CStr(updatedValues("LicenseCounterMethod"))
+                    If updatedValues.ContainsKey("LicenseCounterIntervall") Then context.INI_LicenseCounterIntervall = ParseLicenseCounterIntervall(System.Convert.ToString(updatedValues("LicenseCounterIntervall"), System.Globalization.CultureInfo.InvariantCulture))
                     If updatedValues.ContainsKey("LicenseCounterAnon") Then context.INI_LicenseCounterAnon = CBool(updatedValues("LicenseCounterAnon"))
                     If updatedValues.ContainsKey("InkyMemoryCap") Then context.INI_InkyMemoryCap = CInt(updatedValues("InkyMemoryCap"))
                     If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))

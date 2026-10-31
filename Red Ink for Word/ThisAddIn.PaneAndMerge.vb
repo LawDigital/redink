@@ -129,12 +129,15 @@ Partial Public Class ThisAddIn
         ByVal selectWholeParagraph As Boolean, Silent As Boolean) As System.Threading.Tasks.Task
 
         Try
+            Await EnsureUIThread()
             Dim context As BalloonMergeContext = Await CaptureBalloonMergeContextAsync(Globals.ThisAddIn.Application.Selection, selectWholeParagraph)
+            Await EnsureUIThread()
             If context Is Nothing Then
                 ShowCustomMessageBox("Select a comment, or place the cursor in the text that the comment refers to.", "Inky - Apply Comment")
                 Return
             End If
             If Not Await ApplyBalloonMergeContextAsync(context, Silent) Then Return
+            Await EnsureUIThread()
         Catch ex As System.Exception
             ReportWordCommandFailure("ApplyComment", ex, "Inky could not apply this comment. Please select the comment again and retry.")
         End Try
@@ -152,11 +155,13 @@ Partial Public Class ThisAddIn
 
     Private Async Function CaptureBalloonMergeContextAsync(selection As Microsoft.Office.Interop.Word.Selection,
                                                 selectWholeParagraph As System.Boolean) As System.Threading.Tasks.Task(Of BalloonMergeContext)
+        Await EnsureUIThread()
         If selection Is Nothing Then Return Nothing
 
         ' Capture the modern UI before reading Comment.Range (which can move Word
         ' out of its modern comments view). This await never blocks Office's STA.
         Dim evidence As WordCommentSelectionTracker.Evidence = Await CaptureCommentSelectionEvidenceAsync()
+        Await EnsureUIThread()
 
         ' Word.Selection is live. Capture origin, coordinates and text BEFORE inspecting comments
         ' or activating ranges; later UI/COM state must not become the instruction source.
@@ -429,6 +434,7 @@ Partial Public Class ThisAddIn
     Private Async Function ApplyBalloonMergeContextAsync(context As BalloonMergeContext,
                                                         Silent As System.Boolean,
                                                         Optional onDocumentWriteback As System.Action(Of Microsoft.Office.Interop.Word.Range) = Nothing) As System.Threading.Tasks.Task(Of System.Boolean)
+        Await EnsureUIThread()
         Dim targetRange As Microsoft.Office.Interop.Word.Range = context.TargetRange.Duplicate
         Dim newtext As System.String = context.FullCommentText
         Dim instructionSource As System.String = "full_comment"
@@ -519,6 +525,7 @@ Partial Public Class ThisAddIn
             False,
             INI_KeepFormatCap,
             onDocumentWriteback:=onDocumentWriteback)
+        Await EnsureUIThread()
 
         Return True
     End Function

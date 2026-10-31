@@ -18,6 +18,11 @@
 '  - E-mail reports are rendered deterministically by the host and never contain
 '    raw log excerpts or raw log files.
 '  - Foreground AutoPilot work cancels idle diagnostics immediately.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, AutoPilotLogDiagnosticRunBundle (host partial/UI).
+'   • Entry points/helpers: ToPromptJson, GetAutoPilotLogDiagnosticTopicPolicyPath,
+'     InitializeAutoPilotLogDiagnosticTopicPolicy.
 ' =============================================================================
 
 Option Explicit On

@@ -16,6 +16,10 @@
 '  - Permissions: AllowRead, AllowWrite, AllowMoveCopyRename, AllowDelete.
 '  - PersistUntilRevoked: survives host restarts until user clears it.
 '  - IncludeHiddenSystem: whether hidden/system files are visible.
+'
+' KEY ARCHITECTURE
+'   • Surface: WorkspaceState, WorkspaceStore (VB implementation).
+'   • Entry points/helpers: ResolveDir, FileFor, Load.
 ' =============================================================================
 
 Option Strict On

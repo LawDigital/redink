@@ -27,6 +27,11 @@
 ' External dependencies:
 '  - `SharedMethods.InputParameter` and `ShowCustomVariableInputForm` (UI prompting)
 '  - `AN` (used in the UI caption text)
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods (VB implementation).
+'   • Entry points/helpers: ProcessParameterPlaceholders, SplitOptionsRespectingAngles,
+'     JsonEscape.
 ' =============================================================================
 
 Option Strict On

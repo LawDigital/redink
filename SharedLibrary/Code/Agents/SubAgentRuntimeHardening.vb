@@ -17,6 +17,10 @@
 '  - Result (JToken: object, array, or string).
 '  - ResultKind (envelope, json_object, json_array, text, error).
 '  - Error envelope (when IsError=true).
+'
+' KEY ARCHITECTURE
+'   • Surface: SubAgentRuntimeHardening, NormalizedEnvelope (VB implementation).
+'   • Entry points/helpers: GetErrorCode, ToJObject, ToJson.
 ' =============================================================================
 
 Option Strict On

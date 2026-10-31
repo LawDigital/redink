@@ -32,6 +32,11 @@
 '              caller blocks on Join. That leaves the host stuck disabled ("invisible"
 '              blocking window; clicks only ding) and can deadlock. The dialog instead
 '              stays reachable via TopMost and cursor-screen positioning.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, AskUserMarkdownRun (VB implementation).
+'   • Entry points/helpers: ShowAskUserDialog, ShowAskUserDialogCore,
+'     ProtectAskUserQuestionWindowsPathsForMarkdown.
 ' =============================================================================
 
 Option Strict On
@@ -92,12 +97,29 @@ Namespace SharedLibrary
             Dim uiThread As New System.Threading.Thread(
                 Sub()
                     Try
+                        System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
                         result = ShowAskUserDialogCore(
                             request,
                             ownerHandleForUiThread
                         )
                     Catch ex As System.Exception
                         uiError = ex
+                    Finally
+                        Dim workerContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                            TryCast(System.Threading.SynchronizationContext.Current, System.Windows.Forms.WindowsFormsSynchronizationContext)
+                        Try
+                            System.Windows.Forms.Application.ExitThread()
+                        Catch ex As System.Exception
+                            If uiError Is Nothing Then uiError = ex
+                        Finally
+                            Try
+                                If workerContext IsNot Nothing Then workerContext.Dispose()
+                            Catch ex As System.Exception
+                                If uiError Is Nothing Then uiError = ex
+                            Finally
+                                System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                            End Try
+                        End Try
                     End Try
                 End Sub)
 
@@ -184,16 +206,10 @@ Namespace SharedLibrary
                     inputForm.ClientSize = New System.Drawing.Size(760, 600)
 
                     Try
-                        Dim bmp As New System.Drawing.Bitmap(
-                            SharedMethods.GetLogoBitmap(
-                                SharedMethods.LogoType.Standard
-                            )
-                        )
-                        inputForm.Icon =
-                            System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                        SharedMethods.ApplyStandardDialogIcon(inputForm)
                     Catch ex As System.Exception
-                        ' Keep the dialog usable even if the application icon
-                        ' cannot be obtained.
+                        ' Branding failure must not discard the user's pending question.
+                        System.Diagnostics.Trace.TraceWarning("[DialogIcon] ask_user: retaining default icon ({0}).", ex.ToString())
                     End Try
 
                     Dim hasOptions As Boolean =

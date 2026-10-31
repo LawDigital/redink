@@ -1,4 +1,16 @@
 ﻿' Part of Red Ink / SharedLibrary.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: CollectionAnalysisService.vb
+' PURPOSE
+'   Runs collection-wide evidence analysis independently of the Office host.
+'
+' KEY ARCHITECTURE
+'   • Core: Performs collection-wide source analysis without Office host dependencies.
+'   • Integrity: Evidence is treated as data; job-scoped checkpoints are validated.
+' =============================================================================
+
 ' Collection-wide, evidence-based analysis. No Office/Excel/Outlook dependencies.
 ' All source material is data, never instructions. Checkpoints are job-scoped and validated.
 Option Strict On

@@ -1,4 +1,17 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: SubAgentLogScope.vb
+' PURPOSE
+'   Maintains nested, async-flow-local sub-agent log identities without altering workflow state.
+'
+' KEY ARCHITECTURE
+'   • Identity: AsyncLocal immutable frames label nested agent logs by logical flow.
+'   • Lifecycle: Enter and Dispose restore the parent scope without touching workflow state.
+' =============================================================================
+
+Option Explicit On
 Option Strict On
 
 Namespace Agents

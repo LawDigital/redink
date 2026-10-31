@@ -493,22 +493,53 @@ Partial Public Class ThisAddIn
             ProgressBarModule.GlobalProgressValue = 0
             ProgressBarModule.GlobalProgressLabel = If(initialLabel, "")
 
-            ' Spin up a dedicated STA UI thread with its own message loop for the progress form
+            ' The independent progress STA owns its complete form/context lifetime.
+            ' Disposal never waits for that STA from the Office message loop.
+            Dim hostExitToken As System.Threading.CancellationToken = Globals.ThisAddIn.HostWindowLifetimeToken
             _uiThread = New System.Threading.Thread(
-            Sub()
-                Try
-                    System.Windows.Forms.Application.EnableVisualStyles()
-                    _form = If(_useDpiForm,
+                Sub()
+                    Try
+                        If System.Threading.Volatile.Read(_closed) <> 0 OrElse hostExitToken.IsCancellationRequested Then Return
+                        System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                        System.Windows.Forms.Application.EnableVisualStyles()
+                        Using progressForm As System.Windows.Forms.Form =
+                            If(_useDpiForm,
                                CType(New DPIProgressForm(headerText, initialLabel), System.Windows.Forms.Form),
                                CType(New ProgressForm(headerText, initialLabel), System.Windows.Forms.Form))
-
-                    ' Run form (timer inside form pulls ProgressBarModule.* and closes itself when CancelOperation=True)
-                    System.Windows.Forms.Application.Run(_form)
-                Catch
-                    ' Swallow exceptions — cleanup is always attempted in Dispose.
-                End Try
-            End Sub
-        )
+                            System.Threading.Volatile.Write(_form, progressForm)
+                            If System.Threading.Volatile.Read(_closed) <> 0 OrElse hostExitToken.IsCancellationRequested Then Return
+                            Using closeTimer As New System.Windows.Forms.Timer() With {.Interval = 100}
+                                AddHandler closeTimer.Tick,
+                                    Sub()
+                                        If System.Threading.Volatile.Read(_closed) <> 0 OrElse hostExitToken.IsCancellationRequested Then
+                                            closeTimer.Stop()
+                                            progressForm.Close()
+                                        End If
+                                    End Sub
+                                closeTimer.Start()
+                                System.Windows.Forms.Application.Run(progressForm)
+                            End Using
+                        End Using
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("Progress window: " & ex.Message)
+                    Finally
+                        System.Threading.Volatile.Write(_form, Nothing)
+                        Try
+                            System.Windows.Forms.Application.ExitThread()
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Progress message loop cleanup: " & ex.Message)
+                        End Try
+                        Try
+                            Dim workerContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                                TryCast(System.Threading.SynchronizationContext.Current, System.Windows.Forms.WindowsFormsSynchronizationContext)
+                            If workerContext IsNot Nothing Then workerContext.Dispose()
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Progress context cleanup: " & ex.Message)
+                        Finally
+                            System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                        End Try
+                    End Try
+                End Sub)
             _uiThread.IsBackground = True
             _uiThread.SetApartmentState(System.Threading.ApartmentState.STA)
             _uiThread.Start()
@@ -557,41 +588,24 @@ Partial Public Class ThisAddIn
         End Property
 
         ''' <summary>
-        ''' Disposes the progress scope, signaling cancellation and closing the progress form.
-        ''' Waits up to 1 second for the UI thread to exit cleanly.
+        ''' Disposes the progress scope, signaling cancellation and asynchronously
+        ''' closing the progress form on its own STA. A delayed worker startup checks
+        ''' the same closed flag before and after constructing its form.
         ''' </summary>
         Public Sub Dispose() Implements IDisposable.Dispose
             If System.Threading.Interlocked.Exchange(_closed, 1) <> 0 Then Return
+            ProgressBarModule.CancelOperation = True
+            Dim f As System.Windows.Forms.Form = System.Threading.Volatile.Read(_form)
+            If f Is Nothing Then Return
             Try
-                ' Signal cancel so the form's timer path also closes itself
-                ProgressBarModule.CancelOperation = True
-
-                Dim f = _form
-                If f IsNot Nothing Then
-                    Try
-                        If f.IsHandleCreated AndAlso Not f.IsDisposed Then
-                            ' Request close on the form's thread
-                            f.BeginInvoke(New System.Action(Sub()
-                                                                Try
-                                                                    If Not f.IsDisposed Then f.Close()
-                                                                Catch
-                                                                End Try
-                                                            End Sub))
-                        End If
-                    Catch
-                        ' Ignore cross-thread or shutdown races
-                    End Try
+                If f.IsHandleCreated AndAlso Not f.IsDisposed Then
+                    f.BeginInvoke(New System.Action(
+                        Sub()
+                            If Not f.IsDisposed Then f.Close()
+                        End Sub))
                 End If
-            Finally
-                ' Give the UI thread a moment to exit cleanly
-                Try
-                    If _uiThread IsNot Nothing AndAlso _uiThread.IsAlive Then
-                        If Not _uiThread.Join(1000) Then
-                            Try : _uiThread.Interrupt() : Catch : End Try
-                        End If
-                    End If
-                Catch
-                End Try
+            Catch ex As System.InvalidOperationException
+                ' The worker's local timer/Finally handles the concurrent shutdown.
             End Try
         End Sub
     End Class

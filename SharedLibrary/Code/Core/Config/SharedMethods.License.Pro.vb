@@ -54,6 +54,11 @@ Namespace SharedLibrary
                                                          prefilledUserId As String,
                                                          prefilled As Boolean) As Boolean
             RequireInteractiveExecution("license_activation")
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(
+                    Function() ShowProLicenseEntryForm(context, prefilledKey, prefilledProductId, prefilledUserId, prefilled),
+                    "Red Ink Pro license", alwaysUseWorker:=True)
+            End If
             Using form As New Form()
                 ' Let WinForms handle DPI scaling automatically
                 ' Set AutoScaleDimensions to 96 DPI (design baseline), then AutoScaleMode.Dpi
@@ -74,8 +79,7 @@ Namespace SharedLibrary
                 form.MinimumSize = New Size(900, 720)
 
                 Try
-                    Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    form.Icon = Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 
@@ -1143,6 +1147,9 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <returns><see langword="True"/> if deactivation succeeded; otherwise <see langword="False"/>.</returns>
         Public Shared Function ShowDeactivationDialog() As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowDeactivationDialog(), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
             Try
                 ' Check if we have a pro license to deactivate
                 If Not HasStoredProLicense() Then
@@ -1240,6 +1247,10 @@ Namespace SharedLibrary
         ''' Shows a license management dialog and allows opening the Pro license management form.
         ''' </summary>
         Public Shared Sub ShowLicenseManagementDialog()
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                RunOnStaThread(AddressOf ShowLicenseManagementDialog, "Red Ink license management", alwaysUseWorker:=True)
+                Return
+            End If
             Dim detailedStatus = GetDetailedLicenseStatus()
             Dim hasProLicense As Boolean = HasStoredProLicense()
 

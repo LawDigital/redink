@@ -1,5 +1,16 @@
 ' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.AutoPilot.PromptCoaching.Tool.vb
+' PURPOSE
+'   Exposes sender-owned recommendation controls through AutoPilot and exact mail commands.
+'
+' KEY ARCHITECTURE
+'   • Interface: Exposes manage_prompt_coaching and an exact-mail control surface.
+'   • Authorization: Controls apply to the current sender, not a supplied recipient.
+' =============================================================================
+
 '
 ' Own-sender Inky recommendation controls. The exact mail command works without a
 ' model/tool-capable configuration. Neither interface accepts a recipient address.

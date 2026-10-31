@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 29.10.2026
+' 31.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -71,7 +71,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.291026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.311026" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -140,26 +140,14 @@ Partial Public Class ThisAddIn
     Public Shared undoStates As New List(Of CellState)
 
     Private Shared _uiContext As SynchronizationContext
+    Private Shared _uiThreadId As System.Int32
     Private Shared _uiScheduler As TaskScheduler
     Private mainThreadControl As New System.Windows.Forms.Control()
 
-    ' Lightweight UI switch helper (no exception risk).
-    Private Shared Function EnsureUIThread() As Task
-        ' If already on UI thread (or UI context not captured), do nothing.
-        If _uiContext Is Nothing OrElse SynchronizationContext.Current Is _uiContext Then
-            Return Task.CompletedTask
-        End If
-
-        Dim tcs As New TaskCompletionSource(Of Object)(TaskCreationOptions.RunContinuationsAsynchronously)
-
-        ' Post back to the captured UI context.
-        _uiContext.Post(
-            Sub(state As Object)
-                tcs.SetResult(Nothing)
-            End Sub,
-            Nothing)
-
-        Return tcs.Task
+    Private Shared Function EnsureUIThread() As Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable
+        ' Await posts the continuation itself; a posted no-op Task cannot switch an MTA caller.
+        Return New Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable(
+            _uiContext, _uiThreadId, Globals.ThisAddIn.HostWindowLifetimeToken)
     End Function
 
     Private chatForm As frmAIChat
@@ -182,6 +170,15 @@ Partial Public Class ThisAddIn
         Return _hostModelessWindows.Register(form)
     End Function
 
+    Friend ReadOnly Property HostWindowLifetimeToken As System.Threading.CancellationToken
+        Get
+            If _hostModelessWindows Is Nothing Then
+                Return New System.Threading.CancellationToken(True)
+            End If
+            Return _hostModelessWindows.ShutdownToken
+        End Get
+    End Property
+
     Friend Sub ShowHostModelessForm(form As System.Windows.Forms.Form)
         If _hostModelessWindows Is Nothing Then
             Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
@@ -190,6 +187,11 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub CloseHostModelessWindows()
+        Try
+            Global.SharedLibrary.SharedLibrary.LogWindow.Shutdown()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink shared log shutdown failed: " & ex.Message)
+        End Try
         Try
             If _hostModelessWindows IsNot Nothing Then _hostModelessWindows.CloseAll()
         Catch ex As System.Exception
@@ -224,6 +226,7 @@ Partial Public Class ThisAddIn
         Dim dummy = mainThreadControl.Handle
 
         ' 2) Capture synchronization context & scheduler exactly once.
+        _uiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
         _uiContext = SynchronizationContext.Current
         If _uiContext Is Nothing Then
             ' Fallback: install a WindowsFormsSynchronizationContext explicitly.
@@ -231,6 +234,7 @@ Partial Public Class ThisAddIn
             SynchronizationContext.SetSynchronizationContext(_uiContext)
         End If
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
+        Global.SharedLibrary.SharedLibrary.LogWindow.InitializeUiDispatcher(_uiContext, _hostModelessWindows)
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
         UpdateHandler.MainControl = mainThreadControl
@@ -291,7 +295,13 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private licenseCounterReporter As System.IDisposable
+
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        If licenseCounterReporter IsNot Nothing Then
+            licenseCounterReporter.Dispose()
+            licenseCounterReporter = Nothing
+        End If
         CloseHostModelessWindows()
         Try
             RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
@@ -340,10 +350,14 @@ Partial Public Class ThisAddIn
 
         MeasureExcelStartupStep("ContextMenu", Sub() AddContextMenu(), startupTimings)
 
-        If _context IsNot Nothing AndAlso _context.INIloaded Then
+        ' License counting must not depend on successful model setup.
+        If _context IsNot Nothing Then
             MeasureExcelStartupStep(
                 "LicenseCounter",
-                Sub() SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "EX"),
+                Sub()
+                    If licenseCounterReporter IsNot Nothing Then licenseCounterReporter.Dispose()
+                    licenseCounterReporter = Global.SharedLibrary.SharedLibrary.SharedMethods.StartLicenseCounterReporting(_context, "EX")
+                End Sub,
                 startupTimings)
         End If
 
@@ -448,7 +462,7 @@ Partial Public Class ThisAddIn
     End Function
     Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = True, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "") As Task(Of String)
         Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject)
-        Await EnsureUIThread().ConfigureAwait(False)
+        Await EnsureUIThread()
         Return Response
     End Function
     Private Sub ShowSettingsWindow(Settings As Dictionary(Of String, String), SettingsTips As Dictionary(Of String, String))

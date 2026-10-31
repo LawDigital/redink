@@ -120,6 +120,10 @@
 '
 '   Artifact identity and delivery are handled separately by ArtifactDelivery.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ExplicitOperationRecord, ExplicitOperationIdentity (VB implementation).
+'   • Entry points/helpers: ExportRecords, ImportRecords, IsTerminal.
 ' =============================================================================
 
 Option Strict On

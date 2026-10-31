@@ -14,6 +14,10 @@
 '  - "Open Folder" button to browse the resource directory.
 '  - "Refresh" to rescan the discovery paths.
 '  - "Author Mode" checkbox to enable/disable skill authoring.
+'
+' KEY ARCHITECTURE
+'   • Surface: AgentResourcesViewerForm, Entry (host partial/UI).
+'   • Entry points/helpers: OnShown, SendMessage, ToString.
 ' =============================================================================
 
 Option Strict On
@@ -94,8 +98,7 @@ Namespace Agents
             Me.MinimumSize = New Size(820, 440)
 
             Try
-                Dim bmp As New Bitmap(SharedLibrary.SharedMethods.GetLogoBitmap(SharedLibrary.SharedMethods.LogoType.Standard))
-                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
 

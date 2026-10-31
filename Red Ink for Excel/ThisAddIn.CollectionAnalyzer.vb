@@ -1,4 +1,17 @@
 ﻿' Part of Red Ink for Excel. Independent Collection Analyzer UI adapter.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.CollectionAnalyzer.vb
+' PURPOSE
+'   Excel UI adapter for independent collection-wide, evidence-based analysis.
+'
+' KEY ARCHITECTURE
+'   • UI: Dedicated collection dialog captures sources, objectives and model preferences.
+'   • Boundary: Delegates analysis to the shared service; existing Excel extraction stays
+'     separate.
+' =============================================================================
+
 ' Existing Data Extractor, worksheet output and Outlook export are untouched.
 Option Strict On
 Option Explicit On
@@ -108,9 +121,7 @@ Friend NotInheritable Class CollectionAnalyzerDialog
         Me.MaximizeBox = False
         Me.MinimizeBox = False
         ' Use the same Red Ink logo as the existing parameter dialogs.
-        Dim logoBitmap As New System.Drawing.Bitmap(Global.SharedLibrary.SharedLibrary.SharedMethods.GetLogoBitmap(
-            Global.SharedLibrary.SharedLibrary.SharedMethods.LogoType.Standard))
-        Me.Icon = System.Drawing.Icon.FromHandle(logoBitmap.GetHicon())
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
 
         Dim panel As New System.Windows.Forms.TableLayoutPanel With {
             .Dock = System.Windows.Forms.DockStyle.Fill, .ColumnCount = 3, .RowCount = 9,

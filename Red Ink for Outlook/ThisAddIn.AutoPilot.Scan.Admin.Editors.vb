@@ -34,7 +34,7 @@ Namespace ScanInbox
             form.BackColor = System.Drawing.SystemColors.Control
             ' Same icon source as CreateSchedulerDashboardForm; no in-form branding.
             Try
-                form.Icon = System.Drawing.Icon.FromHandle((New System.Drawing.Bitmap(GetLogoBitmap(LogoType.Standard))).GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch ex As System.Exception
                 System.Diagnostics.Debug.WriteLine(ex.Message)
             End Try

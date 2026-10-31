@@ -929,10 +929,6 @@ Namespace SharedLibrary
     End Class
 
     Partial Public Class SharedMethods
-        <System.Runtime.InteropServices.DllImport("user32.dll")>
-        Private Shared Function DestroyIcon(handle As System.IntPtr) As System.Boolean
-        End Function
-
         Public Shared Function CreateMarkdownDocumentBitmap(Optional edge As System.Int32 = 32) As System.Drawing.Bitmap
             Dim bitmap As New System.Drawing.Bitmap(edge, edge, System.Drawing.Imaging.PixelFormat.Format32bppArgb)
             Using graphics = System.Drawing.Graphics.FromImage(bitmap)
@@ -954,16 +950,7 @@ Namespace SharedLibrary
         End Function
 
         Public Shared Function CreateMarkdownEditorIcon() As System.Drawing.Icon
-            Using bitmap As New System.Drawing.Bitmap(GetLogoBitmap(LogoType.Standard))
-                Dim handle = bitmap.GetHicon()
-                Try
-                    Using borrowed = System.Drawing.Icon.FromHandle(handle)
-                        Return DirectCast(borrowed.Clone(), System.Drawing.Icon)
-                    End Using
-                Finally
-                    DestroyIcon(handle)
-                End Try
-            End Using
+            Return CreateOwnedDialogIcon()
         End Function
     End Class
 End Namespace

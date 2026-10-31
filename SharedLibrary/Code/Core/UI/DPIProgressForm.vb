@@ -93,8 +93,7 @@ Namespace SharedLibrary
             Me.MinimumSize = New System.Drawing.Size(440, 0)
 
             ' Set icon
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
 
             ' --- Root layout ---
             layoutRoot = New System.Windows.Forms.TableLayoutPanel() With {
@@ -125,7 +124,7 @@ Namespace SharedLibrary
             ' --- Progress bar ---
             progressBar = New System.Windows.Forms.ProgressBar() With {
                 .Minimum = 0,
-                .Maximum = ProgressBarModule.GlobalProgressMax,
+                .Maximum = System.Math.Max(0, ProgressBarModule.GlobalProgressMax),
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .Height = 22,
                 .Margin = New System.Windows.Forms.Padding(0, 0, 0, 8)
@@ -209,8 +208,14 @@ Namespace SharedLibrary
         ''' <param name="e">Event arguments.</param>
         Private Sub Timer_Tick(sender As Object, e As System.EventArgs)
             Try
+                If ProgressBarModule.CancelOperation Then
+                    Me.DialogResult = System.Windows.Forms.DialogResult.Cancel
+                    Me.Close()
+                    Return
+                End If
+
                 progressBar.Maximum = Math.Max(1, ProgressBarModule.GlobalProgressMax)
-                progressBar.Value = Math.Min(ProgressBarModule.GlobalProgressValue, progressBar.Maximum)
+                progressBar.Value = System.Math.Max(progressBar.Minimum, System.Math.Min(ProgressBarModule.GlobalProgressValue, progressBar.Maximum))
 
                 Dim newStatus As String = ProgressBarModule.GlobalProgressLabel
                 If lblStatus.Text <> newStatus Then
@@ -218,10 +223,6 @@ Namespace SharedLibrary
                     UpdateStatusLayout()
                 End If
 
-                If ProgressBarModule.CancelOperation Then
-                    Me.DialogResult = System.Windows.Forms.DialogResult.Cancel
-                    Me.Close()
-                End If
             Catch ex As System.Exception
                 System.Diagnostics.Debug.WriteLine("Timer error: " & ex.Message)
             End Try
@@ -241,9 +242,22 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="e">Provides data for the <see cref="System.Windows.Forms.Form.FormClosed"/> event.</param>
         Protected Overrides Sub OnFormClosed(e As System.Windows.Forms.FormClosedEventArgs)
-            uiTimer.Stop()
+            If uiTimer IsNot Nothing Then uiTimer.Stop()
             ProgressBarModule.CancelOperation = True
             MyBase.OnFormClosed(e)
+        End Sub
+
+        Protected Overrides Sub Dispose(disposing As System.Boolean)
+            Try
+                If disposing AndAlso uiTimer IsNot Nothing Then
+                    uiTimer.Stop()
+                    RemoveHandler uiTimer.Tick, AddressOf Timer_Tick
+                    uiTimer.Dispose()
+                    uiTimer = Nothing
+                End If
+            Finally
+                MyBase.Dispose(disposing)
+            End Try
         End Sub
     End Class
 

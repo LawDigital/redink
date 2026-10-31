@@ -20,6 +20,11 @@
 '    account and cleanup-group metadata as the primary message.
 '  - A single attachment that cannot fit safely by itself is never submitted
 '    blindly; its filename is disclosed in the primary delivery notice.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, AutoPilotOutgoingDeliveryPlan (host partial/UI).
+'   • Entry points/helpers: GetAutoPilotRecipientSmtpAddress, SubmitAutoPilotMailOnce,
+'     PrepareAutoPilotOutgoingDelivery.
 ' =============================================================================
 
 Option Explicit On

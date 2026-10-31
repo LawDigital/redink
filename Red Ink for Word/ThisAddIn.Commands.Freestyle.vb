@@ -403,8 +403,10 @@ Partial Public Class ThisAddIn
     ''' <returns>The content wrapped in document tags, or empty string on failure.</returns>
     Private Async Function LoadUrlContentAsync(url As String, ctx As FileLoadingContext) As Task(Of String)
         Try
+            Await EnsureUIThread()
             ' Retrieve content using WebView2
             Dim content As String = Await RetrieveWebsiteContent_WebView2(url, 0)
+            Await EnsureUIThread()
 
             If String.IsNullOrWhiteSpace(content) Then
                 ctx.FailedFiles.Add(url)
@@ -482,6 +484,7 @@ Partial Public Class ThisAddIn
     ''' </returns>
     Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False, Optional askWorksheetSelection As Boolean = False) As Task(Of String)
         Try
+            Await EnsureUIThread()
             Dim doOCR As Boolean = False
             Dim askUser As Boolean = False
             ' Check if OCR is available at all
@@ -525,6 +528,7 @@ Partial Public Class ThisAddIn
                 AskWorksheetSelection:=askWorksheetSelection,
                 OcrAdditionalInstruction:=Add_OcrMarkdownInstruction
             )
+            Await EnsureUIThread()
 
             ' Track PDFs that may have incomplete content
             If fileResult.PdfMayBeIncomplete Then
@@ -588,6 +592,7 @@ Partial Public Class ThisAddIn
     ''' <returns>Combined content of all files, or "ABORT" if user cancelled, or empty string on error.</returns>
     Private Async Function LoadDirectoryFilesAsync(dirPath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional ensureProgressBar As Boolean = False) As Task(Of String)
         Try
+            Await EnsureUIThread()
             If Not Directory.Exists(dirPath) Then
                 ctx.FailedFiles.Add(dirPath)
                 Return ""
@@ -708,6 +713,7 @@ Partial Public Class ThisAddIn
                 ' Always wrap individual files from directory with document tags
                 ' Pass isFromDirectory=True to use directory OCR mode for PDFs
                 Dim fileContent As String = Await LoadSingleFileAsync(filePath, False, ctx, isFromDirectory:=True)
+                Await EnsureUIThread()
                 If Not String.IsNullOrWhiteSpace(fileContent) Then
                     resultBuilder.Append(fileContent)
                 End If
@@ -735,6 +741,7 @@ Partial Public Class ThisAddIn
     ''' <param name="prompt">The prompt to process.</param>
     ''' <returns>A tuple containing: (success flag, modified prompt). If success is False, the operation should abort.</returns>
     Private Async Function ProcessExternalFileTriggers(prompt As String) As Task(Of (Success As Boolean, ModifiedPrompt As String))
+        Await EnsureUIThread()
         ' Check if any file triggers are present
         Dim hasExtTriggers As Boolean = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0
         Dim hasDirTriggers As Boolean = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase) >= 0
@@ -947,6 +954,7 @@ Partial Public Class ThisAddIn
                             ctx,
                             isFromDirectory:=False,
                             askWorksheetSelection:=askWorksheetSelection)
+                        Await EnsureUIThread()
 
                         ' Start progress bar after selection if it was deferred
                         If askWorksheetSelection AndAlso Not progressBarStarted Then
@@ -996,6 +1004,7 @@ Partial Public Class ThisAddIn
                         ' dialogs (file count confirmation, OCR choice) first and will start the
                         ' progress bar itself once all questions have been answered.
                         replacementText = Await LoadDirectoryFilesAsync(selectedDir, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        Await EnsureUIThread()
                         progressBarStarted = True
 
                         If replacementText = "ABORT" Then
@@ -1044,6 +1053,7 @@ Partial Public Class ThisAddIn
 
                         Try
                             replacementText = Await LoadUrlContentAsync(userUrl, ctx)
+                            Await EnsureUIThread()
                         Catch
                         End Try
 
@@ -1095,6 +1105,7 @@ Partial Public Class ThisAddIn
 
                     Try
                         replacementText = Await LoadUrlContentAsync(inlineUrl, ctx)
+                        Await EnsureUIThread()
                     Catch
                     End Try
 
@@ -1160,6 +1171,7 @@ Partial Public Class ThisAddIn
                             ctx,
                             isFromDirectory:=False,
                             askWorksheetSelection:=askWorksheetSelection)
+                        Await EnsureUIThread()
 
                         ' Start progress bar after selection if it was deferred
                         If askWorksheetSelection AndAlso Not progressBarStarted Then
@@ -1174,6 +1186,7 @@ Partial Public Class ThisAddIn
                     ElseIf Directory.Exists(candidatePath) Then
                         ' Directory - defer progress bar to LoadDirectoryFilesAsync (user dialogs first)
                         replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        Await EnsureUIThread()
                         progressBarStarted = True
                         If replacementText = "ABORT" Then
                             ProgressBarModule.CancelOperation = True
@@ -1303,6 +1316,7 @@ Partial Public Class ThisAddIn
     Public Async Sub FreeStyleNM()
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Await ExecuteFreeStyleAsync(False)
+        Await EnsureUIThread()
 
         My.Settings.LastFreestyleModelConfig = Nothing
         My.Settings.LastFreestyleWasAM = False
@@ -1323,10 +1337,12 @@ Partial Public Class ThisAddIn
         Dim commentEvidence As WordCommentSelectionTracker.Evidence = Nothing
         Try
             commentEvidence = Await CaptureCommentSelectionEvidenceAsync()
+            Await EnsureUIThread()
         Catch ex As System.Exception
             ReportWordCommandFailure("Freestyle.CommentSelection", ex)
             Return
         End Try
+        Await EnsureUIThread()
 
         If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
 
@@ -1340,6 +1356,7 @@ Partial Public Class ThisAddIn
         LastFreestyleModelConfig = GetCurrentConfig(_context)
 
         Await ExecuteFreeStyleAsync(True, initialCommentEvidence:=commentEvidence)
+        Await EnsureUIThread()
 
         My.Settings.LastFreestyleModelConfig = LastFreestyleModelConfig
         My.Settings.LastFreestyleWasAM = True
@@ -1415,6 +1432,7 @@ Partial Public Class ThisAddIn
     Private Async Function ExecuteFreeStyleAsync(UseSecondAPI As System.Boolean,
                                                   Optional LastPrompt As System.String = "",
                                                   Optional initialCommentEvidence As WordCommentSelectionTracker.Evidence = Nothing) As System.Threading.Tasks.Task
+        Await EnsureUIThread()
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Try
             ' Initialize prompt and system variables
@@ -1508,6 +1526,7 @@ Partial Public Class ThisAddIn
             Dim replyOrigin As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
             Dim commentEvidence As WordCommentSelectionTracker.Evidence = initialCommentEvidence
             If commentEvidence Is Nothing Then commentEvidence = Await CaptureCommentSelectionEvidenceAsync()
+            Await EnsureUIThread()
             If initialCommentEvidence IsNot Nothing AndAlso _commentSelectionTracker IsNot Nothing AndAlso
                initialCommentEvidence.DocumentGeneration >= 0 AndAlso Not _commentSelectionTracker.IsCurrent(initialCommentEvidence) Then
                 Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
@@ -2469,6 +2488,7 @@ SkipPromptInput:
             If System.String.Equals(OtherPrompt.Trim(), "ocrclean", System.StringComparison.OrdinalIgnoreCase) OrElse
                System.String.Equals(OtherPrompt.Trim(), "cleanocr", System.StringComparison.OrdinalIgnoreCase) Then
                 Await RunOcrMarkdownCleanupCommandAsync()
+                Await EnsureUIThread()
                 Return
             End If
 
@@ -2547,6 +2567,7 @@ SkipPromptInput:
                 End If
 
                 Await KnowledgeWikiService.CreatePageFromClipboardAsync(selectedStorePath, My.Computer.Clipboard.GetText(), _context)
+                Await EnsureUIThread()
                 ShowCustomMessageBox("Clipboard saved to Wiki!")
                 Return
             End If
@@ -2573,6 +2594,7 @@ SkipPromptInput:
                 End If
 
                 Dim report = Await KnowledgeWikiService.LintWikiAsync(selectedStorePath, _context)
+                Await EnsureUIThread()
                 SP_MergePrompt_Cached = SP_MergePrompt
 
                 Dim response = ShowCustomWindow("Here is the health report of the Knowledge Store you have selected:", report, "You can copy it to the clipboard, if you wish.", "{AN} Knowledge Store")
@@ -2650,6 +2672,7 @@ SkipPromptInput:
                     kbRootPath:=selectedStorePath,
                     context:=_context,
                     includeLlmRepairs:=True)
+                Await EnsureUIThread()
 
                 SP_MergePrompt_Cached = SP_MergePrompt
 
@@ -2721,6 +2744,7 @@ SkipPromptInput:
                 Await RunForegroundKnowledgeStoreIndexAsync(
                     storeName:=selectedStoreName,
                     forceReindex:=forceReindex)
+                Await EnsureUIThread()
 
                 Return
             End If
@@ -2834,6 +2858,7 @@ SkipPromptInput:
                             progressPrefix:=store.Name,
                             progressOffset:=progressOffset,
                             progressTotal:=totalPages)
+                        Await EnsureUIThread()
 
                         progressOffset += storePageCount
                     Next
@@ -3018,6 +3043,7 @@ SkipPromptInput:
                 End If
 
                 Dim response As String = Await LLM(SP_GenerateResponseKey & vbCrLf & Code_JsonTemplateFormatter, vbCrLf & SelectedText, "", "", 0, UseSecondAPI)
+                Await EnsureUIThread()
 
                 selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
                 selection.InsertAfter(vbCrLf & vbCrLf & response)
@@ -3301,6 +3327,7 @@ SkipPromptInput:
 
             If String.Equals(OtherPrompt.Trim(), "generateindex", StringComparison.OrdinalIgnoreCase) Then
                 Await GenerateSemanticSearchIndexAsync()
+                Await EnsureUIThread()
                 Return
             End If
 
@@ -4023,6 +4050,7 @@ SkipPromptInput:
                 Try
                     archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
                         _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                    Await EnsureUIThread()
                 Finally
                     If saSplash.InvokeRequired Then
                         saSplash.Invoke(Sub()
@@ -4046,6 +4074,7 @@ SkipPromptInput:
             End If
 
             Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+            Await EnsureUIThread()
             If Not fileResult.Success Then
                 Return
             End If
@@ -4068,6 +4097,7 @@ SkipPromptInput:
                 Try
                     Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
                         Await AssembleDocumentFromTemplates(OtherPrompt, assembleContext, UseSecondAPI, semanticArchivePrepared:=archivePrepared)
+                        Await EnsureUIThread()
                     End Using
                 Catch ex As System.Exception When IsWordCommandCancellation(ex)
                     Throw
@@ -4087,6 +4117,7 @@ SkipPromptInput:
                 Try
                     Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
                         Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI, semanticArchivePrepared:=archivePrepared)
+                        Await EnsureUIThread()
                     End Using
                 Catch ex As System.Exception When IsWordCommandCancellation(ex)
                     Throw
@@ -4263,11 +4294,13 @@ SkipPromptInput:
                         Await CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs &
                                 " Newly authored prose: use straight ASCII quotation marks and write z.B. without spaces; preserve unchanged source paragraphs character for character.",
                                 "_freestyle", UseSecondAPI, True)
+                        Await EnsureUIThread()
                     Else
                         Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
                             Await CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs &
                                 " Newly authored prose: use straight ASCII quotation marks and write z.B. without spaces; preserve unchanged source paragraphs character for character.",
                                 "_freestyle", UseSecondAPI, True)
+                            Await EnsureUIThread()
                         End Using
                     End If
                 Catch ex As System.Exception When IsWordCommandCancellation(ex)
@@ -4289,10 +4322,12 @@ SkipPromptInput:
                 If DoLib Then
                     ' Library search mode: consult library and update SysPrompt
                     Dim isSuccess As Boolean = Await ConsultLibrary(DoMarkup)
+                    Await EnsureUIThread()
                     If Not isSuccess Then Return
                 ElseIf DoNet Then
                     ' Internet search mode: consult internet and update SysPrompt
                     Dim isSuccess As Boolean = Await ConsultInternet(DoMarkup)
+                    Await EnsureUIThread()
                     If Not isSuccess Then Return
                 ElseIf NoText Then
                     ' No text selected: use freestyle prompt without text processing
@@ -4344,6 +4379,7 @@ SkipPromptInput:
                         Dim kbResolved As (Content As String, StatusMessage As String)
                         Try
                             kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context, kbResolveOptions)
+                            Await EnsureUIThread()
                         Finally
                             If kbSplash.InvokeRequired Then
                                 kbSplash.Invoke(Sub()
@@ -4422,6 +4458,7 @@ SkipPromptInput:
             Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
                 Dim result As String = Await ProcessSelectedText(processingPrompt, True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel,
                     TargetReplyCommentIndex:=replyTargetCommentIndex)
+                Await EnsureUIThread()
             End Using
 
         Catch ex As System.Exception When IsWordCommandCancellation(ex)

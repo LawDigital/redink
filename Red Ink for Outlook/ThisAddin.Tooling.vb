@@ -1387,6 +1387,9 @@ Partial Public Class ThisAddIn
         context.ProgressSink = effectiveProgressSink
         context.ReportProgress("Preparing request: determining language, context and workflow...")
 
+        If Not subAgentMode AndAlso Not resumeWorkflowFromCheckpoint Then
+            SharedLogger.Log(_context, _context.RDV, "AgentRun_" & OutlookUsageSurface() & " invoked")
+        End If
         context.Log(If(subAgentMode, "Starting subagent workflow...", "Starting tooling session..."))
         If selectedTools IsNot Nothing Then
             context.Log($"Selected tools: {String.Join(", ", selectedTools.Select(Function(t) t.ToolName))}")
@@ -7210,21 +7213,11 @@ Partial Public Class ThisAddIn
 
 
 
-    Private Sub LogAgentToolCallStatistic(toolName As String)
-        Dim surface As String = ""
-
-        If _apActive Then
-            surface = "Outlook_AutoPilot"
-        ElseIf _chatAgentActive Then
-            surface = "Outlook_LocalChatAgent"
-        Else
-            Return
-        End If
-
-        SharedLogger.LogAgentToolCall(_context, _context.RDV, surface, toolName)
-    End Sub
-
-
+    Private Function OutlookUsageSurface() As System.String
+        If _apActive Then Return "Outlook_AutoPilot"
+        If _chatAgentActive Then Return "Outlook_LocalChatAgent"
+        Return "Outlook_Tooling"
+    End Function
 
     Private Function IsEmptyJsRunResult(rawResponse As String) As Boolean
         Dim raw As String = If(rawResponse, "").Trim()
@@ -7384,7 +7377,6 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
 
-        LogAgentToolCallStatistic(toolCall.ToolName)
 
         If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
             If toolCall.Arguments Is Nothing Then
@@ -7413,6 +7405,16 @@ Partial Public Class ThisAddIn
 
             If restoredRetryInvariants <> "" Then
                 context.Log("Retry fidelity guard restored: " & restoredRetryInvariants, "diag")
+            End If
+        End If
+
+        If Not cancellationToken.IsCancellationRequested AndAlso Not System.String.IsNullOrWhiteSpace(toolCall.ToolName) AndAlso Not IsInternalKnowledgeToolName(toolCall.ToolName) AndAlso
+           Not toolCall.ToolName.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) Then
+            Dim registry As SharedLibrary.Agents.ToolRegistry = If(context Is Nothing, Nothing, context.AllowedToolRegistry)
+            If (registry IsNot Nothing AndAlso registry.Contains(toolCall.ToolName)) OrElse
+               (toolConfig IsNot Nothing AndAlso System.String.Equals(toolConfig.ToolName, toolCall.ToolName, System.StringComparison.OrdinalIgnoreCase)) OrElse
+               (registry Is Nothing AndAlso SharedLibrary.Agents.HostToolRegistration.IsInternalToolName(toolCall.ToolName)) Then
+                SharedLogger.LogAgentToolCall(_context, _context.RDV, OutlookUsageSurface(), toolCall.ToolName)
             End If
         End If
 
@@ -7873,7 +7875,8 @@ Partial Public Class ThisAddIn
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
         authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
-        semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope)).ConfigureAwait(False)
+        semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope),
+        onSkillLoaded:=Sub(skillName As System.String) SharedLogger.LogAgentToolCall(_context, _context.RDV, OutlookUsageSurface(), SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName))).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
@@ -7930,7 +7933,8 @@ Partial Public Class ThisAddIn
 
                 response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(
                     skillArgs,
-                    If(context Is Nothing, Nothing, context.LatestUserRequestRaw))
+                    If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
+                    onSkillLoaded:=Sub(skillName As System.String) SharedLogger.LogAgentToolCall(_context, _context.RDV, OutlookUsageSurface(), SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName)))
 
                 Dim hostExpectedArtifacts As Object = Nothing
                 If toolCall.Arguments IsNot Nothing AndAlso

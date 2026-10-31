@@ -1,4 +1,5 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
 ' File: SharedMethods.License.Admin.vb
@@ -125,6 +126,10 @@ Namespace SharedLibrary
 #Region "Organization Bulk License Management - Entry Point"
 
         Public Shared Sub ShowOrganizationBulkLicenseManagementDialog()
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                RunOnStaThread(AddressOf ShowOrganizationBulkLicenseManagementDialog, "Red Ink license manager", alwaysUseWorker:=True)
+                Return
+            End If
             Dim storedProductId As String = ""
             Dim storedLicenseKey As String = ""
 
@@ -156,8 +161,7 @@ Namespace SharedLibrary
                 form.Font = New System.Drawing.Font("Segoe UI", 9.5F)
 
                 Try
-                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 
@@ -2531,8 +2535,7 @@ Namespace SharedLibrary
                 form.Font = New System.Drawing.Font("Segoe UI", 9.5F)
 
                 Try
-                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 

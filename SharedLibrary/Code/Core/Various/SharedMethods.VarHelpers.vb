@@ -48,7 +48,7 @@ Namespace SharedLibrary
 
 
         ' Standard (dark theme):
-        'Me.Icon = Icon.FromHandle(SharedMethods.GetLogoBitmap(_context, SharedMethods.LogoType.Standard).GetHicon())
+        'SharedMethods.ApplyStandardDialogIcon(Me)
 
         ' Medium (light theme):
         'Menu1.Image = SharedMethods.GetLogoBitmap(ThisAddIn._context, SharedMethods.LogoType.Medium)
@@ -94,8 +94,13 @@ Namespace SharedLibrary
         ''' <param name="logoType">Which logo type to retrieve.</param>
         ''' <returns>Valid Bitmap from external source or the embedded resource fallback.</returns>
         Public Shared Function GetLogoBitmap(logoType As LogoType, Optional RedInkLogo As Boolean = False) As System.Drawing.Bitmap
+            Dim ownsResult As System.Boolean = False
+            Return ResolveLogoBitmap(logoType, RedInkLogo, ownsResult)
+        End Function
 
-            If Not RedInkLogo Then
+        Private Shared Function ResolveLogoBitmap(logoType As LogoType, redInkLogo As System.Boolean, ByRef ownsResult As System.Boolean) As System.Drawing.Bitmap
+            ownsResult = False
+            If Not redInkLogo Then
                 Try
 
                     Dim logoPath As String = Nothing
@@ -111,6 +116,7 @@ Namespace SharedLibrary
                     If Not String.IsNullOrWhiteSpace(logoPath) Then
                         Dim bmp = LoadBitmapFromPath(logoPath)
                         If bmp IsNot Nothing AndAlso bmp.Width > 0 AndAlso bmp.Height > 0 Then
+                            ownsResult = True
                             Return bmp
                         End If
                         bmp?.Dispose()

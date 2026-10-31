@@ -418,6 +418,7 @@ Namespace SharedLibrary
                 context.INI_NoHelperDownload = ParseBoolean(configDict, "NoHelperDownload")
                 context.INI_LicenseCounterPath = If(configDict.ContainsKey("LicenseCounterPath"), configDict("LicenseCounterPath"), "")
                 context.INI_LicenseCounterMethod = If(configDict.ContainsKey("LicenseCounterMethod"), configDict("LicenseCounterMethod"), DEFAULT_LICENSECOUNTERMETHOD)
+                context.INI_LicenseCounterIntervall = ParseLicenseCounterIntervall(If(configDict.ContainsKey("LicenseCounterIntervall"), configDict("LicenseCounterIntervall"), ""))
                 context.INI_LicenseCounterAnon = ParseBoolean(configDict, "LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON)
                 context.INI_UpdateCheckInterval = If(configDict.ContainsKey("UpdateCheckInterval"), CInt(configDict("UpdateCheckInterval")), DefaultUpdateIntervalDays)
                 context.INI_UpdatePath = If(configDict.ContainsKey("UpdatePath"), configDict("UpdatePath"), "")
@@ -870,8 +871,7 @@ Namespace SharedLibrary
             settingsForm.TopMost = True
 
             ' Set the icon.
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(settingsForm)
 
             ' Set a predefined font for consistent layout.
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)

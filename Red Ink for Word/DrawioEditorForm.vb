@@ -85,8 +85,7 @@ Public Class DrawioEditorForm
         Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
 
         Try
-            Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
-            Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

@@ -878,6 +878,9 @@ Partial Public Class ThisAddIn
         context.ProgressSink = effectiveProgressSink
         context.ReportProgress("Preparing request: determining language, context and workflow...")
 
+        If Not subAgentMode AndAlso Not resumeWorkflowFromCheckpoint Then
+            SharedLogger.Log(_context, _context.RDV, "AgentRun_" & "Word_Agent" & " invoked")
+        End If
         context.Log(If(subAgentMode, "Starting subagent workflow...", "Starting tooling session..."))
         If selectedTools IsNot Nothing Then
             context.Log($"Selected tools: {String.Join(", ", selectedTools.Select(Function(t) t.ToolName))}")

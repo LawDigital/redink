@@ -1,5 +1,16 @@
 ' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ToolingOriginalRequestLog.vb
+' PURPOSE
+'   Defines immutable original-request records and canonical tooling-log header formatting.
+'
+' KEY ARCHITECTURE
+'   • Contract: Preserves the complete host-supplied request in immutable log metadata.
+'   • Trust: Sender identifiers are descriptive, never a source of delivery authority.
+' =============================================================================
+
 '
 ' Host-independent original-request log contract. The first three lines of a new
 ' tooling log contain the complete, immutable host-supplied request. Model/tool

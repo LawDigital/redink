@@ -1,5 +1,16 @@
 ' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.AutoPilot.PromptCoaching.Delivery.vb
+' PURPOSE
+'   Maintains durable sender-specific advice delivery receipts and a safe Outlook recommendation outbox.
+'
+' KEY ARCHITECTURE
+'   • Durability: Per-sender receipts and claims survive retries and interrupted processing.
+'   • Send safety: Uncertain Outlook submissions are not automatically repeated.
+' =============================================================================
+
 '
 ' Per-sender recommendation outbox. Durable claims are authoritative across a
 ' crash or a partial job update. Only a successfully prepared Outlook message

@@ -20,14 +20,14 @@
                     "type": "integer",
                     "validation": ">0",
                     "default": "",
-                    "description": "Enter the product ID that belongs to the license key. This must match the product configured for your organisation. Example: 1560. [LicenseProductID]"
+                    "description": "Enter the product ID corresponding to the configured licence. It is also used to attribute usage reports when no verified Pro licence is stored (Private, trial or LicenseNoCheck=True). If omitted in that case, reports use the explicitly unassigned product ID UNASSIGNED. Example: 1702. [LicenseProductID]"
                 },
                 {
                     "key": "LicenseUserID",
                     "label": "User ID",
                     "type": "string",
                     "default": "%USERNAME%",
-                    "description": "Enter the formula that resolves to the user or device identifier used for activation (it should be unique per user). Environment variables are allowed and are expanded automatically. Example: %USERNAME% or %USERDOMAIN%\\%USERNAME%. [LicenseUserID]"
+                    "description": "Enter the formula that resolves to the user or device identifier used for activation and licence counting (it must be stable and unique per user). The counter also uses it for Private, trial and LicenseNoCheck=True installations. Environment variables are expanded automatically. Example: %USERNAME% or %USERDOMAIN%\\%USERNAME%. [LicenseUserID]"
                 },
                 {
                     "key": "LicenseAutoMode",
@@ -55,21 +55,29 @@
                     "label": "License Counter Targets",
                     "type": "string",
                     "default": "",
-                    "description": "Optional offline license-counter targets. Leave empty to disable counting completely. You may enter one or more targets separated by line breaks or by |. Supported targets include local folders, UNC shares, and http/https URLs. Example: \\\\server\\share\\redink-licensecounter|https://intranet.example.local/licensecounter. [LicenseCounterPath]"
+                    "description": "Optional license-counter targets for add-in load counting, independent of the current licence type and LicenseNoCheck. Leave empty to disable counting completely. You may enter one or more targets separated by line breaks or by |. Supported targets include local folders, UNC shares, and http/https URLs. Example: \\\\server\\share\\redink-licensecounter|https://intranet.example.local/licensecounter. [LicenseCounterPath]"
                 },
                 {
                     "key": "LicenseCounterMethod",
                     "label": "License Counter Method",
                     "type": "string",
                     "default": "Auto",
-                    "description": "Transport mode for the offline license counter. Recommended values: Auto, File, WebBasic, WebExtended, LocalOnly, AppendFile. Example: Auto. [LicenseCounterMethod]"
+                    "description": "Transport mode for add-in load counting (independent of Pro, Private, trial or LicenseNoCheck). Supported values: Auto, File, WebBasic, WebPathOnly, WebExtended, LocalOnly, AppendFile. For the active Usage Server select WebExtended;RequireAck=true; optionally set a consistent NetworkScope to group Office hosts across clients. Example: WebExtended;RequireAck=true;NetworkScope=example.org. [LicenseCounterMethod]"
+                },
+                {
+                    "key": "LicenseCounterIntervall",
+                    "label": "License Counter Interval (Minutes)",
+                    "type": "integer",
+                    "validation": "0-10080",
+                    "default": "360",
+                    "description": "How often the add-in checks for a new local load date and retries unsent licence-counter records, in minutes (0–10080). 360 is the default. 0 records and reports on add-in startup only, without later timer checks. A positive interval also observes the next local day while an Office host remains open. Successfully delivered evidence is not resent unless a new observed day or Office host is added. This measures add-in loading, not AI requests. Example: 360. [LicenseCounterIntervall]"
                 },
                 {
                     "key": "LicenseCounterAnon",
                     "label": "Anonymous License Counter",
                     "type": "boolean",
                     "default": "True",
-                    "description": "If True, the offline license counter does not include reversible user data in marker/report payloads. If False, a reversible obfuscated user value may be stored for reporting purposes. Example: True. [LicenseCounterAnon]"
+                    "description": "If True, add-in load reports do not include reversible user data in marker/report payloads, regardless of licence type. If False, a reversible obfuscated user value may be stored for reporting purposes. Example: True. [LicenseCounterAnon]"
                 },
                 {
                     "key": "LicenseAutoModeSilent",
@@ -1132,10 +1140,10 @@
                 },
                 {
                     "key": "LogPath",
-                    "label": "Anonymous Log Directory",
+                    "label": "Usage log directory",
                     "type": "path",
                     "default": "",
-                    "description": "Directory path where Red Ink writes anonymous log files during normal use. These logs can later be analyzed from Freestyle via a short command. Example: %APPDATA%\\RedInk\\Logs. [LogPath]"
+                    "description": "Directory for pseudonymous per-user, per-device and per-Office-host usage logs. New files use monthly segments; existing unsplit files remain readable. The Usage Server requires read access and a configured LogPath import source. Freestyle can also analyze the files directly. Agent run starts and tool activity are separate; store searches record the configured store name. Raw diagnostic messages may contain sensitive information. Restrict access and define an archive policy. Example: %APPDATA%\\RedInk\\Logs. [LogPath]"
                 },
                 {
                     "key": "PythonAgentPath",
