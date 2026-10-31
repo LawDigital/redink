@@ -1047,7 +1047,10 @@ Partial Public Class ThisAddIn
         End Select
 
         Try
-            If TryExtractOfficeText(filePath, extracted, label) Then
+            Dim officeRead = Await TryExtractOfficeTextAsync(filePath).ConfigureAwait(False)
+            extracted = officeRead.Item2
+            label = officeRead.Item3
+            If officeRead.Item1 Then
                 If Not String.IsNullOrWhiteSpace(extracted) Then
                     Return extracted
                 End If
@@ -1059,7 +1062,10 @@ Partial Public Class ThisAddIn
         End Try
 
         Try
-            If TryExtractTextLike(filePath, extracted, label) Then
+            Dim textRead = Await TryExtractTextLikeAsync(filePath).ConfigureAwait(False)
+            extracted = textRead.Item2
+            label = textRead.Item3
+            If textRead.Item1 Then
                 If Not String.IsNullOrWhiteSpace(extracted) Then
                     Return extracted
                 End If

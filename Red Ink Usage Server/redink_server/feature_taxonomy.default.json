@@ -1,0 +1,17 @@
+{
+  "description": "Classify log feature labels. First matching group wins. Agentic = explicitly agent-labelled invocation, NOT successful autonomous execution.",
+  "groups": [
+    {"id": "agent", "label": "Agent-labelled operations", "agentic": true,
+      "patterns": ["*AutoPilot*", "*WebAgent*", "AgentToolCall_*", "*AgentTool_*", "Agent_*", "RI_Agent*"]},
+    {"id": "chat", "label": "Chat and tool controls", "agentic": false,
+      "patterns": ["*Chat*", "LocalChat_*", "Browser_Freestyle"]},
+    {"id": "freestyle", "label": "Freestyle", "agentic": false,
+      "patterns": ["*Freestyle*", "RI_DiscussInky*", "*SpecialModel*"]},
+    {"id": "language", "label": "Language and editing", "agentic": false,
+      "patterns": ["*Translate*", "*PrimLang*", "*SecLang*", "*Correct*", "*Improve*", "*Summarize*", "*Shorten*", "*Explain*"]},
+    {"id": "documents", "label": "Documents and analysis", "agentic": false,
+      "patterns": ["*Extractor*", "*Analyze*", "*Compare*", "*Snapshot*", "*Charting*", "*Import*", "*Doc*", "*Style*", "*MailMover*", "*InboxBoard*", "*Regex*"]},
+    {"id": "administration", "label": "Settings and utilities", "agentic": false,
+      "patterns": ["Settings*", "*Clipboard*", "*Undo*", "*Height*", "*Remove*", "*Renamer*"]}
+  ]
+}

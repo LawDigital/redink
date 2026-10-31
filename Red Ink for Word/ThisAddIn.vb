@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 29.10.2026
+' 31.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -69,7 +69,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.291026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.311026" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -534,6 +534,11 @@ Partial Public Class ThisAddIn
 
     Private Sub CloseHostModelessWindows()
         Try
+            Global.SharedLibrary.SharedLibrary.LogWindow.Shutdown()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink shared log shutdown failed: " & ex.Message)
+        End Try
+        Try
             If _hostModelessWindows IsNot Nothing Then _hostModelessWindows.CloseAll()
         Catch ex As System.Exception
             System.Diagnostics.Debug.WriteLine("Red Ink modeless host shutdown failed: " & ex.Message)
@@ -581,6 +586,7 @@ Partial Public Class ThisAddIn
             SynchronizationContext.SetSynchronizationContext(_uiContext)
         End If
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
+        Global.SharedLibrary.SharedLibrary.LogWindow.InitializeUiDispatcher(_uiContext, _hostModelessWindows)
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
         UpdateHandler.MainControl = mainThreadControl
@@ -644,18 +650,10 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    Private Shared Function EnsureUIThread() As Task
-        ' If UI context not set or already on it, nothing to do.
-        If _uiContext Is Nothing OrElse SynchronizationContext.Current Is _uiContext Then
-            Return Task.CompletedTask
-        End If
-        Dim tcs As New TaskCompletionSource(Of Object)(TaskCreationOptions.RunContinuationsAsynchronously)
-        _uiContext.Post(
-            Sub(state As Object)
-                tcs.TrySetResult(Nothing)
-            End Sub,
-            Nothing)
-        Return tcs.Task
+    Private Shared Function EnsureUIThread() As Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable
+        ' Await posts the continuation itself; a posted no-op Task cannot switch an MTA caller.
+        Return New Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable(
+            _uiContext, UiThreadId, Globals.ThisAddIn.HostWindowLifetimeToken)
     End Function
 
 
@@ -831,7 +829,13 @@ Partial Public Class ThisAddIn
         Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.HostClosing("Word")
     End Sub
 
+    Private licenseCounterReporter As System.IDisposable
+
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        If licenseCounterReporter IsNot Nothing Then
+            licenseCounterReporter.Dispose()
+            licenseCounterReporter = Nothing
+        End If
         CancelActiveToolingForHostExit()
         CloseHostModelessWindows()
         Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.HostClosing("Word")
@@ -895,10 +899,15 @@ Partial Public Class ThisAddIn
 
         MeasureWordStartupStep("ContextMenu.schedule", Sub() AddContextMenu(), startupTimings)
 
-        If _context IsNot Nothing AndAlso _context.INIloaded Then
+        ' Reporting checks the stored, verified licence itself. INIloaded also
+        ' depends on model setup and must not suppress a valid license count.
+        If _context IsNot Nothing Then
             MeasureWordStartupStep(
                 "LicenseCounter.schedule",
-                Sub() SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "WD"),
+                Sub()
+                    If licenseCounterReporter IsNot Nothing Then licenseCounterReporter.Dispose()
+                    licenseCounterReporter = Global.SharedLibrary.SharedLibrary.SharedMethods.StartLicenseCounterReporting(_context, "WD")
+                End Sub,
                 startupTimings)
         End If
 
@@ -965,7 +974,7 @@ Partial Public Class ThisAddIn
     Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False, Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True, Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
         Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution:=ToolExecution, transportRetryProfile:=transportRetryProfile)
         If EnsureUI Then
-            Await EnsureUIThread().ConfigureAwait(False)
+            Await EnsureUIThread()
         End If
         Return Response
     End Function

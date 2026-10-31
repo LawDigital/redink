@@ -105,7 +105,8 @@ Namespace Agents
         ''' Caller passes the dictionary from ToolCall.Arguments.
         ''' </summary>
         Public Shared Function Execute(arguments As IDictionary(Of String, Object),
-                                       Optional authoritativeUserRequest As System.String = Nothing) As String
+                                       Optional authoritativeUserRequest As System.String = Nothing,
+                                       Optional onSkillLoaded As System.Action(Of System.String) = Nothing) As String
             Try
                 Dim name As String = GetStr(arguments, "name")
                 Dim input As String = GetStr(arguments, "input")
@@ -205,6 +206,13 @@ Namespace Agents
                     result("input_role") = "orchestrator_summary_non_authoritative"
                 End If
 
+                If onSkillLoaded IsNot Nothing Then
+                    Try
+                        onSkillLoaded(sk.Name)
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("[SharedLogger] Skill telemetry unavailable.")
+                    End Try
+                End If
                 Return result.ToString(Formatting.None)
             Catch ex As Exception
                 Return JsonConvert.SerializeObject(New With {Key .error = "skill_invoke_failed", Key .message = ex.Message})

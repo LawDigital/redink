@@ -18,13 +18,39 @@ Partial Public Class ThisAddIn
     Private Sub CommentSelectionStartup() Handles Me.Startup
         Try
             _commentSelectionTracker = New WordCommentSelectionTracker()
-            Try
-                _commentSelectionTracker.WatchWindow(New System.IntPtr(Application.ActiveWindow.Hwnd))
-            Catch noWindow As System.Exception
-                LogWordCommandDiagnostic("CommentSelection.InitialWindow", noWindow.ToString())
-            End Try
+            WatchActiveCommentWindow()
         Catch ex As System.Exception
             LogWordCommandDiagnostic("CommentSelection.Startup", ex.ToString())
+        End Try
+    End Sub
+
+    ' Only call from Office event handlers or after EnsureUIThread. The main application
+    ' HWND or the foreground window is not proof of the active document's identity.
+    Private Shared Function GetActiveWordDocumentWindow(app As Microsoft.Office.Interop.Word.Application) As Microsoft.Office.Interop.Word.Window
+        If app Is Nothing Then Return Nothing
+        Try
+            Dim docs As Microsoft.Office.Interop.Word.Documents = app.Documents
+            If docs Is Nothing OrElse docs.Count = 0 Then Return Nothing
+            Dim windows As Microsoft.Office.Interop.Word.Windows = app.Windows
+            If windows Is Nothing OrElse windows.Count = 0 Then Return Nothing
+            Return app.ActiveWindow
+        Catch closed As System.Runtime.InteropServices.COMException When closed.ErrorCode = &H800A1098I
+            ' The last document closed between the collection and ActiveWindow calls.
+            Return Nothing
+        End Try
+    End Function
+
+    Private Sub WatchActiveCommentWindow()
+        Dim tracker As WordCommentSelectionTracker = _commentSelectionTracker
+        If tracker Is Nothing Then Return
+        Try
+            Dim window As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(Application)
+            tracker.WatchWindow(If(window Is Nothing, System.IntPtr.Zero, New System.IntPtr(window.Hwnd)))
+        Catch closed As System.Runtime.InteropServices.COMException When closed.ErrorCode = &H800A1098I
+            tracker.WatchWindow(System.IntPtr.Zero)
+        Catch ex As System.Exception
+            tracker.WatchWindow(System.IntPtr.Zero)
+            LogWordCommandDiagnostic("CommentSelection.ActiveWindow", ex.ToString())
         End Try
     End Sub
 
@@ -41,11 +67,7 @@ Partial Public Class ThisAddIn
         _lastCommentBodyStory = -1
         If _commentSelectionTracker IsNot Nothing Then
             _commentSelectionTracker.Invalidate()
-            Try
-                _commentSelectionTracker.WatchWindow(New System.IntPtr(Application.ActiveWindow.Hwnd))
-            Catch noWindow As System.Exception
-                LogWordCommandDiagnostic("CommentSelection.ActiveWindow", noWindow.ToString())
-            End Try
+            WatchActiveCommentWindow()
         End If
     End Sub
 
@@ -55,7 +77,10 @@ Partial Public Class ThisAddIn
                selection.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory OrElse
                CBool(selection.Information(Microsoft.Office.Interop.Word.WdInformation.wdInCommentPane)) Then Return
             Dim currentRange As Microsoft.Office.Interop.Word.Range = selection.Range
-            Dim hwnd As System.Int32 = selection.Application.ActiveWindow.Hwnd
+            If currentRange Is Nothing Then Return
+            Dim window As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(selection.Application)
+            If window Is Nothing OrElse Not IsSameProcessingDocument(window.Document, currentRange.Document) Then Return
+            Dim hwnd As System.Int32 = window.Hwnd
             If hwnd <> _lastCommentBodyWindow OrElse currentRange.Start <> _lastCommentBodyStart OrElse
                currentRange.End <> _lastCommentBodyEnd OrElse CInt(currentRange.StoryType) <> _lastCommentBodyStory Then
                 _lastCommentBodyWindow = hwnd
@@ -67,6 +92,9 @@ Partial Public Class ThisAddIn
                 ' change. Let the input/UIA observer distinguish those transitions.
                 _commentSelectionTracker.ObserveBodySelectionChange(New System.IntPtr(hwnd))
             End If
+        Catch closed As System.Runtime.InteropServices.COMException When closed.ErrorCode = &H800A1098I
+            ' A final selection event can race the last document closing.
+            If _commentSelectionTracker IsNot Nothing Then _commentSelectionTracker.WatchWindow(System.IntPtr.Zero)
         Catch ex As System.Exception
             LogWordCommandDiagnostic("CommentSelection.SelectionEvent", ex.ToString())
         End Try
@@ -74,14 +102,16 @@ Partial Public Class ThisAddIn
 
     Private Async Function CaptureCommentSelectionEvidenceAsync() As System.Threading.Tasks.Task(Of WordCommentSelectionTracker.Evidence)
         Await EnsureUIThread()
-        Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
-        Dim hwnd As New System.IntPtr(Globals.ThisAddIn.Application.ActiveWindow.Hwnd)
+        Dim before As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(Globals.ThisAddIn.Application)
+        If before Is Nothing Then Throw New WordCommandNoticeException("Open a document and select its comment first.")
+        Dim doc As Microsoft.Office.Interop.Word.Document = before.Document
+        Dim hwnd As New System.IntPtr(before.Hwnd)
         Dim tracker As WordCommentSelectionTracker = _commentSelectionTracker
         If tracker Is Nothing Then Return WordCommentSelectionTracker.Evidence.Unknown("tracker_unavailable")
         Dim evidence As WordCommentSelectionTracker.Evidence = Await tracker.CaptureAsync(hwnd)
         Await EnsureUIThread()
-        If Not IsSameProcessingDocument(doc, Globals.ThisAddIn.Application.ActiveDocument) OrElse
-           Globals.ThisAddIn.Application.ActiveWindow.Hwnd <> hwnd.ToInt32() Then
+        Dim after As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(Globals.ThisAddIn.Application)
+        If after Is Nothing OrElse after.Hwnd <> hwnd.ToInt32() OrElse Not IsSameProcessingDocument(doc, after.Document) Then
             Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
         End If
         LogCommentCommandResolution("uia; " & evidence.Diagnostic)

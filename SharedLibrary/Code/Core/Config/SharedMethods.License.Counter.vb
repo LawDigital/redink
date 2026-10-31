@@ -3,11 +3,12 @@
 '
 ' =============================================================================
 ' File: SharedMethods.License.Counter.vb
-' Purpose: Offline license-counter for offline-domain licenses.
+' Purpose: Durable monthly licence counter with sparse daily add-in load observations.
 '
 ' Scope:
 '  - Creates one local usage marker per Month + JointNetworkKey + ProductID + HostID + UserKey.
-'  - Reports markers to file/directory and web targets.
+'  - Records observed local load dates; reports one user/month aggregate to each target.
+'  - Retries failures without resending successful daily evidence across Office hosts.
 '  - Stores lightweight delivery state and pending error events.
 '  - Provides a simple evaluator UI for Word via the "licensecounter" freestyle command.
 ' =============================================================================
@@ -40,6 +41,147 @@ Namespace SharedLibrary
         Private Const LicenseCounterWebTimeoutMs As Integer = 5000
         Private Const LicenseCounterRetryHours As Integer = 24
         Public Const LicenseCounterOutlookTimerHours As Integer = 6
+
+        ' Reporting never calls Office or displays UI. This in-process host gate and
+        ' a separate background-only profile mutex prevent overlapping deliveries.
+        ' Local monthly markers are persisted before either transport gate.
+        Private Shared ReadOnly LicenseCounterReportBusy As New System.Collections.Concurrent.ConcurrentDictionary(Of System.String, System.Byte)(System.StringComparer.OrdinalIgnoreCase)
+
+        Private NotInheritable Class LicenseCounterRuntimeOptions
+            Public Property PathRaw As System.String = ""
+            Public Property MethodRaw As System.String = ""
+            Public Property Anon As System.Boolean
+            Public Property ReportIntervalMinutes As System.Int32 = DEFAULT_LICENSECOUNTERINTERVALL
+            Public Property RequireAck As System.Boolean
+            Public Property ClassicNetworkScope As System.String = ""
+            ' Snapshot at startup; timer callbacks must not read UI/context config.
+            Public Property ConfiguredProductId As System.String = ""
+            Public Property ConfiguredUserId As System.String = ""
+        End Class
+
+        Private NotInheritable Class LicenseCounterReporter
+            Implements System.IDisposable
+
+            Private ReadOnly _timer As System.Threading.Timer
+            Private ReadOnly _options As LicenseCounterRuntimeOptions
+            Private ReadOnly _hostId As System.String
+            Private _disposed As System.Int32
+
+            Public Sub New(options As LicenseCounterRuntimeOptions, hostId As System.String)
+                _options = options
+                _hostId = NormalizeLicenseCounterHostId(hostId)
+                _timer = New System.Threading.Timer(
+                    Sub(state As System.Object)
+                        If System.Threading.Volatile.Read(_disposed) <> 0 Then Return
+                        Try
+                            RegisterLicenseCounterUsageAndReportOptions(_options, _hostId)
+                        Finally
+                            ScheduleNextCheck()
+                        End Try
+                    End Sub,
+                    Nothing,
+                    System.Threading.Timeout.InfiniteTimeSpan,
+                    System.Threading.Timeout.InfiniteTimeSpan)
+                ' Record the startup date before background transport. Reusing scalar
+                ' configuration avoids accessing Office objects on timer threads.
+                RegisterLicenseCounterUsageAndReportOptions(_options, _hostId)
+                ScheduleNextCheck()
+            End Sub
+
+            Private Sub ScheduleNextCheck()
+                If _options.ReportIntervalMinutes = 0 OrElse System.Threading.Volatile.Read(_disposed) <> 0 Then Return
+                Try
+                    _timer.Change(GetLicenseCounterNextCheckDelay(_options.ReportIntervalMinutes, System.DateTime.Now), System.Threading.Timeout.InfiniteTimeSpan)
+                Catch ex As System.ObjectDisposedException
+                    ' Disposal may race the final callback; no rescheduling is needed.
+                End Try
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If System.Threading.Interlocked.Exchange(_disposed, 1) = 0 Then _timer.Dispose()
+            End Sub
+        End Class
+
+        Private Shared Function GetLicenseCounterNextCheckDelay(intervalMinutes As System.Int32, nowLocal As System.DateTime) As System.TimeSpan
+            If intervalMinutes = 0 Then Return System.Threading.Timeout.InfiniteTimeSpan
+            ' A long configured retry interval must not skip a loaded calendar day.
+            ' Observe just after local midnight; UTC subtraction also handles DST.
+            Dim untilNextDay As System.TimeSpan = nowLocal.Date.AddDays(1).AddSeconds(1).ToUniversalTime().Subtract(nowLocal.ToUniversalTime())
+            Dim interval As System.TimeSpan = System.TimeSpan.FromMinutes(intervalMinutes)
+            Dim due As System.TimeSpan = If(untilNextDay < interval, untilNextDay, interval)
+            Return If(due > System.TimeSpan.Zero, due, System.TimeSpan.FromSeconds(1))
+        End Function
+
+        ' <summary>
+        ' Starts durable monthly registration with daily load checks and retry polling. Own and dispose
+        ' the returned token in the host lifecycle. Configuration is captured on the caller
+        ' thread; callbacks never read Office objects or invoke licence dialogs.
+        ' </summary>
+        Public Shared Function StartLicenseCounterReporting(context As ISharedContext, hostId As System.String) As System.IDisposable
+            Try
+                Dim options As LicenseCounterRuntimeOptions = ReadLicenseCounterRuntimeOptions(context)
+                If options Is Nothing OrElse System.String.IsNullOrWhiteSpace(options.PathRaw) Then Return Nothing
+                LogLicenseCounterDiagnostic("reporter_started", NormalizeLicenseCounterHostId(hostId) & "; intervalMinutes=" & options.ReportIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                Return New LicenseCounterReporter(options, hostId)
+            Catch ex As System.Exception
+                LogLicenseCounterDiagnostic("reporter_start_error", ex.GetType().Name)
+                LogLicenseCounterInternal("reporter_start_error", ex.Message)
+                Return Nothing
+            End Try
+        End Function
+
+        Private Shared Function ReadLicenseCounterRuntimeOptions(context As ISharedContext) As LicenseCounterRuntimeOptions
+            If context Is Nothing Then Return Nothing
+            Dim options As New LicenseCounterRuntimeOptions() With {
+                .PathRaw = context.INI_LicenseCounterPath,
+                .MethodRaw = context.INI_LicenseCounterMethod,
+                .Anon = context.INI_LicenseCounterAnon
+            }
+            options.ReportIntervalMinutes = ParseLicenseCounterIntervall(context.INI_LicenseCounterIntervall.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            options.ClassicNetworkScope = GetLicenseCounterOption(options.MethodRaw, "NetworkScope")
+            ' License counting is independent of whether a Pro/private licence is present
+            ' or the normal licence verification was explicitly disabled.
+            If _licenseConfigDict IsNot Nothing Then
+                Dim configured As System.String = Nothing
+                If _licenseConfigDict.TryGetValue("LicenseProductID", configured) Then options.ConfiguredProductId = NormalizeLicenseCounterValue(configured)
+                configured = Nothing
+                If _licenseConfigDict.TryGetValue("LicenseUserID", configured) Then options.ConfiguredUserId = NormalizeLicenseCounterValue(configured)
+            End If
+            Dim requireAck As System.String = GetLicenseCounterOption(options.MethodRaw, "RequireAck")
+            If Not System.String.IsNullOrWhiteSpace(requireAck) Then
+                Select Case requireAck.Trim().ToLowerInvariant()
+                    Case "true", "1"
+                        options.RequireAck = True
+                    Case "false", "0"
+                        options.RequireAck = False
+                    Case Else
+                        Throw New System.FormatException("LicenseCounterMethod RequireAck must be true or false; reporting was not started.")
+                End Select
+            End If
+            Return options
+        End Function
+
+        Private Shared Function GetLicenseCounterOption(rawValue As System.String, optionName As System.String) As System.String
+            Dim result As System.String = ""
+            Dim parts As System.String() = If(rawValue, "").Split(";"c)
+            For i As System.Int32 = 1 To parts.Length - 1
+                Dim part As System.String = parts(i).Trim()
+                Dim equalsIndex As System.Int32 = part.IndexOf("="c)
+                If equalsIndex <= 0 Then Continue For
+                If System.String.Equals(part.Substring(0, equalsIndex).Trim(), optionName, System.StringComparison.OrdinalIgnoreCase) Then
+                    result = part.Substring(equalsIndex + 1).Trim()
+                End If
+            Next
+            Return result
+        End Function
+
+        ' Minutes; zero disables the periodic timer but retains startup reporting.
+        Public Shared Function ParseLicenseCounterIntervall(value As System.String) As System.Int32
+            If System.String.IsNullOrWhiteSpace(value) Then Return DEFAULT_LICENSECOUNTERINTERVALL
+            Dim parsed As System.Int32
+            If System.Int32.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, parsed) AndAlso parsed >= 0 AndAlso parsed <= 10080 Then Return parsed
+            Throw New System.FormatException("LicenseCounterIntervall must be an integer from 0 to 10080 minutes.")
+        End Function
 
         Private Enum LicenseCounterMethodKind
             Auto = 0
@@ -77,9 +219,12 @@ Namespace SharedLibrary
             Public Property PathRaw As String = ""
             Public Property MethodRaw As String = ""
             Public Property MethodKind As LicenseCounterMethodKind
+            Public Property ReportIntervalMinutes As System.Int32 = DEFAULT_LICENSECOUNTERINTERVALL
+            Public Property RequireAck As System.Boolean
             Public Property WebMode As LicenseCounterWebModeKind
             Public Property Targets As New List(Of LicenseCounterTarget)()
             Public Property Month As String = ""
+            Public Property ObservedLocalDate As System.String = ""
             Public Property JointNetworkId As String = ""
             Public Property JointNetworkKey As String = ""
             Public Property NetworkScope As String = ""
@@ -117,6 +262,11 @@ Namespace SharedLibrary
             Public Property billingEventId As String = ""
             Public Property hostEventId As String = ""
             Public Property firstUseUtc As String = ""
+            Public Property lastUseUtc As System.String = ""
+            Public Property lastUseIh As System.String = ""
+            Public Property loadedDates As New System.Collections.Generic.List(Of System.String)()
+            Public Property loadedDatesIh As System.String = ""
+            Public Property reportIntervalMinutes As System.Int32 = DEFAULT_LICENSECOUNTERINTERVALL
             Public Property anon As Boolean
             Public Property actualNetworkId As String = ""
             Public Property actualNetworkKey As String = ""
@@ -173,6 +323,11 @@ Namespace SharedLibrary
             Public Property billingEventId As String = ""
             Public Property hostEventId As String = ""
             Public Property firstUseUtc As String = ""
+            Public Property lastUseUtc As System.String = ""
+            Public Property reportedUtc As System.String = ""
+            Public Property loadedDates As New System.Collections.Generic.List(Of System.String)()
+            Public Property loadedHosts As New System.Collections.Generic.List(Of System.String)()
+            Public Property reportIntervalMinutes As System.Int32 = DEFAULT_LICENSECOUNTERINTERVALL
             Public Property anon As Boolean
             Public Property userObf As String = ""
             Public Property errorEventId As String = ""
@@ -185,13 +340,22 @@ Namespace SharedLibrary
             Public Property Source As String = ""
 
             <JsonIgnore>
+            Public Property GroupedDeliveryKey As System.String = ""
+
+            <JsonIgnore>
+            Public Property SourceHostEventIds As New System.Collections.Generic.List(Of System.String)()
+
+            <JsonIgnore>
+            Public Property SourceMarkerFiles As New System.Collections.Generic.List(Of System.String)()
+
+            <JsonIgnore>
             Public ReadOnly Property DeliveryKey As String
                 Get
                     If String.Equals(t, "E", StringComparison.OrdinalIgnoreCase) Then
                         Return errorEventId
                     End If
 
-                    Return hostEventId
+                    Return If(System.String.IsNullOrWhiteSpace(GroupedDeliveryKey), hostEventId, GroupedDeliveryKey)
                 End Get
             End Property
         End Class
@@ -205,6 +369,7 @@ Namespace SharedLibrary
             Public Property ProductId As String = ""
             Public Property ProductIdSafe As String = ""
             Public Property HostId As String = ""
+            Public Property LoadedHosts As New System.Collections.Generic.List(Of System.String)()
             Public Property UserKey As String = ""
             Public Property BillingEventId As String = ""
             Public Property HostEventId As String = ""
@@ -270,33 +435,52 @@ Namespace SharedLibrary
             Public Property Token As String = ""
         End Class
 
-        Public Shared Sub RegisterLicenseCounterUsageAndReport(context As ISharedContext, hostId As String)
+        Public Shared Sub RegisterLicenseCounterUsageAndReport(context As ISharedContext, hostId As System.String)
+            Try
+                RegisterLicenseCounterUsageAndReportOptions(ReadLicenseCounterRuntimeOptions(context), hostId)
+            Catch ex As System.Exception
+                LogLicenseCounterInternal("register_error", ex.Message)
+            End Try
+        End Sub
+
+        Private Shared Sub RegisterLicenseCounterUsageAndReportOptions(options As LicenseCounterRuntimeOptions, hostId As System.String)
             Try
                 Dim runtime As LicenseCounterRuntimeContext = Nothing
+                If Not TryCreateLicenseCounterRuntimeContext(options, hostId, runtime) Then Return
 
-                If Not TryCreateLicenseCounterRuntimeContext(context, hostId, runtime) Then
-                    Return
-                End If
-
+                ' This always runs, including while an older backlog is still being sent.
+                ' It therefore records month boundaries independently of the network.
                 EnsureLicenseCounterMarker(runtime)
+                Dim capturedRuntime As LicenseCounterRuntimeContext = runtime
 
-                Dim capturedRuntime = runtime
-
-                System.Threading.Tasks.Task.Run(
-                    Sub()
-                        Try
-                            ProcessLicenseCounterBackground(capturedRuntime)
-                        Catch ex As System.Exception
-                            LogLicenseCounterInternal("background_error", ex.Message)
-                        End Try
-                    End Sub)
-
+                If Not LicenseCounterReportBusy.TryAdd(runtime.HostId, 0) Then Return
+                Try
+                    System.Threading.Tasks.Task.Run(
+                        Sub()
+                            Try
+                                ProcessLicenseCounterBackground(capturedRuntime)
+                            Catch ex As System.Exception
+                                LogLicenseCounterInternal("background_error", ex.Message)
+                            Finally
+                                Dim removed As System.Byte
+                                LicenseCounterReportBusy.TryRemove(capturedRuntime.HostId, removed)
+                            End Try
+                        End Sub)
+                Catch
+                    Dim removed As System.Byte
+                    LicenseCounterReportBusy.TryRemove(runtime.HostId, removed)
+                    Throw
+                End Try
             Catch ex As System.Exception
                 LogLicenseCounterInternal("register_error", ex.Message)
             End Try
         End Sub
 
         Public Shared Sub ShowLicenseCounterEvaluatorDialog(context As ISharedContext)
+            If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                RunOnStaThread(Sub() ShowLicenseCounterEvaluatorDialog(context), "Red Ink license counter", alwaysUseWorker:=True)
+                Return
+            End If
             Try
                 Dim analyzeFolderFirst As Boolean = (ShowCustomYesNoBox(
                     "Analyze a folder?" & vbCrLf & vbCrLf &
@@ -362,46 +546,77 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        Private Shared Function TryCreateLicenseCounterRuntimeContext(context As ISharedContext,
+        Private Shared Function TryCreateLicenseCounterRuntimeContext(options As LicenseCounterRuntimeOptions,
                                                                       hostId As String,
                                                                       ByRef runtime As LicenseCounterRuntimeContext) As Boolean
             runtime = Nothing
 
             Try
-                If context Is Nothing Then Return False
-                If String.IsNullOrWhiteSpace(context.INI_LicenseCounterPath) Then Return False
-                If Not HasStoredProLicense() Then Return False
-
-                Dim licenseKey As String = My.Settings.License_Key
-                Dim productId As String = My.Settings.License_ProductID
-
-                If String.IsNullOrWhiteSpace(licenseKey) OrElse Not IsOfflineDomainLicenseKey(licenseKey) Then
-                    Return False
+                If options Is Nothing Then Return False
+                If System.String.IsNullOrWhiteSpace(options.PathRaw) Then Return False
+                ' Reporting is not a licensing gate. A configured LicenseCounterPath
+                ' records the add-in load even for LicenseNoCheck, Private or trial use.
+                ' Never activate, elevate or alter the licence state here.
+                Dim hasStoredPro As System.Boolean = HasStoredProLicense()
+                Dim licenseKey As System.String = If(hasStoredPro, My.Settings.License_Key, "")
+                Dim storedProductId As System.String = If(hasStoredPro, My.Settings.License_ProductID, "")
+                ' Existing stored Pro identities take precedence to preserve the
+                ' established monthly key even when the optional INI value differs.
+                Dim effectiveProductId As System.String = NormalizeLicenseCounterValue(storedProductId)
+                If System.String.IsNullOrWhiteSpace(effectiveProductId) Then effectiveProductId = NormalizeLicenseCounterValue(options.ConfiguredProductId)
+                If System.String.IsNullOrWhiteSpace(effectiveProductId) Then
+                    effectiveProductId = "UNASSIGNED"
+                    LogLicenseCounterDiagnostic("unassigned_product", "host=" & NormalizeLicenseCounterHostId(hostId) & "; configure LicenseProductID for billing attribution")
                 End If
 
-                Dim info As OfflineDomainLicenseInfo = Nothing
-                Dim reason As String = ""
+                Dim actualNetworkId As System.String = NormalizeLicenseCounterValue(System.Environment.GetEnvironmentVariable("USERDNSDOMAIN")).ToLowerInvariant()
+                If System.String.IsNullOrWhiteSpace(actualNetworkId) Then actualNetworkId = NormalizeLicenseCounterValue(System.Environment.UserDomainName).ToLowerInvariant()
+                If System.String.IsNullOrWhiteSpace(actualNetworkId) Then actualNetworkId = "local-" & NormalizeLicenseCounterValue(System.Environment.MachineName).ToLowerInvariant()
 
-                If Not TryParseAndVerifyOfflineDomainLicense(productId, licenseKey, info, reason) Then
-                    LogLicenseCounterInternal("license_not_verified_for_counter", reason)
-                    Return False
+                Dim normalizedAllowedNetworkIds As System.Collections.Generic.List(Of System.String) = Nothing
+                Dim signedOfflineIdentity As System.Boolean = False
+                If hasStoredPro AndAlso Not System.String.IsNullOrWhiteSpace(licenseKey) AndAlso IsOfflineDomainLicenseKey(licenseKey) Then
+                    Dim info As OfflineDomainLicenseInfo = Nothing
+                    Dim reason As System.String = ""
+                    If TryParseAndVerifyOfflineDomainLicense(storedProductId, licenseKey, info, reason) Then
+                        ' Preserve the v1 network/product identity of a verified signed licence.
+                        effectiveProductId = info.ProductId
+                        actualNetworkId = NormalizeLicenseCounterValue(info.MatchedDomain)
+                        normalizedAllowedNetworkIds = NormalizeAllowedNetworkIds(info.AllowedDomains)
+                        signedOfflineIdentity = True
+                    Else
+                        ' Invalid evidence is never treated as a verified licence. Counting
+                        ' still proceeds using the configured reporting identity below.
+                        LogLicenseCounterDiagnostic("unverified_offline_identity", "host=" & NormalizeLicenseCounterHostId(hostId) & "; using reporting scope")
+                    End If
                 End If
 
-                Dim effectiveUserId As String = My.Settings.License_UserID
-                Dim fallbackUsed As Boolean = False
+                If Not signedOfflineIdentity Then
+                    ' A single NetworkScope provides stable grouping for classic/private/
+                    ' unchecked deployments across multiple Office hosts and machines.
+                    Dim scope As System.String = NormalizeLicenseCounterValue(options.ClassicNetworkScope).ToLowerInvariant()
+                    If System.String.IsNullOrWhiteSpace(scope) Then scope = actualNetworkId
+                    normalizedAllowedNetworkIds = SplitAllowedNetworkIds(scope)
+                    If normalizedAllowedNetworkIds.Count = 0 Then normalizedAllowedNetworkIds.Add("UNKNOWN_NETWORK")
+                End If
 
-                If String.IsNullOrWhiteSpace(effectiveUserId) Then
+                ' Prefer the established Pro user identity when present. With private or
+                ' unchecked installations, honour the explicitly configured LicenseUserID.
+                Dim effectiveUserId As System.String = ""
+                If hasStoredPro Then effectiveUserId = My.Settings.License_UserID
+                If System.String.IsNullOrWhiteSpace(effectiveUserId) Then effectiveUserId = ExpandLicenseEnvironmentVariables(options.ConfiguredUserId)
+                Dim fallbackUsed As System.Boolean = False
+                If System.String.IsNullOrWhiteSpace(effectiveUserId) Then
                     effectiveUserId = ExpandLicenseEnvironmentVariables("%USERNAME%")
                     fallbackUsed = True
                 End If
 
                 Dim normalizedUserId As String = NormalizeLicenseCounterUserId(effectiveUserId)
                 Dim normalizedHostId As String = NormalizeLicenseCounterHostId(hostId)
-                Dim actualNetworkId As String = NormalizeLicenseCounterValue(info.MatchedDomain)
-                Dim normalizedAllowedNetworkIds As List(Of String) = NormalizeAllowedNetworkIds(info.AllowedDomains)
                 Dim jointNetworkId As String = BuildJointNetworkId(normalizedAllowedNetworkIds)
-                Dim month As String = System.DateTime.Now.ToString("yyyy-MM", CultureInfo.InvariantCulture)
-                Dim resubmitInstruction As LicenseCounterResubmitInstruction = ParseLicenseCounterResubmitInstruction(context.INI_LicenseCounterMethod)
+                Dim observedLocalTime As System.DateTime = System.DateTime.Now
+                Dim month As String = observedLocalTime.ToString("yyyy-MM", CultureInfo.InvariantCulture)
+                Dim resubmitInstruction As LicenseCounterResubmitInstruction = ParseLicenseCounterResubmitInstruction(options.MethodRaw)
 
                 If String.IsNullOrWhiteSpace(normalizedUserId) Then
                     normalizedUserId = "UNKNOWN_USER"
@@ -409,13 +624,13 @@ Namespace SharedLibrary
 
                 Dim jointNetworkKey As String = BuildJointNetworkKey(jointNetworkId)
                 Dim actualNetworkKey As String = BuildNetworkKey(actualNetworkId)
-                Dim productIdSafe As String = MakeLicenseCounterSafeProductId(info.ProductId)
+                Dim productIdSafe As String = MakeLicenseCounterSafeProductId(effectiveProductId)
                 Dim userKey As String = BuildUserKey(jointNetworkKey, normalizedUserId)
-                Dim billingEventId As String = BuildBillingEventId(month, jointNetworkKey, info.ProductId, userKey)
-                Dim hostEventId As String = BuildHostEventId(month, jointNetworkKey, info.ProductId, normalizedHostId, userKey)
-                Dim anon As Boolean = context.INI_LicenseCounterAnon
+                Dim billingEventId As String = BuildBillingEventId(month, jointNetworkKey, effectiveProductId, userKey)
+                Dim hostEventId As String = BuildHostEventId(month, jointNetworkKey, effectiveProductId, normalizedHostId, userKey)
+                Dim anon As Boolean = options.Anon
                 Dim userObf As String = If(anon, "", BuildUserObf(normalizedUserId))
-                Dim firstUseUtc As String = System.DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+                Dim firstUseUtc As String = observedLocalTime.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
                 Dim markerFileName As String = $"{LicenseCounterMarkerPrefix}{month}_{jointNetworkKey}_{productIdSafe}_{normalizedHostId}_{userKey}.json"
 
                 Dim markerRecord As New LicenseCounterMarkerRecord() With {
@@ -425,7 +640,7 @@ Namespace SharedLibrary
                     .networkKey = jointNetworkKey,
                     .networkScope = jointNetworkId,
                     .allowedNetworkIds = New List(Of String)(normalizedAllowedNetworkIds),
-                    .productId = info.ProductId,
+                    .productId = effectiveProductId,
                     .productIdSafe = productIdSafe,
                     .hostId = normalizedHostId,
                     .userKey = userKey,
@@ -440,27 +655,30 @@ Namespace SharedLibrary
 
                 markerRecord.ih = ComputeMarkerIntegrityHash(markerRecord)
 
-                Dim parsedMethod As LicenseCounterMethodKind = ParseLicenseCounterMethod(context.INI_LicenseCounterMethod)
-                Dim parsedWebMode As LicenseCounterWebModeKind = ParseLicenseCounterWebMode(context.INI_LicenseCounterMethod, parsedMethod)
+                Dim parsedMethod As LicenseCounterMethodKind = ParseLicenseCounterMethod(options.MethodRaw)
+                Dim parsedWebMode As LicenseCounterWebModeKind = ParseLicenseCounterWebMode(options.MethodRaw, parsedMethod)
                 Dim parsedTargets As List(Of LicenseCounterTarget) = ParseLicenseCounterTargets(
-                    context.INI_LicenseCounterPath,
+                    options.PathRaw,
                     parsedMethod)
 
                 runtime = New LicenseCounterRuntimeContext() With {
                     .BaseFolder = GetLicenseCounterBaseFolder(),
-                    .PathRaw = context.INI_LicenseCounterPath,
-                    .MethodRaw = context.INI_LicenseCounterMethod,
+                    .PathRaw = options.PathRaw,
+                    .MethodRaw = options.MethodRaw,
                     .MethodKind = parsedMethod,
+                    .ReportIntervalMinutes = options.ReportIntervalMinutes,
+                    .RequireAck = options.RequireAck,
                     .WebMode = parsedWebMode,
                     .Targets = parsedTargets,
                     .Month = month,
+                    .ObservedLocalDate = observedLocalTime.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
                     .JointNetworkId = jointNetworkId,
                     .JointNetworkKey = jointNetworkKey,
                     .NetworkScope = jointNetworkId,
                     .AllowedNetworkIds = New List(Of String)(normalizedAllowedNetworkIds),
                     .ActualNetworkId = actualNetworkId,
                     .ActualNetworkKey = actualNetworkKey,
-                    .ProductId = info.ProductId,
+                    .ProductId = effectiveProductId,
                     .ProductIdSafe = productIdSafe,
                     .HostId = normalizedHostId,
                     .UserId = normalizedUserId,
@@ -479,10 +697,14 @@ Namespace SharedLibrary
 
                 LogLicenseCounterInternal("runtime_context",
                                           $"Method={runtime.MethodKind}, WebMode={runtime.WebMode}, Targets={runtime.Targets.Count}, Month={runtime.Month}, HostEventId={runtime.HostEventId}, BillingEventId={runtime.BillingEventId}")
+                If runtime.Targets.Count = 0 AndAlso runtime.MethodKind <> LicenseCounterMethodKind.LocalOnly Then
+                    LogLicenseCounterDiagnostic("skipped", "No valid reporting targets; host=" & runtime.HostId)
+                End If
 
                 Return True
 
             Catch ex As System.Exception
+                LogLicenseCounterDiagnostic("context_error", ex.GetType().Name)
                 LogLicenseCounterInternal("context_error", ex.Message)
                 Return False
             End Try
@@ -490,38 +712,135 @@ Namespace SharedLibrary
 
         Private Shared Sub EnsureLicenseCounterMarker(runtime As LicenseCounterRuntimeContext)
             Try
-                Directory.CreateDirectory(runtime.BaseFolder)
-
-                If File.Exists(runtime.MarkerFilePath) Then
-                    LogLicenseCounterInternal("marker_exists",
-                                              $"HostEventId={runtime.HostEventId}, File='{runtime.MarkerFileName}'")
-                    Return
-                End If
-
-                Dim json As String = JsonConvert.SerializeObject(runtime.MarkerRecord, Formatting.Indented)
-
-                Try
-                    Using fs As New FileStream(runtime.MarkerFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.Read)
-                        Using sw As New StreamWriter(fs, New UTF8Encoding(True))
-                            sw.Write(json)
-                        End Using
-                    End Using
-
-                    LogLicenseCounterInternal("marker_created",
-                                              $"HostEventId={runtime.HostEventId}, File='{runtime.MarkerFileName}'")
-                Catch ex As IOException
-                    If Not File.Exists(runtime.MarkerFilePath) Then
-                        LogLicenseCounterInternal("marker_create_error", ex.Message)
-                    End If
-                End Try
-
+                System.IO.Directory.CreateDirectory(runtime.BaseFolder)
+                WithLicenseCounterStateLock(
+                    runtime.BaseFolder,
+                    Sub(state)
+                        Dim record As LicenseCounterMarkerRecord = runtime.MarkerRecord
+                        Dim markerExists As System.Boolean = System.IO.File.Exists(runtime.MarkerFilePath)
+                        If markerExists Then
+                            record = Newtonsoft.Json.JsonConvert.DeserializeObject(Of LicenseCounterMarkerRecord)(System.IO.File.ReadAllText(runtime.MarkerFilePath, System.Text.Encoding.UTF8))
+                            If record Is Nothing OrElse Not System.String.Equals(record.ih, ComputeMarkerIntegrityHash(record), System.StringComparison.OrdinalIgnoreCase) OrElse
+                               Not System.String.Equals(record.hostEventId, runtime.HostEventId, System.StringComparison.OrdinalIgnoreCase) Then
+                                Throw New System.IO.InvalidDataException("Existing licence-counter marker failed integrity validation; it was preserved for investigation.")
+                            End If
+                        End If
+                        ' Read optional metadata before an anonymity change alters v1 ih.
+                        ' Old markers contribute monthly evidence, never invented dates.
+                        Dim observedDates As System.Collections.Generic.List(Of System.String) = ReadLicenseCounterLoadedDates(record)
+                        Dim previousLastUse As System.String = ReadLicenseCounterLastUseUtc(record)
+                        Dim newDay As System.Boolean = Not observedDates.Contains(runtime.ObservedLocalDate)
+                        Dim removeIdentity As System.Boolean = runtime.Anon AndAlso (Not record.anon OrElse Not System.String.IsNullOrWhiteSpace(record.userObf))
+                        Dim changed As System.Boolean = Not markerExists OrElse newDay OrElse removeIdentity OrElse record.reportIntervalMinutes <> runtime.ReportIntervalMinutes
+                        If newDay Then observedDates.Add(runtime.ObservedLocalDate)
+                        If runtime.Anon Then
+                            record.anon = True
+                            record.userObf = ""
+                        End If
+                        record.loadedDates = observedDates.OrderBy(Function(value) value, System.StringComparer.Ordinal).ToList()
+                        ' This timestamp now means the first load observation of the latest
+                        ' observed day. Same-day checks neither move it nor rewrite the marker.
+                        record.lastUseUtc = If(newDay, runtime.FirstUseUtc, previousLastUse)
+                        record.reportIntervalMinutes = runtime.ReportIntervalMinutes
+                        record.ih = ComputeMarkerIntegrityHash(record)
+                        record.lastUseIh = ComputeLicenseCounterLastUseIntegrityHash(record)
+                        record.loadedDatesIh = ComputeLicenseCounterLoadedDatesIntegrityHash(record)
+                        If changed Then
+                            WriteLicenseCounterJsonAtomically(runtime.MarkerFilePath, Newtonsoft.Json.JsonConvert.SerializeObject(record, Newtonsoft.Json.Formatting.Indented))
+                            LogLicenseCounterInternal("marker_updated", "HostEventId=" & record.hostEventId & ", Month=" & record.month & ", LoadedDate=" & runtime.ObservedLocalDate)
+                            LogLicenseCounterDiagnostic("marker_updated", "host=" & runtime.HostId & "; month=" & record.month & "; loadedDate=" & runtime.ObservedLocalDate)
+                        End If
+                        runtime.MarkerRecord = record
+                        runtime.FirstUseUtc = record.firstUseUtc
+                        EnsureKnownMarkerEntry(state, record.hostEventId, runtime.MarkerFileName)
+                    End Sub)
             Catch ex As System.Exception
+                LogLicenseCounterDiagnostic("marker_error", ex.GetType().Name)
                 LogLicenseCounterInternal("marker_error", ex.Message)
             End Try
         End Sub
 
+        Private Shared Function ComputeLicenseCounterLoadedDatesIntegrityHash(record As LicenseCounterMarkerRecord) As System.String
+            Return HashSha256("RI-LC-LOADED-DATES-v1|" & record.ih & "|" & System.String.Join("|", If(record.loadedDates, New System.Collections.Generic.List(Of System.String)())) & "|" & LicenseCounterLicenseFingerprint)
+        End Function
+
+        Private Shared Function ReadLicenseCounterLoadedDates(record As LicenseCounterMarkerRecord) As System.Collections.Generic.List(Of System.String)
+            Dim empty As New System.Collections.Generic.List(Of System.String)()
+            If record.loadedDates Is Nothing OrElse record.loadedDates.Count = 0 Then Return empty
+            If record.loadedDates.Count <= 31 AndAlso System.String.Equals(record.loadedDatesIh, ComputeLicenseCounterLoadedDatesIntegrityHash(record), System.StringComparison.OrdinalIgnoreCase) Then
+                For Each value As System.String In record.loadedDates
+                    Dim parsed As System.DateTime
+                    If Not System.DateTime.TryParseExact(value, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, parsed) OrElse
+                       Not System.String.Equals(parsed.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture), record.month, System.StringComparison.Ordinal) Then
+                        LogLicenseCounterInternal("marker_loaded_dates_invalid", "HostEventId=" & record.hostEventId & "; monthly evidence retained without invalid daily metadata.")
+                        Return empty
+                    End If
+                Next
+                Return record.loadedDates.Distinct(System.StringComparer.Ordinal).OrderBy(Function(value) value, System.StringComparer.Ordinal).ToList()
+            End If
+            LogLicenseCounterInternal("marker_loaded_dates_integrity_error", "HostEventId=" & record.hostEventId & "; monthly evidence retained without unverified daily metadata.")
+            Return empty
+        End Function
+
+        Private Shared Function ComputeLicenseCounterLastUseIntegrityHash(record As LicenseCounterMarkerRecord) As System.String
+            Return HashSha256("RI-LC-LASTUSE-v1|" & record.ih & "|" & record.lastUseUtc & "|" & LicenseCounterLicenseFingerprint)
+        End Function
+
+        Private Shared Function ReadLicenseCounterLastUseUtc(record As LicenseCounterMarkerRecord) As System.String
+            If System.String.IsNullOrWhiteSpace(record.lastUseUtc) Then Return ""
+            If System.String.Equals(record.lastUseIh, ComputeLicenseCounterLastUseIntegrityHash(record), System.StringComparison.OrdinalIgnoreCase) Then Return record.lastUseUtc
+            LogLicenseCounterInternal("marker_freshness_integrity_error", "HostEventId=" & record.hostEventId & "; monthly evidence retained without freshness metadata.")
+            Return ""
+        End Function
+
+        Private Shared Sub WriteLicenseCounterJsonAtomically(path As System.String, json As System.String)
+            Dim temporaryPath As System.String = path & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+            Try
+                Using stream As New System.IO.FileStream(temporaryPath, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None)
+                    Dim preamble As System.Byte() = New System.Text.UTF8Encoding(True).GetPreamble()
+                    Dim bytes As System.Byte() = System.Text.Encoding.UTF8.GetBytes(json)
+                    stream.Write(preamble, 0, preamble.Length)
+                    stream.Write(bytes, 0, bytes.Length)
+                    stream.Flush(True)
+                End Using
+                If System.IO.File.Exists(path) Then
+                    System.IO.File.Replace(temporaryPath, path, Nothing)
+                Else
+                    System.IO.File.Move(temporaryPath, path)
+                End If
+            Finally
+                If System.IO.File.Exists(temporaryPath) Then System.IO.File.Delete(temporaryPath)
+            End Try
+        End Sub
+
         Private Shared Sub ProcessLicenseCounterBackground(runtime As LicenseCounterRuntimeContext)
+            Dim mutexName As System.String = "Local\RI_LicenseCounter_Report_" & FirstHex(HashSha256(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile)), 16)
+            Dim hasHandle As System.Boolean = False
+            Using reportMutex As New System.Threading.Mutex(False, mutexName)
+                Try
+                    Try
+                        ' Wait on a background worker rather than dropping a concurrent
+                        ' Excel/Outlook start while Word is delivering its first marker.
+                        hasHandle = reportMutex.WaitOne(System.TimeSpan.FromMinutes(2))
+                    Catch ex As System.Threading.AbandonedMutexException
+                        hasHandle = True
+                    End Try
+                    If Not hasHandle Then
+                        LogLicenseCounterDiagnostic("delivery_lock_timeout", "host=" & runtime.HostId & "; marker retained for later retry")
+                        Return
+                    End If
+                    ' Hold this separate lock through the ACK save. Network I/O never
+                    ' holds the local state mutex; Office UI never waits on this transport lock.
+                    ProcessLicenseCounterBackgroundLocked(runtime)
+                Finally
+                    If hasHandle Then reportMutex.ReleaseMutex()
+                End Try
+            End Using
+        End Sub
+
+        Private Shared Sub ProcessLicenseCounterBackgroundLocked(runtime As LicenseCounterRuntimeContext)
             Dim pendingEvents As New List(Of LicenseCounterTransportEvent)()
+            Dim pendingTargets As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.HashSet(Of System.String))(System.StringComparer.OrdinalIgnoreCase)
 
             WithLicenseCounterStateLock(
                 runtime.BaseFolder,
@@ -538,8 +857,16 @@ Namespace SharedLibrary
                                                  "LicenseUserID was empty; fallback %USERNAME% was used.")
                     End If
 
-                    ApplyLicenseCounterRetention(runtime.BaseFolder, state)
-                    pendingEvents.AddRange(CollectLicenseCounterPendingEvents(runtime.BaseFolder, state, runtime.Targets))
+                    Dim enabledTargets As System.Collections.Generic.List(Of LicenseCounterTarget) = runtime.Targets.Where(Function(target) ShouldUseLicenseCounterTarget(runtime.MethodKind, target)).ToList()
+                    ApplyLicenseCounterRetention(runtime.BaseFolder, state, enabledTargets, runtime.Anon)
+                    pendingEvents.AddRange(CollectLicenseCounterPendingEvents(runtime.BaseFolder, state, enabledTargets, runtime.Anon))
+                    For Each evt As LicenseCounterTransportEvent In pendingEvents
+                        Dim targetHashes As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                        For Each target As LicenseCounterTarget In enabledTargets
+                            If ShouldAttemptLicenseCounterEvent(state, evt, target.TargetHash) Then targetHashes.Add(target.TargetHash)
+                        Next
+                        pendingTargets(evt.DeliveryKey) = targetHashes
+                    Next
                 End Sub)
 
             If runtime.MethodKind = LicenseCounterMethodKind.LocalOnly Then
@@ -554,6 +881,7 @@ Namespace SharedLibrary
 
             For Each evt In pendingEvents
                 For Each target In runtime.Targets
+                    If Not pendingTargets.ContainsKey(evt.DeliveryKey) OrElse Not pendingTargets(evt.DeliveryKey).Contains(target.TargetHash) Then Continue For
                     If Not ShouldUseLicenseCounterTarget(runtime.MethodKind, target) Then
                         LogLicenseCounterInternal("submit_skipped",
                                                   $"Event={evt.DeliveryKey}, TargetHash={target.TargetHash}, TargetType={target.TargetType}, Method={runtime.MethodKind}")
@@ -564,12 +892,13 @@ Namespace SharedLibrary
                     Dim statusText As String = ""
 
                     LogLicenseCounterInternal("submit_attempt",
-                                              $"Event={evt.DeliveryKey}, Type={evt.t}, Target='{target.NormalizedValue}', TargetHash={target.TargetHash}, TargetType={target.TargetType}")
+                                              $"Event={evt.DeliveryKey}, Type={evt.t}, TargetHash={target.TargetHash}, TargetType={target.TargetType}")
 
                     Try
+                        evt.reportedUtc = System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)
                         Select Case target.TargetType
                             Case LicenseCounterTargetType.Web
-                                success = SendLicenseCounterWebEvent(target, evt, runtime.MethodKind, runtime.WebMode, statusText)
+                                success = SendLicenseCounterWebEvent(target, evt, runtime.MethodKind, runtime.WebMode, statusText, runtime.RequireAck)
 
                             Case LicenseCounterTargetType.Directory
                                 success = WriteLicenseCounterReportFile(target, evt, statusText)
@@ -587,8 +916,30 @@ Namespace SharedLibrary
 
                     LogLicenseCounterInternal("submit_result",
                                               $"Event={evt.DeliveryKey}, TargetHash={target.TargetHash}, Success={success}, Status={statusText}")
+                    ' Preserve only an expected HTTP status or a fixed networking error
+                    ' label. Never persist raw exception text, which can contain the
+                    ' credential-bearing destination URL.
+                    Dim safeStatus As System.String = If(success, "ok", "failed")
+                    If target.TargetType = LicenseCounterTargetType.Web Then
+                        If System.Text.RegularExpressions.Regex.IsMatch(If(statusText, ""), "^[1-5][0-9]{2}(:[a-z_]+)?$") Then
+                            safeStatus = statusText
+                        Else
+                            Select Case statusText
+                                Case "ConnectFailure", "Timeout", "NameResolutionFailure", "ProxyNameResolutionFailure", "TrustFailure", "SendFailure", "ReceiveFailure", "ProtocolError"
+                                    safeStatus = statusText
+                            End Select
+                        End If
+                    End If
+                    LogLicenseCounterDiagnostic("delivery", "host=" & runtime.HostId & "; targetType=" & target.TargetType.ToString() & "; success=" & success.ToString() & "; status=" & safeStatus)
 
                     deliveryResults.Add(Tuple.Create(evt.DeliveryKey, target.TargetHash, success, statusText))
+                    If success AndAlso System.String.Equals(evt.t, "U", System.StringComparison.OrdinalIgnoreCase) Then
+                        ' Preserve original host delivery entries for v1 readers, resubmit
+                        ' and legacy retention. The group ACK separately proves the dates.
+                        For Each sourceHostEventId As System.String In evt.SourceHostEventIds
+                            deliveryResults.Add(System.Tuple.Create(sourceHostEventId, target.TargetHash, True, statusText))
+                        Next
+                    End If
                 Next
             Next
 
@@ -632,38 +983,19 @@ Namespace SharedLibrary
                 End Sub)
         End Sub
 
-        Private Shared Function CollectLicenseCounterPendingEvents(baseFolder As String,
+        Private Shared Function CollectLicenseCounterPendingEvents(baseFolder As System.String,
                                                                    state As LicenseCounterStateFile,
-                                                                   targets As List(Of LicenseCounterTarget)) As List(Of LicenseCounterTransportEvent)
-            Dim results As New List(Of LicenseCounterTransportEvent)()
-
+                                                                   targets As System.Collections.Generic.List(Of LicenseCounterTarget),
+                                                                   Optional forceAnonymous As System.Boolean = False) As System.Collections.Generic.List(Of LicenseCounterTransportEvent)
+            Dim results As New System.Collections.Generic.List(Of LicenseCounterTransportEvent)()
             Try
-                For Each filePath In Directory.GetFiles(baseFolder, $"{LicenseCounterMarkerPrefix}*.json", SearchOption.TopDirectoryOnly)
-                    Dim evt = TryReadLicenseCounterUsageEvent(filePath)
-
-                    If evt Is Nothing Then
-                        Continue For
-                    End If
-
-                    Dim anyPending As Boolean = False
-
-                    For Each target In targets
-                        Dim deliveryStatus = GetLicenseCounterDeliveryStatus(state, evt.DeliveryKey, target.TargetHash)
-
-                        If ShouldAttemptLicenseCounterDelivery(deliveryStatus) Then
-                            anyPending = True
-                            Exit For
-                        End If
-                    Next
-
-                    If anyPending Then
-                        LogLicenseCounterInternal("pending_usage_event",
-                                                  $"Event={evt.DeliveryKey}, Month={evt.month}, NetworkKey={evt.networkKey}, ProductId={evt.productId}, HostId={evt.hostId}")
+                For Each evt As LicenseCounterTransportEvent In CollectLicenseCounterUsageGroups(baseFolder, forceAnonymous)
+                    If targets.Any(Function(target) ShouldAttemptLicenseCounterEvent(state, evt, target.TargetHash)) Then
+                        LogLicenseCounterInternal("pending_usage_event", "Event=" & evt.DeliveryKey & ", Month=" & evt.month & ", LoadedDays=" & evt.loadedDates.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
                         results.Add(evt)
                     End If
                 Next
-
-                For Each errEvt In state.pendingErrors
+                For Each errEvt As LicenseCounterErrorEvent In state.pendingErrors
                     Dim evt As New LicenseCounterTransportEvent() With {
                         .v = errEvt.v,
                         .t = "E",
@@ -674,52 +1006,69 @@ Namespace SharedLibrary
                         .detail = errEvt.detail,
                         .Source = "state"
                     }
-
-                    Dim anyPending As Boolean = False
-
-                    For Each target In targets
-                        Dim deliveryStatus = GetLicenseCounterDeliveryStatus(state, evt.DeliveryKey, target.TargetHash)
-
-                        If ShouldAttemptLicenseCounterDelivery(deliveryStatus) Then
-                            anyPending = True
-                            Exit For
-                        End If
-                    Next
-
-                    If anyPending Then
-                        LogLicenseCounterInternal("pending_error_event",
-                                                  $"Event={evt.DeliveryKey}, ErrorCode={evt.errorCode}, RelatedFile={evt.relatedFile}")
-                        results.Add(evt)
-                    End If
+                    If targets.Any(Function(target) ShouldAttemptLicenseCounterEvent(state, evt, target.TargetHash)) Then results.Add(evt)
                 Next
-
             Catch ex As System.Exception
                 LogLicenseCounterInternal("collect_pending_error", ex.Message)
             End Try
-
             Return results
         End Function
 
-        Private Shared Function ShouldAttemptLicenseCounterDelivery(status As LicenseCounterDeliveryStatus) As Boolean
-            If status Is Nothing Then
-                Return True
+        Private Shared Function CollectLicenseCounterUsageGroups(baseFolder As System.String,
+                                                                 Optional forceAnonymous As System.Boolean = False) As System.Collections.Generic.List(Of LicenseCounterTransportEvent)
+            Dim markers As New System.Collections.Generic.List(Of LicenseCounterTransportEvent)()
+            For Each filePath As System.String In System.IO.Directory.GetFiles(baseFolder, LicenseCounterMarkerPrefix & "*.json", System.IO.SearchOption.TopDirectoryOnly)
+                Dim evt As LicenseCounterTransportEvent = TryReadLicenseCounterUsageEvent(filePath)
+                If evt IsNot Nothing Then markers.Add(evt)
+            Next
+            Dim results As New System.Collections.Generic.List(Of LicenseCounterTransportEvent)()
+            For Each group In markers.GroupBy(Function(evt) evt.billingEventId, System.StringComparer.OrdinalIgnoreCase)
+                ' Keep a native host/e identity for older readers; billing identity is
+                ' shared by the aggregate and all its actual local host markers.
+                Dim aggregate As LicenseCounterTransportEvent = group.OrderBy(Function(evt) evt.firstUseUtc, System.StringComparer.Ordinal).ThenBy(Function(evt) evt.hostId, System.StringComparer.Ordinal).First()
+                aggregate.SourceHostEventIds = group.Select(Function(evt) evt.hostEventId).Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+                aggregate.SourceMarkerFiles = group.Select(Function(evt) evt.Source).ToList()
+                aggregate.loadedDates = group.SelectMany(Function(evt) evt.loadedDates).Distinct(System.StringComparer.Ordinal).OrderBy(Function(value) value, System.StringComparer.Ordinal).ToList()
+                aggregate.loadedHosts = group.Select(Function(evt) evt.hostId).Distinct(System.StringComparer.OrdinalIgnoreCase).OrderBy(Function(value) value, System.StringComparer.Ordinal).ToList()
+                aggregate.lastUseUtc = If(group.Select(Function(evt) evt.lastUseUtc).Where(Function(value) Not System.String.IsNullOrWhiteSpace(value)).OrderByDescending(Function(value) value, System.StringComparer.Ordinal).FirstOrDefault(), "")
+                aggregate.anon = forceAnonymous OrElse group.Any(Function(evt) evt.anon)
+                If aggregate.anon Then aggregate.userObf = ""
+                aggregate.GroupedDeliveryKey = BuildLicenseCounterGroupDeliveryKey(aggregate)
+                results.Add(aggregate)
+            Next
+            Return results
+        End Function
+
+        Private Shared Function BuildLicenseCounterGroupDeliveryKey(evt As LicenseCounterTransportEvent) As System.String
+            ' Change the ACK identity when dates OR host coverage changes. A Word
+            ' acknowledgement cannot suppress a later Excel/Outlook host observation.
+            Dim days As System.String = System.String.Join("|", evt.loadedDates)
+            Dim hosts As System.String = System.String.Join("|", evt.loadedHosts)
+            Return "d" & evt.billingEventId & "_" & FirstHex(HashSha256("RI-LC-EVIDENCE-DELIVERY-v2|" & days & "|" & hosts & "|" & evt.anon.ToString(System.Globalization.CultureInfo.InvariantCulture)), 32)
+        End Function
+
+        Private Shared Function ShouldAttemptLicenseCounterEvent(state As LicenseCounterStateFile,
+                                                                 evt As LicenseCounterTransportEvent,
+                                                                 targetHash As System.String) As System.Boolean
+            If Not ShouldAttemptLicenseCounterDelivery(GetLicenseCounterDeliveryStatus(state, evt.DeliveryKey, targetHash)) Then Return False
+            If System.String.Equals(evt.t, "U", System.StringComparison.OrdinalIgnoreCase) AndAlso evt.loadedDates.Count > 0 AndAlso evt.loadedHosts.Count = 1 Then
+                ' Existing v1.1 day-only ACKs proved coverage for a single host. Preserve
+                ' them on upgrade rather than replaying every historic single-host marker.
+                Dim legacyDays As System.String = System.String.Join("|", evt.loadedDates)
+                Dim legacyKey As System.String = "d" & evt.billingEventId & "_" & FirstHex(HashSha256("RI-LC-DAY-DELIVERY-v1|" & legacyDays & "|" & evt.anon.ToString(System.Globalization.CultureInfo.InvariantCulture)), 32)
+                If Not ShouldAttemptLicenseCounterDelivery(GetLicenseCounterDeliveryStatus(state, legacyKey, targetHash)) Then Return False
             End If
-
-            If Not String.IsNullOrWhiteSpace(status.lastSuccessUtc) Then
-                Return False
+            If System.String.Equals(evt.t, "U", System.StringComparison.OrdinalIgnoreCase) AndAlso evt.loadedDates.Count = 0 AndAlso evt.SourceHostEventIds.Count > 0 Then
+                ' Upgrade does not replay old, already acknowledged month-only markers.
+                Return evt.SourceHostEventIds.Any(Function(hostEventId) ShouldAttemptLicenseCounterDelivery(GetLicenseCounterDeliveryStatus(state, hostEventId, targetHash)))
             End If
+            Return True
+        End Function
 
-            If String.IsNullOrWhiteSpace(status.lastAttemptUtc) Then
-                Return True
-            End If
-
-            Dim lastAttemptUtc As System.DateTime
-
-            If Not System.DateTime.TryParse(status.lastAttemptUtc, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, lastAttemptUtc) Then
-                Return True
-            End If
-
-            Return lastAttemptUtc <= System.DateTime.UtcNow.AddHours(-LicenseCounterRetryHours)
+        Private Shared Function ShouldAttemptLicenseCounterDelivery(status As LicenseCounterDeliveryStatus) As System.Boolean
+            ' Interval/startup checks retry unacknowledged evidence only. A successful
+            ' target remains suppressed until the aggregate gains another observed date.
+            Return status Is Nothing OrElse System.String.IsNullOrWhiteSpace(status.lastSuccessUtc)
         End Function
 
         Private Shared Function ShouldUseLicenseCounterTarget(methodKind As LicenseCounterMethodKind,
@@ -771,6 +1120,10 @@ Namespace SharedLibrary
                     .billingEventId = record.billingEventId,
                     .hostEventId = record.hostEventId,
                     .firstUseUtc = record.firstUseUtc,
+                    .lastUseUtc = ReadLicenseCounterLastUseUtc(record),
+                    .loadedDates = ReadLicenseCounterLoadedDates(record),
+                    .loadedHosts = New System.Collections.Generic.List(Of System.String) From {record.hostId},
+                    .reportIntervalMinutes = record.reportIntervalMinutes,
                     .anon = record.anon,
                     .userObf = If(record.anon, "", record.userObf),
                     .Source = filePath
@@ -802,23 +1155,55 @@ Namespace SharedLibrary
 
             Dim fullPath As String = Path.Combine(dirPath, fileName)
 
-            If File.Exists(fullPath) Then
-                statusText = "exists"
-                LogLicenseCounterInternal("report_file_exists", $"Path='{fullPath}'")
-                Return True
-            End If
-
-            Dim json As String = JsonConvert.SerializeObject(evt, Formatting.Indented)
-
-            Using fs As New FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read)
-                Using sw As New StreamWriter(fs, New UTF8Encoding(True))
-                    sw.Write(json)
-                End Using
-            End Using
-
-            statusText = "written"
-            LogLicenseCounterInternal("report_file_written", $"Path='{fullPath}'")
-            Return True
+            For attempt As System.Int32 = 1 To 5
+                Try
+                    Using reportLock As New System.IO.FileStream(fullPath & ".lock", System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                        If System.IO.File.Exists(fullPath) Then
+                            If Not System.String.Equals(evt.t, "U", System.StringComparison.OrdinalIgnoreCase) Then
+                                statusText = "exists"
+                                Return True
+                            End If
+                            Dim previous As LicenseCounterTransportEvent = Newtonsoft.Json.JsonConvert.DeserializeObject(Of LicenseCounterTransportEvent)(System.IO.File.ReadAllText(fullPath, System.Text.Encoding.UTF8))
+                            If previous Is Nothing OrElse Not System.String.Equals(previous.hostEventId, evt.hostEventId, System.StringComparison.OrdinalIgnoreCase) Then
+                                statusText = "existing_report_identity_mismatch"
+                                Return False
+                            End If
+                            Dim previousDates As System.Collections.Generic.List(Of System.String) = If(previous.loadedDates, New System.Collections.Generic.List(Of System.String)())
+                            Dim previousHosts As System.Collections.Generic.List(Of System.String) = If(previous.loadedHosts, New System.Collections.Generic.List(Of System.String)())
+                            Dim addedEvidence As System.Boolean = evt.loadedDates.Any(Function(value) Not previousDates.Contains(value)) OrElse evt.loadedHosts.Any(Function(value) Not previousHosts.Contains(value))
+                            evt.loadedDates = previousDates.Union(evt.loadedDates, System.StringComparer.Ordinal).OrderBy(Function(value) value, System.StringComparer.Ordinal).ToList()
+                            evt.loadedHosts = previousHosts.Union(evt.loadedHosts, System.StringComparer.OrdinalIgnoreCase).OrderBy(Function(value) value, System.StringComparer.Ordinal).ToList()
+                            Dim removeIdentity As System.Boolean = evt.anon AndAlso (Not previous.anon OrElse Not System.String.IsNullOrWhiteSpace(previous.userObf))
+                            If previous.anon Then
+                                evt.anon = True
+                                evt.userObf = ""
+                            End If
+                            Dim previousUtc As System.DateTimeOffset
+                            Dim incomingUtc As System.DateTimeOffset
+                            If System.DateTimeOffset.TryParse(previous.lastUseUtc, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, previousUtc) AndAlso
+                               System.DateTimeOffset.TryParse(evt.lastUseUtc, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, incomingUtc) AndAlso previousUtc >= incomingUtc Then
+                                If Not removeIdentity AndAlso Not addedEvidence Then
+                                    statusText = "exists_current"
+                                    Return True
+                                End If
+                                evt.lastUseUtc = previous.lastUseUtc
+                            End If
+                            Dim previousFirst As System.DateTimeOffset
+                            Dim incomingFirst As System.DateTimeOffset
+                            If System.DateTimeOffset.TryParse(previous.firstUseUtc, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, previousFirst) AndAlso
+                               System.DateTimeOffset.TryParse(evt.firstUseUtc, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, incomingFirst) AndAlso previousFirst < incomingFirst Then evt.firstUseUtc = previous.firstUseUtc
+                        End If
+                        WriteLicenseCounterJsonAtomically(fullPath, Newtonsoft.Json.JsonConvert.SerializeObject(evt, Newtonsoft.Json.Formatting.Indented))
+                        statusText = "written"
+                        LogLicenseCounterInternal("report_file_written", "Event=" & evt.DeliveryKey & ", TargetHash=" & target.TargetHash)
+                        Return True
+                    End Using
+                Catch ex As System.IO.IOException
+                    statusText = ex.GetType().Name
+                    If attempt < 5 Then System.Threading.Thread.Sleep(GetLicenseCounterRetryDelayMs(attempt))
+                End Try
+            Next
+            Return False
         End Function
 
         Private Shared Function AppendLicenseCounterReportLine(target As LicenseCounterTarget,
@@ -890,7 +1275,24 @@ Namespace SharedLibrary
                                                            evt As LicenseCounterTransportEvent,
                                                            methodKind As LicenseCounterMethodKind,
                                                            webMode As LicenseCounterWebModeKind,
-                                                           ByRef statusText As String) As Boolean
+                                                           ByRef statusText As String,
+                                                           Optional requireAck As System.Boolean = False) As Boolean
+            If requireAck Then
+                ' Active collectors use one canonical JSON event. A logging-only HTTP
+                ' response must never retire the durable local marker in this mode.
+                Dim payload As Newtonsoft.Json.Linq.JObject
+                If System.String.Equals(evt.t, "E", System.StringComparison.OrdinalIgnoreCase) Then
+                    payload = New Newtonsoft.Json.Linq.JObject() From {
+                        {"ri_lc_v", evt.v}, {"t", "E"}, {"id", evt.errorEventId},
+                        {"ec", evt.errorCode}, {"m", evt.relatedMonth},
+                        {"f", evt.relatedFile}, {"detail", evt.detail}
+                    }
+                Else
+                    payload = BuildLicenseCounterWebJsonPayload(evt)
+                End If
+                Return SendAcknowledgedLicenseCounterJson(target.NormalizedValue, payload, statusText)
+            End If
+
             Dim reached As Boolean = False
             Dim statuses As New List(Of String)()
 
@@ -931,9 +1333,79 @@ Namespace SharedLibrary
             statusText = String.Join(" | ", statuses.Where(Function(s) Not String.IsNullOrWhiteSpace(s)))
 
             LogLicenseCounterInternal("web_submission",
-                                      $"Target='{target.NormalizedValue}', Method={methodKind}, WebMode={webMode}, Event={evt.DeliveryKey}, Reached={reached}, Status={statusText}")
+                                      $"TargetHash={target.TargetHash}, Method={methodKind}, WebMode={webMode}, Event={evt.DeliveryKey}, Reached={reached}, Status={statusText}")
 
             Return reached
+        End Function
+
+        ' Local collectors must not be forwarded through a corporate proxy.
+        ' External HTTP(S) destinations retain the normal system proxy settings.
+        Private Shared Function CreateLicenseCounterWebRequest(url As System.String) As System.Net.HttpWebRequest
+            Dim destination As System.Uri = Nothing
+            If Not System.Uri.TryCreate(url, System.UriKind.Absolute, destination) OrElse
+               (destination.Scheme <> System.Uri.UriSchemeHttp AndAlso destination.Scheme <> System.Uri.UriSchemeHttps) Then
+                Throw New System.UriFormatException("License counter destination must be an absolute HTTP(S) URL.")
+            End If
+            Dim request As System.Net.HttpWebRequest = DirectCast(System.Net.WebRequest.Create(destination), System.Net.HttpWebRequest)
+            If destination.IsLoopback Then request.Proxy = Nothing
+            Return request
+        End Function
+
+        Private Shared Function SendAcknowledgedLicenseCounterJson(url As System.String,
+                                                                    payload As Newtonsoft.Json.Linq.JObject,
+                                                                    ByRef statusText As System.String) As System.Boolean
+            Try
+                Dim request As System.Net.HttpWebRequest = CreateLicenseCounterWebRequest(url)
+                request.Method = "POST"
+                request.ContentType = "application/json"
+                request.Accept = "application/json"
+                request.AllowAutoRedirect = False
+                request.Timeout = LicenseCounterWebTimeoutMs
+                request.ReadWriteTimeout = LicenseCounterWebTimeoutMs
+                request.CachePolicy = New System.Net.Cache.RequestCachePolicy(System.Net.Cache.RequestCacheLevel.NoCacheNoStore)
+                Dim bytes As System.Byte() = System.Text.Encoding.UTF8.GetBytes(payload.ToString(Newtonsoft.Json.Formatting.None))
+                request.ContentLength = bytes.Length
+                Using stream As System.IO.Stream = request.GetRequestStream()
+                    stream.Write(bytes, 0, bytes.Length)
+                End Using
+                Using response As System.Net.HttpWebResponse = DirectCast(request.GetResponse(), System.Net.HttpWebResponse)
+                    Dim statusCode As System.Int32 = CInt(response.StatusCode)
+                    statusText = statusCode.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    If statusCode < 200 OrElse statusCode >= 300 Then Return False
+                    Using stream As System.IO.Stream = response.GetResponseStream()
+                        Using reader As New System.IO.StreamReader(stream, System.Text.Encoding.UTF8)
+                            ' Bound the ACK body; never accept an HTML login/error page.
+                            Dim buffer(4096) As System.Char
+                            Dim used As System.Int32 = 0
+                            While used < buffer.Length
+                                Dim count As System.Int32 = reader.Read(buffer, used, buffer.Length - used)
+                                If count = 0 Then Exit While
+                                used += count
+                            End While
+                            If used > 4096 Then
+                                statusText &= ":ack_too_large"
+                                Return False
+                            End If
+                            Dim ack As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(New System.String(buffer, 0, used))
+                            Dim accepted As Newtonsoft.Json.Linq.JToken = ack("accepted")
+                            If accepted IsNot Nothing AndAlso accepted.Type = Newtonsoft.Json.Linq.JTokenType.Boolean AndAlso accepted.Value(Of System.Boolean)() Then Return True
+                        End Using
+                    End Using
+                    statusText &= ":ack_missing_or_rejected"
+                End Using
+            Catch ex As System.Net.WebException
+                Dim response As System.Net.HttpWebResponse = TryCast(ex.Response, System.Net.HttpWebResponse)
+                If response IsNot Nothing Then
+                    Using response
+                        statusText = CInt(response.StatusCode).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    End Using
+                Else
+                    statusText = ex.Status.ToString()
+                End If
+            Catch ex As System.Exception
+                statusText = ex.GetType().Name
+            End Try
+            Return False
         End Function
 
         Private Shared Function SendLicenseCounterHttpRequest(method As String,
@@ -942,7 +1414,7 @@ Namespace SharedLibrary
                                                               ByRef reached As Boolean,
                                                               Optional contentType As String = "") As String
             Try
-                Dim request = CType(WebRequest.Create(url), HttpWebRequest)
+                Dim request As System.Net.HttpWebRequest = CreateLicenseCounterWebRequest(url)
                 request.Method = method
                 request.Timeout = LicenseCounterWebTimeoutMs
                 request.ReadWriteTimeout = LicenseCounterWebTimeoutMs
@@ -1022,6 +1494,11 @@ Namespace SharedLibrary
             sb.Append("&e=" & Uri.EscapeDataString(evt.hostEventId))
             sb.Append("&a=" & If(evt.anon, "1", "0"))
             sb.Append("&r=" & CreateLicenseCounterNonce())
+            sb.Append("&lastUseUtc=" & System.Uri.EscapeDataString(evt.lastUseUtc))
+            sb.Append("&reportedUtc=" & System.Uri.EscapeDataString(evt.reportedUtc))
+            sb.Append("&reportIntervalMinutes=" & evt.reportIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            sb.Append("&loadedDates=" & System.Uri.EscapeDataString(System.String.Join(",", evt.loadedDates)))
+            sb.Append("&loadedHosts=" & System.Uri.EscapeDataString(System.String.Join(",", evt.loadedHosts)))
 
             If Not evt.anon AndAlso Not String.IsNullOrWhiteSpace(evt.userObf) Then
                 sb.Append("&du=" & Uri.EscapeDataString(evt.userObf))
@@ -1060,7 +1537,12 @@ Namespace SharedLibrary
                 {"b", evt.billingEventId},
                 {"e", evt.hostEventId},
                 {"a", If(evt.anon, 1, 0)},
-                {"firstUseUtc", evt.firstUseUtc}
+                {"firstUseUtc", evt.firstUseUtc},
+                {"lastUseUtc", evt.lastUseUtc},
+                {"reportedUtc", evt.reportedUtc},
+                {"reportIntervalMinutes", evt.reportIntervalMinutes},
+                {"loadedDates", Newtonsoft.Json.Linq.JArray.FromObject(evt.loadedDates)},
+                {"loadedHosts", Newtonsoft.Json.Linq.JArray.FromObject(evt.loadedHosts)}
             }
 
             If evt.allowedNetworkIds IsNot Nothing AndAlso evt.allowedNetworkIds.Count > 0 Then
@@ -1086,7 +1568,12 @@ Namespace SharedLibrary
                 "u=" & Uri.EscapeDataString(evt.userKey),
                 "b=" & Uri.EscapeDataString(evt.billingEventId),
                 "e=" & Uri.EscapeDataString(evt.hostEventId),
-                "a=" & If(evt.anon, "1", "0")
+                "a=" & If(evt.anon, "1", "0"),
+                "lastUseUtc=" & System.Uri.EscapeDataString(evt.lastUseUtc),
+                "reportedUtc=" & System.Uri.EscapeDataString(evt.reportedUtc),
+                "reportIntervalMinutes=" & evt.reportIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "loadedDates=" & System.Uri.EscapeDataString(System.String.Join(",", evt.loadedDates)),
+                "loadedHosts=" & System.Uri.EscapeDataString(System.String.Join(",", evt.loadedHosts))
             }
 
             If evt.allowedNetworkIds IsNot Nothing AndAlso evt.allowedNetworkIds.Count > 0 Then
@@ -1174,7 +1661,7 @@ Namespace SharedLibrary
                 End If
 
                 LogLicenseCounterInternal("target_parsed",
-                                          $"Raw='{target.RawValue}', Normalized='{target.NormalizedValue}', Type={target.TargetType}, Hash={target.TargetHash}, Note={target.Note}")
+                                          $"Type={target.TargetType}, Hash={target.TargetHash}, Note={target.Note}")
 
                 results.Add(target)
             Next
@@ -1320,6 +1807,7 @@ Namespace SharedLibrary
 
                 If ShouldResubmitLicenseCounterEvent(evt, instruction) Then
                     state.delivery.Remove(evt.DeliveryKey)
+                    RemoveLicenseCounterGroupDeliveryEntries(state, evt.billingEventId)
                 End If
             Next
 
@@ -1384,56 +1872,59 @@ Namespace SharedLibrary
             Next
         End Sub
 
-        Private Shared Sub ApplyLicenseCounterRetention(baseFolder As String, state As LicenseCounterStateFile)
+        Private Shared Sub ApplyLicenseCounterRetention(baseFolder As System.String,
+                                                        state As LicenseCounterStateFile,
+                                                        enabledTargets As System.Collections.Generic.List(Of LicenseCounterTarget),
+                                                        Optional forceAnonymous As System.Boolean = False)
             Try
-                For Each filePath In Directory.GetFiles(baseFolder, $"{LicenseCounterMarkerPrefix}*.json", SearchOption.TopDirectoryOnly)
-                    Dim evt = TryReadLicenseCounterUsageEvent(filePath)
-
-                    If evt Is Nothing Then
+                For Each evt As LicenseCounterTransportEvent In CollectLicenseCounterUsageGroups(baseFolder, forceAnonymous)
+                    If IsLicenseCounterMonthWithinRetention(evt.month) Then Continue For
+                    ' Require proof for the latest complete date union, not an older host
+                    ' ACK. LocalOnly or a new/failed target must preserve outage backlog.
+                    Dim reportedEverywhere As System.Boolean = enabledTargets IsNot Nothing AndAlso enabledTargets.Count > 0
+                    If reportedEverywhere Then reportedEverywhere = enabledTargets.All(Function(target) Not ShouldAttemptLicenseCounterEvent(state, evt, target.TargetHash))
+                    If Not reportedEverywhere Then
+                        Dim noticeId As System.String = "x" & FirstHex(HashSha256("RI-LC-RETENTION-PRESERVED-v1|" & evt.billingEventId), 32)
+                        If Not state.delivery.ContainsKey(noticeId) AndAlso Not state.pendingErrors.Any(Function(item) System.String.Equals(item.errorEventId, noticeId, System.StringComparison.OrdinalIgnoreCase)) Then
+                            state.pendingErrors.Add(New LicenseCounterErrorEvent() With {
+                                .v = LicenseCounterFormatVersion,
+                                .t = "E",
+                                .errorEventId = noticeId,
+                                .errorCode = "retention_preserved_unreported_marker",
+                                .relatedMonth = evt.month,
+                                .relatedFile = System.IO.Path.GetFileName(evt.Source),
+                                .detail = "Marker exceeded normal retention but was preserved until every enabled target confirms delivery of all observed dates.",
+                                .createdUtc = System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)
+                            })
+                            LogLicenseCounterInternal("retention_preserved_unreported_marker", "Event=" & evt.DeliveryKey & ", Month=" & evt.month)
+                        End If
                         Continue For
                     End If
-
-                    If Not IsLicenseCounterMonthWithinRetention(evt.month) Then
-                        Dim reportedEverywhere As Boolean = True
-
-                        If state.delivery.ContainsKey(evt.DeliveryKey) Then
-                            For Each kvp In state.delivery(evt.DeliveryKey)
-                                If String.IsNullOrWhiteSpace(kvp.Value.lastSuccessUtc) Then
-                                    reportedEverywhere = False
-                                    Exit For
-                                End If
-                            Next
-                        Else
-                            reportedEverywhere = False
-                        End If
-
-                        If Not reportedEverywhere Then
-                            QueueLicenseCounterError(state,
-                                                     "retention_deleted_unreported_marker",
-                                                     evt.month,
-                                                     Path.GetFileName(filePath),
-                                                     "Marker exceeded retention before successful reporting to all targets.")
-                        End If
-
+                    For Each filePath As System.String In evt.SourceMarkerFiles
                         Try
-                            File.Delete(filePath)
-                        Catch
+                            Dim marker As LicenseCounterTransportEvent = TryReadLicenseCounterUsageEvent(filePath)
+                            If marker Is Nothing Then Continue For
+                            System.IO.File.Delete(filePath)
+                            If Not System.IO.File.Exists(filePath) Then
+                                state.knownHostEventIds.Remove(marker.hostEventId)
+                                state.delivery.Remove(marker.hostEventId)
+                            End If
+                        Catch ex As System.Exception
+                            LogLicenseCounterInternal("retention_delete_error", "Event=" & evt.DeliveryKey & ", Error=" & ex.GetType().Name)
                         End Try
-                    End If
+                    Next
+                    If evt.SourceMarkerFiles.All(Function(filePath) Not System.IO.File.Exists(filePath)) Then RemoveLicenseCounterGroupDeliveryEntries(state, evt.billingEventId)
                 Next
-
-                For Each key In state.knownHostEventIds.Keys.ToList()
-                    Dim monthValue As String = ExtractMonthFromKnownMarkerFileName(state.knownHostEventIds(key).file)
-
-                    If Not String.IsNullOrWhiteSpace(monthValue) AndAlso Not IsLicenseCounterMonthWithinRetention(monthValue) Then
-                        state.knownHostEventIds.Remove(key)
-                        state.delivery.Remove(key)
-                    End If
-                Next
-
             Catch ex As System.Exception
                 LogLicenseCounterInternal("retention_error", ex.Message)
             End Try
+        End Sub
+
+        Private Shared Sub RemoveLicenseCounterGroupDeliveryEntries(state As LicenseCounterStateFile, billingEventId As System.String)
+            Dim prefix As System.String = "d" & billingEventId & "_"
+            For Each key As System.String In state.delivery.Keys.Where(Function(value) value.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase)).ToList()
+                state.delivery.Remove(key)
+            Next
         End Sub
 
         Private Shared Function IsLicenseCounterMonthWithinRetention(monthValue As String) As Boolean
@@ -1564,6 +2055,7 @@ Namespace SharedLibrary
                 Next
 
                 If Not hasHandle Then
+                    LogLicenseCounterDiagnostic("state_lock_timeout", "Unable to acquire the local counter-state mutex")
                     Return
                 End If
 
@@ -1574,6 +2066,7 @@ Namespace SharedLibrary
                 SaveLicenseCounterState(baseFolder, state)
 
             Catch ex As System.Exception
+                LogLicenseCounterDiagnostic("state_lock_error", ex.GetType().Name)
                 LogLicenseCounterInternal("state_lock_error", ex.Message)
             Finally
                 Try
@@ -1635,7 +2128,7 @@ Namespace SharedLibrary
             state.ih = ComputeStateIntegrityHash(state)
 
             Dim json As String = JsonConvert.SerializeObject(state, Formatting.Indented)
-            File.WriteAllText(statePath, json, New UTF8Encoding(True))
+            WriteLicenseCounterJsonAtomically(statePath, json)
         End Sub
 
         Private Shared Function ComputeStateIntegrityHash(state As LicenseCounterStateFile) As String
@@ -1878,6 +2371,33 @@ Namespace SharedLibrary
             Return ""
         End Function
 
+        ' Minimal local reporting diagnostics. The active collector does not print
+        ' access logs by default (Waitress), so support must not rely on console
+        ' output to determine whether the add-in actually attempted reporting.
+        ' Never write configured URLs/tokens, licence keys, user identities or payloads.
+        Private Shared ReadOnly LicenseCounterDiagnosticLock As New System.Object()
+        Private Shared Sub LogLicenseCounterDiagnostic(eventType As System.String, detail As System.String)
+            Try
+                Dim baseFolder As System.String = GetLicenseCounterBaseFolder()
+                System.IO.Directory.CreateDirectory(baseFolder)
+                Dim diagnosticPath As System.String = System.IO.Path.Combine(baseFolder, "RI_LC_Diagnostics.log")
+                Dim cleanType As System.String = System.Text.RegularExpressions.Regex.Replace(If(eventType, "unknown"), "[^a-zA-Z0-9_-]", "_")
+                ' This helper is called exclusively with fixed, deliberately sanitized
+                ' metadata; never pass user-controlled error messages into it.
+                Dim line As System.String = System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture) & " " & cleanType & " " & If(detail, "") & System.Environment.NewLine
+                SyncLock LicenseCounterDiagnosticLock
+                    If System.IO.File.Exists(diagnosticPath) AndAlso New System.IO.FileInfo(diagnosticPath).Length > 524288 Then
+                        Dim previousPath As System.String = diagnosticPath & ".old"
+                        If System.IO.File.Exists(previousPath) Then System.IO.File.Delete(previousPath)
+                        System.IO.File.Move(diagnosticPath, previousPath)
+                    End If
+                    System.IO.File.AppendAllText(diagnosticPath, line, New System.Text.UTF8Encoding(False))
+                End SyncLock
+            Catch
+                ' Diagnostics must never interfere with licencing or the add-in.
+            End Try
+        End Sub
+
         Private Shared Sub LogLicenseCounterInternal(eventType As String, details As String)
             Try
                 LogLicenseEvent($"Counter:{eventType}", details)
@@ -1905,8 +2425,7 @@ Namespace SharedLibrary
                 form.Font = New Drawing.Font("Segoe UI", 9.0F, Drawing.FontStyle.Regular, Drawing.GraphicsUnit.Point)
 
                 Try
-                    Dim bmpIcon As New Drawing.Bitmap(GetLogoBitmap(LogoType.Standard))
-                    form.Icon = Drawing.Icon.FromHandle(bmpIcon.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 
@@ -2214,6 +2733,7 @@ Namespace SharedLibrary
                                         GetJsonValue(jObj, "productId")),
                         .ProductIdSafe = GetJsonValue(jObj, "productIdSafe"),
                         .HostId = GetJsonValue(jObj, "hostId"),
+                        .LoadedHosts = GetJsonStringArray(jObj, "loadedHosts"),
                         .UserKey = GetJsonValue(jObj, "userKey"),
                         .BillingEventId = GetJsonValue(jObj, "billingEventId"),
                         .HostEventId = GetJsonValue(jObj, "hostEventId"),
@@ -2386,6 +2906,7 @@ Namespace SharedLibrary
                         .ProductId = GetDictionaryValue(parameters, "p"),
                         .ProductIdSafe = GetDictionaryValue(parameters, "p"),
                         .HostId = NormalizeLicenseCounterHostId(GetDictionaryValue(parameters, "h")),
+                        .LoadedHosts = GetDictionaryValue(parameters, "loadedHosts").Split(","c).Where(Function(value) Not System.String.IsNullOrWhiteSpace(value)).ToList(),
                         .UserKey = GetDictionaryValue(parameters, "u"),
                         .BillingEventId = GetDictionaryValue(parameters, "b"),
                         .HostEventId = GetDictionaryValue(parameters, "e"),
@@ -2435,7 +2956,6 @@ Namespace SharedLibrary
             For Each evt In events.Where(Function(e) String.Equals(e.EventType, "U", StringComparison.OrdinalIgnoreCase))
                 Dim productIdForGrouping As String = If(String.IsNullOrWhiteSpace(evt.ProductId), evt.ProductIdSafe, evt.ProductId)
                 Dim mainKey As String = $"{evt.Month}|{evt.NetworkKey}|{productIdForGrouping}"
-                Dim hostKey As String = $"{evt.Month}|{evt.NetworkKey}|{productIdForGrouping}|{evt.HostId}"
                 Dim userKey As String = $"{evt.Month}|{evt.NetworkKey}|{productIdForGrouping}|{evt.UserKey}"
 
                 If Not mainGroups.ContainsKey(mainKey) Then
@@ -2443,10 +2963,15 @@ Namespace SharedLibrary
                 End If
                 mainGroups(mainKey).Add(evt.UserKey)
 
-                If Not hostGroups.ContainsKey(hostKey) Then
-                    hostGroups(hostKey) = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-                End If
-                hostGroups(hostKey).Add(evt.UserKey)
+                Dim observedHosts As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase) From {evt.HostId}
+                For Each loadedHost As System.String In evt.LoadedHosts
+                    observedHosts.Add(NormalizeLicenseCounterHostId(loadedHost))
+                Next
+                For Each loadedHost As System.String In observedHosts
+                    Dim observedHostKey As System.String = $"{evt.Month}|{evt.NetworkKey}|{productIdForGrouping}|{loadedHost}"
+                    If Not hostGroups.ContainsKey(observedHostKey) Then hostGroups(observedHostKey) = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                    hostGroups(observedHostKey).Add(evt.UserKey)
+                Next
 
                 If Not userGroups.ContainsKey(userKey) Then
                     userGroups(userKey) = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
@@ -2459,6 +2984,10 @@ Namespace SharedLibrary
                         .Hosts = ""
                     }
                 End If
+
+                For Each loadedHost As System.String In observedHosts
+                    userGroups(userKey).Add(loadedHost)
+                Next
 
                 If String.IsNullOrWhiteSpace(userMeta(userKey).UserId) AndAlso Not String.IsNullOrWhiteSpace(evt.UserId) Then
                     userMeta(userKey).UserId = evt.UserId
@@ -2503,21 +3032,8 @@ Namespace SharedLibrary
                 })
             Next
 
-            Dim userHosts As New Dictionary(Of String, HashSet(Of String))(StringComparer.OrdinalIgnoreCase)
-
-            For Each evt In events.Where(Function(e) String.Equals(e.EventType, "U", StringComparison.OrdinalIgnoreCase))
-                Dim productIdForGrouping As String = If(String.IsNullOrWhiteSpace(evt.ProductId), evt.ProductIdSafe, evt.ProductId)
-                Dim userKey As String = $"{evt.Month}|{evt.NetworkKey}|{productIdForGrouping}|{evt.UserKey}"
-
-                If Not userHosts.ContainsKey(userKey) Then
-                    userHosts(userKey) = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-                End If
-
-                userHosts(userKey).Add(evt.HostId)
-            Next
-
             For Each key In userMeta.Keys.OrderBy(Function(k) k, StringComparer.OrdinalIgnoreCase)
-                userMeta(key).Hosts = String.Join(", ", userHosts(key).OrderBy(Function(h) h, StringComparer.OrdinalIgnoreCase))
+                userMeta(key).Hosts = String.Join(", ", userGroups(key).OrderBy(Function(h) h, StringComparer.OrdinalIgnoreCase))
                 result.UserRows.Add(userMeta(key))
             Next
 

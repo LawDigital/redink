@@ -208,6 +208,191 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
+        ' Explicit host-owned dispatcher. Initialization happens on the actual Office STA.
+        ' Never discover a dispatcher from OpenForms, foreground windows, or an arbitrary caller.
+        Private Shared ReadOnly _hostUiDispatchLock As New System.Object()
+        Private Shared _hostUiDispatchContext As System.Threading.SynchronizationContext
+        Private Shared _hostUiDispatchThreadId As System.Int32
+        Private Shared _hostUiDispatchRegistry As HostModelessFormRegistry
+
+        Public Shared Sub InitializeHostUiDispatcher(context As System.Threading.SynchronizationContext,
+                                                      registry As HostModelessFormRegistry)
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            If registry Is Nothing Then Throw New System.ArgumentNullException(NameOf(registry))
+            If System.Threading.Thread.CurrentThread.GetApartmentState() <> System.Threading.ApartmentState.STA Then
+                Throw New System.InvalidOperationException("The host UI dispatcher must be initialized on the Office STA.")
+            End If
+            SyncLock _hostUiDispatchLock
+                If _hostUiDispatchRegistry IsNot Nothing AndAlso
+                   Not _hostUiDispatchRegistry.ShutdownToken.IsCancellationRequested AndAlso
+                   (_hostUiDispatchThreadId <> System.Threading.Thread.CurrentThread.ManagedThreadId OrElse
+                    _hostUiDispatchRegistry IsNot registry) Then
+                    Throw New System.InvalidOperationException("A different live Office UI dispatcher is already registered.")
+                End If
+                _hostUiDispatchContext = context
+                _hostUiDispatchThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
+                _hostUiDispatchRegistry = registry
+            End SyncLock
+        End Sub
+
+        Public Shared ReadOnly Property HasHostUiDispatcher As System.Boolean
+            Get
+                SyncLock _hostUiDispatchLock
+                    Return _hostUiDispatchContext IsNot Nothing AndAlso _hostUiDispatchRegistry IsNot Nothing AndAlso
+                           Not _hostUiDispatchRegistry.ShutdownToken.IsCancellationRequested
+                End SyncLock
+            End Get
+        End Property
+
+        Public Shared ReadOnly Property IsOnHostUiThread As System.Boolean
+            Get
+                SyncLock _hostUiDispatchLock
+                    Return _hostUiDispatchContext IsNot Nothing AndAlso _hostUiDispatchRegistry IsNot Nothing AndAlso
+                           Not _hostUiDispatchRegistry.ShutdownToken.IsCancellationRequested AndAlso
+                           System.Threading.Thread.CurrentThread.ManagedThreadId = _hostUiDispatchThreadId AndAlso
+                           System.Threading.Thread.CurrentThread.GetApartmentState() = System.Threading.ApartmentState.STA
+                End SyncLock
+            End Get
+        End Property
+
+        Private Shared Function AwaitHostUiThread() As OfficeUiThreadAwaitable
+            SyncLock _hostUiDispatchLock
+                Dim token As System.Threading.CancellationToken = System.Threading.CancellationToken.None
+                If _hostUiDispatchRegistry IsNot Nothing Then token = _hostUiDispatchRegistry.ShutdownToken
+                Return New OfficeUiThreadAwaitable(_hostUiDispatchContext, _hostUiDispatchThreadId, token)
+            End SyncLock
+        End Function
+
+        ''' <summary>
+        ''' Executes the whole action on the captured host UI thread. The returned Task
+        ''' reports completion, cancellation or failure; its caller must dispatch its own
+        ''' later UI work explicitly if it does not preserve a UI synchronization context.
+        ''' No shared lock is held while posting or executing the action.
+        ''' </summary>
+        Public Shared Async Function PostToHostUiAsync(action As System.Action) As System.Threading.Tasks.Task
+            If action Is Nothing Then Throw New System.ArgumentNullException(NameOf(action))
+            Await AwaitHostUiThread()
+            action.Invoke()
+        End Function
+
+        Public Shared Async Function PostToHostUiAsync(Of TResult)(action As System.Func(Of TResult)) As System.Threading.Tasks.Task(Of TResult)
+            If action Is Nothing Then Throw New System.ArgumentNullException(NameOf(action))
+            Await AwaitHostUiThread()
+            Return action.Invoke()
+        End Function
+
+        Private Shared Function RequireHostUiRegistry() As HostModelessFormRegistry
+            SyncLock _hostUiDispatchLock
+                If Not IsOnHostUiThread Then
+                    Throw New System.InvalidOperationException("Host UI forms must be managed on the initialized Office UI thread.")
+                End If
+                Return _hostUiDispatchRegistry
+            End SyncLock
+        End Function
+
+        Public Shared Function RegisterHostUiForm(form As System.Windows.Forms.Form) As System.Windows.Forms.IWin32Window
+            Return RequireHostUiRegistry().Register(form)
+        End Function
+
+        Public Shared Sub ShowHostUiForm(form As System.Windows.Forms.Form)
+            RequireHostUiRegistry().Show(form)
+        End Sub
+
+        <System.ThreadStatic>
+        Private Shared _hostNeutralStaDepth As System.Int32
+
+        Public Shared ReadOnly Property IsOnHostNeutralSta As System.Boolean
+            Get
+                Return _hostNeutralStaDepth > 0 AndAlso
+                       System.Threading.Thread.CurrentThread.GetApartmentState() = System.Threading.ApartmentState.STA
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Runs a complete host-neutral dialog or OLE operation on an STA. Existing STA
+        ''' callers stay on their thread, preserving safe modal ownership. MTA callers
+        ''' use a background STA and never transfer an Office owner to that thread.
+        ''' The action must dispose its forms on its own thread and must not access Office COM.
+        ''' Worker failures are rethrown on the caller so existing error handlers still run.
+        ''' </summary>
+        Public Shared Sub RunOnStaThread(action As System.Action,
+                                        Optional threadName As System.String = "Red Ink STA",
+                                        Optional waitTimeoutMilliseconds As System.Int32 = System.Threading.Timeout.Infinite,
+                                        Optional alwaysUseWorker As System.Boolean = False)
+            If action Is Nothing Then Throw New System.ArgumentNullException(NameOf(action))
+            RunOnStaThread(Of System.Boolean)(
+                Function()
+                    action.Invoke()
+                    Return True
+                End Function, threadName, waitTimeoutMilliseconds, alwaysUseWorker)
+        End Sub
+
+        Public Shared Function RunOnStaThread(Of TResult)(action As System.Func(Of TResult),
+                                                          Optional threadName As System.String = "Red Ink STA",
+                                                          Optional waitTimeoutMilliseconds As System.Int32 = System.Threading.Timeout.Infinite,
+                                                          Optional alwaysUseWorker As System.Boolean = False) As TResult
+            If action Is Nothing Then Throw New System.ArgumentNullException(NameOf(action))
+            If waitTimeoutMilliseconds < System.Threading.Timeout.Infinite Then
+                Throw New System.ArgumentOutOfRangeException(NameOf(waitTimeoutMilliseconds))
+            End If
+            If Not alwaysUseWorker AndAlso System.Threading.Thread.CurrentThread.GetApartmentState() = System.Threading.ApartmentState.STA Then
+                Dim previousScopeDepth As System.Int32 = _hostNeutralStaDepth
+                _hostNeutralStaDepth += 1
+                Try
+                    Return action.Invoke()
+                Finally
+                    _hostNeutralStaDepth = previousScopeDepth
+                End Try
+            End If
+
+            Dim result As TResult = Nothing
+            Dim failure As System.Runtime.ExceptionServices.ExceptionDispatchInfo = Nothing
+            Dim worker As New System.Threading.Thread(
+                Sub()
+                    ' This is a new, dedicated worker, never an Office/UI thread. Do not
+                    ' adopt a caller's synchronization context or marshal back to its owner.
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                    _hostNeutralStaDepth += 1
+                    Try
+                        result = action.Invoke()
+                    Catch ex As System.Exception
+                        failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex)
+                    Finally
+                        _hostNeutralStaDepth -= 1
+                        ' A modal dialog may install WinForms' marshaling control. Dispose
+                        ' that thread's context before it exits; do not leave a SystemEvents
+                        ' subscriber pointing at a dead worker/message pump.
+                        Dim workerUiContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                            TryCast(System.Threading.SynchronizationContext.Current,
+                                    System.Windows.Forms.WindowsFormsSynchronizationContext)
+                        Try
+                            System.Windows.Forms.Application.ExitThread()
+                            If workerUiContext IsNot Nothing Then workerUiContext.Dispose()
+                        Catch cleanupError As System.Exception
+                            If failure Is Nothing Then
+                                failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanupError)
+                            Else
+                                System.Diagnostics.Debug.WriteLine("STA context cleanup: " & cleanupError.Message)
+                            End If
+                        Finally
+                            System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                        End Try
+                    End Try
+                End Sub)
+            worker.IsBackground = True
+            worker.Name = threadName
+            worker.SetApartmentState(System.Threading.ApartmentState.STA)
+            worker.Start()
+            ' Modal callers wait only off the Office STA. Short OLE operations can explicitly
+            ' request a worker with a bounded wait. A timed-out native call is never aborted/retried.
+            If Not worker.Join(waitTimeoutMilliseconds) Then
+                Throw New System.TimeoutException("The STA operation did not complete within " &
+                    waitTimeoutMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) & " milliseconds.")
+            End If
+            If failure IsNot Nothing Then failure.Throw()
+            Return result
+        End Function
+
         ''' <summary>
         ''' Resolves the ambient dialog owner but returns it ONLY when its window
         ''' belongs to the current (calling) thread. A modal dialog shown with a
@@ -246,52 +431,149 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        ''' <summary>
-        ''' Attaches a lightweight, self-disposing watchdog to a TopMost shared dialog
-        ''' so it can surface a same-process foreground window (e.g. Word's native
-        ''' "Save changes?" prompt) that would otherwise stay hidden behind it.
-        '''
-        ''' A single Deactivate check is unreliable: Windows may report
-        ''' GetForegroundWindow() as zero or still our own handle while activation is
-        ''' in transit, so the foreign prompt can be missed permanently. This helper
-        ''' polls on a short WinForms timer that runs on the dialog's own UI thread
-        ''' through the message pump ShowDialog is already spinning, then calls the
-        ''' existing PromoteForeignForegroundDialog logic. The timer is created,
-        ''' started, and — via the dialog's FormClosed event — stopped and disposed
-        ''' automatically, so callers do not have to change their ShowDialog control
-        ''' flow. Ownership and TopMost policy are untouched. Safe no-op on failure.
-        ''' </summary>
-        Public Shared Sub AttachForeignForegroundWatchdog(dialog As Form)
-            If dialog Is Nothing Then Return
+        ' One state per form, shared by the timer and any Deactivate handler. All
+        ' methods run on the dialog's own UI thread. Never marshal to the Office STA.
+        Private Shared ReadOnly _foregroundWatches As New System.Runtime.CompilerServices.ConditionalWeakTable(Of System.Windows.Forms.Form, ForegroundWatch)()
+        Private Shared ReadOnly _watchProcessId As System.Int32 = ReadWatchProcessId()
+
+        Private Shared Function ReadWatchProcessId() As System.Int32
+            Using process As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
+                Return process.Id
+            End Using
+        End Function
+
+        Public Shared Sub AttachForeignForegroundWatchdog(dialog As System.Windows.Forms.Form)
+            If dialog Is Nothing OrElse dialog.Disposing OrElse dialog.IsDisposed OrElse dialog.InvokeRequired Then Return
             Try
-                Dim watchdog As New System.Windows.Forms.Timer()
-                watchdog.Interval = 100
-
-                Dim tick As EventHandler = Nothing
-                tick =
-                    Sub(s As Object, ev As System.EventArgs)
-                        PromoteForeignForegroundDialog(dialog)
-                    End Sub
-
-                Dim closed As System.Windows.Forms.FormClosedEventHandler = Nothing
-                closed =
-                    Sub(s As Object, ev As System.Windows.Forms.FormClosedEventArgs)
-                        Try
-                            RemoveHandler dialog.FormClosed, closed
-                            RemoveHandler watchdog.Tick, tick
-                            watchdog.Stop()
-                            watchdog.Dispose()
-                        Catch
-                        End Try
-                    End Sub
-
-                AddHandler watchdog.Tick, tick
-                AddHandler dialog.FormClosed, closed
-                watchdog.Start()
-            Catch
-                ' Never throw from dialog setup.
+                _foregroundWatches.GetValue(dialog, Function(owner) New ForegroundWatch(owner)).Start()
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("[DialogWatchdog] Cannot start foreground monitoring: " & ex.ToString())
             End Try
         End Sub
+
+        Private NotInheritable Class ForegroundWatch
+            Private ReadOnly _form As System.Windows.Forms.Form
+            Private _timer As System.Windows.Forms.Timer
+            Private _lastTarget As System.IntPtr
+            Private _retry As System.Diagnostics.Stopwatch
+            Private _processing As System.Boolean
+            Private _restoreTopMost As System.Boolean
+            Private _reportedError As System.Boolean
+            Private _stopped As System.Boolean
+
+            Friend Sub New(form As System.Windows.Forms.Form)
+                _form = form
+                AddHandler _form.FormClosed, AddressOf Closed
+                AddHandler _form.Disposed, AddressOf Disposed
+                AddHandler _form.Activated, AddressOf Activated
+            End Sub
+
+            Friend Sub Start()
+                If _stopped OrElse _timer IsNot Nothing Then Return
+                _timer = New System.Windows.Forms.Timer() With {.Interval = 100}
+                Try
+                    AddHandler _timer.Tick, AddressOf Tick
+                    _timer.Start()
+                Catch
+                    StopMonitoring()
+                    Throw
+                End Try
+            End Sub
+
+            Private Sub Tick(sender As System.Object, e As System.EventArgs)
+                CheckForeground()
+            End Sub
+
+            Private Sub Activated(sender As System.Object, e As System.EventArgs)
+                _lastTarget = System.IntPtr.Zero
+                If Not _restoreTopMost OrElse _stopped Then Return
+                _restoreTopMost = False
+                Try
+                    _form.TopMost = True
+                Catch ex As System.Exception
+                    ReportOnce(ex.ToString())
+                End Try
+            End Sub
+
+            Private Sub Closed(sender As System.Object, e As System.Windows.Forms.FormClosedEventArgs)
+                StopMonitoring()
+            End Sub
+
+            Private Sub Disposed(sender As System.Object, e As System.EventArgs)
+                StopMonitoring()
+            End Sub
+
+            Private Sub StopMonitoring()
+                If _stopped Then Return
+                _stopped = True
+                RemoveHandler _form.FormClosed, AddressOf Closed
+                RemoveHandler _form.Disposed, AddressOf Disposed
+                RemoveHandler _form.Activated, AddressOf Activated
+                If _timer IsNot Nothing Then
+                    RemoveHandler _timer.Tick, AddressOf Tick
+                    _timer.Stop()
+                    _timer.Dispose()
+                    _timer = Nothing
+                End If
+                _foregroundWatches.Remove(_form)
+            End Sub
+
+            Private Sub ReportOnce(message As System.String)
+                If _reportedError Then Return
+                _reportedError = True
+                System.Diagnostics.Debug.WriteLine("[DialogWatchdog] " & message)
+            End Sub
+
+            Friend Sub CheckForeground()
+                If _processing OrElse _stopped OrElse _form.IsDisposed OrElse _form.Disposing OrElse
+                    Not _form.IsHandleCreated OrElse _form.InvokeRequired OrElse Not _form.Visible Then Return
+                _processing = True
+                Try
+                    Dim target As System.IntPtr = NativeMethods.GetForegroundWindow()
+                    ' No stable foreground during activation hand-off. No work or log.
+                    If target = System.IntPtr.Zero OrElse target = _form.Handle Then
+                        _lastTarget = System.IntPtr.Zero
+                        Return
+                    End If
+                    Dim pid As System.Int32 = 0
+                    If NativeMethods.GetWindowThreadProcessId(target, pid) = 0 OrElse pid <> _watchProcessId Then
+                        _lastTarget = System.IntPtr.Zero
+                        Return
+                    End If
+                    If target = _lastTarget AndAlso Not _form.TopMost Then
+                        If _retry Is Nothing OrElse _retry.ElapsedMilliseconds < 1000 Then Return
+                    End If
+                    If ContainsExpandedComboBox(_form) Then
+                        _lastTarget = System.IntPtr.Zero
+                        Return
+                    End If
+                    If NativeMethods.GetForegroundWindow() <> target Then Return
+                    _lastTarget = target
+                    _retry = Nothing
+                    If _form.TopMost Then
+                        _restoreTopMost = True
+                        _form.TopMost = False
+                        System.Diagnostics.Debug.WriteLine("[PromoteForeign] Yielded TopMost to a foreground window of this Office process.")
+                    End If
+                    ' The target already has focus. Raise its Z-order, not its input
+                    ' focus, and never wait on a different input queue.
+                    If _stopped OrElse NativeMethods.GetForegroundWindow() <> target Then
+                        _lastTarget = System.IntPtr.Zero
+                        Return
+                    End If
+                    Const flags As System.UInt32 = &H1UI Or &H2UI Or &H10UI Or &H4000UI ' NOSIZE/NOMOVE/NOACTIVATE/ASYNCWINDOWPOS
+                    If Not NativeMethods.SetWindowPos(target, System.IntPtr.Zero, 0, 0, 0, 0, flags) Then
+                        _retry = System.Diagnostics.Stopwatch.StartNew()
+                        ReportOnce("Cannot raise the same-process foreground window; retrying while it remains in front.")
+                    End If
+                Catch ex As System.Exception
+                    _retry = System.Diagnostics.Stopwatch.StartNew()
+                    ReportOnce(ex.ToString())
+                Finally
+                    _processing = False
+                End Try
+            End Sub
+        End Class
 
 
         ''' <summary>
@@ -318,86 +600,18 @@ Namespace SharedLibrary
         '''
         ''' This helper detects that situation from the dialog's Deactivate event and
         ''' promotes the foreign foreground window above our dialog (making it visible
-        ''' and foreground) so the user can act on it. It only touches windows of our
-        ''' own process and does NOT change the dialog's TopMost state or its owner,
-        ''' so it introduces no Z-order/owner regressions. Safe no-op on failure.
+        ''' without stealing focus) so the user can act on it. It temporarily yields
+        ''' TopMost, restores it on reactivation and never changes the dialog owner.
         ''' </summary>
-        Public Shared Sub PromoteForeignForegroundDialog(dialog As Form)
-            If dialog Is Nothing Then Return
+        Public Shared Sub PromoteForeignForegroundDialog(dialog As System.Windows.Forms.Form)
+            If dialog Is Nothing OrElse dialog.Disposing OrElse dialog.IsDisposed OrElse
+                Not dialog.IsHandleCreated OrElse dialog.InvokeRequired Then Return
             Try
-                System.Diagnostics.Debug.WriteLine("[PromoteForeign] Deactivate fired.")
-
-                Dim fg As IntPtr = NativeMethods.GetForegroundWindow()
-                System.Diagnostics.Debug.WriteLine("[PromoteForeign] fg=" & fg.ToString() & " dialog=" & dialog.Handle.ToString())
-                If fg = IntPtr.Zero OrElse fg = dialog.Handle Then
-                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: fg is zero or is our own dialog.")
-                    Return
-                End If
-
-                ' Restrict to windows of our own (host) process, e.g. Word's prompts.
-                Dim fgPid As Integer = 0
-                NativeMethods.GetWindowThreadProcessId(fg, fgPid)
-                If fgPid = 0 Then
-                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: fgPid is 0.")
-                    Return
-                End If
-
-                Dim ourPid As Integer = System.Diagnostics.Process.GetCurrentProcess().Id
-                System.Diagnostics.Debug.WriteLine("[PromoteForeign] fgPid=" & fgPid & " ourPid=" & ourPid)
-                If fgPid <> ourPid Then
-                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: foreground window belongs to a different process.")
-                    Return
-                End If
-
-                ' An expanded ComboBox's native list is an intentional, same-process
-                ' popup, not a competing Office dialog. Preserve the parent TopMost
-                ' state while it is open; otherwise the list can disappear immediately.
-                If ContainsExpandedComboBox(dialog) Then
-                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: dialog ComboBox dropdown is open.")
-                    Return
-                End If
-
-                System.Diagnostics.Debug.WriteLine("[PromoteForeign] Proceeding to move/demote our dialog.")
-
-                ' A same-process window (e.g. Word's native "Save changes?" or
-                ' "You cannot close Microsoft Word because a dialogue box is open"
-                ' prompt) has taken the foreground. Because our dialog is TopMost, it
-                ' shares the topmost band with — and keeps covering — that prompt, so
-                ' merely re-promoting the prompt does not surface it. Instead, drop our
-                ' own dialog out of the topmost band so the foreign prompt can come to
-                ' the front, and remember to restore TopMost once we are re-activated
-                ' (i.e. after the user dismisses that prompt).
-                If dialog.TopMost Then
-                    dialog.TopMost = False
-
-                    ' One-shot restore: when our dialog regains activation, put it back
-                    ' into the topmost band so later focus changes still keep it above
-                    ' the host. Detaches itself so it only fires once per demotion.
-                    Dim restore As EventHandler = Nothing
-                    restore =
-                        Sub(s As Object, ev As System.EventArgs)
-                            Try
-                                RemoveHandler dialog.Activated, restore
-                                dialog.TopMost = True
-                            Catch
-                            End Try
-                        End Sub
-                    AddHandler dialog.Activated, restore
-                End If
-
-                Const HWND_TOP As Integer = 0
-                Const SWP_NOMOVE As UInteger = &H2UI
-                Const SWP_NOSIZE As UInteger = &H1UI
-                Const SWP_SHOWWINDOW As UInteger = &H40UI
-
-                NativeMethods.SetWindowPos(fg, New IntPtr(HWND_TOP), 0, 0, 0, 0,
-                                           SWP_NOMOVE Or SWP_NOSIZE Or SWP_SHOWWINDOW)
-                NativeMethods.SetForegroundWindow(fg)
-            Catch
-                ' Never throw from an event-driven watchdog.
+                _foregroundWatches.GetValue(dialog, Function(owner) New ForegroundWatch(owner)).CheckForeground()
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("[DialogWatchdog] Cannot check foreground: " & ex.ToString())
             End Try
         End Sub
-
 
         Public Shared Function IfOwnerOnCurrentThread(owner As IWin32Window) As IWin32Window
             If owner Is Nothing Then Return Nothing
@@ -493,6 +707,91 @@ Namespace SharedLibrary
     End Class
 
     ''' <summary>
+    ''' Awaitable that posts the continuation itself to a captured Office UI thread.
+    ''' Completing a Task on that thread does not switch an awaiting MTA caller to it.
+    ''' Capture context and thread ID on the host STA; this type never invents a UI
+    ''' context or accepts a different thread. It is intended for one Await per instance.
+    ''' Host shutdown completes pending awaits as cancelled even if the UI stops pumping.
+    ''' </summary>
+    Public NotInheritable Class OfficeUiThreadAwaitable
+        Implements System.Runtime.CompilerServices.INotifyCompletion
+
+        Private ReadOnly _context As System.Threading.SynchronizationContext
+        Private ReadOnly _threadId As System.Int32
+        Private ReadOnly _shutdownToken As System.Threading.CancellationToken
+        Private _dispatchFailure As System.Runtime.ExceptionServices.ExceptionDispatchInfo
+
+        Public Sub New(context As System.Threading.SynchronizationContext,
+                       threadId As System.Int32,
+                       shutdownToken As System.Threading.CancellationToken)
+            _context = context
+            _threadId = threadId
+            _shutdownToken = shutdownToken
+        End Sub
+
+        Public Function GetAwaiter() As OfficeUiThreadAwaitable
+            Return Me
+        End Function
+
+        Public ReadOnly Property IsCompleted As System.Boolean
+            Get
+                ' Missing initialization and cancellation fail synchronously in GetResult.
+                Return _context Is Nothing OrElse _threadId <= 0 OrElse
+                       _shutdownToken.IsCancellationRequested OrElse
+                       System.Threading.Thread.CurrentThread.ManagedThreadId = _threadId
+            End Get
+        End Property
+
+        Public Sub GetResult()
+            _shutdownToken.ThrowIfCancellationRequested()
+            If _dispatchFailure IsNot Nothing Then _dispatchFailure.Throw()
+            If _context Is Nothing OrElse _threadId <= 0 Then
+                Throw New System.InvalidOperationException("The Office UI thread has not been initialized.")
+            End If
+            If System.Threading.Thread.CurrentThread.ManagedThreadId <> _threadId Then
+                Throw New System.InvalidOperationException("The continuation did not reach the captured Office UI thread.")
+            End If
+        End Sub
+
+        Public Sub OnCompleted(continuation As System.Action) Implements System.Runtime.CompilerServices.INotifyCompletion.OnCompleted
+            If continuation Is Nothing Then Throw New System.ArgumentNullException(NameOf(continuation))
+            Dim completed As System.Int32 = 0
+            Dim registration As System.Threading.CancellationTokenRegistration
+            Dim resumeContinuation As System.Action =
+                Sub()
+                    ' A queued UI callback and shutdown may race. Resume exactly once.
+                    If System.Threading.Interlocked.Exchange(completed, 1) <> 0 Then Return
+                    Try
+                        continuation.Invoke()
+                    Finally
+                        registration.Dispose()
+                    End Try
+                End Sub
+
+            Try
+                If _shutdownToken.CanBeCanceled Then
+                    registration = _shutdownToken.Register(
+                        Sub()
+                            ' Never synchronously wait for or execute Office work during shutdown.
+                            ' GetResult throws cancellation before any continuation UI/COM work.
+                            System.Threading.ThreadPool.QueueUserWorkItem(Sub(state As System.Object) resumeContinuation.Invoke())
+                        End Sub)
+                End If
+                If System.Threading.Volatile.Read(completed) = 0 Then
+                    _context.Post(Sub(state As System.Object) resumeContinuation.Invoke(), Nothing)
+                End If
+            Catch ex As System.Exception
+                _dispatchFailure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex)
+                ' Rejected dispatch must fault the awaiting task, never strand it.
+                resumeContinuation.Invoke()
+            Finally
+                ' Covers cancellation/dispatch completing before Register returned its handle.
+                If System.Threading.Volatile.Read(completed) <> 0 Then registration.Dispose()
+            End Try
+        End Sub
+    End Class
+
+    ''' <summary>
     ''' Per-Office-add-in lifetime for explicitly registered modeless windows. Never enumerates
     ''' Application.OpenForms (which may include windows belonging to another add-in).
     ''' Registration and shutdown run on the Office UI thread; the validated Office HWND is
@@ -548,6 +847,7 @@ Namespace SharedLibrary
             If form Is Nothing OrElse form.IsDisposed Then Throw New System.ArgumentException("A live form is required.", NameOf(form))
             If Not _registered.Contains(form) Then
                 AddHandler form.FormClosed, AddressOf RegisteredFormClosed
+                AddHandler form.Disposed, AddressOf RegisteredFormDisposed
                 _registered.Add(form)
             End If
             Dim owner As System.Windows.Forms.IWin32Window = VerifiedOfficeOwner()
@@ -581,7 +881,14 @@ Namespace SharedLibrary
             If form IsNot Nothing Then Unregister(form)
         End Sub
 
+        Private Sub RegisteredFormDisposed(sender As System.Object, e As System.EventArgs)
+            Dim form As System.Windows.Forms.Form = TryCast(sender, System.Windows.Forms.Form)
+            If form IsNot Nothing Then Unregister(form)
+        End Sub
+
         Private Sub Unregister(form As System.Windows.Forms.Form)
+            If Not _registered.Contains(form) Then Return
+            RemoveHandler form.Disposed, AddressOf RegisteredFormDisposed
             RemoveHandler form.FormClosed, AddressOf RegisteredFormClosed
             _registered.Remove(form)
         End Sub

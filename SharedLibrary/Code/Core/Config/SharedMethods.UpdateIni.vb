@@ -897,8 +897,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -1004,7 +1003,7 @@ Namespace SharedLibrary
                                               Dim report = $"=== {AN} Signature Validation Report ==={vbCrLf}" &
                                                            $"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}{vbCrLf}{vbCrLf}" &
                                                            String.Join(vbCrLf & vbCrLf, errors)
-                                              Clipboard.SetText(report)
+                                              PutInClipboard(report)
                                               ShowCustomMessageBox("Error report copied to clipboard.")
                                           Catch ex As Exception
                                               ShowCustomMessageBox("Failed to copy to clipboard: " & ex.Message)
@@ -1339,8 +1338,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -2629,8 +2627,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -2801,8 +2798,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -3033,8 +3029,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -3606,6 +3601,10 @@ Namespace SharedLibrary
         ''' Shows the signature management UI for generating keys, signing files, and verifying signatures.
         ''' </summary>
         Public Shared Sub ShowSignatureManagementDialog()
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                RunOnStaThread(AddressOf ShowSignatureManagementDialog, "Red Ink signature manager", alwaysUseWorker:=True)
+                Return
+            End If
             Dim form As New Form() With {
                 .Text = $"{AN} - Update Signature Management",
                 .Size = New Size(750, 380),
@@ -3619,8 +3618,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -4036,12 +4034,16 @@ Namespace SharedLibrary
             }
             tabHelp.Controls.Add(txtHelp)
 
-            Dim __safeDialogOwner3772 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
-            If __safeDialogOwner3772 IsNot Nothing Then
-                form.ShowDialog(__safeDialogOwner3772)
-            Else
-                form.ShowDialog()
-            End If
+            Try
+                Dim __safeDialogOwner3772 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner3772 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner3772)
+                Else
+                    form.ShowDialog()
+                End If
+            Finally
+                form.Dispose()
+            End Try
 
         End Sub
 
@@ -4130,6 +4132,10 @@ Namespace SharedLibrary
         ''' Shows a dialog for selecting multiple files and signing them with a single private key.
         ''' </summary>
         Public Shared Sub ShowBatchSigningDialog()
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                RunOnStaThread(AddressOf ShowBatchSigningDialog, "Red Ink batch signing", alwaysUseWorker:=True)
+                Return
+            End If
             Dim form As New Form() With {
                 .Text = $"{AN} - Batch Sign Files",
                 .Size = New Size(750, 520),
@@ -4144,8 +4150,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -4319,12 +4324,16 @@ Namespace SharedLibrary
                                              ShowCustomMessageBox(sb.ToString())
                                          End Sub
 
-            Dim __safeDialogOwner4049 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
-            If __safeDialogOwner4049 IsNot Nothing Then
-                form.ShowDialog(__safeDialogOwner4049)
-            Else
-                form.ShowDialog()
-            End If
+            Try
+                Dim __safeDialogOwner4049 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner4049 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner4049)
+                Else
+                    form.ShowDialog()
+                End If
+            Finally
+                form.Dispose()
+            End Try
         End Sub
 
 #End Region
@@ -5040,8 +5049,7 @@ Namespace SharedLibrary
             }
 
             Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch ex As System.Exception
                 System.Diagnostics.Debug.WriteLine($"Could not set Agent Resources dialog icon: {ex.Message}")
             End Try

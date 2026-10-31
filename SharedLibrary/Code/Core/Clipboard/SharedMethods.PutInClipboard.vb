@@ -6,8 +6,9 @@
 ' Purpose: Writes text to the Windows clipboard on an STA thread.
 '
 ' Architecture:
-'  - STA Isolation: Clipboard APIs require an STA thread; the operation runs on
-'    a dedicated STA thread and blocks the caller until completion (Join).
+'  - STA execution: A dedicated background STA worker preserves OLE isolation.
+'    Waits are bounded to five seconds; worker failures are rethrown on the caller.
+'    A native call still running at timeout is not aborted or retried automatically.
 '  - Format Handling: If the input appears to be RTF (prefix "{\rtf"), the
 '    method places both RTF and a derived plain-text representation into a
 '    single DataObject. Otherwise, it places plain text only.
@@ -30,38 +31,19 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="text">The text to write to the clipboard.</param>
         Public Shared Sub PutInClipboard(text As String)
-            Dim thread As New Threading.Thread(Sub()
-                                                   Dim textValue As String = If(text, String.Empty)
-
-                                                   ' Check if the text is RTF formatted
-                                                   If textValue.StartsWith("{\rtf", StringComparison.Ordinal) Then
-                                                       ' Set RTF content to the clipboard
-                                                       'Clipboard.SetData(DataFormats.Rtf, text)
-
-                                                       Dim plainText As String
-
-                                                       ' Convert RTF to plain text using RichTextBox
-                                                       Using rtb As New RichTextBox()
-                                                           rtb.Rtf = textValue
-                                                           plainText = rtb.Text
-                                                       End Using
-
-                                                       ' Set both RTF and plain text in the clipboard
-                                                       Dim dataObj As New DataObject()
-                                                       dataObj.SetData(DataFormats.Rtf, textValue)
-                                                       dataObj.SetData(DataFormats.Text, plainText)
-                                                       Clipboard.SetDataObject(dataObj, True)
-
-                                                   Else
-                                                       ' Set plain text to the clipboard
-                                                       Clipboard.SetText(textValue)
-                                                   End If
-                                               End Sub)
-
-            ' Ensure the thread is STA (Single Thread Apartment), as required by the clipboard
-            thread.SetApartmentState(Threading.ApartmentState.STA)
-            thread.Start()
-            thread.Join()
+            RunOnStaThread(
+                Sub()
+                    Dim textValue As System.String = If(text, System.String.Empty)
+                    If textValue.StartsWith("{\rtf", System.StringComparison.Ordinal) Then
+                        Dim plainText As System.String = RtfToPlainText(textValue)
+                        Dim data As New System.Windows.Forms.DataObject()
+                        data.SetData(System.Windows.Forms.DataFormats.Rtf, textValue)
+                        data.SetData(System.Windows.Forms.DataFormats.Text, plainText)
+                        System.Windows.Forms.Clipboard.SetDataObject(data, True)
+                    Else
+                        System.Windows.Forms.Clipboard.SetText(textValue)
+                    End If
+                End Sub, "Red Ink clipboard", waitTimeoutMilliseconds:=5000, alwaysUseWorker:=True)
 
         End Sub
 

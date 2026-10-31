@@ -1394,6 +1394,7 @@ Partial Public Class ThisAddIn
 ) As Task(Of String)
 
         Try
+            Await EnsureUIThread()
             Dim app As Word.Application = Globals.ThisAddIn.Application
             If app Is Nothing Then Return ""
 
@@ -1482,11 +1483,13 @@ Partial Public Class ThisAddIn
                 AddUserPrompt:=OtherPrompt,
                 FileObject:=FileObject
             )
+            Await EnsureUIThread()
 
             llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If Not String.IsNullOrEmpty(llmResult) Then
                 llmResult = Await PostCorrection(llmResult, UseSecondAPI)
+                Await EnsureUIThread()
             End If
 
             If String.IsNullOrWhiteSpace(llmResult) Then
@@ -1527,6 +1530,7 @@ Partial Public Class ThisAddIn
             For i As Integer = 1 To 6
                 System.Windows.Forms.Application.DoEvents()
                 Await System.Threading.Tasks.Task.Delay(75)
+                Await EnsureUIThread()
 
                 Try
                     afterText = NormalizeCommentText(activeComment.Range.Text)
@@ -1544,6 +1548,7 @@ Partial Public Class ThisAddIn
                 For i As Integer = 1 To 4
                     System.Windows.Forms.Application.DoEvents()
                     Await System.Threading.Tasks.Task.Delay(75)
+                    Await EnsureUIThread()
 
                     Try
                         afterText = NormalizeCommentText(activeComment.Range.Text)

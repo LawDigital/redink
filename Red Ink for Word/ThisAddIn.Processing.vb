@@ -59,6 +59,8 @@ Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
+    Private _wordProcessingCleanupGeneration As System.Int64
+
     ''' <summary>
     ''' P/Invoke to enable or disable a window handle.
     ''' </summary>
@@ -306,6 +308,7 @@ Partial Public Class ThisAddIn
      Optional DoChart As Integer = 0,
      Optional DoShowModel As Boolean = False,
      Optional TargetReplyCommentIndex As System.Int32 = 0) As Task(Of String)
+        Await EnsureUIThread()
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -333,7 +336,7 @@ Partial Public Class ThisAddIn
                     bubbleSel = Nothing
                 End Try
 
-                Return Await ProcessSelectedTextInActiveCommentBubble(
+                Dim uiResultAfterAwait336 = Await ProcessSelectedTextInActiveCommentBubble(
                         SysCommand,
                         CheckMaxToken,
                         bubbleSel,
@@ -343,6 +346,8 @@ Partial Public Class ThisAddIn
                         DoMarkup:=DoMarkup,
                         MarkupMethod:=MarkupMethod
                     )
+                Await EnsureUIThread()
+                Return uiResultAfterAwait336
             End If
 
 
@@ -369,13 +374,15 @@ Partial Public Class ThisAddIn
        (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
         selection.StoryType = Word.WdStoryType.wdEndnotesStory) Then
 
-                Return Await ProcessSelectedTextInActiveFootnote(
+                Dim uiResultAfterAwait372 = Await ProcessSelectedTextInActiveFootnote(
                             SysCommand,
                             CheckMaxToken,
                             UseSecondAPI,
                             SelectionMandatory,
                             FileObject
                         )
+                Await EnsureUIThread()
+                Return uiResultAfterAwait372
             End If
 
             If selection.Type = WdSelectionType.wdSelectionIP And SelectionMandatory Then
@@ -389,6 +396,7 @@ Partial Public Class ThisAddIn
 
                     Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart, DoShowModel,
                         TargetReplyCommentIndex:=TargetReplyCommentIndex)
+                    Await EnsureUIThread()
 
                 Else
 
@@ -470,12 +478,14 @@ Partial Public Class ThisAddIn
                                             PutInBubbles, SelectionMandatory, UseSecondAPI,
                                             FormattingCap, DoTPMarkup, TPMarkupname, False,
                                             FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                        Await EnsureUIThread()
 
                                         ' If the cell was cancelled with Esc, offer to abort the whole process
                                         If ConfirmAbortIfRequested() Then Exit For
 
                                         ' Throttle so Word doesn't lock up
                                         Await System.Threading.Tasks.Task.Delay(50)
+                                        Await EnsureUIThread()
                                     End If
                                 Next
                             Finally
@@ -519,11 +529,13 @@ Partial Public Class ThisAddIn
                                         If textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                            Await EnsureUIThread()
                                             If ConfirmAbortIfRequested() Then
                                                 IsExit = True
                                                 Exit For
                                             End If
                                             Await System.Threading.Tasks.Task.Delay(50)
+                                            Await EnsureUIThread()
                                         End If
                                     Else
 
@@ -534,11 +546,13 @@ Partial Public Class ThisAddIn
                                         If textChunk.Tables.Count = 0 AndAlso textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                            Await EnsureUIThread()
                                             If ConfirmAbortIfRequested() Then
                                                 IsExit = True
                                                 Exit For
                                             End If
                                             Await System.Threading.Tasks.Task.Delay(50)
+                                            Await EnsureUIThread()
                                         End If
 
                                     End If
@@ -564,11 +578,13 @@ Partial Public Class ThisAddIn
                                         If cellRange.Start < cellRange.End AndAlso Not String.IsNullOrWhiteSpace(cellRange.Text) Then
                                             cellRange.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                            Await EnsureUIThread()
                                             If ConfirmAbortIfRequested() Then
                                                 IsExit = True
                                                 Exit For
                                             End If
                                             Await System.Threading.Tasks.Task.Delay(50)
+                                            Await EnsureUIThread()
                                         End If
                                     Next
 
@@ -592,6 +608,7 @@ Partial Public Class ThisAddIn
                                     finalChunk.Select()
                                     Dim text = selection.Text
                                     Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                    Await EnsureUIThread()
                                 Else
                                     Do
                                         finalChunk.Start += 1
@@ -602,6 +619,7 @@ Partial Public Class ThisAddIn
                                     If finalChunk.Tables.Count = 0 AndAlso finalChunk.Start < finalChunk.End Then
                                         finalChunk.Select()
                                         Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                        Await EnsureUIThread()
                                     End If
                                 End If
                             End If
@@ -612,6 +630,7 @@ Partial Public Class ThisAddIn
                     ElseIf userdialog = 1 Then
 
                         Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart, DoShowModel)
+                        Await EnsureUIThread()
 
                     End If
 
@@ -704,6 +723,7 @@ Partial Public Class ThisAddIn
        Optional DoShowModel As Boolean = False,
        Optional onDocumentWriteback As System.Action(Of Microsoft.Office.Interop.Word.Range) = Nothing,
        Optional TargetReplyCommentIndex As System.Int32 = 0) As Task(Of String)
+        Await EnsureUIThread()
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -731,6 +751,10 @@ Partial Public Class ThisAddIn
         Dim writebackRestoreSelection As Word.Range = Nothing
         Dim writebackOriginalScreenUpdating As Boolean = True
         Dim writebackFocusLeaseActive As Boolean = False
+        Dim cleanupGeneration As System.Int64 = System.Threading.Interlocked.Increment(_wordProcessingCleanupGeneration)
+        Dim cleanupHostToken As System.Threading.CancellationToken = HostWindowLifetimeToken
+        Dim totalEndBm As Word.Bookmark = Nothing
+        Dim nextStartBm As Word.Bookmark = Nothing
 
         Try
             savedUiWindow = application.ActiveWindow
@@ -887,7 +911,6 @@ Partial Public Class ThisAddIn
 
             Dim effectiveChunk As Integer = If(ChunkSize > 0, ChunkSize, Integer.MaxValue)
 
-            Dim totalEndBm As Word.Bookmark
 
             ' Added for processing footnotes etc. too
             Dim docEnd As Integer = storyRange.End
@@ -911,7 +934,7 @@ Partial Public Class ThisAddIn
             Dim safeRange As Word.Range = selection.Range
             safeRange.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseStart)
 
-            Dim nextStartBm As Word.Bookmark = currentdoc.Bookmarks.Add(
+            nextStartBm = currentdoc.Bookmarks.Add(
                     Name:="NextStart",
                     Range:=safeRange)
 
@@ -1281,13 +1304,20 @@ Partial Public Class ThisAddIn
                             pinnedWordDocumentFullName:=GetSafeWordDocumentFullName(currentdoc),
                             pinnedWordSelectionStart:=If(rng Is Nothing, -1, rng.Start),
                             pinnedWordSelectionEnd:=If(rng Is Nothing, -1, rng.End))
+                        Await EnsureUIThread()
                     Finally
                         If infoBoxShown Then
                             Try
-                                If mainThreadControl IsNot Nothing AndAlso mainThreadControl.InvokeRequired Then
-                                    mainThreadControl.Invoke(New System.Windows.Forms.MethodInvoker(Sub() SLib.InfoBox.ShowInfoBox("", 1)))
-                                Else
-                                    SLib.InfoBox.ShowInfoBox("", 1)
+                                If mainThreadControl IsNot Nothing AndAlso mainThreadControl.IsHandleCreated AndAlso
+                                   Not mainThreadControl.IsDisposed AndAlso Not HostWindowLifetimeToken.IsCancellationRequested Then
+                                    If mainThreadControl.InvokeRequired Then
+                                        mainThreadControl.BeginInvoke(New System.Windows.Forms.MethodInvoker(
+                                            Sub()
+                                                If Not HostWindowLifetimeToken.IsCancellationRequested Then SLib.InfoBox.ShowInfoBox("", 1)
+                                            End Sub))
+                                    Else
+                                        SLib.InfoBox.ShowInfoBox("", 1)
+                                    End If
                                 End If
                             Catch
                             End Try
@@ -1300,6 +1330,7 @@ Partial Public Class ThisAddIn
                     If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart > 0 Then
 
                         LLMResult = Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject))
+                        Await EnsureUIThread()
 
                     Else
 
@@ -1308,6 +1339,7 @@ Partial Public Class ThisAddIn
                             ApplyModelConfig(_context, mc, err)
 
                             LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)) & vbCrLf
+                            Await EnsureUIThread()
 
                         Next
 
@@ -1321,6 +1353,7 @@ Partial Public Class ThisAddIn
 
                 If Not String.IsNullOrEmpty(LLMResult) Then
                     LLMResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(LLMResult, UseSecondAPI))
+                    Await EnsureUIThread()
                 End If
 
                 ' Freestyle prose policy is scoped by a runtime marker, not by model/provider.
@@ -1754,6 +1787,7 @@ Partial Public Class ThisAddIn
                             writebackFocusLeaseActive)
 
                         Dim RegexResult = Await AwaitWordModelRequestAsync(Function() LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False))
+                        Await EnsureUIThread()
 
                         If Not BeginProcessingFocusLease(
                             application,
@@ -2108,24 +2142,66 @@ Partial Public Class ThisAddIn
             INIloaded = False
             Throw
         Finally
+            ' A fault/cancellation can bypass the Await that normally restores UI
+            ' affinity. Keep the complete COM cleanup on the captured Office STA.
+            Dim cleanupIsDeferred As System.Boolean = Not SharedMethods.IsOnHostUiThread
+            Dim cleanup As System.Action =
+                Sub()
+                    If cleanupHostToken.IsCancellationRequested OrElse
+                       cleanupGeneration <> System.Threading.Volatile.Read(_wordProcessingCleanupGeneration) Then Return
 
-            EndProcessingFocusLease(
-                application,
-                writebackRestoreWindow,
-                writebackRestoreSelection,
-                writebackOriginalScreenUpdating,
-                writebackFocusLeaseActive)
+                    If Not cleanupIsDeferred Then
+                        EndProcessingFocusLease(
+                            application,
+                            writebackRestoreWindow,
+                            writebackRestoreSelection,
+                            writebackOriginalScreenUpdating,
+                            writebackFocusLeaseActive)
+                    Else
+                        ' A delayed callback must not activate a previous window or
+                        ' select a previous range after the user has moved on.
+                        Try
+                            If writebackFocusLeaseActive Then application.ScreenUpdating = writebackOriginalScreenUpdating
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Deferred processing screen cleanup: " & ex.Message)
+                        Finally
+                            If writebackRestoreSelection IsNot Nothing Then
+                                Try
+                                    System.Runtime.InteropServices.Marshal.ReleaseComObject(writebackRestoreSelection)
+                                Catch ex As System.Exception
+                                    System.Diagnostics.Debug.WriteLine("Deferred processing range cleanup: " & ex.Message)
+                                End Try
+                            End If
+                            writebackRestoreSelection = Nothing
+                            writebackRestoreWindow = Nothing
+                            writebackFocusLeaseActive = False
+                        End Try
+                    End If
 
-            Try
-                ' Aufräumen aller temporären Bookmarks
-                For yi As Integer = currentdoc.Bookmarks.Count To 1 Step -1
-                    Dim bm As Word.Bookmark = currentdoc.Bookmarks(yi)
-                    If bm.Name = "TotalEnd" OrElse bm.Name = "NextStart" Then bm.Delete()
-                Next
-            Catch ex As System.Exception
-                '
-            End Try
+                    ' Use only the bookmarks created by this invocation. Never find
+                    ' similarly named bookmarks in a newer command/active document.
+                    For Each bookmark As Word.Bookmark In New Word.Bookmark() {totalEndBm, nextStartBm}
+                        If bookmark Is Nothing Then Continue For
+                        Try
+                            If System.Object.ReferenceEquals(bookmark.Range.Document, currentdoc) Then bookmark.Delete()
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Processing bookmark cleanup: " & ex.Message)
+                        End Try
+                    Next
+                End Sub
 
+            If SharedMethods.IsOnHostUiThread Then
+                cleanup.Invoke()
+            ElseIf Not cleanupHostToken.IsCancellationRequested Then
+                Dim pendingCleanup As System.Threading.Tasks.Task = SharedMethods.PostToHostUiAsync(cleanup)
+                Dim observeCleanup As System.Threading.Tasks.Task = pendingCleanup.ContinueWith(
+                    Sub(completed As System.Threading.Tasks.Task)
+                        System.Diagnostics.Debug.WriteLine("Deferred processing cleanup: " & completed.Exception.GetBaseException().Message)
+                    End Sub,
+                    System.Threading.CancellationToken.None,
+                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted,
+                    System.Threading.Tasks.TaskScheduler.Default)
+            End If
         End Try
 
         Return ""
@@ -2158,6 +2234,7 @@ Partial Public Class ThisAddIn
 ) As Task(Of String)
 
         Try
+            Await EnsureUIThread()
             Dim app As Word.Application = Globals.ThisAddIn.Application
             If app Is Nothing OrElse app.Selection Is Nothing OrElse app.Selection.Range Is Nothing Then Return ""
 
@@ -2267,11 +2344,13 @@ Partial Public Class ThisAddIn
                 AddUserPrompt:=OtherPromptUnfilled,
                 FileObject:=fileObject
             ))
+            Await EnsureUIThread()
 
             llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If Not String.IsNullOrEmpty(llmResult) Then
                 llmResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(llmResult, useSecondApi))
+                Await EnsureUIThread()
             End If
 
             If String.IsNullOrWhiteSpace(llmResult) Then

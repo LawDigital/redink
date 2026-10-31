@@ -107,8 +107,7 @@ Public Class ReviewChangesDialog
         Me.Location = New Point(wa.Left + (wa.Width - w) \ 2, wa.Top + (wa.Height - h) \ 2)
 
         Try
-            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

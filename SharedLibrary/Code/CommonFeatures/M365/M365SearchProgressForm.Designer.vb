@@ -70,8 +70,7 @@ Namespace SharedLibrary
 
             ' Red Ink logo as window icon.
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
                 ' Fallback: leave default icon if logo unavailable.
             End Try

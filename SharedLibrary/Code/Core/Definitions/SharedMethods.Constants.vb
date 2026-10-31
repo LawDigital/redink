@@ -1,5 +1,4 @@
-﻿Option Strict On
-Option Explicit On
+﻿
 ' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
@@ -25,6 +24,9 @@ Option Explicit On
 '  - This file intentionally contains both constants and shared mutable values; review
 '    consumers before changing names or defaults.
 ' =============================================================================
+
+Option Strict On
+Option Explicit On
 
 Imports System.Security.Cryptography
 Imports Microsoft.Office.Tools.Ribbon
@@ -644,6 +646,7 @@ Namespace SharedLibrary
         Public Const LogFileName As String = "RI_Logfile.txt"
 
         Public Const DEFAULT_LICENSECOUNTERMETHOD = "Auto"
+        Public Const DEFAULT_LICENSECOUNTERINTERVALL As System.Int32 = 360 ' Minutes; 0 means startup only.
         Public Const DEFAULT_LICENSECOUNTERANON = True
 
         ' URLs

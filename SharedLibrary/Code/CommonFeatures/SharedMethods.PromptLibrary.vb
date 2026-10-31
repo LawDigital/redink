@@ -150,8 +150,7 @@ Namespace SharedLibrary
                 }
             settingsForm.MinimumSize = New System.Drawing.Size(900, 650)
 
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(settingsForm)
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             settingsForm.Font = standardFont
@@ -627,8 +626,7 @@ Namespace SharedLibrary
                 }
             settingsForm.MinimumSize = New System.Drawing.Size(900, 650)
 
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(settingsForm)
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             settingsForm.Font = standardFont
@@ -1245,8 +1243,7 @@ Namespace SharedLibrary
             }
             form.MinimumSize = New System.Drawing.Size(820, 560)
 
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             form.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
             Dim layout As New System.Windows.Forms.TableLayoutPanel With {
@@ -1540,8 +1537,7 @@ Namespace SharedLibrary
             }
             pickerForm.MinimumSize = New System.Drawing.Size(950, 680)
 
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            pickerForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(pickerForm)
             pickerForm.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
             Dim layout As New System.Windows.Forms.TableLayoutPanel With {

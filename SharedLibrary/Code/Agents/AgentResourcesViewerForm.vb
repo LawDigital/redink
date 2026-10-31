@@ -94,8 +94,7 @@ Namespace Agents
             Me.MinimumSize = New Size(820, 440)
 
             Try
-                Dim bmp As New Bitmap(SharedLibrary.SharedMethods.GetLogoBitmap(SharedLibrary.SharedMethods.LogoType.Standard))
-                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
 

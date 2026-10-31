@@ -1033,8 +1033,7 @@ Partial Public Class ThisAddIn
 
             ' Icon — same as all custom forms
             Try
-                Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                frm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(frm)
             Catch
             End Try
 

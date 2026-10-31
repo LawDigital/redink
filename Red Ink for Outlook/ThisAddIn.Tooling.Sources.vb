@@ -955,6 +955,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim storeLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(boundStore)
+            SharedLogger.LogKnowledgeStoreInvocation(_context, _context.RDV, OutlookUsageSurface(), boundStore.Name)
             Dim query As String = GetToolArgumentString(toolCall.Arguments, "query")
             Dim taskPrompt As String = GetToolArgumentString(toolCall.Arguments, "task_prompt")
             Dim tagName As String = GetToolArgumentString(toolCall.Arguments, "tag")

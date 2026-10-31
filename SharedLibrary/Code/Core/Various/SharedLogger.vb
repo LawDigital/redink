@@ -76,11 +76,12 @@ Public Module SharedLogger
             End If
             version = version.PadRight(20)
 
-            Dim fileName As String = $"{AN2}-" & fileHash & "-" & appCode & ".log"
+            Dim observed As System.DateTime = System.DateTime.Now
+            Dim fileName As String = $"{AN2}-" & fileHash & "-" & observed.ToString("yyyyMM", System.Globalization.CultureInfo.InvariantCulture) & "-" & appCode & ".log"
             Dim fullPath As String = System.IO.Path.Combine(logDir, fileName)
 
             Dim line As String =
-                "[" & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) & "] " &
+                "[" & observed.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) & "] " &
                 userHash & " " &
                 version & " " &
                 functionName
@@ -112,7 +113,7 @@ Public Module SharedLogger
                             ' Optional diagnostic log written alongside the primary logs.
                             Dim dbgPath As String = System.IO.Path.Combine(logDir, $"{AN2}-logger-debug.log")
                             Dim dbgLine As String =
-                                    "[" & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) & "] " &
+                                    "[" & observed.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) & "] " &
                                     "ERROR " & ex.GetType().Name & ": " & ex.Message & " | fullPath=" & fullPath
                             System.IO.Directory.CreateDirectory(logDir)
                             System.IO.File.AppendAllText(dbgPath, dbgLine & Environment.NewLine, Encoding.UTF8)
@@ -752,6 +753,17 @@ Public Module SharedLogger
                 key = tokens(0)
             End If
 
+            If isInvoked Then
+                Select Case key.ToLowerInvariant()
+                    Case "balloomergepart_word", "ri_balloomergepart_click", "ri_balloonmergepart_click"
+                        key = "BalloonMergePart_Word"
+                    Case "browser_senttooutlook"
+                        key = "Browser_SendToOutlook"
+                    Case "easteregg_word"
+                        key = "EasterEgg_Word"
+                End Select
+            End If
+
             Dim pl As New ParsedLine()
             pl.Time = DateTime.ParseExact(timePart, "yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)
             pl.UserHash = userHash
@@ -790,6 +802,15 @@ Public Module SharedLogger
     ''' </summary>
     Public Sub LogAgentToolCall(context As ISharedContext, RDV As String, surface As String, toolName As String)
         Try
+            If System.String.IsNullOrWhiteSpace(toolName) Then Return
+            Select Case toolName.Trim().ToLowerInvariant()
+                Case "tool_loader", "tool_describe", "context_expand", "context_compact", "resolve_capability_route",
+                     "report_progress", "report_inability", "attest_response", "skill_use", "memory_put",
+                     "memory_list", "memory_get", "memory_delete"
+                    Return
+            End Select
+            ' Write store telemetry only at the bound catalogue lookup. Never expose the transport ID.
+            If toolName.StartsWith("knowledge_search_store_", System.StringComparison.OrdinalIgnoreCase) Then Return
             Dim safeSurface As String = NormalizeLogTokenPart(surface)
             Dim safeToolName As String = NormalizeLogTokenPart(toolName)
 
@@ -807,6 +828,7 @@ Public Module SharedLogger
     ''' Keeps letters, digits, and underscores; collapses separators to underscores.
     ''' </summary>
     Friend Function NormalizeLogTokenPart(value As String) As String
+        ' Canonical keys remain compatible with LogCountTool.
         If String.IsNullOrWhiteSpace(value) Then Return ""
 
         Dim sb As New StringBuilder()
@@ -839,5 +861,18 @@ Public Module SharedLogger
 
         Return sb.ToString().Trim("_"c)
     End Function
+
+    ' A display label is host-owned catalogue metadata, never the query, path, model arguments or ID.
+    Public Sub LogKnowledgeStoreInvocation(context As ISharedContext, rdv As System.String,
+                                           surface As System.String, displayName As System.String)
+        Try
+            Dim name As System.String = System.Text.RegularExpressions.Regex.Replace(If(displayName, ""), "[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+", " ").Trim()
+            If name.Length = 0 Then name = "Unknown store"
+            If name.Length > 96 Then name = name.Substring(0, 96)
+            Log(context, rdv, "AgentToolCall_" & NormalizeLogTokenPart(surface) & "_knowledge_search_store (" & name & ") invoked")
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("[SharedLogger] Could not record the knowledge-store invocation.")
+        End Try
+    End Sub
 
 End Module

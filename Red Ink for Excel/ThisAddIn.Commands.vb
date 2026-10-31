@@ -182,6 +182,7 @@ Partial Public Class ThisAddIn
                                                Optional isFromDirectory As Boolean = False,
                                                Optional askWorksheetSelection As Boolean = False) As Task(Of String)
         Try
+            Await EnsureUIThread()
             Dim doOCR As Boolean = False
             Dim askUser As Boolean = False
 
@@ -224,6 +225,7 @@ Partial Public Class ThisAddIn
                 DoOCR:=doOCR,
                 AskUser:=askUser,
                 AskWorksheetSelection:=askWorksheetSelection)
+            Await EnsureUIThread()
 
             ' Track PDFs that may have incomplete content
             If fileResult.PdfMayBeIncomplete Then
@@ -284,6 +286,7 @@ Partial Public Class ThisAddIn
     ''' <returns>Combined content of all files, or "ABORT" if user cancelled, or empty string on error.</returns>
     Private Async Function LoadDirectoryFilesAsync(dirPath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional ensureProgressBar As Boolean = False) As Task(Of String)
         Try
+            Await EnsureUIThread()
             If Not IO.Directory.Exists(dirPath) Then
                 ctx.FailedFiles.Add(dirPath)
                 Return ""
@@ -406,6 +409,7 @@ Partial Public Class ThisAddIn
                 ' Always wrap individual files from directory with document tags
                 ' Pass isFromDirectory=True to use directory OCR mode for PDFs
                 Dim fileContent As String = Await LoadSingleFileAsync(filePath, False, ctx, isFromDirectory:=True)
+                Await EnsureUIThread()
                 If Not String.IsNullOrWhiteSpace(fileContent) Then
                     resultBuilder.Append(fileContent)
                 End If
@@ -432,6 +436,7 @@ Partial Public Class ThisAddIn
     ''' <param name="prompt">The prompt to process.</param>
     ''' <returns>A tuple containing: (success flag, modified prompt). If success is False, the operation should abort.</returns>
     Private Async Function ProcessExternalFileTriggers(prompt As String) As Task(Of (Success As Boolean, ModifiedPrompt As String))
+        Await EnsureUIThread()
         ' Check if any file triggers are present
         Dim hasExtTriggers As Boolean = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0
         Dim hasDirTriggers As Boolean = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase) >= 0
@@ -612,6 +617,7 @@ Partial Public Class ThisAddIn
                             ctx,
                             isFromDirectory:=False,
                             askWorksheetSelection:=askWorksheetSelection)
+                        Await EnsureUIThread()
 
                         ' Start progress bar after selection if it was deferred
                         If askWorksheetSelection AndAlso Not progressBarStarted Then
@@ -660,6 +666,7 @@ Partial Public Class ThisAddIn
                         ' dialogs (file count confirmation, OCR choice) first and will start the
                         ' progress bar itself once all questions have been answered.
                         replacementText = Await LoadDirectoryFilesAsync(selectedDir, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        Await EnsureUIThread()
                         progressBarStarted = True
 
                         If replacementText = "ABORT" Then
@@ -734,6 +741,7 @@ Partial Public Class ThisAddIn
                             ctx,
                             isFromDirectory:=False,
                             askWorksheetSelection:=askWorksheetSelection)
+                        Await EnsureUIThread()
 
                         ' Start progress bar after selection if it was deferred
                         If askWorksheetSelection AndAlso Not progressBarStarted Then
@@ -748,6 +756,7 @@ Partial Public Class ThisAddIn
                     ElseIf IO.Directory.Exists(candidatePath) Then
                         ' Directory - defer progress bar to LoadDirectoryFilesAsync (user dialogs first)
                         replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        Await EnsureUIThread()
                         progressBarStarted = True
                         If replacementText = "ABORT" Then
                             ProgressBarModule.CancelOperation = True
@@ -1099,6 +1108,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <returns>Task(Of Boolean). Result variable not explicitly returned. Exits early if model selection canceled.</returns>
     Public Async Function FreestyleAM() As Task(Of Boolean)
+        Await EnsureUIThread()
         System.Windows.Forms.Application.DoEvents()
         If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
             If Not ShowModelSelection(_context, INI_AlternateModelPath) Then
@@ -1107,6 +1117,7 @@ Partial Public Class ThisAddIn
             End If
         End If
         Dim result As Boolean = Await Freestyle(True)
+        Await EnsureUIThread()
         If originalConfigLoaded Then
             RestoreDefaults(_context, originalConfig)
             originalConfigLoaded = False
@@ -1122,6 +1133,7 @@ Partial Public Class ThisAddIn
     ''' <param name="UseSecondAPI">True to use second API/model path; affects object trigger availability.</param>
     ''' <returns>Task(Of Boolean). Result variables not explicitly returned. Returns False early in multiple validation failure cases.</returns>
     Public Async Function Freestyle(ByVal UseSecondAPI As Boolean) As Task(Of Boolean)
+        Await EnsureUIThread()
         Dim selectedRange As Excel.Range = TryCast(Globals.ThisAddIn.Application.Selection, Excel.Range)
         Dim NoSelectedCells As Boolean = False
         Dim DoClipboard As Boolean = False
@@ -1629,6 +1641,7 @@ SkipPromptWin:
         ' Handles {doc}, {dir}, and {path} triggers with unified document numbering
 
         Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+        Await EnsureUIThread()
         If Not fileResult.Success Then
             Return False
         End If
@@ -1675,16 +1688,20 @@ SkipPromptWin:
         If OtherPrompt.StartsWith(PurePrefix, StringComparison.OrdinalIgnoreCase) Then
             OtherPrompt = OtherPrompt.Substring(PurePrefix.Length).Trim()
             Dim result As Boolean = Await ProcessSelectedRange(OtherPrompt, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS)
+            Await EnsureUIThread()
         Else
             If Not NoSelectedCells Then
                 If DoRange Then
                     FormulaInstruction = INI_FormulaInstruction
                     Dim result As Boolean = Await ProcessSelectedRange(SP_RangeOfCells, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS, BatchPath)
+                    Await EnsureUIThread()
                 Else
                     Dim result As Boolean = Await ProcessSelectedRange(SP_FreestyleText, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS)
+                    Await EnsureUIThread()
                 End If
             Else
                 Dim result As Boolean = Await ProcessSelectedRange(SP_RangeOfCells, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS, BatchPath)
+                Await EnsureUIThread()
             End If
         End If
     End Function

@@ -104,8 +104,7 @@ Namespace SharedLibrary
 
             ' Set icon
             Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                editorForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(editorForm)
             Catch ex As System.Exception
                 ' Non-fatal
             End Try

@@ -45,7 +45,8 @@ Namespace Agents
                                                     Optional cancellationToken As CancellationToken = Nothing,
                                                     Optional sharedContext As ISharedContext = Nothing,
                                                     Optional authoritativeUserRequest As System.String = Nothing,
-                                                    Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing) As System.Threading.Tasks.Task(Of System.String)
+                                                    Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing,
+                                                    Optional onSkillLoaded As System.Action(Of System.String) = Nothing) As System.Threading.Tasks.Task(Of System.String)
             If String.IsNullOrWhiteSpace(toolName) Then Return Nothing
 
             If SemanticArchiveTools.IsSemanticArchiveTool(toolName) Then
@@ -85,7 +86,7 @@ Namespace Agents
             End If
 
             If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
-                Return SkillInvokeTool.Execute(arguments, authoritativeUserRequest)
+                Return SkillInvokeTool.Execute(arguments, authoritativeUserRequest, onSkillLoaded)
             End If
 
             If toolName.StartsWith(AgentToolPrefix, StringComparison.OrdinalIgnoreCase) Then

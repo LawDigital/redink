@@ -2619,6 +2619,7 @@ Namespace SharedLibrary
                                             Next
                                         End Sub)
                     clipboardThread.SetApartmentState(System.Threading.ApartmentState.STA)
+                    clipboardThread.IsBackground = True
                     clipboardThread.Start()
                     clipboardThread.Join()
 

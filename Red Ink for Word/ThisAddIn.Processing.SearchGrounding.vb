@@ -831,6 +831,19 @@ Partial Public Class ThisAddIn
                 Catch ex As System.Exception
                     System.Diagnostics.Debug.WriteLine("[WebView2] User data folder cleanup error: " & ex.Message)
                 End Try
+
+                ' This short-lived STA owns the WebView2 pump and its WinForms
+                ' marshaling control; do not leave a context targeting a dead thread.
+                Try
+                    System.Windows.Forms.Application.ExitThread()
+                    Dim workerContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                        TryCast(System.Threading.SynchronizationContext.Current, System.Windows.Forms.WindowsFormsSynchronizationContext)
+                    If workerContext IsNot Nothing Then workerContext.Dispose()
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] Worker context cleanup error: " & ex.Message)
+                Finally
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                End Try
             End Try
 
             Dim finalText As String = If(result.TextContent, "").Trim()

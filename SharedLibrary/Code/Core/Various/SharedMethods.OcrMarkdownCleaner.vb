@@ -710,8 +710,16 @@ Namespace SharedLibrary
                 If System.String.Equals(marker, label, System.StringComparison.Ordinal) OrElse
                    System.String.Equals(marker, "[" & label & "]", System.StringComparison.Ordinal) OrElse
                    System.String.Equals(marker, "[^" & label & "]", System.StringComparison.Ordinal) Then Return True
-                ' Retain the previously supported source-superscript -> plain-label case.
-                Return System.String.Equals(marker.Normalize(System.Text.NormalizationForm.FormKC), label, System.StringComparison.Ordinal)
+                ' Legacy offset proposals can select the same complete wrappers as the
+                ' source-owned candidate list. Normalize only the label inside the span;
+                ' never search neighbouring text, accept attributes or invent a link.
+                Dim printed As System.String = marker
+                Dim wrapper As System.Text.RegularExpressions.Match = System.Text.RegularExpressions.Regex.Match(marker,
+                    "\A(?:\[\^?(?<label>[\p{L}\p{N}*†‡]{1,16})\]|<sup[ \t]*>[ \t]*(?<label>[\p{L}\p{N}*†‡]{1,16})[ \t]*</sup[ \t]*>)\z",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+                If wrapper.Success Then printed = wrapper.Groups("label").Value
+                Return System.String.Equals(printed.Normalize(System.Text.NormalizationForm.FormKC),
+                    label.Normalize(System.Text.NormalizationForm.FormKC), System.StringComparison.Ordinal)
             End Function
 
             Private Shared Function DescribeReferenceValue(value As System.String) As System.String
@@ -867,7 +875,7 @@ Namespace SharedLibrary
                     cancellationToken.ThrowIfCancellationRequested()
                     If options.ShowProgressWindow Then
                         statusDialog = New OcrChunkStatusDialog("Markdown", options.SourceName)
-                        statusDialog.Show("Preparing source-referenced Markdown...")
+                        Await statusDialog.ShowAsync("Preparing source-referenced Markdown...", cancellationToken).ConfigureAwait(False)
                         linkedCancellation = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, statusDialog.CancellationToken)
                         cancellationToken = linkedCancellation.Token
                     End If

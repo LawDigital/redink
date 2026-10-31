@@ -495,7 +495,7 @@ Partial Public Class ThisAddIn
             Using progress As New InboxBoardProgressScope(
                 "Inbox Board",
                 "Preparing inbox board…",
-                1)
+                1, HostWindowLifetimeToken)
 
                 ReportInboxBoardProgress(progress, 0, 1, "Preparing inbox board…")
                 If progress.CancelRequested Then Return
@@ -532,111 +532,116 @@ Partial Public Class ThisAddIn
 #Region "InboxBoard Mail Collection"
 
     Private NotInheritable Class InboxBoardProgressScope
-        Implements IDisposable
+        Implements System.IDisposable
 
-        Private ReadOnly _cts As New CancellationTokenSource()
-        Private ReadOnly _ready As New ManualResetEventSlim(False)
-        Private _uiThread As Thread
-        Private _form As Form
-        Private _closed As Integer = 0
+        Private ReadOnly _hostLifetimeToken As System.Threading.CancellationToken
+        Private _uiThread As System.Threading.Thread
+        Private _form As System.Windows.Forms.Form
+        Private _closed As System.Int32 = 0
 
-        Public Sub New(headerText As String,
-                       initialLabel As String,
-                       Optional max As Integer = 100)
+        Public Sub New(headerText As System.String,
+                       initialLabel As System.String,
+                       max As System.Int32,
+                       hostLifetimeToken As System.Threading.CancellationToken)
+            _hostLifetimeToken = hostLifetimeToken
+            If _hostLifetimeToken.IsCancellationRequested Then Return
 
             ProgressBarModule.CancelOperation = False
-            ProgressBarModule.GlobalProgressMax = Math.Max(1, max)
+            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, max)
             ProgressBarModule.GlobalProgressValue = 0
-            ProgressBarModule.GlobalProgressLabel = If(initialLabel, "")
+            ProgressBarModule.GlobalProgressLabel = If(initialLabel, System.String.Empty)
 
-            _uiThread = New Thread(
-                Sub()
-                    Try
-                        System.Windows.Forms.Application.EnableVisualStyles()
-
-                        Dim frm As System.Windows.Forms.Form =
-                            CType(New Global.SharedLibrary.SharedLibrary.DPIProgressForm(headerText, initialLabel), System.Windows.Forms.Form)
-
-                        _form = frm
-
-                        AddHandler frm.Shown,
-                            Sub()
-                                Try
-                                    _ready.Set()
-                                Catch
-                                End Try
-                            End Sub
-
-                        System.Windows.Forms.Application.Run(frm)
-                    Catch
-                        Try
-                            _ready.Set()
-                        Catch
-                        End Try
-                    End Try
-                End Sub)
-
+            _uiThread = New System.Threading.Thread(Sub() RunProgressWindow(headerText, initialLabel))
             _uiThread.IsBackground = True
-            _uiThread.SetApartmentState(ApartmentState.STA)
+            _uiThread.Name = "Red Ink Inbox Board progress"
+            _uiThread.SetApartmentState(System.Threading.ApartmentState.STA)
             _uiThread.Start()
+        End Sub
 
+        Private Sub RunProgressWindow(headerText As System.String, initialLabel As System.String)
+            System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+            Dim workerUiContext As System.Windows.Forms.WindowsFormsSynchronizationContext = Nothing
             Try
-                _ready.Wait(750)
-            Catch
+                If CancelRequested Then Return
+                Using form As System.Windows.Forms.Form =
+                    New Global.SharedLibrary.SharedLibrary.DPIProgressForm(headerText, initialLabel)
+                    System.Threading.Interlocked.Exchange(Of System.Windows.Forms.Form)(_form, form)
+                    If CancelRequested Then Return
+
+                    ' Create and own the handle on this worker. Dispose can arrive before
+                    ' construction, during handle creation or immediately before Run.
+                    Dim ownedHandle As System.IntPtr = form.Handle
+                    workerUiContext = TryCast(System.Threading.SynchronizationContext.Current,
+                                              System.Windows.Forms.WindowsFormsSynchronizationContext)
+                    If CancelRequested Then Return
+                    Using shutdownRegistration As System.Threading.CancellationTokenRegistration =
+                        _hostLifetimeToken.Register(Sub() RequestClose())
+                        If CancelRequested Then Return
+                        System.Windows.Forms.Application.Run(form)
+                    End Using
+                End Using
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.TraceWarning("Inbox Board progress window failed: {0}", ex.Message)
+            Finally
+                System.Threading.Interlocked.Exchange(Of System.Windows.Forms.Form)(_form, Nothing)
+                System.Threading.Interlocked.Exchange(_closed, 1)
+                If workerUiContext Is Nothing Then
+                    workerUiContext = TryCast(System.Threading.SynchronizationContext.Current,
+                                              System.Windows.Forms.WindowsFormsSynchronizationContext)
+                End If
+                Try
+                    System.Windows.Forms.Application.ExitThread()
+                Catch ex As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Inbox Board progress loop cleanup failed: {0}", ex.Message)
+                End Try
+                Try
+                    If workerUiContext IsNot Nothing Then workerUiContext.Dispose()
+                Catch ex As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Inbox Board progress context cleanup failed: {0}", ex.Message)
+                Finally
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
+                End Try
             End Try
         End Sub
 
-        Public Shared Sub Report(current As Integer,
-                                 Optional max As Integer = -1,
-                                 Optional label As String = Nothing)
+        Private Sub RequestClose()
+            Dim form As System.Windows.Forms.Form =
+                System.Threading.Interlocked.CompareExchange(Of System.Windows.Forms.Form)(_form, Nothing, Nothing)
+            If form Is Nothing Then Return
+            Try
+                If form.IsHandleCreated AndAlso Not form.IsDisposed Then
+                    form.BeginInvoke(New System.Action(
+                        Sub()
+                            If Not form.IsDisposed Then form.Close()
+                        End Sub))
+                End If
+            Catch ex As System.InvalidOperationException
+                ' The worker disposed its form before the asynchronous close was queued.
+            End Try
+        End Sub
+
+        Public Shared Sub Report(current As System.Int32,
+                                 Optional max As System.Int32 = -1,
+                                 Optional label As System.String = Nothing)
             If max >= 1 Then ProgressBarModule.GlobalProgressMax = max
             If label IsNot Nothing Then ProgressBarModule.GlobalProgressLabel = label
             ProgressBarModule.GlobalProgressValue =
-                Math.Max(0, Math.Min(current, ProgressBarModule.GlobalProgressMax))
+                System.Math.Max(0, System.Math.Min(current, ProgressBarModule.GlobalProgressMax))
         End Sub
 
-        Public ReadOnly Property CancelRequested As Boolean
+        Public ReadOnly Property CancelRequested As System.Boolean
             Get
-                Return ProgressBarModule.CancelOperation OrElse _cts.IsCancellationRequested
+                Return System.Threading.Volatile.Read(_closed) <> 0 OrElse
+                    _hostLifetimeToken.IsCancellationRequested OrElse ProgressBarModule.CancelOperation
             End Get
         End Property
 
-        Public Sub Dispose() Implements IDisposable.Dispose
-            If Interlocked.Exchange(_closed, 1) <> 0 Then Return
-
-            Try
-                ProgressBarModule.CancelOperation = True
-
-                Dim f = _form
-                If f IsNot Nothing Then
-                    Try
-                        If f.IsHandleCreated AndAlso Not f.IsDisposed Then
-                            f.BeginInvoke(New System.Action(
-                                Sub()
-                                    Try
-                                        If Not f.IsDisposed Then f.Close()
-                                    Catch
-                                    End Try
-                                End Sub))
-                        End If
-                    Catch
-                    End Try
-                End If
-            Finally
-                Try
-                    If _uiThread IsNot Nothing AndAlso _uiThread.IsAlive Then
-                        If Not _uiThread.Join(1000) Then
-                            Try : _uiThread.Interrupt() : Catch : End Try
-                        End If
-                    End If
-                Catch
-                End Try
-
-                Try
-                    _ready.Dispose()
-                Catch
-                End Try
-            End Try
+        Public Sub Dispose() Implements System.IDisposable.Dispose
+            If System.Threading.Interlocked.Exchange(_closed, 1) <> 0 Then Return
+            ProgressBarModule.CancelOperation = True
+            ' Never wait for this worker on Office's UI thread. Its own loop performs
+            ' Close, Using/Dispose and synchronization-context cleanup.
+            RequestClose()
         End Sub
     End Class
 
@@ -675,7 +680,7 @@ Partial Public Class ThisAddIn
             progress = New InboxBoardProgressScope(
                 "Inbox Board",
                 "Preparing inbox board…",
-                1)
+                1, HostWindowLifetimeToken)
         End If
 
         Try
@@ -1833,9 +1838,7 @@ Partial Public Class ThisAddIn
         If savedMax <> 0 Then frm.WindowState = FormWindowState.Maximized
 
         Try
-            Dim bmp As New Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            frm.Icon = Drawing.Icon.FromHandle(bmp.GetHicon())
-            bmp.Dispose()
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(frm)
         Catch
         End Try
 

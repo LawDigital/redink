@@ -177,7 +177,7 @@ Namespace SharedLibrary
             Me.MinimumSize = New System.Drawing.Size(720, 420)
             Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
             Try
-                Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
 

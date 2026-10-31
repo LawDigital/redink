@@ -162,6 +162,12 @@ Public NotInheritable Class WordCommentSelectionTracker
         Dim generation As System.Int32 = System.Threading.Volatile.Read(_generation)
         Enqueue(Sub()
                     Try
+                        ' Drop expired queued probes before making any provider calls.
+                        If completion.Task.IsCompleted Then Return
+                        If generation <> System.Threading.Volatile.Read(_generation) Then
+                            completion.TrySetResult(Evidence.Unknown("document_changed"))
+                            Return
+                        End If
                         If _automation Is Nothing OrElse System.Threading.Volatile.Read(_stopping) <> 0 Then
                             completion.TrySetResult(Evidence.Unknown("uia_unavailable"))
                             Return
@@ -176,8 +182,7 @@ Public NotInheritable Class WordCommentSelectionTracker
                         If generation <> System.Threading.Volatile.Read(_generation) Then
                             completion.TrySetResult(Evidence.Unknown("document_changed"))
                         ElseIf _last.WindowHandle = windowHandle Then
-                            completion.TrySetResult(_last.ForGeneration(generation))
-                            _commandSurfaceWindow = System.IntPtr.Zero
+                            If completion.TrySetResult(_last.ForGeneration(generation)) Then _commandSurfaceWindow = System.IntPtr.Zero
                         Else
                             completion.TrySetResult(Evidence.Unknown("focus_window_mismatch"))
                         End If
@@ -191,7 +196,7 @@ Public NotInheritable Class WordCommentSelectionTracker
         ' A stalled provider cannot trigger a late selection or write: probes are read-only.
         Dim finished As System.Threading.Tasks.Task = Await System.Threading.Tasks.Task.WhenAny(
             completion.Task, System.Threading.Tasks.Task.Delay(1200)).ConfigureAwait(False)
-        If finished IsNot completion.Task Then Return Evidence.Unknown("uia_timeout")
+        If finished IsNot completion.Task Then completion.TrySetResult(Evidence.Unknown("uia_timeout"))
         Return Await completion.Task.ConfigureAwait(False)
     End Function
 
@@ -216,6 +221,11 @@ Public NotInheritable Class WordCommentSelectionTracker
     End Sub
 
     Private Sub WatchWindowCore(windowHandle As System.IntPtr)
+        If windowHandle = System.IntPtr.Zero Then
+            ' Last document closed: unsubscribe on the UIA worker, never on Office's STA.
+            RemoveSelectionSubscriptions()
+            Return
+        End If
         If _automation Is Nothing OrElse windowHandle = _watchedWindow OrElse Not IsWordWindow(windowHandle) Then Return
         RemoveSelectionSubscriptions()
         Dim root As NativeElement = Nothing

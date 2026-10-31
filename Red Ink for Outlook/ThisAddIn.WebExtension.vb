@@ -3842,7 +3842,10 @@ Partial Public Class ThisAddIn
                         If Not System.String.IsNullOrWhiteSpace(fileObject) Then
                             Dim okOffice As System.Boolean = False
                             Try
-                                okOffice = TryExtractOfficeText(fileObject, extractedDoc, extractedLabel)
+                                Dim officeRead = Await TryExtractOfficeTextAsync(fileObject).ConfigureAwait(False)
+                                okOffice = officeRead.Item1
+                                extractedDoc = officeRead.Item2
+                                extractedLabel = officeRead.Item3
                             Catch
                                 okOffice = False
                             End Try
@@ -3853,7 +3856,10 @@ Partial Public Class ThisAddIn
                             Else
                                 Dim okText As System.Boolean = False
                                 Try
-                                    okText = TryExtractTextLike(fileObject, extractedDoc, extractedLabel)
+                                    Dim textRead = Await TryExtractTextLikeAsync(fileObject).ConfigureAwait(False)
+                                    okText = textRead.Item1
+                                    extractedDoc = textRead.Item2
+                                    extractedLabel = textRead.Item3
                                 Catch
                                     okText = False
                                 End Try
@@ -5128,7 +5134,7 @@ Partial Public Class ThisAddIn
         Select Case cmd0
             Case "redink_sendtooutlook"
 
-                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_SentToOutlook invoked")
+                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_SendToOutlook invoked")
 
                 ' (Legacy Outlook insert)
                 If String.IsNullOrWhiteSpace(textBody0) Then Return ""
@@ -5252,10 +5258,17 @@ Partial Public Class ThisAddIn
                 Dim promptCaption As String = AN & " Freestyle (for Browser)"
                 Dim wordInstalled As Boolean = False
                 Try
-                    Dim wordApp As Object = CreateObject("Word.Application")
-                    wordInstalled = True
-                    wordApp.Quit()
-                    System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
+                    wordInstalled = Await SLib.PostToHostUiAsync(Of Boolean)(
+                        Function() As Boolean
+                            Try
+                                Dim wordApp As Object = CreateObject("Word.Application")
+                                wordApp.Quit()
+                                System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
+                                Return True
+                            Catch ex As System.Exception
+                                Return False
+                            End Try
+                        End Function).ConfigureAwait(False)
                 Catch ex As System.Exception
                     wordInstalled = False
                 End Try
@@ -5379,11 +5392,8 @@ Partial Public Class ThisAddIn
 
                 Dim plainText As String
 
-                ' Convert RTF to plain text using RichTextBox
-                Using rtb As New RichTextBox()
-                    rtb.Rtf = finalTxt
-                    plainText = rtb.Text
-                End Using
+                ' Parse/dispose the hidden RichEdit control on STA without installing a worker UI context.
+                plainText = SLib.RtfToPlainText(finalTxt)
 
                 Return plainText
         End Select
@@ -5396,15 +5406,18 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Function TryCreateWordDocFromMarkdown(markdown As String) As Task(Of Boolean)
         Try
-            Dim wordApp As New Microsoft.Office.Interop.Word.Application()
-            wordApp.Visible = True
-            Dim newDoc As Microsoft.Office.Interop.Word.Document = wordApp.Documents.Add()
-            Dim docSelection As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
-            InsertTextWithMarkdown(docSelection, markdown, True)
-            Await SwitchToUi(Sub()
-                                 ShowCustomMessageBox("Your Word document has been created. It may be hidden behind the other windows.")
-                             End Sub)
-            Return True
+            ' Browser continuations may be MTA. Dispatch the complete Office COM
+            ' block, not only the message shown after document creation.
+            Return Await SLib.PostToHostUiAsync(Of Boolean)(
+                Function() As Boolean
+                    Dim wordApp As New Microsoft.Office.Interop.Word.Application()
+                    wordApp.Visible = True
+                    Dim newDoc As Microsoft.Office.Interop.Word.Document = wordApp.Documents.Add()
+                    Dim docSelection As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+                    InsertTextWithMarkdown(docSelection, markdown, True)
+                    ShowCustomMessageBox("Your Word document has been created. It may be hidden behind the other windows.")
+                    Return True
+                End Function).ConfigureAwait(False)
         Catch
             Return False
         End Try

@@ -108,9 +108,7 @@ Friend NotInheritable Class CollectionAnalyzerDialog
         Me.MaximizeBox = False
         Me.MinimizeBox = False
         ' Use the same Red Ink logo as the existing parameter dialogs.
-        Dim logoBitmap As New System.Drawing.Bitmap(Global.SharedLibrary.SharedLibrary.SharedMethods.GetLogoBitmap(
-            Global.SharedLibrary.SharedLibrary.SharedMethods.LogoType.Standard))
-        Me.Icon = System.Drawing.Icon.FromHandle(logoBitmap.GetHicon())
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
 
         Dim panel As New System.Windows.Forms.TableLayoutPanel With {
             .Dock = System.Windows.Forms.DockStyle.Fill, .ColumnCount = 3, .RowCount = 9,

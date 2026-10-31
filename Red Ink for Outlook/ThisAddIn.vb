@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 29.10.2026
+' 31.10.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -77,7 +77,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.291026" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.311026" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -234,9 +234,9 @@ Partial Public Class ThisAddIn
     Private startupReconcileFallbackTimer As System.Threading.Timer
 
     ''' <summary>
-    ''' Periodic offline license-counter timer for long-running Outlook sessions.
+    ''' Shared interval reporter for monthly licence usage in long-running Outlook sessions.
     ''' </summary>
-    Private licenseCounterTimer As System.Threading.Timer
+    Private licenseCounterReporter As System.IDisposable
 
     ''' <summary>
     ''' Shared UI synchronization context used by the shared tooling loop.
@@ -283,6 +283,11 @@ Partial Public Class ThisAddIn
     End Property
 
     Private Sub CloseHostModelessWindows()
+        Try
+            Global.SharedLibrary.SharedLibrary.LogWindow.Shutdown()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink shared log shutdown failed: " & ex.Message)
+        End Try
         Try
             If _hostModelessWindows IsNot Nothing Then _hostModelessWindows.CloseAll()
         Catch ex As System.Exception
@@ -337,6 +342,7 @@ Partial Public Class ThisAddIn
         ArmAskUserInteractivityGuard()
 
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
+        Global.SharedLibrary.SharedLibrary.LogWindow.InitializeUiDispatcher(_uiContext, _hostModelessWindows)
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
         UpdateHandler.MainControl = mainThreadControl
@@ -545,12 +551,13 @@ Partial Public Class ThisAddIn
                 Sub() UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context),
                 startupTimings)
 
-            If _context IsNot Nothing AndAlso _context.INIloaded Then
+            ' Valid licence evidence is independent of model setup readiness.
+            If _context IsNot Nothing Then
                 MeasureOutlookStartupStep(
                     "LicenseCounter.schedule",
                     Sub()
-                        SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "OL")
-                        StartLicenseCounterTimer()
+                        If licenseCounterReporter IsNot Nothing Then licenseCounterReporter.Dispose()
+                        licenseCounterReporter = Global.SharedLibrary.SharedLibrary.SharedMethods.StartLicenseCounterReporting(_context, "OL")
                     End Sub,
                     startupTimings)
             End If
@@ -788,7 +795,10 @@ Partial Public Class ThisAddIn
         End Try
 
         Try
-            StopLicenseCounterTimer()
+            If licenseCounterReporter IsNot Nothing Then
+                licenseCounterReporter.Dispose()
+                licenseCounterReporter = Nothing
+            End If
         Catch
         End Try
 
@@ -806,54 +816,13 @@ Partial Public Class ThisAddIn
 
     End Sub
 
-    Private Sub StartLicenseCounterTimer()
-        Try
-            StopLicenseCounterTimer()
-
-            licenseCounterTimer = New System.Threading.Timer(
-                Sub(state As Object)
-                    Try
-                        If _context Is Nothing OrElse Not _context.INIloaded Then
-                            Return
-                        End If
-
-                        SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "OL")
-                    Catch
-                    End Try
-                End Sub,
-                Nothing,
-                TimeSpan.FromHours(SharedMethods.LicenseCounterOutlookTimerHours),
-                TimeSpan.FromHours(SharedMethods.LicenseCounterOutlookTimerHours))
-        Catch
-        End Try
-    End Sub
-
-    Private Sub StopLicenseCounterTimer()
-        Try
-            If licenseCounterTimer IsNot Nothing Then
-                licenseCounterTimer.Dispose()
-                licenseCounterTimer = Nothing
-            End If
-        Catch
-        End Try
-    End Sub
-
-    ' Lightweight UI switch helper (matches Excel version)
-
     ''' <summary>
-    ''' Ensures execution continuity on the captured UI thread by posting a no-op if current context differs.
+    ''' Resumes the awaiting continuation on the captured Office UI thread.
     ''' </summary>
-    Private Shared Function EnsureUIThread() As System.Threading.Tasks.Task
-        If _uiContext Is Nothing OrElse SynchronizationContext.Current Is _uiContext Then
-            Return System.Threading.Tasks.Task.CompletedTask
-        End If
-        Dim tcs As New TaskCompletionSource(Of Object)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
-        _uiContext.Post(
-            Sub(state As Object)
-                tcs.SetResult(Nothing)
-            End Sub,
-            Nothing)
-        Return tcs.Task
+    Private Shared Function EnsureUIThread() As Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable
+        ' Await posts the continuation itself; a posted no-op Task cannot switch an MTA caller.
+        Return New Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable(
+            _uiContext, UiThreadId, Globals.ThisAddIn.HostWindowLifetimeToken)
     End Function
 
     ''' <summary>
@@ -1126,7 +1095,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional HideSplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing, Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
         Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, HideSplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution, binaryOutputDirectory, transportRetryProfile)
-        If EnsureUI Then Await EnsureUIThread().ConfigureAwait(False)
+        If EnsureUI Then Await EnsureUIThread()
         Return Response
     End Function
 

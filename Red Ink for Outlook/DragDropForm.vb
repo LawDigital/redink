@@ -122,10 +122,7 @@ Partial Public Class DragDropForm
     End Sub
 
     Private Sub DragDropForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
-        Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-        Dim iconValue As Icon = Icon.FromHandle(bmp.GetHicon())
-        Me.Icon = iconValue
-        bmp.Dispose()
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
 
         Me.TopMost = True
         Me.BringToFront()

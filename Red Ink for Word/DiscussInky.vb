@@ -454,7 +454,7 @@ Public Class DiscussInky
         ' shared Show* helpers already re-assert TopMost themselves on Shown,
         ' so they will always come to the foreground even over Word.
         Try
-            Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

@@ -22,6 +22,10 @@ Namespace SharedLibrary
     ''' </summary>
     Public Class NativeMethods
 
+        <System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint:="DestroyIcon", ExactSpelling:=True, SetLastError:=True)>
+        Friend Shared Function DestroyIcon(handle As System.IntPtr) As System.Boolean
+        End Function
+
         <System.Runtime.InteropServices.DllImport("user32.dll")>
         Public Shared Function IsWindow(hwnd As System.IntPtr) As System.Boolean
         End Function

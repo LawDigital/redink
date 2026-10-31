@@ -2714,8 +2714,7 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            frm.Icon = Drawing.Icon.FromHandle(
-                (New Drawing.Bitmap(GetLogoBitmap(LogoType.Standard))).GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(frm)
         Catch
         End Try
 

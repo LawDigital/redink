@@ -215,6 +215,7 @@ Partial Public Class ThisAddIn
 
         Dim thread As New System.Threading.Thread(
         Sub()
+            System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
             Dim result As New WebRetrievalResult() With {
                 .FinalUrl = baseUrl,
                 .LinksJson = "[]"
@@ -577,6 +578,9 @@ Partial Public Class ThisAddIn
                 System.Diagnostics.Debug.WriteLine("[WebView2] Error: " & ex.Message)
 
             Finally
+                Dim workerUiContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                    TryCast(System.Threading.SynchronizationContext.Current,
+                            System.Windows.Forms.WindowsFormsSynchronizationContext)
                 Try
                     If webView IsNot Nothing Then
                         webView.Dispose()
@@ -600,6 +604,18 @@ Partial Public Class ThisAddIn
                     End If
                 Catch ex As System.Exception
                     System.Diagnostics.Debug.WriteLine("[WebView2] User data folder cleanup error: " & ex.Message)
+                End Try
+                Try
+                    System.Windows.Forms.Application.ExitThread()
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] Message loop cleanup error: " & ex.Message)
+                End Try
+                Try
+                    If workerUiContext IsNot Nothing Then workerUiContext.Dispose()
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] Synchronization context cleanup error: " & ex.Message)
+                Finally
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
                 End Try
             End Try
 
