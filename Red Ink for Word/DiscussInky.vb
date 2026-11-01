@@ -3622,6 +3622,10 @@ Public Class DiscussInky
                        "an index")
 
                 AppendSystemMessage($"Converted '{fileName}' into a searchable index ({segmentInfo}).")
+                If generationResult.MetadataGenerationWarnings.Count > 0 Then
+                    AppendSystemMessage("Warning: " & generationResult.MetadataGenerationWarnings.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        " segment(s) have source-derived metadata after LLM failures. Affected IDs and causes are recorded in the index.")
+                End If
                 OfferDesktopIndexCopy(outputPath, fileName)
                 UpdateWindowTitle()
                 PersistCurrentSessionSettings()
@@ -4593,6 +4597,10 @@ Public Class DiscussInky
                     $"The {targetEntries.Count:N0} selected document(s) were removed from the inlined knowledge and will now be searched per message. " &
                     "The index is stored durably and will be included when you persist or archive this session.")
 
+                If generationResult.MetadataGenerationWarnings.Count > 0 Then
+                    AppendSystemMessage("Warning: " & generationResult.MetadataGenerationWarnings.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        " segment(s) have source-derived metadata after LLM failures. Affected IDs and causes are recorded in the index.")
+                End If
                 OfferDesktopIndexCopy(outputPath, displayName)
                 UpdateWindowTitle()
                 Return targetEntries.Count
