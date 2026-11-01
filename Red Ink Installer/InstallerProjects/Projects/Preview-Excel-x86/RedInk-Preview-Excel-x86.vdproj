@@ -327,6 +327,12 @@
         }
         "Entry"
         {
+        "MsmKey" = "8:_F101FA5F757B136D8E3D771FEDDDBC43"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
         "MsmKey" = "8:_BB80D81F8BD326F61FA1A393F1129FF6"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
@@ -525,7 +531,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_3E77A7FF8AF49C6658C8238C21187553"
+        "MsmKey" = "8:_57AD6D16BDA8AA2853E43D337A2F72B6"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -549,7 +555,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_3658DEE4F8C4C6375307C00B622D5A57"
+        "MsmKey" = "8:_0D5FC6214C844197FFAF6A60B331D795"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -567,13 +573,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_676C9E86B91E054689C42F41A804A232"
+        "MsmKey" = "8:_2E6C07A87461BA7F72E99480EC177F59"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_DA8CA706324570950346427404B7AD99"
+        "MsmKey" = "8:_CC80EEED1E10D799C5F763D0063FC85C"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -585,7 +591,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_973B68346ECE2303CE89EC2DB137E2FC"
+        "MsmKey" = "8:_E22482F467083E26998D6E561F8DD5C5"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -603,7 +609,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_E791CBA5A6862D77E5AC2C6A0805ADDC"
+        "MsmKey" = "8:_F0B0E4A81B4BA9696F633B29413B54B6"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -615,13 +621,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_5199BF32990AABE66C59EACF28F9C119"
+        "MsmKey" = "8:_71062C819F5A874C45EBCC0F45E5F169"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_71062C819F5A874C45EBCC0F45E5F169"
+        "MsmKey" = "8:_1757D34CBF952F505EE81EF48A3D64B3"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -657,13 +663,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_B9382215AF793C0CF85249CF7445DF4F"
+        "MsmKey" = "8:_AC72F9E2A7A3C73CA5072FECEB5DFC5D"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_AC72F9E2A7A3C73CA5072FECEB5DFC5D"
+        "MsmKey" = "8:_268325D1A167A15DCDAD90BBBFEEFE92"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -3377,6 +3383,26 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_F101FA5F757B136D8E3D771FEDDDBC43"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\tools\\skills\\playwright-cli\\references\\pr-attachments.md"
+            "TargetName" = "8:pr-attachments.md"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_DC8EA34D47EE50D482FF29D17C678227"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
             "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_BB80D81F8BD326F61FA1A393F1129FF6"
             {
             "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\tools\\skills\\playwright-cli\\references\\request-mocking.md"
@@ -4037,10 +4063,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_3E77A7FF8AF49C6658C8238C21187553"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_57AD6D16BDA8AA2853E43D337A2F72B6"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\codeMirrorModule-CVQWJZAA.js"
-            "TargetName" = "8:codeMirrorModule-CVQWJZAA.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\codeMirrorModule-DK72OMRi.js"
+            "TargetName" = "8:codeMirrorModule-DK72OMRi.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_9EC2CE3D9B37638E5382EA492680C002"
             "Condition" = "8:"
@@ -4117,10 +4143,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_3658DEE4F8C4C6375307C00B622D5A57"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_0D5FC6214C844197FFAF6A60B331D795"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\index-hrlLqLtq.js"
-            "TargetName" = "8:index-hrlLqLtq.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\index-Cn0mmDuv.js"
+            "TargetName" = "8:index-Cn0mmDuv.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_9EC2CE3D9B37638E5382EA492680C002"
             "Condition" = "8:"
@@ -4177,10 +4203,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_676C9E86B91E054689C42F41A804A232"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_2E6C07A87461BA7F72E99480EC177F59"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\codeMirrorModule-BbkfBe3n.js"
-            "TargetName" = "8:codeMirrorModule-BbkfBe3n.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\codeMirrorModule-BEB2e8M3.js"
+            "TargetName" = "8:codeMirrorModule-BEB2e8M3.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_4F25A256275BF8522047DF1DCFC14A28"
             "Condition" = "8:"
@@ -4197,10 +4223,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_DA8CA706324570950346427404B7AD99"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_CC80EEED1E10D799C5F763D0063FC85C"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\defaultSettingsView-Ds6CBOo0.js"
-            "TargetName" = "8:defaultSettingsView-Ds6CBOo0.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\defaultSettingsView-D-g2vrvf.js"
+            "TargetName" = "8:defaultSettingsView-D-g2vrvf.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_4F25A256275BF8522047DF1DCFC14A28"
             "Condition" = "8:"
@@ -4237,10 +4263,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_973B68346ECE2303CE89EC2DB137E2FC"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_E22482F467083E26998D6E561F8DD5C5"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\xtermModule-DywYcAf8.js"
-            "TargetName" = "8:xtermModule-DywYcAf8.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\xtermModule-B794rD2Z.js"
+            "TargetName" = "8:xtermModule-B794rD2Z.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_4F25A256275BF8522047DF1DCFC14A28"
             "Condition" = "8:"
@@ -4297,10 +4323,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_E791CBA5A6862D77E5AC2C6A0805ADDC"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_F0B0E4A81B4BA9696F633B29413B54B6"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\defaultSettingsView.Bqk9acqE.css"
-            "TargetName" = "8:defaultSettingsView.Bqk9acqE.css"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\defaultSettingsView.C8BeHuxd.css"
+            "TargetName" = "8:defaultSettingsView.C8BeHuxd.css"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_54E16CB279FF18378A1697380AE67AA4"
             "Condition" = "8:"
@@ -4337,10 +4363,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_5199BF32990AABE66C59EACF28F9C119"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_71062C819F5A874C45EBCC0F45E5F169"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.B4cLoZK3.js"
-            "TargetName" = "8:index.B4cLoZK3.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.html"
+            "TargetName" = "8:index.html"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_54E16CB279FF18378A1697380AE67AA4"
             "Condition" = "8:"
@@ -4357,10 +4383,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_71062C819F5A874C45EBCC0F45E5F169"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_1757D34CBF952F505EE81EF48A3D64B3"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.html"
-            "TargetName" = "8:index.html"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.oNry3Hjv.js"
+            "TargetName" = "8:index.oNry3Hjv.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_54E16CB279FF18378A1697380AE67AA4"
             "Condition" = "8:"
@@ -4477,10 +4503,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_B9382215AF793C0CF85249CF7445DF4F"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_AC72F9E2A7A3C73CA5072FECEB5DFC5D"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CU5KtEkS.js"
-            "TargetName" = "8:uiMode.CU5KtEkS.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CyMfwkXJ.css"
+            "TargetName" = "8:uiMode.CyMfwkXJ.css"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_54E16CB279FF18378A1697380AE67AA4"
             "Condition" = "8:"
@@ -4497,10 +4523,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_AC72F9E2A7A3C73CA5072FECEB5DFC5D"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_268325D1A167A15DCDAD90BBBFEEFE92"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CyMfwkXJ.css"
-            "TargetName" = "8:uiMode.CyMfwkXJ.css"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CYwC_gH1.js"
+            "TargetName" = "8:uiMode.CYwC_gH1.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_54E16CB279FF18378A1697380AE67AA4"
             "Condition" = "8:"
@@ -10421,15 +10447,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Excel (Preview)"
-        "ProductCode" = "8:{82A4731C-B6E5-43CA-BCDC-D8A1086CA537}"
-        "PackageCode" = "8:{25258D37-B357-47C7-ACE2-89B13E54A882}"
+        "ProductCode" = "8:{083CA060-BFEC-4677-8909-4609CE032892}"
+        "PackageCode" = "8:{DEB40CC5-5228-4E2B-9835-DC3924D91FC6}"
         "UpgradeCode" = "8:{71903376-5275-44CA-9A5E-30AEC2282B47}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"
         "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:TRUE"
         "InstallAllUsers" = "11:TRUE"
-        "ProductVersion" = "8:1.7.19"
+        "ProductVersion" = "8:1.8.0"
         "Manufacturer" = "8:LawDigital Ltd."
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:"

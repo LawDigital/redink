@@ -327,6 +327,12 @@
         }
         "Entry"
         {
+        "MsmKey" = "8:_D07BC26242B26AF534088C2ED552AB66"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
         "MsmKey" = "8:_FBDC4678EE9F2712473815E2E731A358"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
@@ -525,7 +531,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_F699FD66C4FEE17344CC9E26B000D9A6"
+        "MsmKey" = "8:_670869C77E8E51A7A66AF57C2CC0661E"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -549,7 +555,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_42F68B91E8D27674AE7C417FC6E8ED05"
+        "MsmKey" = "8:_15474D055D5C10DE620D50682A0655BC"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -567,13 +573,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_B30EA4A2E5CDEBFC6B100A00D9BB8248"
+        "MsmKey" = "8:_F4EB73A5185A43259DDC06E4D039A651"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_4971831915C0CE8542CB43D3C2C90FED"
+        "MsmKey" = "8:_C95642FFD0578F0EF19C64E9133340C6"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -585,7 +591,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_FBD5B39455694456E5290E531C8AEA76"
+        "MsmKey" = "8:_C535F668AC250F9B1060916B62EA4461"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -603,7 +609,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_D11C4C03E3E88BF070153670C71C899A"
+        "MsmKey" = "8:_680EDAF2D2D3F777829AF88B39D52756"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -615,13 +621,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_A348991DAC56EE3B6DFB093341ADCD95"
+        "MsmKey" = "8:_B818651983D60833B0D35509F8728434"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_B818651983D60833B0D35509F8728434"
+        "MsmKey" = "8:_366EC85FE61392867E7BFE6740C532EC"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -657,13 +663,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_9C53B404E2311FE396177F6505648BF2"
+        "MsmKey" = "8:_8501C4FC569E80AAE6472AC9A85DDD98"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_8501C4FC569E80AAE6472AC9A85DDD98"
+        "MsmKey" = "8:_42FF2D6649A6CB23A70F68B594C2F1F9"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -3497,6 +3503,26 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_D07BC26242B26AF534088C2ED552AB66"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\tools\\skills\\playwright-cli\\references\\pr-attachments.md"
+            "TargetName" = "8:pr-attachments.md"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_1ACA1A9E7CFE9E0B722EEC819A4BB8E1"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
             "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_FBDC4678EE9F2712473815E2E731A358"
             {
             "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\tools\\skills\\playwright-cli\\references\\request-mocking.md"
@@ -4157,10 +4183,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_F699FD66C4FEE17344CC9E26B000D9A6"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_670869C77E8E51A7A66AF57C2CC0661E"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\codeMirrorModule-CVQWJZAA.js"
-            "TargetName" = "8:codeMirrorModule-CVQWJZAA.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\codeMirrorModule-DK72OMRi.js"
+            "TargetName" = "8:codeMirrorModule-DK72OMRi.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_A9CB24F646BDD851A47F965BC69C0FDB"
             "Condition" = "8:"
@@ -4237,10 +4263,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_42F68B91E8D27674AE7C417FC6E8ED05"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_15474D055D5C10DE620D50682A0655BC"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\index-hrlLqLtq.js"
-            "TargetName" = "8:index-hrlLqLtq.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\index-Cn0mmDuv.js"
+            "TargetName" = "8:index-Cn0mmDuv.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_A9CB24F646BDD851A47F965BC69C0FDB"
             "Condition" = "8:"
@@ -4297,10 +4323,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_B30EA4A2E5CDEBFC6B100A00D9BB8248"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_F4EB73A5185A43259DDC06E4D039A651"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\codeMirrorModule-BbkfBe3n.js"
-            "TargetName" = "8:codeMirrorModule-BbkfBe3n.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\codeMirrorModule-BEB2e8M3.js"
+            "TargetName" = "8:codeMirrorModule-BEB2e8M3.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_559BA620A0460EFC0D285D0BEBF02ADE"
             "Condition" = "8:"
@@ -4317,10 +4343,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_4971831915C0CE8542CB43D3C2C90FED"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_C95642FFD0578F0EF19C64E9133340C6"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\defaultSettingsView-Ds6CBOo0.js"
-            "TargetName" = "8:defaultSettingsView-Ds6CBOo0.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\defaultSettingsView-D-g2vrvf.js"
+            "TargetName" = "8:defaultSettingsView-D-g2vrvf.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_559BA620A0460EFC0D285D0BEBF02ADE"
             "Condition" = "8:"
@@ -4357,10 +4383,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_FBD5B39455694456E5290E531C8AEA76"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_C535F668AC250F9B1060916B62EA4461"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\xtermModule-DywYcAf8.js"
-            "TargetName" = "8:xtermModule-DywYcAf8.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\xtermModule-B794rD2Z.js"
+            "TargetName" = "8:xtermModule-B794rD2Z.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_559BA620A0460EFC0D285D0BEBF02ADE"
             "Condition" = "8:"
@@ -4417,10 +4443,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_D11C4C03E3E88BF070153670C71C899A"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_680EDAF2D2D3F777829AF88B39D52756"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\defaultSettingsView.Bqk9acqE.css"
-            "TargetName" = "8:defaultSettingsView.Bqk9acqE.css"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\defaultSettingsView.C8BeHuxd.css"
+            "TargetName" = "8:defaultSettingsView.C8BeHuxd.css"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_74999F29D94C4D970DF11EEDFD1E4957"
             "Condition" = "8:"
@@ -4457,10 +4483,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_A348991DAC56EE3B6DFB093341ADCD95"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_B818651983D60833B0D35509F8728434"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.B4cLoZK3.js"
-            "TargetName" = "8:index.B4cLoZK3.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.html"
+            "TargetName" = "8:index.html"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_74999F29D94C4D970DF11EEDFD1E4957"
             "Condition" = "8:"
@@ -4477,10 +4503,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_B818651983D60833B0D35509F8728434"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_366EC85FE61392867E7BFE6740C532EC"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.html"
-            "TargetName" = "8:index.html"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.oNry3Hjv.js"
+            "TargetName" = "8:index.oNry3Hjv.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_74999F29D94C4D970DF11EEDFD1E4957"
             "Condition" = "8:"
@@ -4597,10 +4623,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_9C53B404E2311FE396177F6505648BF2"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_8501C4FC569E80AAE6472AC9A85DDD98"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CU5KtEkS.js"
-            "TargetName" = "8:uiMode.CU5KtEkS.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CyMfwkXJ.css"
+            "TargetName" = "8:uiMode.CyMfwkXJ.css"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_74999F29D94C4D970DF11EEDFD1E4957"
             "Condition" = "8:"
@@ -4617,10 +4643,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_8501C4FC569E80AAE6472AC9A85DDD98"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_42FF2D6649A6CB23A70F68B594C2F1F9"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CyMfwkXJ.css"
-            "TargetName" = "8:uiMode.CyMfwkXJ.css"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Outlook\\bin\\x64\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CYwC_gH1.js"
+            "TargetName" = "8:uiMode.CYwC_gH1.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_74999F29D94C4D970DF11EEDFD1E4957"
             "Condition" = "8:"
@@ -10952,15 +10978,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Outlook (Preview)"
-        "ProductCode" = "8:{EE92F24C-6719-4D31-806A-B21119B563E7}"
-        "PackageCode" = "8:{050CE147-8440-4016-9222-F1B02CD26C99}"
+        "ProductCode" = "8:{0F2A5190-AED9-4A60-B497-0EF04DFD542E}"
+        "PackageCode" = "8:{0D3CCE33-DD4B-49E8-887C-A82913FA025B}"
         "UpgradeCode" = "8:{3FF21BD8-0E2D-4561-B224-D40A4C6049ED}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"
         "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:TRUE"
         "InstallAllUsers" = "11:TRUE"
-        "ProductVersion" = "8:1.7.19"
+        "ProductVersion" = "8:1.8.0"
         "Manufacturer" = "8:LawDigital Ltd."
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:"

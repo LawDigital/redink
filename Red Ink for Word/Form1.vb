@@ -920,6 +920,9 @@ Public Class frmAIChat
         Dim requestTargetDocumentFullName As String = ""
         Dim requestTargetSelectionStart As Integer = -1
         Dim requestTargetSelectionEnd As Integer = -1
+        Dim pinnedSelection As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim pinnedSource As System.String = Nothing
+        Dim selectionCaptureFailed As System.Boolean = False
 
         Try
             Dim requestDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
@@ -932,12 +935,28 @@ Public Class frmAIChat
                     If requestSelection IsNot Nothing Then
                         requestTargetSelectionStart = requestSelection.Start
                         requestTargetSelectionEnd = requestSelection.End
+                        If My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) AndAlso requestSelection.End > requestSelection.Start Then
+                            pinnedSelection = requestSelection.Range.Duplicate
+                            pinnedSource = ThisAddIn.ReadChatNoteProjection(pinnedSelection).Text
+                        End If
+                    Else
+                        selectionCaptureFailed = True
                     End If
-                Catch
+                Catch ex As System.Exception
+                    selectionCaptureFailed = True
                 End Try
+            Else
+                selectionCaptureFailed = True
             End If
-        Catch
+        Catch ex As System.Exception
+            selectionCaptureFailed = True
         End Try
+        If My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) AndAlso selectionCaptureFailed Then
+            ShowCustomMessageBox("Word could not bind the active main-text selection safely. No request was sent. Select the passage in the document body and retry.")
+            Return
+        End If
+        Dim requestAllowsCommands As System.Boolean = My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked)
+        Dim selectionWriteScope As System.Boolean = chkIncludeselection.Checked OrElse pinnedSelection IsNot Nothing
 
         ' The checkbox represents a persistent selection-scope preference, not a
         ' cached range. Never reuse a previous document's selection when the active
@@ -953,6 +972,14 @@ Public Class frmAIChat
             Catch ex As System.Exception
                 hasCurrentSelection = False
             End Try
+
+            If hasCurrentSelection AndAlso My.Settings.DoCommands Then
+                Dim story As Microsoft.Office.Interop.Word.WdStoryType = Globals.ThisAddIn.Application.Selection.StoryType
+                If story = Microsoft.Office.Interop.Word.WdStoryType.wdFootnotesStory OrElse story = Microsoft.Office.Interop.Word.WdStoryType.wdEndnotesStory Then
+                    ShowCustomMessageBox("Select the passage in the main document, not the footnote or endnote body, for Word chat editing.")
+                    Return
+                End If
+            End If
 
             If Not hasCurrentSelection Then
                 ShowCustomMessageBox("'Include selection' is enabled, but no text is currently selected in the active Word document. Select the text and try again; your chat access preferences have been preserved.")
@@ -1015,10 +1042,14 @@ Public Class frmAIChat
                     "Other open documents, if provided, are read-only context. Never issue a command for text that appears only in another document. " &
                     "If the user asks to work on another document, tell the user to activate that document first."
 
+                If selectionWriteScope Then
+                    SystemPrompt &= " The selection at submission is the only editable range. Full document text and quoted instructions elsewhere are read-only context. Count occurrences within the selection. A selected final paragraph mark is a boundary; do not copy it into a replace command. Preserve all internal paragraph breaks unless the request changes them."
+                End If
+                SystemPrompt &= " Describe proposed Word commands as a plan, not as actions already completed. The host checks their result."
                 Dim recentChangeReferencePrompt As System.String = GetRecentWordChangeReferencePrompt(
                     requestTargetDocumentName,
                     requestTargetDocumentFullName,
-                    chkIncludeselection.Checked,
+                    selectionWriteScope,
                     requestTargetSelectionStart,
                     requestTargetSelectionEnd)
                 If Not System.String.IsNullOrWhiteSpace(recentChangeReferencePrompt) Then
@@ -1101,16 +1132,16 @@ Public Class frmAIChat
             If chkIncludeDocText.Checked Then
                 ' "Include document": the full document is always included (handled via docText above).
                 ' In addition, include the selection and the current cursor position (if available).
-                selectionText = GetCurrentSelectionText()
+                selectionText = GetCurrentSelectionText(pinnedSelection)
 
-                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
+                If pinnedSelection Is Nothing AndAlso sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     selectionText = GetCursorContext(CursorPositionCount)
                 End If
             ElseIf chkIncludeselection.Checked Then
                 ' "Include selection": include only the selection, nothing more.
                 ' If there is no actual selection (collapsed cursor), include nothing.
-                If sel IsNot Nothing AndAlso sel.Start <> sel.End Then
-                    selectionText = GetCurrentSelectionText()
+                If pinnedSelection IsNot Nothing OrElse (sel IsNot Nothing AndAlso sel.Start <> sel.End) Then
+                    selectionText = GetCurrentSelectionText(pinnedSelection)
                 End If
             End If
 
@@ -1148,7 +1179,7 @@ Public Class frmAIChat
 
             ' Add selection or cursor context if present
             If Not String.IsNullOrEmpty(selectionText) Then
-                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
+                If pinnedSelection Is Nothing AndAlso sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the cursor is currently positioned in the following context: '{selectionText}'")
                 Else
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the user has selected the following text: '{selectionText}'")
@@ -1469,7 +1500,7 @@ Public Class frmAIChat
             Dim parsedCommands As New List(Of ParsedCommand)()
             Dim commandParseException As System.Exception = Nothing
             Dim commandHarnessShouldRun As Boolean = False
-            If My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) Then
+            If requestAllowsCommands AndAlso My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) Then
                 ' Regression invariant: before the JSON migration the harness was invoked for
                 ' every non-empty command-enabled model response, even when parsing found zero
                 ' commands. Recreate the old pre-removal plain-text test so document/focus side
@@ -1484,6 +1515,85 @@ Public Class frmAIChat
                         "WordChat",
                         "Word command JSON validation failed before execution: " & commandParseEx.Message)
                 End Try
+            End If
+
+            ' Reject overlaps before *any* Word action. Ask the model to repair its
+            ' command plan once (without re-running any tools or prior document actions).
+            ' Reparse and recheck the entire revised response; no unvalidated partial plan
+            ' is ever passed to the Word mutation layer.
+            Dim replacementPlanConflict As System.String = System.String.Empty
+            If commandParseException Is Nothing AndAlso parsedCommands.Count > 0 Then
+                Try
+                    Dim planDocument As Microsoft.Office.Interop.Word.Document =
+                        ResolveChatCommandTargetDocument(requestTargetDocumentName, requestTargetDocumentFullName)
+                    RefreshPinnedChatSelection(pinnedSelection, pinnedSource, planDocument, requestTargetSelectionStart, requestTargetSelectionEnd)
+                    replacementPlanConflict = FindOverlappingWordReplacementPlan(
+                        parsedCommands, planDocument, selectionWriteScope,
+                        requestTargetSelectionStart, requestTargetSelectionEnd)
+                Catch ex As System.Exception
+                    If parsedCommands.Exists(Function(pc) System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase)) Then
+                        replacementPlanConflict = "The current Word text snapshot could not be validated: " & ex.GetType().Name
+                    End If
+                End Try
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(replacementPlanConflict) Then
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan re-planning requested: " & replacementPlanConflict)
+                Dim revisedReply As System.String = System.String.Empty
+                Try
+                    Dim correctionPrompt As System.String =
+                        "Your previous Word-edit command plan cannot be safely executed: " & replacementPlanConflict & vbLf &
+                        "Regenerate your COMPLETE previous answer including ONE valid redInkWordCommands envelope. " &
+                        "Preserve every substantive requested edit and the intended prose. Use short unambiguous, " &
+                        "strictly NON-OVERLAPPING source spans taken from the ORIGINAL document. " &
+                        "Combine truly overlapping edits into one minimal enclosing replacement with the final combined wording. " &
+                        "For native note references, copy the exact original tokens into both search and text, once and in the same order. " &
+                        "Use separate note-free native format commands when formatting is requested. " &
+                        "Do NOT output two commands that modify any one original character. Do not claim changes already occurred. " &
+                        "Do not call tools. The prior response follows:" & vbLf & aiResponseMd
+                    revisedReply = Await CallLlmWithSelectedModelAsync(
+                        SystemPrompt, fullPrompt.ToString() & vbLf & correctionPrompt, _chatLifetimeCts.Token)
+                Catch ex As System.Exception
+                    SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Overlap re-plan model call failed: " & ex.GetType().Name & ": " & ex.Message)
+                End Try
+                If ChatLifetimeEnded Then Return
+
+                If Not System.String.IsNullOrWhiteSpace(revisedReply) Then
+                    Try
+                        Dim revisedCommands As System.Collections.Generic.List(Of ParsedCommand) = ParseCommands(revisedReply.TrimEnd())
+                        Dim revisedConflict As System.String = System.String.Empty
+                        If revisedCommands.Count > 0 Then
+                            Dim planDocument As Microsoft.Office.Interop.Word.Document =
+                                ResolveChatCommandTargetDocument(requestTargetDocumentName, requestTargetDocumentFullName)
+                            RefreshPinnedChatSelection(pinnedSelection, pinnedSource, planDocument, requestTargetSelectionStart, requestTargetSelectionEnd)
+                            revisedConflict = FindOverlappingWordReplacementPlan(
+                                revisedCommands, planDocument, selectionWriteScope,
+                                requestTargetSelectionStart, requestTargetSelectionEnd)
+                        End If
+                        If revisedCommands.Count > 0 AndAlso System.String.IsNullOrEmpty(revisedConflict) Then
+                            aiResponseMd = revisedReply.TrimEnd()
+                            parsedCommands = revisedCommands
+                            replacementPlanConflict = System.String.Empty
+                            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan regenerated and validated")
+                        Else
+                            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan remained unsafe/empty: " & revisedConflict)
+                        End If
+                    Catch ex As System.Exception
+                        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan could not be parsed: " & ex.Message)
+                    End Try
+                End If
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(replacementPlanConflict) Then
+                Await UpdateUIAsync(Sub()
+                                        RemoveLastLineFromChatHistory()
+                                        RemoveAssistantThinking()
+                                        ReportCommandExecutionError("Word could not safely validate the replacement plan: " & replacementPlanConflict & " " &
+                                            "No Word chat replacement command was executed; any earlier tool actions are unaffected. " &
+                                            "Please request smaller independent edits or a single consolidated change.")
+                                        txtUserInput.Text = promptToRestore
+                                    End Sub)
+                Return
             End If
 
             ' VB.NET does not permit Await inside Catch/Finally. Keep the caught exception and
@@ -1520,20 +1630,12 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             ' STEP 11: Update UI - Show Assistant Response
             ' ──────────────────────────────────────────────────────────────
+            Dim verifiedForReply As System.Int32 = 0
+            Dim publishModelReply As System.Boolean = True
             Await UpdateUIAsync(Sub()
                                     ' Remove "Thinking..." placeholder from both views
                                     RemoveLastLineFromChatHistory()
                                     RemoveAssistantThinking()
-
-                                    ' Append assistant answer to plain text transcript
-                                    AppendToChatHistory(Environment.NewLine & $"{AN5}: " &
-                                                       aiResponsePlain.TrimStart().TrimEnd().
-                                                       Replace(vbCrLf, Environment.NewLine).
-                                                       Replace(vbLf, Environment.NewLine) &
-                                                       Environment.NewLine)
-
-                                    ' Append assistant answer as Markdown-rendered HTML
-                                    AppendAssistantMarkdown(aiResponseMdDisplay.TrimStart())
 
                                     ' Execute bot commands if present and permitted
                                     _keepFocusOnDocumentAfterCommands = False
@@ -1545,12 +1647,16 @@ Public Class frmAIChat
                                                 "ExecuteAnyCommands start (targetDoc=" & requestTargetDocumentName &
                                                 "; commandCount=" & parsedCommands.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
 
-                                            ExecuteAnyCommands(parsedCommands, chkIncludeselection.Checked, requestTargetDocumentName, requestTargetDocumentFullName, requestTargetSelectionStart, requestTargetSelectionEnd)
+                                            RefreshPinnedChatSelection(pinnedSelection, pinnedSource, ResolveChatCommandTargetDocument(requestTargetDocumentName, requestTargetDocumentFullName), requestTargetSelectionStart, requestTargetSelectionEnd)
+                                            ExecuteAnyCommands(parsedCommands, selectionWriteScope, requestTargetDocumentName, requestTargetDocumentFullName, requestTargetSelectionStart, requestTargetSelectionEnd)
+                                            publishModelReply = FailedCommandsList.Count = 0
+                                            If publishModelReply Then verifiedForReply = _verifiedChatBlocksInBatch
 
                                             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
                                                 "WordChat",
                                                 "ExecuteAnyCommands done")
-                                        Catch cmdEx As Exception
+                                        Catch cmdEx As System.Exception
+                                            publishModelReply = False
                                             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
                                                 "WordChat",
                                                 "ExecuteAnyCommands error: " & cmdEx.Message)
@@ -1562,6 +1668,24 @@ Public Class frmAIChat
                                         End Try
                                     End If
 
+                                    If publishModelReply Then
+                                        ' Append assistant answer to plain text transcript
+                                        AppendToChatHistory(Environment.NewLine & $"{AN5}: " &
+                                                           aiResponsePlain.TrimStart().TrimEnd().
+                                                           Replace(vbCrLf, Environment.NewLine).
+                                                           Replace(vbLf, Environment.NewLine) &
+                                                           Environment.NewLine)
+
+                                        ' Append assistant answer as Markdown-rendered HTML
+                                        AppendAssistantMarkdown(aiResponseMdDisplay.TrimStart())
+                                        If verifiedForReply > 0 Then
+                                            Dim receipt As System.String = "Word confirmed: " & verifiedForReply.ToString(System.Globalization.CultureInfo.InvariantCulture) & If(verifiedForReply = 1, " replacement block verified.", " replacement blocks verified.")
+                                            AppendToChatHistory(Environment.NewLine & "System: " & receipt & Environment.NewLine)
+                                            AppendHtml("<div class='msg assistant'><span class='who'>System:</span> <span class='content'>" & HtmlEncode(receipt) & "</span></div>")
+                                            PersistChatHtml()
+                                        End If
+                                    End If
+
                                     ' Clear user input and restore focus unless a goto/jump/show/select
                                     ' command intentionally moved focus back to Word.
                                     txtUserInput.Text = ""
@@ -1571,7 +1695,7 @@ Public Class frmAIChat
                                 End Sub)
 
             ' Add to in-memory history
-            _chatHistory.Add(("assistant", aiResponsePlain.TrimEnd()))
+            If publishModelReply Then _chatHistory.Add(("assistant", aiResponsePlain.TrimEnd()))
 
         Catch ex As System.Exception
             ' Capture error without performing async work inside catch block
@@ -1584,6 +1708,8 @@ Public Class frmAIChat
                 "Your request could not be completed. Please try again. " &
                 "If the issue continues, check your connection or try another AI model. " &
                 "If you requested document changes, review the document before retrying because some changes may already have been applied."
+        Finally
+            ReleaseWordRange(pinnedSelection)
         End Try
 
         ' ──────────────────────────────────────────────────────────────
@@ -1688,11 +1814,11 @@ Public Class frmAIChat
 
             ' Extract text before cursor
             Dim beforeRange As Microsoft.Office.Interop.Word.Range = activeDoc.Range(contextStart, cursorPos)
-            Dim textBefore As String = beforeRange.Text
+            Dim textBefore As String = ReadChatSource(beforeRange)
 
             ' Extract text after cursor
             Dim afterRange As Microsoft.Office.Interop.Word.Range = activeDoc.Range(cursorPos, contextEnd)
-            Dim textAfter As String = afterRange.Text
+            Dim textAfter As String = ReadChatSource(afterRange)
 
             ' Combine with cursor position marker
             Dim contextText As String = textBefore & "[cursor is here]" & textAfter
@@ -1713,6 +1839,8 @@ Public Class frmAIChat
 
             Return contextText
 
+        Catch ex As ChatNoteContextException
+            Throw
         Catch ex As Exception
             ' Silently handle any errors; return empty string
             Return ""
@@ -2692,7 +2820,9 @@ Public Class frmAIChat
             ' without the switch it still returns the full document content).
             Dim baseText As String = ""
             Try
-                baseText = doc.Content.Text
+                baseText = ReadChatSource(doc.Content)
+            Catch ex As ChatNoteContextException
+                Throw
             Catch
                 baseText = ""
             End Try
@@ -2743,14 +2873,14 @@ Public Class frmAIChat
     ''' View management identical to GetActiveDocumentText (save/restore pattern).
     ''' All exceptions caught and return empty string.
     ''' </remarks>
-    Private Function GetCurrentSelectionText() As String
+    Private Function GetCurrentSelectionText(Optional pinned As Microsoft.Office.Interop.Word.Range = Nothing) As String
         Try
             Dim activeDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
             Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
             Dim sel As Microsoft.Office.Interop.Word.Selection = activeDoc.Application.Selection
 
             ' Validate selection exists
-            If sel Is Nothing OrElse System.String.IsNullOrEmpty(sel.Text) Then
+            If pinned Is Nothing AndAlso (sel Is Nothing OrElse System.String.IsNullOrEmpty(sel.Text)) Then
                 Return ""
             Else
                 ' Capture the specific window we modify so the Finally restore targets the SAME
@@ -2769,12 +2899,14 @@ Public Class frmAIChat
                     End With
 
                     ' Extract selection text
-                    Dim baseText As String = sel.Text
+                    Dim sourceRange As Microsoft.Office.Interop.Word.Range = If(pinned, sel.Range)
+                    Dim baseText As String = If(pinned Is Nothing, ReadChatSource(sourceRange), ThisAddIn.ReadChatNoteProjection(sourceRange).Text)
+                    If pinned IsNot Nothing AndAlso baseText.EndsWith(vbCr, System.StringComparison.Ordinal) Then baseText = baseText.Substring(0, baseText.Length - 1)
 
                     ' Attempt to extract comments/bubbles from selection
                     Dim bubbles As String = ""
                     Try
-                        bubbles = ThisAddIn.BubblesExtract(sel.Range, True) ' Silent=True
+                        bubbles = ThisAddIn.BubblesExtract(sourceRange, True) ' Silent=True
                     Catch
                         ' Silently ignore errors
                     End Try
@@ -2798,8 +2930,11 @@ Public Class frmAIChat
                     End Try
                 End Try
             End If
-        Catch ex As Exception
-            ' Silently handle all errors
+        Catch ex As ChatNoteContextException
+            Throw
+        Catch ex As System.Exception
+            If pinned IsNot Nothing Then Throw New ChatNoteContextException(ex)
+            ' Preserve read-only legacy chat behaviour
             Return ""
         End Try
     End Function
@@ -3134,6 +3269,12 @@ Public Class frmAIChat
     ''' latest authoritative one-line JSON guidance as an in-memory suffix for this request only.
     ''' </summary>
     Private Function GetEffectiveChatWordCommandPrompt() As String
+        Return GetConfiguredChatWordCommandPrompt() & " " & WordChatNoteGuidance
+    End Function
+
+    Private Const WordChatNoteGuidance As System.String = "NATIVE WORD NOTE ANCHORS: In the editable text [[RI-FN:n]] and [[RI-EN:n]] stand for existing native footnote and endnote references, not printable text. For independent edits prefer short disjoint exact anchors on either side. For a block rewrite use ONE replace whose exact search and plain replacement both contain every enclosed token verbatim, exactly once, in the original order and attached to the relevant revised claim. Never invent a number, infer a new citation, delete or move a reference to a different claim, include the trailing paragraph mark, or pass these tokens to other commands. Use separate note-free native format commands for requested formatting. If the intended attribution is ambiguous, ask rather than guessing."
+
+    Private Function GetConfiguredChatWordCommandPrompt() As System.String
         Dim configuredPrompt As String = If(_context.SP_Add_ChatWord_Commands, "")
 
         ' The transport version (JSON v1) is intentionally stable, while the guidance can
@@ -3145,12 +3286,336 @@ Public Class frmAIChat
             Return configuredPrompt
         End If
 
+        ' Existing R22 INI prompts already contain the full JSON v1 contract.
+        ' Append only the new planning rule instead of duplicating that very long contract.
+        If configuredPrompt.IndexOf("RED_INK_WORD_COMMAND_GUIDANCE_R22", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Return configuredPrompt & " " & SharedMethods.ChatWordCommandGuidanceRevisionMarker &
+                   SharedMethods.ChatWordNonOverlappingEditGuidance
+        End If
+
         If String.IsNullOrWhiteSpace(configuredPrompt) Then
             Return SharedMethods.Default_SP_Add_ChatWord_JsonProtocol
         End If
 
         Return configuredPrompt & " " &
                SharedMethods.Default_SP_Add_ChatWord_JsonProtocol
+    End Function
+
+    Private Sub RefreshPinnedChatSelection(pinned As Microsoft.Office.Interop.Word.Range, original As System.String,
+                                          doc As Microsoft.Office.Interop.Word.Document, ByRef first As System.Int32, ByRef finish As System.Int32)
+        If pinned Is Nothing Then Return
+        If doc Is Nothing OrElse Not IsSameChatWordDocument(pinned.Document, doc) OrElse pinned.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse pinned.Start >= pinned.End OrElse
+           Not System.String.Equals(ThisAddIn.ReadChatNoteProjection(pinned).Text, original, System.StringComparison.Ordinal) Then
+            Throw New System.InvalidOperationException("The original selection changed while the request was running. No chat command was executed.")
+        End If
+        first = pinned.Start
+        finish = pinned.End
+    End Sub
+
+    ''' <summary>
+    ''' Identifies *provable* overlapping replacements on the original visible Word text.
+    ''' This is intentionally a read-only preflight, independent of model/provider and of
+    ''' Word's revision-dependent physical character offsets. A formatting-filtered or
+    ''' non-literal match cannot be proved here and is left to the existing live guards.
+    ''' </summary>
+    Private Function FindOverlappingWordReplacementPlan(
+        commands As System.Collections.Generic.List(Of ParsedCommand),
+        doc As Microsoft.Office.Interop.Word.Document,
+        onlySelection As System.Boolean,
+        selectionStart As System.Int32,
+        selectionEnd As System.Int32) As System.String
+
+        If commands Is Nothing OrElse commands.Count = 0 Then Return System.String.Empty
+        For Each command As ParsedCommand In commands
+            Dim invalid As System.String = ValidateNoteSyntax(command)
+            If invalid.Length > 0 Then Return invalid
+        Next
+        If Not commands.Exists(Function(item) System.String.Equals(item.Command, "replace", System.StringComparison.OrdinalIgnoreCase)) Then Return System.String.Empty
+        If doc Is Nothing Then Return "The pinned Word document is no longer available."
+        Dim includesNativePlan As System.Boolean = commands.Exists(Function(item) HasNoteSyntax(item.Argument1))
+        Dim candidates As New System.Collections.Generic.List(Of (Ordinal As System.Int32, Command As ParsedCommand))()
+        Dim replaceCount As System.Int32 = 0
+        For i As System.Int32 = 0 To commands.Count - 1
+            Dim kind As System.String = If(commands(i).Command, System.String.Empty).ToLowerInvariant()
+            If (kind = "replace" OrElse kind = "insertbefore" OrElse kind = "insertafter") AndAlso
+               Not System.String.IsNullOrEmpty(commands(i).Argument1) AndAlso
+               (commands(i).MatchFormatSpec Is Nothing OrElse includesNativePlan) Then
+                candidates.Add((i + 1, commands(i)))
+                If kind = "replace" Then replaceCount += 1
+            End If
+        Next
+        Dim checkOverlap As System.Boolean = candidates.Count >= 2 AndAlso replaceCount > 0
+
+        Dim scope As Microsoft.Office.Interop.Word.Range = Nothing
+        Try
+            If onlySelection Then
+                If selectionStart >= 0 AndAlso selectionEnd > selectionStart Then
+                    scope = doc.Range(selectionStart, selectionEnd)
+                Else
+                    scope = doc.Application.Selection.Range.Duplicate
+                    If scope.Start = scope.End OrElse scope.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return "No editable main-story selection is available."
+                End If
+            Else
+                scope = doc.StoryRanges(Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory)
+            End If
+            If onlySelection AndAlso scope.End > scope.Start AndAlso doc.Range(scope.End - 1, scope.End).Text = vbCr Then
+                ' A model can echo the structural CR for the WHOLE selected block.
+                ' Normalize only this proved case; never TrimEnd a multi-paragraph payload.
+                Dim fullSource As System.String = ThisAddIn.ReadChatNoteProjection(scope).Text
+                For Each item As ParsedCommand In commands
+                    If Not System.String.Equals(item.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    Dim needle As System.String = NormalizeWordReplacementPlanText(item.Argument1)
+                    If needle.Length > 1 AndAlso needle.EndsWith(vbCr, System.StringComparison.Ordinal) AndAlso System.String.Equals(needle, fullSource, System.StringComparison.Ordinal) Then
+                        item.Argument1 = needle.Substring(0, needle.Length - 1)
+                        Dim replacement As System.String = NormalizeWordReplacementPlanText(item.Argument2)
+                        If replacement.EndsWith(vbCr, System.StringComparison.Ordinal) Then replacement = replacement.Substring(0, replacement.Length - 1)
+                        item.Argument2 = replacement
+                    End If
+                Next
+            End If
+            Dim originalVisibleText As System.String = System.String.Empty
+            If includesNativePlan OrElse HasNativeNote(scope) Then
+                Dim map As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(scope)
+                originalVisibleText = map.Text
+                Dim flat As System.String = map.Flat.ToString()
+                For Each item As ParsedCommand In commands
+                    If Not System.String.Equals(item.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If HasNoteSyntax(item.Argument1) Then
+                        Dim bound As Microsoft.Office.Interop.Word.Range = ResolveNoteTarget(doc, map, item)
+                        If bound Is Nothing Then Return "An exact native-note target could not be verified. Use exact source text or smaller disjoint anchors on each side of the reference."
+                        ReleaseWordRange(bound)
+                    ElseIf OmitsInteriorNote(flat, map.Boundaries, item) Then
+                        Return "A replacement crosses a native note but omits its token. Copy its tokens verbatim or use disjoint note-free replacements."
+                    End If
+                Next
+            ElseIf checkOverlap Then
+                originalVisibleText = Globals.ThisAddIn.GetVisibleText(scope)
+            End If
+            If Not checkOverlap Then Return System.String.Empty
+            If System.String.IsNullOrEmpty(originalVisibleText) Then Return System.String.Empty
+            Dim source As System.String = NormalizeWordReplacementPlanText(originalVisibleText)
+            Dim prior As New System.Collections.Generic.List(Of (Start As System.Int32, Finish As System.Int32, Ordinal As System.Int32, IsReplace As System.Boolean))()
+
+            For Each candidate In candidates
+                Dim needle As System.String = NormalizeWordReplacementPlanText(candidate.Command.Argument1)
+                If needle.Length = 0 Then Continue For
+                Dim occurrence As System.Int32 = 0
+                Dim chosen As System.Int32 = 0
+                Dim firstOccurrence As System.Int32 = If(candidate.Command.MatchSpec Is Nothing, 1, candidate.Command.MatchSpec.GetStartOccurrence())
+                Dim maximum As System.Int32 = If(candidate.Command.MatchSpec Is Nothing,
+                    System.Int32.MaxValue,
+                    candidate.Command.MatchSpec.GetEffectiveMaxMatches(System.Int32.MaxValue))
+                If includesNativePlan AndAlso candidate.Command.MatchFormatSpec IsNot Nothing Then
+                    firstOccurrence = 1
+                    maximum = System.Int32.MaxValue
+                End If
+                Dim searchFrom As System.Int32 = 0
+
+                Do While chosen < maximum AndAlso searchFrom <= source.Length - needle.Length
+                    Dim startPos As System.Int32 = source.IndexOf(needle, searchFrom, System.StringComparison.OrdinalIgnoreCase)
+                    If startPos < 0 Then Exit Do
+                    occurrence += 1
+                    If occurrence >= firstOccurrence Then
+                        Dim finishPos As System.Int32 = startPos + needle.Length
+                        For Each previous In prior
+                            If (System.String.Equals(candidate.Command.Command, "replace", System.StringComparison.OrdinalIgnoreCase) OrElse previous.IsReplace) AndAlso
+                               startPos < previous.Finish AndAlso previous.Start < finishPos Then
+                                Return "Word editing commands #" & previous.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                       " and #" & candidate.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                       " target overlapping original text (at visible-text offsets " &
+                                       startPos.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".." &
+                                       finishPos.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")."
+                            End If
+                        Next
+                        prior.Add((startPos, finishPos, candidate.Ordinal,
+                            System.String.Equals(candidate.Command.Command, "replace", System.StringComparison.OrdinalIgnoreCase)))
+                        chosen += 1
+                    End If
+                    ' Word's replacement scanner advances beyond the preceding match.
+                    searchFrom = startPos + needle.Length
+                Loop
+            Next
+            Return System.String.Empty
+        Finally
+            If scope IsNot Nothing Then ReleaseWordRange(scope)
+        End Try
+    End Function
+
+    Private Shared ReadOnly ChatNoteToken As System.Text.RegularExpressions.Regex = ThisAddIn.ChatNativeReferencePattern
+
+    Private Shared Function HasNoteSyntax(value As System.String) As System.Boolean
+        Return value IsNot Nothing AndAlso (value.IndexOf("[[RI-FN", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+            value.IndexOf("[[RI-EN", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+            value.IndexOf(Microsoft.VisualBasic.ChrW(2)) >= 0)
+    End Function
+
+    Private Shared Function HasNativeNote(r As Microsoft.Office.Interop.Word.Range) As System.Boolean
+        If r.Start >= r.End Then Return False
+        For Each item As Microsoft.Office.Interop.Word.Footnote In r.Footnotes
+            Dim mark As Microsoft.Office.Interop.Word.Range = item.Reference
+            If mark.Start < r.End AndAlso r.Start < mark.End Then Return True
+        Next
+        For Each item As Microsoft.Office.Interop.Word.Endnote In r.Endnotes
+            Dim mark As Microsoft.Office.Interop.Word.Range = item.Reference
+            If mark.Start < r.End AndAlso r.Start < mark.End Then Return True
+        Next
+        Return False
+    End Function
+
+    ' Preserve the historical fast text/bubble path for ordinary context. A projection
+    ' failure for editable text must never silently turn into an unprotected snapshot.
+    Private NotInheritable Class ChatNoteContextException
+        Inherits System.InvalidOperationException
+        Friend Sub New(cause As System.Exception)
+            MyBase.New("Word could not read the native note references safely. Select a smaller main-text passage and retry.", cause)
+        End Sub
+    End Class
+
+    Private Function ReadChatSource(r As Microsoft.Office.Interop.Word.Range) As System.String
+        If My.Settings.DoCommands AndAlso r.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso HasNativeNote(r) Then
+            Try
+                Return ThisAddIn.ReadChatNoteProjection(r).Text
+            Catch ex As System.Exception
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Note context unavailable: " & ex.ToString())
+                Throw New ChatNoteContextException(ex)
+            End Try
+        End If
+        Return r.Text
+    End Function
+
+    Private Function IsPlainChatReplacement(value As System.String) As System.Boolean
+        ' A single literal paragraph, with no Markdown escapes/entities etc., renders
+        ' exactly as supplied. More complex content keeps the existing Markdown path.
+        Dim tree As Markdig.Syntax.MarkdownDocument = Markdig.Markdown.Parse(value, _mdPipeline)
+        If tree.Count <> 1 Then Return False
+        Dim paragraph As Markdig.Syntax.ParagraphBlock = TryCast(tree(0), Markdig.Syntax.ParagraphBlock)
+        If paragraph Is Nothing OrElse paragraph.Inline Is Nothing Then Return False
+        Dim literal As Markdig.Syntax.Inlines.LiteralInline = TryCast(paragraph.Inline.FirstChild, Markdig.Syntax.Inlines.LiteralInline)
+        Return literal IsNot Nothing AndAlso literal.NextSibling Is Nothing AndAlso System.String.Equals(literal.Content.ToString(), value, System.StringComparison.Ordinal)
+    End Function
+
+    Private Function ValidateNoteSyntax(pc As ParsedCommand) As System.String
+        Dim oldValue As System.String = If(pc.Argument1, System.String.Empty)
+        Dim newValue As System.String = If(pc.Argument2, System.String.Empty)
+        If pc.TableRows IsNot Nothing AndAlso pc.TableRows.Exists(Function(row) row.Exists(Function(cell) HasNoteSyntax(cell))) Then
+            Return "Native note tokens cannot be inserted into table cells."
+        End If
+        If Not HasNoteSyntax(oldValue) AndAlso Not HasNoteSyntax(newValue) Then Return System.String.Empty
+        If Not System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Return "Use note-free anchors for commands other than replace."
+        Dim oldMarks As System.Text.RegularExpressions.MatchCollection = ChatNoteToken.Matches(oldValue)
+        Dim newMarks As System.Text.RegularExpressions.MatchCollection = ChatNoteToken.Matches(newValue)
+        If oldMarks.Count = 0 OrElse oldMarks.Count <> newMarks.Count OrElse
+           HasNoteSyntax(ChatNoteToken.Replace(oldValue, System.String.Empty)) OrElse HasNoteSyntax(ChatNoteToken.Replace(newValue, System.String.Empty)) Then
+            Return "Copy every native note token from search into replacement text exactly once, unchanged and in source order."
+        End If
+        Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        For i As System.Int32 = 0 To oldMarks.Count - 1
+            If Not seen.Add(oldMarks(i).Value) OrElse Not System.String.Equals(oldMarks(i).Value, newMarks(i).Value, System.StringComparison.Ordinal) Then
+                Return "The proposed replacement duplicates, changes or reorders native note anchors."
+            End If
+        Next
+        If chkConvertMarkdown.Checked Then
+            ' Inspect syntax, not characters such as underscores or § in ordinary prose.
+            ' Formatting is a separate native command; never feed a note-bearing range
+            ' to the selection-based Markdown renderer or insert markup as plain text.
+            Dim md As Markdig.Syntax.MarkdownDocument = Markdig.Markdown.Parse(ChatNoteToken.Replace(newValue, "NoteAnchor"), _mdPipeline)
+            For Each block As Markdig.Syntax.Block In md
+                Dim para As Markdig.Syntax.ParagraphBlock = TryCast(block, Markdig.Syntax.ParagraphBlock)
+                If para Is Nothing Then Return "Use plain replacement text around native notes and apply formatting with separate, note-free format commands."
+                If para.Inline Is Nothing Then Continue For
+                Dim child As Markdig.Syntax.Inlines.Inline = para.Inline.FirstChild
+                While child IsNot Nothing
+                    If Not TypeOf child Is Markdig.Syntax.Inlines.LiteralInline AndAlso Not TypeOf child Is Markdig.Syntax.Inlines.LineBreakInline Then
+                        Return "Use plain replacement text around native notes and apply formatting with separate, note-free format commands."
+                    End If
+                    child = child.NextSibling
+                End While
+            Next
+        End If
+        Return System.String.Empty
+    End Function
+
+    ' Strict note target resolution. Native IDs make a block unique; a literal lookalike
+    ' in document text is not an anchor. Keep existing occurrence and format semantics.
+    Private Function ResolveNoteTarget(doc As Microsoft.Office.Interop.Word.Document, map As ThisAddIn.ChatNoteProjection,
+                                       pc As ParsedCommand) As Microsoft.Office.Interop.Word.Range
+        Dim source As System.String = pc.Argument1
+        Dim offset As System.Int32 = map.Text.IndexOf(source, System.StringComparison.Ordinal)
+        If offset < 0 OrElse map.Text.IndexOf(source, offset + 1, System.StringComparison.Ordinal) >= 0 OrElse
+           Not IsMatchOrdinalSelected(1, pc.MatchSpec, System.Int32.MaxValue) Then Return Nothing
+        Dim candidate As Microsoft.Office.Interop.Word.Range = doc.Range(map.Starts(offset), map.Finishes(offset + source.Length - 1))
+        Dim live As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(candidate)
+        Dim marks As System.Text.RegularExpressions.MatchCollection = ChatNoteToken.Matches(source)
+        If Not System.String.Equals(live.Text, source, System.StringComparison.Ordinal) OrElse live.References.Count <> marks.Count Then Return Nothing
+        For i As System.Int32 = 0 To marks.Count - 1
+            If Not System.String.Equals(live.References(i).Token, marks(i).Value, System.StringComparison.Ordinal) OrElse
+               live.Starts(marks(i).Index) <> live.References(i).First Then Return Nothing
+        Next
+        ' Do not cross cells, rewrite a terminal paragraph mark, or flatten fields.
+        ' Re-planning into smaller disjoint commands remains possible for such blocks.
+        If source.IndexOf(Microsoft.VisualBasic.ChrW(7)) >= 0 OrElse pc.Argument2.IndexOf(Microsoft.VisualBasic.ChrW(7)) >= 0 OrElse
+           source.EndsWith(vbCr, System.StringComparison.Ordinal) OrElse candidate.Fields.Count > 0 OrElse
+           candidate.InlineShapes.Count > 0 OrElse IsInsideToc(candidate, doc) Then Return Nothing
+        If Not RangeMatchesFormatSpec(candidate, pc.MatchFormatSpec) Then Return Nothing
+        Return candidate
+    End Function
+
+    ' Detect an ORIGINAL exact match whose interior note the model did not copy.
+    ' Endpoints are half-open: an adjacent note is not inside a note-free match.
+    Private Function OmitsInteriorNote(flatText As System.String, boundaries As System.Collections.Generic.List(Of System.Int32),
+                                       pc As ParsedCommand) As System.Boolean
+        Dim needle As System.String = pc.Argument1
+        If System.String.IsNullOrEmpty(needle) OrElse boundaries.Count = 0 Then Return False
+        Dim at As System.Int32 = 0
+        Dim ordinal As System.Int32 = 0
+        While at <= flatText.Length - needle.Length
+            at = flatText.IndexOf(needle, at, System.StringComparison.OrdinalIgnoreCase)
+            If at < 0 Then Exit While
+            ordinal += 1
+            Dim finish As System.Int32 = at + needle.Length
+            Dim k As System.Int32 = boundaries.BinarySearch(at + 1)
+            If k < 0 Then k = Not k
+            If k < boundaries.Count AndAlso boundaries(k) < finish AndAlso
+               (pc.MatchFormatSpec IsNot Nothing OrElse IsMatchOrdinalSelected(ordinal, pc.MatchSpec, System.Int32.MaxValue)) Then Return True
+            at = finish
+        End While
+        Return False
+    End Function
+
+    Private Function ApplyNoteReplacement(doc As Microsoft.Office.Interop.Word.Document, scope As Microsoft.Office.Interop.Word.Range,
+                                          pc As ParsedCommand, trace As System.Text.StringBuilder) As System.Boolean
+        Dim reason As System.String = ValidateNoteSyntax(pc)
+        If reason.Length > 0 Then
+            _lastReplaceFailureMessage = reason
+            Return False
+        End If
+        Dim map As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(scope)
+        Dim target As Microsoft.Office.Interop.Word.Range = ResolveNoteTarget(doc, map, pc)
+        If target Is Nothing Then
+            _lastReplaceFailureMessage = "The note-bearing target could not be verified in the current selection. No text was written by this command."
+            Return False
+        End If
+        Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+            Return ApplyVerifiedChatBlock(target, pc.Argument1, NormalizeWordReplacementPlanText(pc.Argument2), trace, _lastReplaceMayHavePartialChanges)
+        End Using
+    End Function
+
+    ' Per submitted command batch; used for host-issued receipts, not model statements.
+    Private _verifiedChatBlocksInBatch As System.Int32
+
+    Private Function ApplyVerifiedChatBlock(target As Microsoft.Office.Interop.Word.Range, source As System.String,
+                                            desired As System.String, trace As System.Text.StringBuilder,
+                                            ByRef mayHaveWritten As System.Boolean) As System.Boolean
+        Dim first As System.Int32 = target.Start
+        Dim verifiedEnd As System.Int32 = first
+        If Not ThisAddIn.TryApplyExactWordBlock(target, source, desired, trace, mayHaveWritten, verifiedEnd, _lastReplaceFailureMessage) Then Return False
+        _verifiedChatBlocksInBatch += 1
+        RememberLastActionRange(first, verifiedEnd)
+        Return True
+    End Function
+
+    Private Shared Function NormalizeWordReplacementPlanText(value As System.String) As System.String
+        Return If(value, System.String.Empty).Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
     End Function
 
     ''' <summary>
@@ -4506,6 +4971,11 @@ Public Class frmAIChat
     ''' <summary>Tracks commands that failed execution for error reporting to chat</summary>
     Private FailedCommandsList As New List(Of String)()
 
+    ' A failed surgical edit may already have applied some tracked changes. Preserve that
+    ' uncertainty at the chat-command boundary instead of blindly executing a later edit.
+    Private _lastReplaceMayHavePartialChanges As System.Boolean = False
+    Private _lastReplaceFailureMessage As System.String = System.String.Empty
+
     ''' <summary>Start position of the last document action performed by chat commands.</summary>
     Private _lastActionStart As Integer = -1
 
@@ -5068,7 +5538,8 @@ Public Class frmAIChat
             Dim scopeStart As Integer
             Dim scopeEnd As Integer
 
-            If onlySelection AndAlso Not System.String.IsNullOrEmpty(sel.Text) Then
+            If onlySelection Then
+                If sel.Start >= sel.End Then Return False
                 scopeStart = sel.Range.Start
                 scopeEnd = sel.Range.End
             Else
@@ -5088,7 +5559,7 @@ Public Class frmAIChat
                 End Try
 
                 If Not Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then Exit Do
-                If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd Then Exit Do
+                If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd OrElse sel.End > scopeEnd Then Exit Do
 
                 Dim foundStart As Integer = sel.Start
                 Dim foundEnd As Integer = sel.End
@@ -5538,7 +6009,8 @@ Public Class frmAIChat
             Dim scopeStart As Integer
             Dim scopeEnd As Integer
 
-            If onlySelection AndAlso selection.Start <> selection.End Then
+            If onlySelection Then
+                If selection.Start >= selection.End Then Return False
                 scopeStart = selection.Start
                 scopeEnd = selection.End
             Else
@@ -5553,7 +6025,7 @@ Public Class frmAIChat
             Do While nextSearchStart < scopeEnd
                 selection.SetRange(nextSearchStart, scopeEnd)
                 If Not Globals.ThisAddIn.FindLongTextInChunks(searchText, selection, True) Then Exit Do
-                If selection.Start < nextSearchStart OrElse selection.Start >= scopeEnd Then Exit Do
+                If selection.Start < nextSearchStart OrElse selection.Start >= scopeEnd OrElse selection.End > scopeEnd Then Exit Do
 
                 Dim candidateRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
                 Try
@@ -5675,6 +6147,7 @@ Public Class frmAIChat
 
         CommandsList = ""
         FailedCommandsList.Clear()
+        _verifiedChatBlocksInBatch = 0
         Dim LastCommandsList As String = ""
         Dim activateDocumentAfterCommands As Boolean = False
 
@@ -5704,11 +6177,16 @@ Public Class frmAIChat
             End If
 
             If targetSelectionStart >= 0 AndAlso wordApp.Selection IsNot Nothing Then
+                If OnlySelection AndAlso (targetSelectionEnd <= targetSelectionStart OrElse targetSelectionStart < doc.Content.Start OrElse targetSelectionEnd > doc.Content.End) Then Throw New System.InvalidOperationException("The pinned scope is unavailable.")
                 Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(targetSelectionStart, doc.Content.End))
                 Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(If(targetSelectionEnd >= 0, targetSelectionEnd, safeStart), doc.Content.End))
                 If safeEnd < safeStart Then safeEnd = safeStart
-                wordApp.Selection.SetRange(safeStart, safeEnd)
+                doc.Range(safeStart, safeEnd).Select()
+            ElseIf OnlySelection AndAlso wordApp.Selection IsNot Nothing Then
+                targetSelectionStart = wordApp.Selection.Start
+                targetSelectionEnd = wordApp.Selection.End
             End If
+            If OnlySelection AndAlso (wordApp.Selection Is Nothing OrElse wordApp.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse wordApp.Selection.Start <> targetSelectionStart OrElse wordApp.Selection.End <> targetSelectionEnd OrElse targetSelectionEnd <= targetSelectionStart) Then Throw New System.InvalidOperationException("The pinned selection is unavailable.")
 
             targetContextEstablished = IsSameChatWordDocument(wordApp.ActiveDocument, doc)
         Catch ex As System.Exception
@@ -5732,6 +6210,27 @@ Public Class frmAIChat
             Me.TopMost = topmost
             Return
         End If
+
+        ' Refuse a provably conflicting plan *before* Word is modified. A second
+        ' caller may bypass the chat's model-side revision pass, so check here too.
+        Try
+            Dim conflict As System.String = FindOverlappingWordReplacementPlan(
+                commands, doc, OnlySelection, targetSelectionStart, targetSelectionEnd)
+            If Not System.String.IsNullOrEmpty(conflict) Then
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Rejected Word command plan before mutation: " & conflict)
+                FailedCommandsList.Add("Unsafe Word edit plan was not executed: " & conflict &
+                    " No Word chat command in this batch was executed.")
+                commands = New System.Collections.Generic.List(Of ParsedCommand)()
+            End If
+        Catch ex As System.Exception
+            ' A failed validation is not proof of safety. Do not silently execute an
+            ' unvalidated multi-replacement batch if the snapshot is unavailable.
+            If commands.Exists(Function(pc) System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase)) Then
+                FailedCommandsList.Add("Word could not validate the multi-replacement plan before editing (" & ex.GetType().Name & "). No Word changes were made.")
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Word replacement preflight unavailable: " & ex.ToString())
+                commands = New System.Collections.Generic.List(Of ParsedCommand)()
+            End If
+        End Try
 
         Try
         ' ═════════════════════════════════════════════════════════════════════════════
@@ -5770,10 +6269,15 @@ Public Class frmAIChat
             End If
         End If
 
+        Dim batchDocEnd As System.Int32 = doc.Content.End
+        Dim batchSelectionEnd As System.Int32 = targetSelectionEnd
+        Dim commandOrdinal As System.Int32 = 0
         For Each pc In commands
+            commandOrdinal += 1
             Debug.WriteLine($"Command: '{pc.Command}' with '{pc.Argument1}' '{pc.Argument2}'")
 
-            If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And 1) <> 0 Then
+            If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
+                FailedCommandsList.Add("Command execution cancelled before the remaining actions.")
                 Exit For
             End If
 
@@ -5781,7 +6285,20 @@ Public Class frmAIChat
             Dim commandDescription As String = ""
             Dim actionSerialBeforeCommand As Integer = _lastActionSerial
 
-            If Not OnlySelection Then
+            If OnlySelection Then
+                targetSelectionEnd = batchSelectionEnd + (doc.Content.End - batchDocEnd)
+                If Not IsSameChatWordDocument(wordApp.ActiveDocument, doc) OrElse targetSelectionEnd <= targetSelectionStart OrElse targetSelectionEnd > doc.Content.End Then
+                    FailedCommandsList.Add("The selected edit scope is no longer available. No wider search was attempted.")
+                    Exit For
+                End If
+                Dim keepInsertionPoint As System.Boolean = commandOrdinal > 1 AndAlso (pc.Command = "insert" OrElse (pc.Command = "inserttable" AndAlso pc.TablePosition = "cursor")) AndAlso
+                    wordApp.Selection.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso wordApp.Selection.Start >= targetSelectionStart AndAlso wordApp.Selection.End <= targetSelectionEnd
+                If Not keepInsertionPoint Then doc.Range(targetSelectionStart, targetSelectionEnd).Select()
+                If Not keepInsertionPoint AndAlso (wordApp.Selection.Start <> targetSelectionStart OrElse wordApp.Selection.End <> targetSelectionEnd OrElse wordApp.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory) Then
+                    FailedCommandsList.Add("Word could not restore the exact selection. Remaining commands stopped.")
+                    Exit For
+                End If
+            Else
                 Select Case pc.Command.ToLower()
                     Case "find", "addcomment", "replace", "insertafter", "insertbefore", "goto", "jump", "show", "select", "format"
                         Try
@@ -5821,7 +6338,7 @@ Public Class frmAIChat
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteReplyToCommentByIdToken(pc.Argument1, pc.Argument2)
+                    commandSuccess = ExecuteReplyToCommentByIdToken(pc.Argument1, pc.Argument2, If(OnlySelection, doc.Range(targetSelectionStart, targetSelectionEnd), Nothing))
 
                 Case "replace"
                     If String.IsNullOrEmpty(pc.Argument2) Then
@@ -5833,7 +6350,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteReplaceCommand(pc.Argument1, pc.Argument2, OnlySelection, MarkerChar, pc.MatchSpec, pc.MatchFormatSpec)
+                    commandSuccess = ExecuteReplaceCommand(pc.Argument1, pc.Argument2, OnlySelection, MarkerChar, pc.MatchSpec, pc.MatchFormatSpec, If(OnlySelection, doc.Range(targetSelectionStart, targetSelectionEnd), Nothing))
 
                 Case "insertafter"
                     commandDescription = $"Inserting '{pc.Argument2}' after '{pc.Argument1}'"
@@ -5858,7 +6375,7 @@ Public Class frmAIChat
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     Debug.WriteLine("ExecuteInsert")
-                    commandSuccess = ExecuteInsertCommand(pc.Argument1, pc.JoinBefore, pc.JoinAfter)
+                    commandSuccess = ExecuteInsertCommand(pc.Argument1, pc.JoinBefore, pc.JoinAfter, If(OnlySelection, targetSelectionStart, -1), targetSelectionEnd)
 
                 Case "inserttable"
                     commandDescription = "Inserting a Word table"
@@ -5925,7 +6442,26 @@ Public Class frmAIChat
                         ' A partial apply must never leave last_change pointing at an older action.
                         _lastRecentWordChangeId = ""
                 End Select
-                FailedCommandsList.Add($"Failed or incomplete: {commandDescription}. Check the affected passage before retrying; other commands may already have succeeded.")
+                If System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then
+                    ' The replace routine already knows the result cardinality and failure phase.
+                    ' Do not report the same unsuccessful command twice or print full paragraphs.
+                    FailedCommandsList.Add(If(
+                        System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage),
+                        "Replacement could not be completed for '" & PreviewForLog(pc.Argument1, 90) & "'. Review the passage before retrying.",
+                        _lastReplaceFailureMessage))
+                Else
+                    FailedCommandsList.Add($"Failed or incomplete: {commandDescription}. Check the affected passage before retrying; other commands may already have succeeded.")
+                End If
+            End If
+
+            If System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not commandSuccess AndAlso _lastReplaceMayHavePartialChanges Then
+                Dim commandsNotExecuted As System.Int32 = commands.Count - commandOrdinal
+                If commandsNotExecuted > 0 Then
+                    FailedCommandsList.Add($"Stopped {commandsNotExecuted} subsequent Word command(s) because the previous replacement may have left partial tracked changes. Review the affected passage before submitting a new batch.")
+                End If
+                Debug.WriteLine($"ExecuteAnyCommands: stopped after incomplete replacement at command {commandOrdinal}/{commands.Count}")
+                Exit For
             End If
 
             If LastCommandsList <> CommandsList Then
@@ -5934,7 +6470,8 @@ Public Class frmAIChat
         Next
 
         If commands.Count() > 0 Then
-            ReplaceSpecialCharacter(OnlySelection)
+            ' The two-pass executor never inserts MarkerChar. Do not run a global
+            ' cleanup Find against user content or beyond a collapsed selection.
 
             InfoBox.ShowInfoBox("")
 
@@ -6160,7 +6697,7 @@ Public Class frmAIChat
     ''' Uses TryParseCommentIdToken to extract Word comment Index and/or PseudoHash.
     ''' Calls ThisAddIn.ReplyToWordComment with formatted flag from chkConvertMarkdown.
     ''' </remarks>
-    Private Function ExecuteReplyToCommentByIdToken(ByVal idToken As String, ByVal replyText As String) As Boolean
+    Private Function ExecuteReplyToCommentByIdToken(ByVal idToken As String, ByVal replyText As String, Optional scope As Microsoft.Office.Interop.Word.Range = Nothing) As Boolean
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -6202,7 +6739,7 @@ Public Class frmAIChat
 
             ' Execute reply with Markdown formatting if enabled
             Dim formatted As Boolean = chkConvertMarkdown.Checked
-            Dim ok As Boolean = ThisAddIn.ReplyToWordComment(wordId, pseudoHash, AN6 & ": " & replyText, formatted)
+            Dim ok As Boolean = ThisAddIn.ReplyToScopedWordComment(wordId, pseudoHash, AN6 & ": " & replyText, formatted, scope)
 
             If ok Then
                 Debug.WriteLine($"Add-Reply: Successfully added reply to comment {If(wordId.HasValue, wordId.Value.ToString(), pseudoHash)}")
@@ -6360,7 +6897,7 @@ Public Class frmAIChat
 
         Try
             Try
-                app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application)
+                app = If(onlySelection, Globals.ThisAddIn.Application, CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application))
             Catch
                 app = Globals.ThisAddIn.Application
             End Try
@@ -6389,7 +6926,8 @@ Public Class frmAIChat
 
         Dim scopeStart As Integer
         Dim scopeEnd As Integer
-        If onlySelection AndAlso Not System.String.IsNullOrEmpty(sel.Text) Then
+        If onlySelection Then
+                If sel.Start >= sel.End Then Return False
             scopeStart = sel.Range.Start
             scopeEnd = sel.Range.End
         Else
@@ -6411,7 +6949,7 @@ Public Class frmAIChat
                 End Try
 
                 If Not Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) Then Exit Do
-                If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd OrElse sel.Start >= sel.End Then Exit Do
+                If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd OrElse sel.Start >= sel.End OrElse sel.End > scopeEnd Then Exit Do
 
                 Dim anchorStart As Integer = sel.Start
                 Dim anchorEnd As Integer = sel.End
@@ -6519,9 +7057,8 @@ Public Class frmAIChat
 
             ' Define starting selection
             If OnlySelection Then
-                If doc.Application.Selection Is Nothing OrElse doc.Application.Selection.Range.Text = "" Then
-                    OnlySelection = False
-                    doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.End)
+                If doc.Application.Selection Is Nothing OrElse selectionEnd <= selectionStart Then
+                    Return False
                 End If
             Else
                 doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.End)
@@ -6539,7 +7076,8 @@ Public Class frmAIChat
 
                 If doc.Application.Selection Is Nothing Then Exit Do
 
-                System.Windows.Forms.Application.DoEvents()
+                If Not OnlySelection Then System.Windows.Forms.Application.DoEvents()
+                If OnlySelection AndAlso (Not IsSameChatWordDocument(doc, doc.Application.ActiveDocument) OrElse doc.Application.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse doc.Application.Selection.Start < selectionStart OrElse doc.Application.Selection.End > selectionEnd) Then Return False
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
                     CommandsList = $"Operation cancelled by user (ESC)." & System.Environment.NewLine & CommandsList
                     Exit Do
@@ -6671,10 +7209,14 @@ Public Class frmAIChat
     ''' - The cell-boundary advancement in Pass 1 prevents the scanner from getting stuck
     '''   at end-of-cell markers.
     ''' </remarks>
-    Private Function ExecuteReplaceCommand(oldText As System.String, newText As System.String, OnlySelection As Boolean, Marker As System.String, Optional matchSpec As ParsedCommandMatchSpec = Nothing, Optional matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
+    Private Function ExecuteReplaceCommand(oldText As System.String, newText As System.String, OnlySelection As Boolean, Marker As System.String, Optional matchSpec As ParsedCommandMatchSpec = Nothing, Optional matchFormatSpec As ParsedCommandFormat = Nothing, Optional pinnedScope As Microsoft.Office.Interop.Word.Range = Nothing) As Boolean
+        _lastReplaceMayHavePartialChanges = False
+        _lastReplaceFailureMessage = System.String.Empty
         Dim doc As Word.Document = Nothing
         Dim view As Word.View = Nothing
         Dim trackChangesEnabled As Boolean = False
+        Dim trackingCaptured As System.Boolean = False
+        Dim viewCaptured As System.Boolean = False
         Dim originalRevisionsView As Word.WdRevisionsView = Word.WdRevisionsView.wdRevisionsViewFinal
         Dim originalShowRevisions As Boolean = False
 
@@ -6693,18 +7235,24 @@ Public Class frmAIChat
             LogReplaceDiag("START")
 
             Try
-                doc = Globals.ThisAddIn.Application.ActiveDocument
+                doc = If(pinnedScope Is Nothing, Globals.ThisAddIn.Application.ActiveDocument, pinnedScope.Document)
+                If OnlySelection AndAlso (pinnedScope Is Nothing OrElse Not IsSameChatWordDocument(doc, Globals.ThisAddIn.Application.ActiveDocument)) Then
+                    _lastReplaceFailureMessage = "The original document or selection is unavailable. No text was written."
+                    Return False
+                End If
             Catch ex As Exception
                 Debug.WriteLine($"ExecuteReplaceCommand: FAILED to get ActiveDocument: {ex.Message}")
                 Return False
             End Try
 
             trackChangesEnabled = doc.TrackRevisions
+            trackingCaptured = True
 
             Try
                 view = doc.Application.ActiveWindow.View
                 originalRevisionsView = view.RevisionsView
                 originalShowRevisions = view.ShowRevisionsAndComments
+                viewCaptured = True
             Catch ex As Exception
                 Debug.WriteLine($"ExecuteReplaceCommand: FAILED to get view settings: {ex.Message}")
                 Return False
@@ -6728,15 +7276,26 @@ Public Class frmAIChat
             view.RevisionsView = Word.WdRevisionsView.wdRevisionsViewFinal
             view.ShowRevisionsAndComments = True
 
-            Dim savedSelectionStart As Integer = doc.Application.Selection.Start
-            Dim savedSelectionEnd As Integer = doc.Application.Selection.End
+            Dim savedSelectionStart As Integer = If(OnlySelection, pinnedScope.Start, doc.Application.Selection.Start)
+            Dim savedSelectionEnd As Integer = If(OnlySelection, pinnedScope.End, doc.Application.Selection.End)
+            Dim originalSearchDocEnd As System.Int32 = doc.Content.End
             Debug.WriteLine($"ExecuteReplaceCommand: savedSelection=[{savedSelectionStart},{savedSelectionEnd}]")
             LogReplaceDiag($"Saved selection=[{savedSelectionStart},{savedSelectionEnd}] {DescribeSelectionState(doc.Application.Selection)}")
 
             ' Define search boundaries
             Dim searchEnd As Integer
-            If OnlySelection AndAlso Not String.IsNullOrWhiteSpace(doc.Application.Selection.Text) Then
-                searchEnd = doc.Application.Selection.End
+            If OnlySelection Then
+                If savedSelectionStart >= savedSelectionEnd OrElse
+                   pinnedScope.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
+                    _lastReplaceFailureMessage = "The original main-text selection is unavailable. No document-wide search was attempted."
+                    Return False
+                End If
+                searchEnd = savedSelectionEnd
+                If doc.Range(searchEnd - 1, searchEnd).Text = vbCr Then
+                    searchEnd -= 1
+                    If searchEnd <= savedSelectionStart Then Return False
+                    doc.Application.Selection.SetRange(savedSelectionStart, searchEnd)
+                End If
                 Debug.WriteLine($"ExecuteReplaceCommand: searching within selection, searchEnd={searchEnd}")
             Else
                 OnlySelection = False
@@ -6745,24 +7304,67 @@ Public Class frmAIChat
                 Debug.WriteLine($"ExecuteReplaceCommand: searching whole document, searchEnd={searchEnd}")
             End If
             ' ─────────────────────────────────────────────────────────────────────
+            ' A token-bearing search cannot be resolved by Word.Find. Use the same
+            ' exact projection as preflight and never write or render the whole hit.
+            searchTrace.AppendLine($"SCOPE selection={OnlySelection} start={If(OnlySelection, savedSelectionStart, doc.Content.Start)} limit={searchEnd} selectedEnd={savedSelectionEnd}")
+            If HasNoteSyntax(oldText) OrElse HasNoteSyntax(newText) Then
+                Dim noteStart As System.Int32 = If(OnlySelection, savedSelectionStart, doc.Content.Start)
+                Try
+                    Dim noteSucceeded As System.Boolean = ApplyNoteReplacement(doc, doc.Range(noteStart, searchEnd),
+                        New ParsedCommand With {.Command = "replace", .Argument1 = oldText, .Argument2 = newText, .MatchSpec = matchSpec, .MatchFormatSpec = matchFormatSpec}, searchTrace)
+                    searchTraceOutcome = If(noteSucceeded, "native-notes-verified", "native-note-edit-stopped")
+                    Return noteSucceeded
+                Finally
+                    Try
+                        If IsSameChatWordDocument(doc.Application.ActiveDocument, doc) Then
+                            Dim upper As System.Int32 = doc.Content.End
+                            Dim selectionDelta As System.Int32 = If(OnlySelection, upper - originalSearchDocEnd, 0)
+                            Dim restoreStart As System.Int32 = System.Math.Min(savedSelectionStart, upper)
+                            doc.Application.Selection.SetRange(restoreStart, System.Math.Max(restoreStart, System.Math.Min(savedSelectionEnd + selectionDelta, upper)))
+                        End If
+                    Catch restoreEx As System.Exception
+                        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Could not restore note edit selection: " & restoreEx.Message)
+                    End Try
+                End Try
+            End If
+
             ' PASS 1: COLLECT ALL MATCH POSITIONS (forward scan)
             ' ─────────────────────────────────────────────────────────────────────
             Dim matchPositions As New List(Of (Start As Integer, [End] As Integer))
             Dim maxIterations As Integer = 5000
             Dim iterationCount As Integer = 0
             Dim lastFoundEnd As Integer = -1
-            Dim requestedSearchStart As Integer = doc.Application.Selection.Start
+            Dim requestedSearchStart As Integer = If(OnlySelection, savedSelectionStart, doc.Application.Selection.Start)
 
             Debug.WriteLine("ExecuteReplaceCommand: PASS 1 - scanning for matches...")
 
             Do
                 LogReplaceDiag($"PASS1 before Find: nextIteration={iterationCount + 1}; searchEnd={searchEnd}; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}; {DescribeSelectionState(doc.Application.Selection)}")
 
+                If OnlySelection AndAlso requestedSearchStart >= searchEnd Then Exit Do
+                Dim boundedStart As System.Int32 = -1
+                Dim boundedEnd As System.Int32 = -1
                 Dim findReturned As Boolean = False
                 searchTraceAttempts += 1
                 Dim findTraceClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                 Try
-                    findReturned = Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True)
+                    If OnlySelection Then
+                        Dim area As Microsoft.Office.Interop.Word.Range = doc.Range(requestedSearchStart, searchEnd)
+                        Dim scopedSearchHit As Microsoft.Office.Interop.Word.Range = Nothing
+                        Try
+                            findReturned = WordSearchHelper.FindLongTextAnchoredFastRange(area, oldText, scopedSearchHit, viewOverride:=view)
+                            If findReturned Then
+                                If scopedSearchHit Is Nothing OrElse scopedSearchHit.Start < requestedSearchStart OrElse scopedSearchHit.End > searchEnd OrElse scopedSearchHit.End <= scopedSearchHit.Start Then Throw New System.InvalidOperationException("Search returned a hit outside the pinned range.")
+                                boundedStart = scopedSearchHit.Start
+                                boundedEnd = scopedSearchHit.End
+                            End If
+                        Finally
+                            ReleaseWordRange(scopedSearchHit)
+                            ReleaseWordRange(area)
+                        End Try
+                    Else
+                        findReturned = Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True)
+                    End If
                 Catch ex As System.Exception
                     searchTraceOutcome = "search-exception:" & ex.GetType().Name
                     searchTrace.AppendLine("FIND exception at attempt=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) & " type=" & ex.GetType().Name)
@@ -6794,7 +7396,7 @@ Public Class frmAIChat
                 End If
 
                 ' Check for user abort
-                System.Windows.Forms.Application.DoEvents()
+                If Not OnlySelection Then System.Windows.Forms.Application.DoEvents()
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
                     CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
                     Debug.WriteLine("ExecuteReplaceCommand: ESC pressed, aborting")
@@ -6813,12 +7415,17 @@ Public Class frmAIChat
                     Exit Do
                 End If
 
-                Dim selStart As Integer = doc.Application.Selection.Start
-                Dim selEnd As Integer = doc.Application.Selection.End
+                If Not IsSameChatWordDocument(doc.Application.ActiveDocument, doc) Then Throw New System.InvalidOperationException("The active document changed during the replacement scan.")
+                Dim selStart As Integer = If(OnlySelection, boundedStart, doc.Application.Selection.Start)
+                Dim selEnd As Integer = If(OnlySelection, boundedEnd, doc.Application.Selection.End)
                 Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart})")
                 LogReplaceDiag($"PASS1 iteration={iterationCount}; found=[{selStart},{selEnd}]; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}")
 
                 ' Validate match is within search bounds
+                If OnlySelection AndAlso (selStart < savedSelectionStart OrElse selEnd > searchEnd) Then
+                    searchTraceOutcome = "selection-boundary"
+                    Exit Do
+                End If
                 If selStart >= searchEnd Then
                     Debug.WriteLine($"ExecuteReplaceCommand: match start {selStart} >= searchEnd {searchEnd}, exiting")
                     LogReplaceDiag($"PASS1 exiting because selStart {selStart} >= searchEnd {searchEnd}")
@@ -6935,6 +7542,14 @@ Public Class frmAIChat
                     LogReplaceDiag($"PASS1 skipped text match [{selStart},{selEnd}] because match_format did not match")
                 End If
 
+                ' A range-bound scan never borrows the UI caret or expands a collapsed
+                ' selection. The next eligible start is exactly the verified hit end.
+                If OnlySelection Then
+                    requestedSearchStart = selEnd
+                    If requestedSearchStart >= searchEnd Then Exit Do
+                    Continue Do
+                End If
+
                 ' Advance past current match
                 doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
                 Debug.WriteLine($"ExecuteReplaceCommand: collapsed to {doc.Application.Selection.Start}")
@@ -7039,6 +7654,17 @@ Public Class frmAIChat
             End If
 
             ' ─────────────────────────────────────────────────────────────────────
+            ' Canonical Word.Find intentionally ignores some control characters. Do
+            ' not let a fuzzy/legacy hit route a native note into Selection.Text.
+            For Each hit In selectedMatchPositions
+                If HasNativeNote(doc.Range(hit.Start, hit.End)) Then
+                    _lastReplaceFailureMessage = "This replacement crosses a native note without a verified anchor. No text was written by this command."
+                    searchTraceOutcome = "unbound-native-note"
+                    doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
+                    Return False
+                End If
+            Next
+
             ' PASS 2: REPLACE SELECTED MATCHES IN REVERSE ORDER (last match first)
             ' ─────────────────────────────────────────────────────────────────────
             Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 - replacing {selectedMatchPositions.Count} selected match(es) in reverse order...")
@@ -7048,6 +7674,33 @@ Public Class frmAIChat
                 For i As Integer = selectedMatchPositions.Count - 1 To 0 Step -1
                     Dim mStart As Integer = selectedMatchPositions(i).Start
                     Dim mEnd As Integer = selectedMatchPositions(i).End
+
+                    ' Earlier tracked changes (or a live UI event) may have invalidated
+                    ' integer coordinates collected during pass 1. Check the actual final-
+                    ' view source again BEFORE writing, not just when Find first located it.
+                    ' Never re-target a nearby similar paragraph on a stale coordinate.
+                    Dim currentMatchRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Dim currentMatchIsValid As System.Boolean = False
+                    Try
+                        currentMatchRange = doc.Range(mStart, mEnd)
+                        currentMatchIsValid = Not HasNativeNote(currentMatchRange) AndAlso WordSearchHelper.IsEquivalentSearchText(
+                            Globals.ThisAddIn.GetVisibleText(currentMatchRange), oldText)
+                    Catch ex As System.Exception
+                        LogReplaceDiag($"PASS2 source revalidation failed at [{mStart},{mEnd}]: {ex.GetType().Name}: {ex.Message}")
+                    Finally
+                        If currentMatchRange IsNot Nothing Then ReleaseWordRange(currentMatchRange)
+                    End Try
+                    If Not currentMatchIsValid Then
+                        searchTraceOutcome = "source-changed"
+                        searchTrace.AppendLine($"REPLACE source-changed at match={i} range=[{mStart},{mEnd}]")
+                        LogReplaceDiag($"PASS2 refused stale target at [{mStart},{mEnd}]")
+                        _lastReplaceMayHavePartialChanges = replaceCount > 0
+                        _lastReplaceFailureMessage =
+                            "Replacement target changed since the initial search (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " applied). Search: '" & PreviewForLog(oldText, 90) & "'. Review the current text before retrying."
+                        Exit For
+                    End If
 
                     ' Avoid replacing the cell's terminal paragraph mark.
                     ' If the match ends one character before the cell end (i.e. on
@@ -7090,15 +7743,31 @@ Public Class frmAIChat
 
                     Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
 
+                    Dim replacementAttemptStarted As System.Boolean = False
                     Try
                         ' Select the matched text using stored positions
                         Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
                         doc.Application.Selection.SetRange(mStart, mEnd)
                         Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                        If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                        If doc.Application.Selection.Start <> mStart OrElse doc.Application.Selection.End <> mEnd OrElse
+                           HasNativeNote(doc.Application.Selection.Range) Then
+                            Throw New System.InvalidOperationException("Word selected a different range or a protected note reference.")
+                        End If
+                        Dim plainTarget As Microsoft.Office.Interop.Word.Range = doc.Range(mStart, mEnd)
+                        Dim needRenderer As System.Boolean = chkConvertMarkdown.Checked AndAlso adjustedNewText.Length > 0 AndAlso Not IsPlainChatReplacement(adjustedNewText)
+                        If Not needRenderer AndAlso plainTarget.Fields.Count = 0 AndAlso plainTarget.InlineShapes.Count = 0 AndAlso Not ThisAddIn.ContainsChatWordStructure(Globals.ThisAddIn.GetVisibleText(plainTarget)) AndAlso Not ThisAddIn.ContainsChatWordStructure(adjustedNewText) Then
+                            Dim exactOriginal As System.String = Globals.ThisAddIn.GetVisibleText(plainTarget)
+                            Dim exactNew As System.String = If(chkConvertMarkdown.Checked, NormalizeWordReplacementPlanText(adjustedNewText), ThisAddIn.PrepareChatPlainTarget(exactOriginal, adjustedNewText))
+                            If Not ApplyVerifiedChatBlock(plainTarget, exactOriginal, exactNew, searchTrace, replacementAttemptStarted) Then
+                                _lastReplaceMayHavePartialChanges = replacementAttemptStarted OrElse replaceCount > 0
+                                searchTraceOutcome = "block-not-verified"
+                                Exit For
+                            End If
+                        ElseIf chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
                             ' Old replacement path so Markdown can be converted afterwards.
                             Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{adjustedNewText}'")
+                            replacementAttemptStarted = True
                             doc.Application.Selection.Text = adjustedNewText
                             Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
@@ -7106,11 +7775,16 @@ Public Class frmAIChat
                             RememberLastActionRange(mStart, actionEnd)
 
                             Try
+                                If HasNativeNote(doc.Application.Selection.Range) Then Throw New System.InvalidOperationException("The Markdown rendering selection contains a native note reference.")
                                 Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
                                 Globals.ThisAddIn.ConvertMarkdownToWord()
                                 Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
-                            Catch ex As Exception
+                            Catch ex As System.Exception
                                 Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
+                                _lastReplaceMayHavePartialChanges = True
+                                _lastReplaceFailureMessage = "Markdown conversion failed after Word text was modified. Review the affected passage before retrying."
+                                searchTraceOutcome = "markdown-conversion-incomplete"
+                                Exit For
                             End Try
                         Else
                             ' Surgical replacement path for plain-text tracked edits.
@@ -7123,6 +7797,7 @@ Public Class frmAIChat
                                 originalPatchText.EndsWith(vbLf, StringComparison.Ordinal)
 
                             Debug.WriteLine("ExecuteReplaceCommand: applying surgical replacement")
+                            replacementAttemptStarted = True
                             If Not Globals.ThisAddIn.ApplySurgicalReplacement(
                                 originalPatchText,
                                 adjustedNewText,
@@ -7130,18 +7805,37 @@ Public Class frmAIChat
                                 preserveTrailingCr,
                                 showFailureNotice:=False) Then
 
-                                CommandsList = "Note: A surgical replacement was incomplete; check the affected passage before retrying." & System.Environment.NewLine & CommandsList
+                                ' The surgical engine can return False after applying a subset of
+                                ' tracked changes. Continuing with another match or command could
+                                ' then compound an overlap. Never retry an uncertain write in place.
+                                _lastReplaceMayHavePartialChanges = True
+                                _lastReplaceFailureMessage =
+                                    "Surgical replacement incomplete (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    " fully applied). Search: '" & PreviewForLog(oldText, 90) &
+                                    "'. Partial tracked changes may remain; review the passage before retrying."
+                                searchTraceOutcome = "surgical-incomplete"
+                                searchTrace.AppendLine($"REPLACE surgical-incomplete at match={i} range=[{mStart},{mEnd}]")
                                 LogReplaceDiag($"PASS2 surgical replacement incomplete at [{mStart},{mEnd}]; search='{PreviewForLog(oldText)}'")
-                                Continue For
+                                Exit For
                             End If
 
                             RememberLastActionRange(patchRange.Start, patchRange.End)
                         End If
 
                         replaceCount += 1
-                    Catch ex As Exception
+                        replacementAttemptStarted = False
+                    Catch ex As System.Exception
+                        _lastReplaceMayHavePartialChanges = replacementAttemptStarted OrElse replaceCount > 0
+                        _lastReplaceFailureMessage =
+                            "Replacement failed during Word editing (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " fully applied). Search: '" & PreviewForLog(oldText, 90) & "'. Review tracked changes before retrying."
+                        searchTraceOutcome = "word-edit-exception:" & ex.GetType().Name
+                        searchTrace.AppendLine($"REPLACE exception at match={i} type={ex.GetType().Name}")
                         Debug.WriteLine($"ExecuteReplaceCommand: ERROR replacing match #{i} at ({mStart},{mEnd}): {ex.GetType().Name}: {ex.Message}")
                         Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
+                        Exit For
                     End Try
                 Next
             End Using
@@ -7155,14 +7849,17 @@ Public Class frmAIChat
             ' ─────────────────────────────────────────────────────────────────────
             Try
                 Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(savedSelectionStart, doc.Content.End))
-                Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(savedSelectionEnd, doc.Content.End))
+                ' All writes in selection mode are inside its boundaries. Track the actual
+                ' physical shift (including revisions) so later commands see the whole selection.
+                Dim scopeShift As System.Int32 = If(OnlySelection, doc.Content.End - originalSearchDocEnd, 0)
+                Dim safeEnd As Integer = System.Math.Max(safeStart, System.Math.Min(savedSelectionEnd + scopeShift, doc.Content.End))
                 Debug.WriteLine($"ExecuteReplaceCommand: restoring selection to [{safeStart},{safeEnd}]")
                 doc.Application.Selection.SetRange(safeStart, safeEnd)
                 doc.Application.Selection.Select()
             Catch ex As Exception
                 Debug.WriteLine($"ExecuteReplaceCommand: restore selection failed: {ex.Message}")
                 Try
-                    doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.Start)
+                    If Not OnlySelection AndAlso IsSameChatWordDocument(doc.Application.ActiveDocument, doc) Then doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.Start)
                 Catch
                 End Try
             End Try
@@ -7170,15 +7867,24 @@ Public Class frmAIChat
             Dim allReplacementsApplied As System.Boolean = replaceCount = selectedMatchPositions.Count
             Debug.WriteLine($"ExecuteReplaceCommand: END (success={allReplacementsApplied})")
             If Not allReplacementsApplied Then
-                FailedCommandsList.Add($"Replacement incomplete: {replaceCount} of {selectedMatchPositions.Count} matches fully applied for '{oldText}'. Check this passage before retrying; partial changes may remain.")
+                _lastReplaceMayHavePartialChanges = _lastReplaceMayHavePartialChanges OrElse replaceCount > 0
+                If System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage) Then
+                    _lastReplaceFailureMessage =
+                        "Replacement incomplete (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        " fully applied). Search: '" & PreviewForLog(oldText, 90) & "'. Review the passage before retrying."
+                End If
             End If
-            If searchTraceOutcome <> "iteration-guard" Then
+            If System.String.Equals(searchTraceOutcome, "not-completed", System.StringComparison.Ordinal) Then
                 searchTraceOutcome = If(allReplacementsApplied, "success", "incomplete")
             End If
             Return allReplacementsApplied
 
         Catch ex As System.Exception
             searchTraceOutcome = "exception:" & ex.GetType().Name
+            If System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage) Then
+                _lastReplaceFailureMessage = "Replacement aborted by a Word error. Review any tracked changes before retrying."
+            End If
             Debug.WriteLine($"ExecuteReplaceCommand: OUTER CATCH: {ex.GetType().Name}: {ex.Message}")
             Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
 #If DEBUG Then
@@ -7195,7 +7901,7 @@ Public Class frmAIChat
                                    " elapsedMs=" & searchTraceClock.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture))
             SaveWordSearchTrace(searchTrace.ToString())
             Try
-                If view IsNot Nothing Then
+                If viewCaptured AndAlso view IsNot Nothing Then
                     view.RevisionsView = originalRevisionsView
                     view.ShowRevisionsAndComments = originalShowRevisions
                 End If
@@ -7203,7 +7909,7 @@ Public Class frmAIChat
                 Debug.WriteLine($"ExecuteReplaceCommand: FINALLY view restore failed: {ex.Message}")
             End Try
             Try
-                If doc IsNot Nothing Then
+                If trackingCaptured AndAlso doc IsNot Nothing Then
                     doc.TrackRevisions = trackChangesEnabled
                 End If
             Catch ex As Exception
@@ -7472,8 +8178,7 @@ Public Class frmAIChat
             Dim workrange As Microsoft.Office.Interop.Word.Range
             If OnlySelection Then
                 If doc.Application.Selection Is Nothing OrElse doc.Application.Selection.Range.Text = "" Then
-                    OnlySelection = False
-                    workrange = doc.Content
+                    Return False
                 Else
                     workrange = doc.Application.Selection.Range
                 End If
@@ -7550,6 +8255,7 @@ Public Class frmAIChat
 
                             Dim foundStart As Integer = foundRange.Start
                             Dim foundEnd As Integer = foundRange.End
+                            If OnlySelection AndAlso (foundStart < selectionStart OrElse foundEnd > selectionEnd) Then Return False
 
                             If Not RangeMatchesFormatSpec(foundRange, matchFormatSpec) Then
                                 Dim filteredContinuePosition As Integer = System.Math.Max(foundEnd, lastProcessedPosition + 1)
@@ -7582,6 +8288,8 @@ Public Class frmAIChat
                                 Dim actualText As System.String = PrepareWordInsertionText(
                                     doc, insertPosition, newText, joinBefore, joinAfter,
                                     replacementStart, replacementEnd)
+                                If OnlySelection AndAlso (replacementStart < selectionStart OrElse replacementEnd > selectionEnd) Then Return False
+                                Dim beforeInsertDocEnd As System.Int32 = doc.Content.End
                                 Dim netInsertedLength As Integer = actualText.Length - (replacementEnd - replacementStart)
                                 Dim insertionSucceeded As Boolean = False
                                 Dim insertRange As Microsoft.Office.Interop.Word.Range = Nothing
@@ -7621,7 +8329,7 @@ Public Class frmAIChat
                                         End Try
                                     End If
 
-                                    If OnlySelection Then selectionEnd += netInsertedLength
+                                    If OnlySelection Then selectionEnd += doc.Content.End - beforeInsertDocEnd
 
                                     If InsertBefore Then
                                         continuePosition = insertPosition + netInsertedLength + (foundEnd - foundStart)
@@ -7805,7 +8513,8 @@ Public Class frmAIChat
     Private Function ExecuteInsertCommand(
         newText As String,
         Optional joinBefore As System.String = Nothing,
-        Optional joinAfter As System.String = Nothing) As Boolean
+        Optional joinAfter As System.String = Nothing,
+        Optional scopeStart As System.Int32 = -1, Optional scopeEnd As System.Int32 = -1) As Boolean
         Dim doc = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled = doc.TrackRevisions
 
@@ -7826,6 +8535,7 @@ Public Class frmAIChat
                     replacementStart, replacementEnd)
                 ' Preserve Word's native insertion-point formatting. Only an explicit
                 ' paragraph request can widen the range to an adjacent soft break.
+                If scopeStart >= 0 AndAlso (replacementStart < scopeStart OrElse replacementEnd > scopeEnd) Then Return False
                 If replacementStart <> insertStart OrElse replacementEnd <> insertStart Then
                     selection.SetRange(replacementStart, replacementEnd)
                 End If

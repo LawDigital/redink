@@ -384,6 +384,11 @@ Namespace SharedLibrary
             _isBusy = True
             UpdateUiState()
             SetDisplayText("Starting…")
+            ' Paint the status immediately, even if the adapter performs synchronous
+            ' configuration or filesystem checks before its first asynchronous yield.
+            If lblTranscript IsNot Nothing AndAlso Not lblTranscript.IsDisposed Then
+                lblTranscript.Refresh()
+            End If
 
             Try
                 Await _speechAdapter.StartListeningAsync(CancellationToken.None).ConfigureAwait(True)

@@ -300,7 +300,12 @@ Partial Public Class ThisAddIn
                     minimumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
                     maximumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." & vbCrLf &
                     "Segments generated: " &
-                    generationResult.SegmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+                    generationResult.SegmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." &
+                    If(generationResult.MetadataGenerationWarnings.Count > 0,
+                        vbCrLf & vbCrLf & "Warning: " &
+                        generationResult.MetadataGenerationWarnings.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        " segment(s) use source-derived metadata after LLM failures; details are embedded in the index.",
+                        ""))
             Catch ex As System.OperationCanceledException
                 ProgressScope.Report(0, 1, "Cancelled.")
                 ShowCustomMessageBox("Semantic-search index generation was cancelled.")

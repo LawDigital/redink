@@ -327,6 +327,12 @@
         }
         "Entry"
         {
+        "MsmKey" = "8:_5B219B7096CAF68835FCA23917E7C7F9"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
         "MsmKey" = "8:_6E827B4D4DC6121D2F4740559251687C"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
@@ -525,7 +531,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_2EDEA289FCA5D729DAD0564937063007"
+        "MsmKey" = "8:_0A89273B62EC85B5ACD178947DD66BA7"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -549,7 +555,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_84E91136E57F355D3AEC8F97F793B241"
+        "MsmKey" = "8:_D57ECA5526DC5FE826DCE85F8C29F84A"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -567,13 +573,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_0F19FF746933171DE49B17AA966A6C10"
+        "MsmKey" = "8:_ED71DAAD764903ABED1F6E1CBC5CBEDC"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_0D859821D4620B7AE9E721F75E932442"
+        "MsmKey" = "8:_DB1C47A846A4A354425469711C623787"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -585,7 +591,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_B26F49638102B8F521B77A5BB8691D1C"
+        "MsmKey" = "8:_FDCF290D5B2222C024D6C7C12EE4B74C"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -603,7 +609,7 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_61405FEE225FF05FBA84B75CFC72FB47"
+        "MsmKey" = "8:_5813BE132B6466CC086CC0C01AB227F2"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -615,13 +621,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_A6AF4337B44DB7BEF09AF6F0E52A1954"
+        "MsmKey" = "8:_6325AA6AAB0D60B905E8C962DB3CA03B"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_6325AA6AAB0D60B905E8C962DB3CA03B"
+        "MsmKey" = "8:_F7969800C0408E3F8CF17637DC01B4D9"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -657,13 +663,13 @@
         }
         "Entry"
         {
-        "MsmKey" = "8:_D45F5A7682BA60A99D1CB86DDE2776EB"
+        "MsmKey" = "8:_E8EAD2F10876CDD75B75D5ACEDB310DE"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
         "Entry"
         {
-        "MsmKey" = "8:_E8EAD2F10876CDD75B75D5ACEDB310DE"
+        "MsmKey" = "8:_F6E1897117171FD5E79D8F4C3519DEE7"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -3514,6 +3520,26 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_5B219B7096CAF68835FCA23917E7C7F9"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\tools\\skills\\playwright-cli\\references\\pr-attachments.md"
+            "TargetName" = "8:pr-attachments.md"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_22A0573870E625AAD0ECD9F66DB25FEA"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
             "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_6E827B4D4DC6121D2F4740559251687C"
             {
             "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\tools\\skills\\playwright-cli\\references\\request-mocking.md"
@@ -4174,10 +4200,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_2EDEA289FCA5D729DAD0564937063007"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_0A89273B62EC85B5ACD178947DD66BA7"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\codeMirrorModule-CVQWJZAA.js"
-            "TargetName" = "8:codeMirrorModule-CVQWJZAA.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\codeMirrorModule-DK72OMRi.js"
+            "TargetName" = "8:codeMirrorModule-DK72OMRi.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_5E07B8D0A83EEB06D90287D052A064DA"
             "Condition" = "8:"
@@ -4254,10 +4280,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_84E91136E57F355D3AEC8F97F793B241"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_D57ECA5526DC5FE826DCE85F8C29F84A"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\index-hrlLqLtq.js"
-            "TargetName" = "8:index-hrlLqLtq.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\recorder\\assets\\index-Cn0mmDuv.js"
+            "TargetName" = "8:index-Cn0mmDuv.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_5E07B8D0A83EEB06D90287D052A064DA"
             "Condition" = "8:"
@@ -4314,10 +4340,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_0F19FF746933171DE49B17AA966A6C10"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_ED71DAAD764903ABED1F6E1CBC5CBEDC"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\codeMirrorModule-BbkfBe3n.js"
-            "TargetName" = "8:codeMirrorModule-BbkfBe3n.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\codeMirrorModule-BEB2e8M3.js"
+            "TargetName" = "8:codeMirrorModule-BEB2e8M3.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_A8C359E81F50BD4429343481D8AE5373"
             "Condition" = "8:"
@@ -4334,10 +4360,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_0D859821D4620B7AE9E721F75E932442"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_DB1C47A846A4A354425469711C623787"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\defaultSettingsView-Ds6CBOo0.js"
-            "TargetName" = "8:defaultSettingsView-Ds6CBOo0.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\defaultSettingsView-D-g2vrvf.js"
+            "TargetName" = "8:defaultSettingsView-D-g2vrvf.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_A8C359E81F50BD4429343481D8AE5373"
             "Condition" = "8:"
@@ -4374,10 +4400,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_B26F49638102B8F521B77A5BB8691D1C"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_FDCF290D5B2222C024D6C7C12EE4B74C"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\xtermModule-DywYcAf8.js"
-            "TargetName" = "8:xtermModule-DywYcAf8.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\assets\\xtermModule-B794rD2Z.js"
+            "TargetName" = "8:xtermModule-B794rD2Z.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_A8C359E81F50BD4429343481D8AE5373"
             "Condition" = "8:"
@@ -4434,10 +4460,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_61405FEE225FF05FBA84B75CFC72FB47"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_5813BE132B6466CC086CC0C01AB227F2"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\defaultSettingsView.Bqk9acqE.css"
-            "TargetName" = "8:defaultSettingsView.Bqk9acqE.css"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\defaultSettingsView.C8BeHuxd.css"
+            "TargetName" = "8:defaultSettingsView.C8BeHuxd.css"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_61774420F60CA3FED2EC5226794FC832"
             "Condition" = "8:"
@@ -4474,10 +4500,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_A6AF4337B44DB7BEF09AF6F0E52A1954"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_6325AA6AAB0D60B905E8C962DB3CA03B"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.B4cLoZK3.js"
-            "TargetName" = "8:index.B4cLoZK3.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.html"
+            "TargetName" = "8:index.html"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_61774420F60CA3FED2EC5226794FC832"
             "Condition" = "8:"
@@ -4494,10 +4520,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_6325AA6AAB0D60B905E8C962DB3CA03B"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_F7969800C0408E3F8CF17637DC01B4D9"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.html"
-            "TargetName" = "8:index.html"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\index.oNry3Hjv.js"
+            "TargetName" = "8:index.oNry3Hjv.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_61774420F60CA3FED2EC5226794FC832"
             "Condition" = "8:"
@@ -4614,10 +4640,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_D45F5A7682BA60A99D1CB86DDE2776EB"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_E8EAD2F10876CDD75B75D5ACEDB310DE"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CU5KtEkS.js"
-            "TargetName" = "8:uiMode.CU5KtEkS.js"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CyMfwkXJ.css"
+            "TargetName" = "8:uiMode.CyMfwkXJ.css"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_61774420F60CA3FED2EC5226794FC832"
             "Condition" = "8:"
@@ -4634,10 +4660,10 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
-            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_E8EAD2F10876CDD75B75D5ACEDB310DE"
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_F6E1897117171FD5E79D8F4C3519DEE7"
             {
-            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CyMfwkXJ.css"
-            "TargetName" = "8:uiMode.CyMfwkXJ.css"
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Word\\bin\\Release\\.playwright\\package\\lib\\vite\\traceViewer\\uiMode.CYwC_gH1.js"
+            "TargetName" = "8:uiMode.CYwC_gH1.js"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_61774420F60CA3FED2EC5226794FC832"
             "Condition" = "8:"
@@ -11031,15 +11057,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Word (Preview)"
-        "ProductCode" = "8:{7820AB69-EE71-4121-9828-3C53920D142A}"
-        "PackageCode" = "8:{E1AF0F8C-EFA7-44C4-8F46-6DCF984950DA}"
+        "ProductCode" = "8:{BB210ACE-9FAA-4323-853D-CF4D53E150CE}"
+        "PackageCode" = "8:{48CF6E69-7CB5-41D7-8E5F-260B66F9E9F4}"
         "UpgradeCode" = "8:{2C978631-EBB1-45F9-8304-D14C41054C28}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"
         "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:TRUE"
         "InstallAllUsers" = "11:TRUE"
-        "ProductVersion" = "8:1.7.19"
+        "ProductVersion" = "8:1.8.0"
         "Manufacturer" = "8:LawDigital Ltd."
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:"

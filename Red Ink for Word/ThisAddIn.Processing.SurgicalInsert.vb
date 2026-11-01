@@ -200,7 +200,7 @@ Partial Public Class ThisAddIn
     ''' <param name="text2">Revised serialized text returned by the LLM after post-processing.</param>
     ''' <param name="targetRange">Live Word range to be patched in place with tracked revisions.</param>
     ''' <param name="trailingCR">True when the original source ended in a trailing paragraph break that must be preserved.</param>
-    Private Function CompareAndInsertSurgical(ByVal text1 As String, ByVal text2 As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False, Optional ByVal showFailureNotice As System.Boolean = True) As System.Boolean
+    Private Function CompareAndInsertSurgical(ByVal text1 As String, ByVal text2 As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False, Optional ByVal showFailureNotice As System.Boolean = True, Optional exactSegment As System.Boolean = False) As System.Boolean
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
         Dim doc As Microsoft.Office.Interop.Word.Document = targetRange.Document
 
@@ -245,11 +245,11 @@ Partial Public Class ThisAddIn
 
             Dim originalTrailingInlineWhitespace As String = GetTrailingInlineBoundaryWhitespace(text1)
 
-            If Not trailingCR Then
+            If Not exactSegment AndAlso Not trailingCR Then
                 text2 = text2.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
             End If
 
-            If originalTrailingInlineWhitespace.Length > 0 Then
+            If Not exactSegment AndAlso originalTrailingInlineWhitespace.Length > 0 Then
                 text2 = EnsureTrailingInlineBoundaryWhitespace(text2, originalTrailingInlineWhitespace)
             End If
 
@@ -500,6 +500,9 @@ Partial Public Class ThisAddIn
                     End If
                 Next
 
+                If exactSegment AndAlso (targetRange.Footnotes.Count > 0 OrElse targetRange.Endnotes.Count > 0) Then
+                    Throw New SurgicalSourceChangedException("A native note appeared inside the protected text segment during planning.")
+                End If
                 If Not ApplySurgicalPendingEdits(targetRange, atoms, pendingEdits, mutationStarted) Then Return False
 
                 ' Leave untouched text and existing revisions intact; all whitespace edits belong in the diff.
@@ -510,7 +513,7 @@ Partial Public Class ThisAddIn
             LogSurgicalRecovery("Surgical source recovery requested: " & ex.Message)
             noticeRequired = True
             sourceConflict = True
-            If Not mutationStarted Then
+            If Not exactSegment AndAlso Not mutationStarted Then
                 Try
                     Dim liveAtoms As System.Collections.Generic.List(Of SurgicalTextAtom) = BuildSurgicalVisibleAtomMap(targetRange)
                     Dim rebasedEdits As System.Collections.Generic.List(Of PendingSurgicalEdit) = Nothing
@@ -808,6 +811,14 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    ' The note contract owns exact segment whitespace, prohibits partial rebase and
+    ' never gives the surgical engine a native note mark to delete or recreate.
+    Friend Function ApplyExactNoteFreeReplacement(original As System.String, revised As System.String,
+                                                 target As Microsoft.Office.Interop.Word.Range) As System.Boolean
+        If target.Footnotes.Count <> 0 OrElse target.Endnotes.Count <> 0 Then Return False
+        Return CompareAndInsertSurgical(original, revised, target, showFailureNotice:=False, exactSegment:=True)
+    End Function
+
     Public Function ApplySurgicalReplacement(ByVal originalText As String, ByVal newText As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False, Optional ByVal showFailureNotice As System.Boolean = True) As System.Boolean
         Return CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR, showFailureNotice)
     End Function
@@ -915,6 +926,197 @@ Partial Public Class ThisAddIn
         Public OldIndex As Integer
         Public NewIndex As Integer
     End Structure
+
+    Friend Shared Function PrepareChatPlainTarget(source As System.String, desired As System.String) As System.String
+        Dim text As System.String = NormalizeForWordFind(desired)
+        If Not source.EndsWith(vbCr, System.StringComparison.Ordinal) Then text = text.TrimEnd(Microsoft.VisualBasic.ControlChars.Cr, Microsoft.VisualBasic.ControlChars.Lf)
+        Return EnsureTrailingInlineBoundaryWhitespace(text, GetTrailingInlineBoundaryWhitespace(source))
+    End Function
+
+    Friend Shared Function ContainsChatWordStructure(value As System.String) As System.Boolean
+        Return System.Text.RegularExpressions.Regex.IsMatch(value, "[\x00-\x08\x0C\x0E-\x1F]")
+    End Function
+
+    Friend Shared ReadOnly ChatNativeReferencePattern As New System.Text.RegularExpressions.Regex(
+        "\[\[RI-(?:FN|EN):[1-9][0-9]*\]\]", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+    ' One contract for a plain range and a block with native references. Plan ALL
+    ' pieces before the first write. No Selection, Find, DoEvents, or replay of a
+    ' possibly committed COM write. Gaps occupied by old deletions are never edited.
+    Friend Shared Function TryApplyExactWordBlock(target As Microsoft.Office.Interop.Word.Range, source As System.String,
+                                            desired As System.String, trace As System.Text.StringBuilder,
+                                            ByRef mayHaveWritten As System.Boolean, ByRef verifiedEnd As System.Int32,
+                                            ByRef failure As System.String) As System.Boolean
+        Dim doc As Microsoft.Office.Interop.Word.Document = target.Document
+        Dim first As System.Int32 = target.Start
+        Dim finish As System.Int32 = target.End
+        Dim storyEnd As System.Int32 = doc.Content.End
+        Dim notes As System.Int32 = 0
+        Dim phase As System.String = "snapshot"
+        Dim completed As System.Int32 = 0
+        Dim writeError As System.Exception = Nothing
+        Dim expectedMarks As New System.Collections.Generic.List(Of System.String)()
+        mayHaveWritten = False
+        verifiedEnd = first
+        failure = System.String.Empty
+        Try
+            If ContainsChatWordStructure(source) OrElse ContainsChatWordStructure(desired) OrElse target.Fields.Count > 0 OrElse target.InlineShapes.Count > 0 Then Throw New System.InvalidOperationException("The target contains a protected Word object or control character.")
+            Dim map As ThisAddIn.ChatNoteProjection = ReadChatNoteProjection(target)
+            notes = map.References.Count
+            If Not System.String.Equals(map.Text, source, System.StringComparison.Ordinal) OrElse map.Starts.Count <> source.Length OrElse map.Finishes.Count <> source.Length Then Throw New System.InvalidOperationException("The current source no longer matches the selected block.")
+            Dim fromMarks As System.Text.RegularExpressions.MatchCollection = ChatNativeReferencePattern.Matches(source)
+            Dim toMarks As System.Text.RegularExpressions.MatchCollection = ChatNativeReferencePattern.Matches(desired)
+            If notes <> fromMarks.Count OrElse notes <> toMarks.Count Then Throw New System.InvalidOperationException("Native reference count changed.")
+            For i As System.Int32 = 0 To notes - 1
+                Dim token As System.String = map.References(i).Token
+                If Not System.String.Equals(token, fromMarks(i).Value, System.StringComparison.Ordinal) OrElse Not System.String.Equals(token, toMarks(i).Value, System.StringComparison.Ordinal) OrElse map.Starts(fromMarks(i).Index) <> map.References(i).First Then Throw New System.InvalidOperationException("Native reference identity or order changed.")
+                expectedMarks.Add(token)
+            Next
+            phase = "plan"
+            Dim edits As New System.Collections.Generic.List(Of (A As System.Int32, B As System.Int32, FromText As System.String, ToText As System.String))()
+            Dim oldPieces As System.String() = ChatNativeReferencePattern.Split(source)
+            Dim newPieces As System.String() = ChatNativeReferencePattern.Split(desired)
+            Dim baseOffset As System.Int32 = 0
+            For i As System.Int32 = 0 To oldPieces.Length - 1
+                For Each delta In ThisAddIn.PlanExactChatDeltas(oldPieces(i), newPieces(i))
+                    Dim pos As System.Int32 = baseOffset + delta.Offset
+                    Dim anchor As System.Int32 = If(pos < map.Starts.Count, map.Starts(pos), finish)
+                    If delta.OldText.Length = 0 Then
+                        edits.Add((anchor, anchor, System.String.Empty, delta.NewText))
+                    Else
+                        Dim j As System.Int32 = 0
+                        While j < delta.OldText.Length
+                            Dim begin As System.Int32 = j
+                            Dim a As System.Int32 = map.Starts(pos + j)
+                            Dim b As System.Int32 = map.Finishes(pos + j)
+                            j += 1
+                            While j < delta.OldText.Length
+                                ' Some Word positions project multiple UTF-16 code units.
+                                ' Never split an atomic Word character into two writes.
+                                Dim sameAtom As System.Boolean = map.Starts(pos + j) = map.Starts(pos + j - 1) AndAlso map.Finishes(pos + j) = b
+                                If Not sameAtom AndAlso map.Starts(pos + j) <> b Then Exit While
+                                b = map.Finishes(pos + j)
+                                j += 1
+                            End While
+                            edits.Add((a, b, delta.OldText.Substring(begin, j - begin), If(begin = 0, delta.NewText, System.String.Empty)))
+                        End While
+                    End If
+                Next
+                baseOffset += oldPieces(i).Length
+                If i < notes Then baseOffset += fromMarks(i).Length
+            Next
+            Dim previousEnd As System.Int32 = first
+            For Each edit In edits
+                If edit.A < previousEnd OrElse edit.B < edit.A OrElse edit.B > finish Then Throw New System.InvalidOperationException("Unsafe or overlapping physical edit span.")
+                previousEnd = edit.B
+                For Each mark In map.References
+                    If edit.A < mark.Finish AndAlso edit.B > mark.First Then Throw New System.InvalidOperationException("Edit touches a native reference.")
+                Next
+                Dim part As Microsoft.Office.Interop.Word.Range = doc.Range(edit.A, edit.B)
+                If part.Fields.Count > 0 OrElse part.InlineShapes.Count > 0 OrElse Not System.String.Equals(ReadVisibleProjection(part, Nothing), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("A planned text span is not safely editable.")
+            Next
+            trace.AppendLine($"BLOCK plan range=[{first},{finish}] notes={notes} writes={edits.Count}")
+            phase = "write"
+            Using undo As New ThisAddIn.WordUndoScope(doc.Application, "Red Ink: replace text")
+                Try
+                    For i As System.Int32 = edits.Count - 1 To 0 Step -1
+                        If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Throw New System.OperationCanceledException()
+                        Dim edit = edits(i)
+                        Dim part As Microsoft.Office.Interop.Word.Range = doc.Range(edit.A, edit.B)
+                        If Not doc.TrackRevisions OrElse part.Start <> edit.A OrElse part.End <> edit.B OrElse Not System.String.Equals(ReadVisibleProjection(part, Nothing), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("The planned write range changed.")
+                        mayHaveWritten = True
+                        part.Text = edit.ToText
+                        completed += 1
+                    Next
+                Catch ex As System.Runtime.InteropServices.COMException
+                    ' Word may commit before reporting a COM error. Verify the whole
+                    ' postcondition exactly once; never repeat the edit or guess.
+                    writeError = ex
+                    trace.AppendLine($"BLOCK write-exception hresult={ex.HResult:X8} completed={completed}")
+                End Try
+            End Using
+            phase = "verify"
+            Dim finalEnd As System.Int32 = finish + (doc.Content.End - storyEnd)
+            Dim actual As ThisAddIn.ChatNoteProjection = ReadChatNoteProjection(doc.Range(first, finalEnd))
+            If Not System.String.Equals(actual.Text, desired, System.StringComparison.Ordinal) OrElse actual.References.Count <> notes Then
+                Dim mismatch As System.Int32 = 0
+                While mismatch < System.Math.Min(actual.Text.Length, desired.Length) AndAlso actual.Text(mismatch) = desired(mismatch)
+                    mismatch += 1
+                End While
+                trace.AppendLine($"BLOCK mismatch offset={mismatch} actualLength={actual.Text.Length} expectedLength={desired.Length} actualNotes={actual.References.Count}")
+                Throw New System.InvalidOperationException("Read-back differs from the requested text or native references.", writeError)
+            End If
+            For i As System.Int32 = 0 To notes - 1
+                If Not System.String.Equals(actual.References(i).Token, expectedMarks(i), System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("Read-back found a different native reference.")
+            Next
+            verifiedEnd = finalEnd
+            trace.AppendLine($"BLOCK verified notes={notes} writesReturned={completed} reconciled={writeError IsNot Nothing}")
+            Return True
+        Catch ex As System.Exception
+            trace.AppendLine($"BLOCK stopped phase={phase} completed={completed} attempted={mayHaveWritten} type={ex.GetType().Name} hresult={ex.HResult:X8}")
+            failure = If(mayHaveWritten, "The replacement was not verified; review this block before retrying. ", "The replacement stopped before writing this block. ") & ex.Message
+            Return False
+        End Try
+    End Function
+
+    ' Exact Word-chat deltas, independent of view state and of Word COM. Reuse the
+    ' patience diff, but compare opaque ordinal IDs: a tab, a space, CR and LF
+    ' must not be trimmed or treated as line delimiters by DiffPlex's line fallback.
+    Friend Shared Function PlanExactChatDeltas(source As System.String, desired As System.String) As System.Collections.Generic.List(Of (Offset As System.Int32, OldText As System.String, NewText As System.String))
+        Dim plan As New System.Collections.Generic.List(Of (Offset As System.Int32, OldText As System.String, NewText As System.String))()
+        If System.String.Equals(source, desired, System.StringComparison.Ordinal) Then Return plan
+        Dim ids As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+        Dim words As New System.Collections.Generic.List(Of System.String)()
+        Dim encode As System.Func(Of System.String, System.Collections.Generic.List(Of System.String)) =
+            Function(value As System.String) As System.Collections.Generic.List(Of System.String)
+                Dim stream As New System.Collections.Generic.List(Of System.String)()
+                For Each token As System.Text.RegularExpressions.Match In System.Text.RegularExpressions.Regex.Matches(value, "[\p{L}\p{M}\p{N}_]+|[ \t]+|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\s\S]")
+                    Dim key As System.String = Nothing
+                    If Not ids.TryGetValue(token.Value, key) Then
+                        key = words.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        ids.Add(token.Value, key)
+                        words.Add(token.Value)
+                    End If
+                    stream.Add(key)
+                Next
+                Return stream
+            End Function
+        Dim before As System.Collections.Generic.List(Of System.String) = encode(source)
+        Dim after As System.Collections.Generic.List(Of System.String) = encode(desired)
+        Dim steps As System.Collections.Generic.List(Of DiffRun) = BuildPatienceTokenDiff(before, after)
+        Dim oldPos As System.Int32 = 0
+        Dim newPos As System.Int32 = 0
+        Dim cluster As System.Int32 = 0
+        Dim removed As New System.Text.StringBuilder()
+        Dim inserted As New System.Text.StringBuilder()
+        For Each stepItem As DiffRun In steps
+            Dim value As System.String = words(System.Int32.Parse(stepItem.Text, System.Globalization.CultureInfo.InvariantCulture))
+            If stepItem.RunType <> DiffPlex.DiffBuilder.Model.ChangeType.Inserted Then
+                If oldPos + value.Length > source.Length OrElse System.String.CompareOrdinal(source, oldPos, value, 0, value.Length) <> 0 Then Throw New System.IO.InvalidDataException("Diff does not replay its source.")
+                oldPos += value.Length
+            End If
+            If stepItem.RunType <> DiffPlex.DiffBuilder.Model.ChangeType.Deleted Then
+                If newPos + value.Length > desired.Length OrElse System.String.CompareOrdinal(desired, newPos, value, 0, value.Length) <> 0 Then Throw New System.IO.InvalidDataException("Diff does not replay its target.")
+                newPos += value.Length
+            End If
+            Select Case stepItem.RunType
+                Case DiffPlex.DiffBuilder.Model.ChangeType.Deleted
+                    removed.Append(value)
+                Case DiffPlex.DiffBuilder.Model.ChangeType.Inserted
+                    inserted.Append(value)
+                Case DiffPlex.DiffBuilder.Model.ChangeType.Unchanged
+                    If removed.Length + inserted.Length > 0 Then plan.Add((cluster, removed.ToString(), inserted.ToString()))
+                    removed.Clear()
+                    inserted.Clear()
+                    cluster = oldPos
+                Case Else
+                    Throw New System.IO.InvalidDataException("Unexpected exact diff operation.")
+            End Select
+        Next
+        If oldPos <> source.Length OrElse newPos <> desired.Length Then Throw New System.IO.InvalidDataException("Incomplete exact diff.")
+        If removed.Length + inserted.Length > 0 Then plan.Add((cluster, removed.ToString(), inserted.ToString()))
+        Return plan
+    End Function
 
     ''' <summary>
     ''' Splits the tokenized text into paragraph bodies plus the break token that followed each body.

@@ -510,6 +510,11 @@ Namespace SharedLibrary
                     Dim generated As SharedMethods.SemanticSearchIndexGenerationResult = Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
                         representation.TextPath, indexPath, modelContext, SemanticArchiveMetadata.GeneratorOptions(), Nothing, cancellationToken).ConfigureAwait(False)
                     interactionScope.ThrowIfInteractionRequested()
+                    If generated.MetadataGenerationWarnings.Count > 0 Then
+                        result.Diagnostics.Add("semantic_index_source_metadata_fallback: " &
+                            generated.MetadataGenerationWarnings.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " segment(s); affected IDs and failure categories are recorded in " & indexPath)
+                    End If
                     If Not System.String.Equals(generated.ContentSha256, payloadHash, System.StringComparison.OrdinalIgnoreCase) Then Throw New System.IO.InvalidDataException("The section index does not describe the extracted text's BOM-free UTF-8 payload.")
                     document.Index = New SemanticArchiveIndexDescriptor() With {
                         .IndexId = SemanticArchiveIdentity.NewId(), .RepresentationId = representation.RepresentationId,
