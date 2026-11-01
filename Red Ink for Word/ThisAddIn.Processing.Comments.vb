@@ -1187,12 +1187,19 @@ Partial Public Class ThisAddIn
                                               ByVal pseudoHashId As System.String,
                                               ByVal replyText As System.String,
                                               ByVal formatted As System.Boolean) As System.Boolean
+        Return ReplyToScopedWordComment(wordId, pseudoHashId, replyText, formatted, Nothing)
+    End Function
+
+    Friend Shared Function ReplyToScopedWordComment(ByVal wordId As System.Nullable(Of System.Int32),
+                                              ByVal pseudoHashId As System.String,
+                                              ByVal replyText As System.String,
+                                              ByVal formatted As System.Boolean, scope As Microsoft.Office.Interop.Word.Range) As System.Boolean
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
 
         Try
             Try
-                app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application)
+                app = If(scope Is Nothing, CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application), scope.Application)
             Catch ex As System.Exception
                 app = Globals.ThisAddIn.Application
             End Try
@@ -1202,7 +1209,7 @@ Partial Public Class ThisAddIn
         End Try
 
         Try
-            doc = app.ActiveDocument
+            doc = If(scope Is Nothing, app.ActiveDocument, scope.Document)
         Catch ex As System.Exception
             Debug.WriteLine("ReplyToWordComment: No active document found.")
             Return False
@@ -1257,6 +1264,11 @@ Partial Public Class ThisAddIn
         If target Is Nothing Then
             Debug.WriteLine("ReplyToWordComment: Target comment not found by Word-ID or pseudo hash id.")
             Return False
+        End If
+
+        If scope IsNot Nothing Then
+            Dim marked As Microsoft.Office.Interop.Word.Range = target.Scope
+            If Not marked.InStory(scope) OrElse marked.Start < scope.Start OrElse marked.End > scope.End Then Return False
         End If
 
         ' 3) Try to create a threaded reply if available, else fall back to appending inside the original comment range.

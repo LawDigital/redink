@@ -2597,6 +2597,52 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ' UTF-16 offsets in Text map to actual Word positions, not offsets in Range.Text.
+    ' One native reference occupies an opaque token of any textual length. These tokens
+    ' are transport only; neither the note body nor the displayed number is serialized.
+    Friend NotInheritable Class ChatNoteProjection
+        Friend ReadOnly Boundaries As New System.Collections.Generic.List(Of System.Int32)()
+        Friend ReadOnly Flat As New System.Text.StringBuilder()
+        Friend Text As System.String
+        Friend ReadOnly Starts As New System.Collections.Generic.List(Of System.Int32)()
+        Friend ReadOnly Finishes As New System.Collections.Generic.List(Of System.Int32)()
+        Friend ReadOnly References As New System.Collections.Generic.List(Of (First As System.Int32, Finish As System.Int32, Token As System.String))()
+    End Class
+
+    Friend Shared Function ReadChatNoteProjection(src As Microsoft.Office.Interop.Word.Range) As ChatNoteProjection
+        Dim result As New ChatNoteProjection()
+        If src.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
+            Throw New System.InvalidOperationException("Word note anchors require the main text story.")
+        End If
+        ' Iterate the DOCUMENT collections: numbering restarts and a selection starting
+        ' at the second note must not renumber tokens. Read the actual Reference ranges,
+        ' including custom reference marks; never identify notes by a printed digit.
+        Dim first As System.Int32 = src.Start
+        Dim finish As System.Int32 = src.End
+        If src.Footnotes.Count > 0 Then
+            For Each item As Microsoft.Office.Interop.Word.Footnote In src.Document.Footnotes
+                AddChatNoteReference(result, first, finish, item.Reference, "FN", item.Index)
+            Next
+        End If
+        If src.Endnotes.Count > 0 Then
+            For Each item As Microsoft.Office.Interop.Word.Endnote In src.Document.Endnotes
+                AddChatNoteReference(result, first, finish, item.Reference, "EN", item.Index)
+            Next
+        End If
+        result.References.Sort(Function(a, b) a.First.CompareTo(b.First))
+        result.Text = ReadVisibleProjection(src, result)
+        Return result
+    End Function
+
+    Private Shared Sub AddChatNoteReference(output As ChatNoteProjection, first As System.Int32, finish As System.Int32,
+                                             mark As Microsoft.Office.Interop.Word.Range, kind As System.String, index As System.Int32)
+        Dim a As System.Int32 = mark.Start
+        Dim b As System.Int32 = mark.End
+        If b <= first OrElse a >= finish Then Return
+        If a < first OrElse b > finish OrElse a >= b Then Throw New System.InvalidOperationException("The selection cuts through a native note reference.")
+        output.References.Add((a, b, "[[RI-" & kind & ":" & index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "]]"))
+    End Sub
+
     ''' <summary>
     ''' Returns the final source projection without deleted/move-from revisions or field codes.
     ''' Uses physical ranges without changing the document's revision view.
@@ -2605,6 +2651,10 @@ Partial Public Class ThisAddIn
     ''' <param name="src">Word range to extract visible text from.</param>
     ''' <returns>Text with deletions omitted and insertions preserved.</returns>
     Public Function GetVisibleText(ByVal src As Microsoft.Office.Interop.Word.Range) As System.String
+        Return ReadVisibleProjection(src, Nothing)
+    End Function
+
+    Private Shared Function ReadVisibleProjection(src As Microsoft.Office.Interop.Word.Range, map As ChatNoteProjection) As System.String
         If src Is Nothing Then Return System.String.Empty
         ' Use the same physical ranges and revision filtering as surgical insertion.
         ' Changing the window's revision view cannot establish a reliable source contract.
@@ -2626,8 +2676,36 @@ Partial Public Class ThisAddIn
         Next
         Dim fieldIndex As System.Int32 = 0
         Dim visible As New System.Text.StringBuilder()
+        Dim noteIndex As System.Int32 = 0
+        Dim emitted As System.Int32 = -1
         For Each atom As SurgicalLiveCharAtom In BuildSurgicalLiveCharAtoms(src)
-            If Not atom.IsTrackedDeletion AndAlso Not SurgicalPositionIsInsideSpan(atom.LiveStart, merged, fieldIndex) Then visible.Append(atom.Text)
+            If atom.IsTrackedDeletion OrElse SurgicalPositionIsInsideSpan(atom.LiveStart, merged, fieldIndex) Then Continue For
+            If map Is Nothing Then
+                visible.Append(atom.Text)
+                Continue For
+            End If
+            While noteIndex < map.References.Count AndAlso map.References(noteIndex).Finish <= atom.LiveStart
+                noteIndex += 1
+            End While
+            Dim text As System.String = atom.Text
+            Dim a As System.Int32 = atom.LiveStart
+            Dim b As System.Int32 = atom.LiveEnd
+            If noteIndex < map.References.Count AndAlso map.References(noteIndex).First <= a Then
+                If emitted = noteIndex Then Continue For
+                emitted = noteIndex
+                text = map.References(noteIndex).Token
+                a = map.References(noteIndex).First
+                b = map.References(noteIndex).Finish
+                map.Boundaries.Add(map.Flat.Length)
+            Else
+                If text.IndexOf(Microsoft.VisualBasic.ChrW(2)) >= 0 Then Throw New System.IO.InvalidDataException("Unmapped native note reference in the Word source.")
+                map.Flat.Append(text)
+            End If
+            visible.Append(text)
+            For charIndex As System.Int32 = 0 To text.Length - 1
+                map.Starts.Add(a)
+                map.Finishes.Add(b)
+            Next
         Next
         Return visible.ToString()
     End Function

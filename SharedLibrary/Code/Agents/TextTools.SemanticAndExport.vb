@@ -446,7 +446,8 @@ Namespace Agents
                 Key .content_byte_length = result.ContentByteLength,
                 Key .document_count = result.DocumentCount,
                 Key .segment_count = result.SegmentCount,
-                Key .content_sha256 = result.ContentSha256
+                Key .content_sha256 = result.ContentSha256,
+                Key .metadata_generation_warnings = result.MetadataGenerationWarnings
             })
         End Function
 
@@ -485,7 +486,8 @@ Namespace Agents
                 Key .content_byte_length = result.ContentByteLength,
                 Key .document_count = result.DocumentCount,
                 Key .segment_count = result.SegmentCount,
-                Key .content_sha256 = result.ContentSha256
+                Key .content_sha256 = result.ContentSha256,
+                Key .metadata_generation_warnings = result.MetadataGenerationWarnings
             })
         End Function
 

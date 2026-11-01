@@ -2155,6 +2155,7 @@ Partial Public Class ThisAddIn
         Dim markdownPreparation As PdfMarkdownPreparationOptions = Nothing
         Dim markdownPreparationSkippedCount As System.Int32 = 0
         Dim conversionDiagnostics As New System.Text.StringBuilder()
+        Dim indexMetadataWarnings As New System.Collections.Generic.List(Of System.String)()
 
         If pdfCount >= 2 AndAlso SharedMethods.IsOcrAvailable(_context) Then
             Dim ocrChoice As Integer = ShowCustomYesNoBox(
@@ -2508,7 +2509,8 @@ Partial Public Class ThisAddIn
                         indexOutputPath = Await CreateSemanticSearchIndexWithUserOptionsAsync(
                             combinedOutputPath,
                             IO.Path.Combine(combineBaseDir, combineBaseName & ".indexed.txt"),
-                            "Preparing combined content ...").ConfigureAwait(True)
+                            "Preparing combined content ...",
+                            indexMetadataWarnings).ConfigureAwait(True)
                     End If
 
                 Catch ex As Exception
@@ -2537,12 +2539,24 @@ Partial Public Class ThisAddIn
                         IO.Path.Combine(
                             IO.Path.GetDirectoryName(singleExtractedOutputPath),
                             IO.Path.GetFileNameWithoutExtension(singleExtractedOutputPath) & ".indexed.txt"),
-                        "Preparing extracted content ...").ConfigureAwait(True)
+                        "Preparing extracted content ...",
+                        indexMetadataWarnings).ConfigureAwait(True)
                 Catch ex As Exception
                     ShowCustomMessageBox($"Failed to create the semantic-search index: {ex.Message}")
                     indexOutputPath = Nothing
                 End Try
             End If
+        End If
+
+        ' A source-derived fallback is deliberately visible: the source is fully
+        ' indexed, but affected segments have less precise semantic metadata.
+        If indexMetadataWarnings.Count > 0 Then
+            conversionDiagnostics.AppendLine("=== SEMANTIC INDEX METADATA FALLBACKS ===")
+            conversionDiagnostics.AppendLine("The source text and byte offsets were preserved. The following segments used source-derived title/summary after metadata-generation failures:")
+            For Each warningText As System.String In indexMetadataWarnings
+                conversionDiagnostics.AppendLine(warningText)
+            Next
+            conversionDiagnostics.AppendLine()
         End If
 
         ' Build summary
@@ -2570,6 +2584,13 @@ Partial Public Class ThisAddIn
         ElseIf Not String.IsNullOrWhiteSpace(indexOutputPath) Then
             summary.AppendLine()
             summary.AppendLine($"Index file: {indexOutputPath}")
+        End If
+
+        If indexMetadataWarnings.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine("Warning: " & indexMetadataWarnings.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " index segment(s) use source-derived metadata after LLM failures; the complete original text remains indexed.")
+            summary.AppendLine("The affected segment IDs and failure categories are in the clipboard log and the index file.")
         End If
 
         If doOcr Then
@@ -2699,7 +2720,8 @@ Partial Public Class ThisAddIn
     Private Async Function CreateSemanticSearchIndexWithUserOptionsAsync(
         sourcePath As String,
         defaultOutputPath As String,
-        preparationMessage As String) As System.Threading.Tasks.Task(Of String)
+        preparationMessage As String,
+        metadataWarnings As System.Collections.Generic.List(Of System.String)) As System.Threading.Tasks.Task(Of String)
 
         If String.IsNullOrWhiteSpace(sourcePath) OrElse
            String.IsNullOrWhiteSpace(defaultOutputPath) Then
@@ -2812,7 +2834,8 @@ Partial Public Class ThisAddIn
                         segCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
                 End Sub)
 
-            Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
+            Dim generationResult As SharedMethods.SemanticSearchIndexGenerationResult =
+                Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
                 sourcePath,
                 outputPath,
                 _context,
@@ -2826,6 +2849,14 @@ Partial Public Class ThisAddIn
                 },
                 generationProgress,
                 indexProgress.Token).ConfigureAwait(True)
+
+            If metadataWarnings IsNot Nothing Then
+                ' Project boundary: keep the structured warning type in SharedLibrary and
+                ' project it into a Word-specific diagnostic line only for UI logging.
+                For Each warning In generationResult.MetadataGenerationWarnings
+                    metadataWarnings.Add(warning.SegmentId & " [" & warning.ErrorType & "]: " & warning.Message)
+                Next
+            End If
         End Using
 
         Return outputPath
